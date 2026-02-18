@@ -180,7 +180,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
         projectPath,
         sessionID,
       });
-      output.messages = result.messages;
+      output.messages.splice(0, output.messages.length, ...result.messages);
 
       // If we hit safety layers, trigger urgent distillation
       if (result.layer >= 2 && sessionID) {
