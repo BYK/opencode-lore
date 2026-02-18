@@ -1,0 +1,192 @@
+import type { Plugin } from "@opencode-ai/plugin";
+import { load, config } from "./config";
+import { ensureProject } from "./db";
+import * as temporal from "./temporal";
+import * as ltm from "./ltm";
+import * as distillation from "./distillation";
+import * as curator from "./curator";
+import { transform, setModelLimits, needsUrgentDistillation } from "./gradient";
+import { formatKnowledge } from "./prompt";
+import { createRecallTool } from "./reflect";
+
+export const NuumPlugin: Plugin = async (ctx) => {
+  const projectPath = ctx.worktree || ctx.directory;
+  await load(ctx.directory);
+  ensureProject(projectPath);
+
+  // Track user turns for periodic curation
+  let turnsSinceCuration = 0;
+
+  // Track active sessions for distillation
+  const activeSessions = new Set<string>();
+
+  // Background distillation — debounced, non-blocking
+  let distilling = false;
+  async function backgroundDistill(sessionID: string) {
+    if (distilling) return;
+    distilling = true;
+    try {
+      const cfg = config();
+      const pending = temporal.undistilledCount(projectPath, sessionID);
+      if (
+        pending >= cfg.distillation.minMessages ||
+        needsUrgentDistillation()
+      ) {
+        await distillation.run({
+          client: ctx.client,
+          projectPath,
+          sessionID,
+          model: cfg.model,
+        });
+      }
+    } catch (e) {
+      console.error("[nuum] distillation error:", e);
+    } finally {
+      distilling = false;
+    }
+  }
+
+  async function backgroundCurate(sessionID: string) {
+    try {
+      const cfg = config();
+      if (!cfg.curator.enabled) return;
+      await curator.run({
+        client: ctx.client,
+        projectPath,
+        sessionID,
+        model: cfg.model,
+      });
+    } catch (e) {
+      console.error("[nuum] curator error:", e);
+    }
+  }
+
+  return {
+    // Disable built-in compaction — we own the context window
+    config: async (input) => {
+      (input as Record<string, unknown>).compaction = {
+        auto: false,
+        prune: false,
+      };
+    },
+
+    // Store all messages in temporal DB for full-text search and distillation
+    event: async ({ event }) => {
+      if (event.type === "message.updated") {
+        const msg = event.properties.info;
+        // Fetch parts for this message
+        try {
+          const full = await ctx.client.session.message({
+            path: { id: msg.sessionID, messageID: msg.id },
+          });
+          if (full.data) {
+            temporal.store({
+              projectPath,
+              info: full.data.info,
+              parts: full.data.parts,
+            });
+            activeSessions.add(msg.sessionID);
+            if (msg.role === "user") turnsSinceCuration++;
+          }
+        } catch {
+          // Message may not be fetchable yet during streaming
+        }
+      }
+
+      if (event.type === "session.idle") {
+        const sessionID = event.properties.sessionID;
+        if (!activeSessions.has(sessionID)) return;
+
+        // Run background distillation
+        backgroundDistill(sessionID);
+
+        // Run curator periodically
+        const cfg = config();
+        if (
+          cfg.curator.onIdle ||
+          turnsSinceCuration >= cfg.curator.afterTurns
+        ) {
+          backgroundCurate(sessionID);
+          turnsSinceCuration = 0;
+        }
+      }
+    },
+
+    // Inject LTM knowledge into system prompt
+    "experimental.chat.system.transform": async (input, output) => {
+      // Cache model limits for the gradient transform
+      if (input.model?.limit) {
+        setModelLimits(input.model.limit);
+      }
+
+      const entries = ltm.forProject(projectPath, config().crossProject);
+      if (!entries.length) return;
+
+      const formatted = formatKnowledge(
+        entries.map((e) => ({
+          category: e.category,
+          title: e.title,
+          content: e.content,
+        })),
+      );
+      if (formatted) {
+        output.system.push(formatted);
+      }
+    },
+
+    // Transform message history: distilled prefix + raw recent
+    "experimental.chat.messages.transform": async (_input, output) => {
+      if (!output.messages.length) return;
+
+      const sessionID = output.messages[0]?.info.sessionID;
+      const result = transform({
+        messages: output.messages,
+        projectPath,
+        sessionID,
+      });
+      output.messages = result.messages;
+
+      // If we hit safety layers, trigger urgent distillation
+      if (result.layer >= 2 && sessionID) {
+        backgroundDistill(sessionID);
+      }
+    },
+
+    // Replace compaction prompt with distillation-aware prompt when manual /compact is used
+    "experimental.session.compacting": async (input, output) => {
+      const entries = ltm.forProject(projectPath, config().crossProject);
+      const knowledge = entries.length
+        ? formatKnowledge(
+            entries.map((e) => ({
+              category: e.category,
+              title: e.title,
+              content: e.content,
+            })),
+          )
+        : "";
+
+      output.prompt = `You are creating a distilled memory summary for an AI coding agent. This summary will be the ONLY context available in the next part of the conversation.
+
+Structure your response as follows:
+
+## Session History
+
+For each major topic or task covered in the conversation, write:
+- A 1-3 sentence narrative of what happened (past tense, focus on outcomes)
+- A bullet list of specific, actionable facts (file paths, values, decisions, what failed and why)
+
+PRESERVE: file paths, specific values, decisions with rationale, user preferences, failed approaches with reasons, environment details.
+DROP: debugging back-and-forth, verbose tool output, pleasantries, redundant restatements.
+
+${knowledge ? `\n${knowledge}\n` : ""}
+End with "I'm ready to continue." so the agent knows to pick up where it left off.`;
+    },
+
+    // Register the recall tool
+    tool: {
+      recall: createRecallTool(projectPath),
+    },
+  };
+};
+
+export default NuumPlugin;
