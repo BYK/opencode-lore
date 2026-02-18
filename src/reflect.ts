@@ -2,6 +2,7 @@ import { tool } from "@opencode-ai/plugin/tool";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import { db, ensureProject } from "./db";
+import { serialize, inline, h, p, ul, lip, liph, t, root } from "./markdown";
 
 type Distillation = {
   id: string;
@@ -52,38 +53,47 @@ function formatResults(input: {
   distillationResults: Distillation[];
   knowledgeResults: ltm.KnowledgeEntry[];
 }): string {
-  const sections: string[] = [];
+  const children: ReturnType<typeof root>["children"] = [];
 
   if (input.knowledgeResults.length) {
-    const entries = input.knowledgeResults
-      .map((k) => `[${k.category}] ${k.title}: ${k.content}`)
-      .join("\n");
-    sections.push(`## Long-term Knowledge\n${entries}`);
+    children.push(h(2, "Long-term Knowledge"));
+    children.push(
+      ul(
+        input.knowledgeResults.map((k) =>
+          liph(t(`[${k.category}] ${inline(k.title)}: ${inline(k.content)}`)),
+        ),
+      ),
+    );
   }
 
   if (input.distillationResults.length) {
-    const entries = input.distillationResults
-      .map((d) => {
-        const facts = JSON.parse(d.facts) as string[];
-        return `${d.narrative}\n${facts.map((f) => `  - ${f}`).join("\n")}`;
-      })
-      .join("\n\n");
-    sections.push(`## Distilled History\n${entries}`);
+    children.push(h(2, "Distilled History"));
+    for (const d of input.distillationResults) {
+      const facts = JSON.parse(d.facts) as string[];
+      children.push(p(inline(d.narrative)));
+      if (facts.length) children.push(ul(facts.map((f) => lip(inline(f)))));
+    }
   }
 
   if (input.temporalResults.length) {
-    const entries = input.temporalResults
-      .map((m) => {
-        const preview =
-          m.content.length > 500 ? m.content.slice(0, 500) + "..." : m.content;
-        return `[${m.role}] (session: ${m.session_id.slice(0, 8)}...) ${preview}`;
-      })
-      .join("\n\n");
-    sections.push(`## Raw Message Matches\n${entries}`);
+    children.push(h(2, "Raw Message Matches"));
+    children.push(
+      ul(
+        input.temporalResults.map((m) => {
+          const preview =
+            m.content.length > 500
+              ? m.content.slice(0, 500) + "..."
+              : m.content;
+          return lip(
+            `[${m.role}] (session: ${m.session_id.slice(0, 8)}...) ${inline(preview)}`,
+          );
+        }),
+      ),
+    );
   }
 
-  if (!sections.length) return "No results found for this query.";
-  return sections.join("\n\n");
+  if (!children.length) return "No results found for this query.";
+  return serialize(root(...children));
 }
 
 export function createRecallTool(projectPath: string): ReturnType<typeof tool> {

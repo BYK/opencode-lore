@@ -16,12 +16,14 @@
     "@opencode-ai/plugin": ">=1.1.0"
   },
   "dependencies": {
+    "remark": "^15.0.1",
     "zod": "^3.25.0"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.1.39",
     "@opencode-ai/sdk": "^1.1.39",
     "@types/bun": "^1.2.0",
+    "fast-check": "^4.5.3",
     "typescript": "^5.8.0"
   }
 }
