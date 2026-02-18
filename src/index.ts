@@ -5,7 +5,13 @@ import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as distillation from "./distillation";
 import * as curator from "./curator";
-import { transform, setModelLimits, needsUrgentDistillation } from "./gradient";
+import {
+  transform,
+  setModelLimits,
+  needsUrgentDistillation,
+  calibrate,
+  estimateMessages,
+} from "./gradient";
 import { formatKnowledge } from "./prompt";
 import { createRecallTool } from "./reflect";
 
@@ -96,6 +102,27 @@ export const NuumPlugin: Plugin = async (ctx) => {
             });
             activeSessions.add(msg.sessionID);
             if (msg.role === "user") turnsSinceCuration++;
+
+            // Calibrate overhead estimate using real token counts from completed assistant messages
+            if (
+              msg.role === "assistant" &&
+              msg.tokens &&
+              (msg.tokens.input > 0 || msg.tokens.cache.read > 0)
+            ) {
+              // Fetch all messages in the session to estimate what we sent
+              const allMsgs = await ctx.client.session.messages({
+                path: { id: msg.sessionID },
+              });
+              if (allMsgs.data) {
+                // Estimate all messages that were sent as input (exclude the assistant msg itself)
+                const withParts = allMsgs.data
+                  .filter((m) => m.info.id !== msg.id)
+                  .map((m) => ({ info: m.info, parts: m.parts }));
+                const msgEstimate = estimateMessages(withParts);
+                const actualInput = msg.tokens.input + msg.tokens.cache.read;
+                calibrate(actualInput, msgEstimate);
+              }
+            }
           }
         } catch {
           // Message may not be fetchable yet during streaming

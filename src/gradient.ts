@@ -32,9 +32,38 @@ function estimateMessage(msg: MessageWithParts): number {
 let contextLimit = 200_000; // sensible default
 let outputReserved = 32_000;
 
+// Conservative overhead reserve for first-turn (before calibration):
+// accounts for provider system prompt + AGENTS.md + tool definitions + env info
+const FIRST_TURN_OVERHEAD = 15_000;
+
+// Calibrated overhead: actual tokens used minus our message estimate.
+// Null = not yet calibrated (first turn). Updated after every assistant response.
+let calibratedOverhead: number | null = null;
+
 export function setModelLimits(limits: { context: number; output: number }) {
   contextLimit = limits.context || 200_000;
   outputReserved = Math.min(limits.output || 32_000, 32_000);
+}
+
+// Called after each assistant message completes with real token usage data.
+// actualInput = tokens.input + tokens.cache.read (all tokens that went into the model)
+// messageEstimate = our chars/4 estimate of the messages we sent
+export function calibrate(actualInput: number, messageEstimate: number) {
+  const overhead = Math.max(0, actualInput - messageEstimate);
+  // Smooth with EMA (alpha=0.3) once calibrated, or set directly on first call
+  calibratedOverhead =
+    calibratedOverhead === null
+      ? overhead
+      : Math.round(calibratedOverhead * 0.7 + overhead * 0.3);
+}
+
+export function getOverhead(): number {
+  return calibratedOverhead ?? FIRST_TURN_OVERHEAD;
+}
+
+// For testing only — reset calibration state
+export function resetCalibration() {
+  calibratedOverhead = null;
 }
 
 type Distillation = {
@@ -179,7 +208,9 @@ export function transform(input: {
   sessionID?: string;
 }): TransformResult {
   const cfg = config();
-  const usable = contextLimit - outputReserved;
+  const overhead = getOverhead();
+  // Usable = full context minus output reservation minus fixed overhead (system + tools)
+  const usable = contextLimit - outputReserved - overhead;
   const distilledBudget = Math.floor(usable * cfg.budget.distilled);
   const rawBudget = Math.floor(usable * cfg.budget.raw);
 
@@ -259,6 +290,11 @@ export function transform(input: {
     rawTokens: nuclearRawTokens,
     totalTokens: nuclearPrefixTokens + nuclearRawTokens,
   };
+}
+
+// Compute our message-only estimate for a set of messages (for calibration use)
+export function estimateMessages(messages: MessageWithParts[]): number {
+  return messages.reduce((sum, m) => sum + estimateMessage(m), 0);
 }
 
 function tryFit(input: {

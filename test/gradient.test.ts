@@ -1,6 +1,11 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { db, close, ensureProject } from "../src/db";
-import { transform, setModelLimits } from "../src/gradient";
+import {
+  transform,
+  setModelLimits,
+  calibrate,
+  resetCalibration,
+} from "../src/gradient";
 import type { Message, Part } from "@opencode-ai/sdk";
 
 const PROJECT = "/test/gradient/project";
@@ -59,8 +64,9 @@ function makeMsg(
 
 beforeAll(() => {
   ensureProject(PROJECT);
-  // Set a small context for testing
+  // Set a small context for testing with zero overhead (no system prompt in tests)
   setModelLimits({ context: 10_000, output: 2_000 });
+  calibrate(0, 0); // zero overhead: no system prompt overhead in unit tests
 });
 
 afterAll(() => close());
@@ -110,6 +116,7 @@ describe("gradient", () => {
       return makeMsg(`nuclear-${i}`, role as "user" | "assistant", text);
     });
     setModelLimits({ context: 2_000, output: 500 }); // 1500 usable, rawBudget ~600
+    calibrate(0, 0); // keep overhead at zero for this test
     const result = transform({
       messages,
       projectPath: PROJECT,
@@ -119,6 +126,7 @@ describe("gradient", () => {
     expect(result.messages.length).toBeLessThanOrEqual(6); // layer 4: up to 3 prefix + 3 raw
     // Reset
     setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0, 0);
   });
 
   test("returns valid token estimates", () => {
