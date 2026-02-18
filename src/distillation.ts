@@ -13,16 +13,21 @@ import { needsUrgentDistillation } from "./gradient";
 type Client = ReturnType<typeof createOpencodeClient>;
 type TemporalMessage = temporal.TemporalMessage;
 
-// Worker session for background distillation — created once per plugin lifecycle
-let workerSessionID: string | undefined;
+// Worker sessions keyed by parent session ID — hidden children, one per source session
+const workerSessions = new Map<string, string>();
 
-async function ensureWorkerSession(client: Client): Promise<string> {
-  if (workerSessionID) return workerSessionID;
+async function ensureWorkerSession(
+  client: Client,
+  parentID: string,
+): Promise<string> {
+  const existing = workerSessions.get(parentID);
+  if (existing) return existing;
   const session = await client.session.create({
-    body: { title: "[nuum] memory worker" },
+    body: { parentID, title: "nuum distillation" },
   });
-  workerSessionID = session.data!.id;
-  return workerSessionID;
+  const id = session.data!.id;
+  workerSessions.set(parentID, id);
+  return id;
 }
 
 // Segment detection: group related messages together
@@ -250,23 +255,24 @@ async function distillSegment(input: {
     messages: text,
   });
 
-  const sessionID = await ensureWorkerSession(input.client);
+  const workerID = await ensureWorkerSession(input.client, input.sessionID);
   const model = input.model ?? config().model;
   const parts = [
     { type: "text" as const, text: `${DISTILLATION_SYSTEM}\n\n${userContent}` },
   ];
 
   await input.client.session.prompt({
-    path: { id: sessionID },
+    path: { id: workerID },
     body: {
       parts,
+      agent: "nuum-distill",
       ...(model ? { model } : {}),
     },
   });
 
   // Read the response
   const msgs = await input.client.session.messages({
-    path: { id: sessionID },
+    path: { id: workerID },
     query: { limit: 2 },
   });
   const last = msgs.data?.at(-1);
@@ -301,22 +307,23 @@ async function metaDistill(input: {
 
   const userContent = recursiveUser(existing);
 
-  const sessionID = await ensureWorkerSession(input.client);
+  const workerID = await ensureWorkerSession(input.client, input.sessionID);
   const model = input.model ?? config().model;
   const parts = [
     { type: "text" as const, text: `${RECURSIVE_SYSTEM}\n\n${userContent}` },
   ];
 
   await input.client.session.prompt({
-    path: { id: sessionID },
+    path: { id: workerID },
     body: {
       parts,
+      agent: "nuum-distill",
       ...(model ? { model } : {}),
     },
   });
 
   const msgs = await input.client.session.messages({
-    path: { id: sessionID },
+    path: { id: workerID },
     query: { limit: 2 },
   });
   const last = msgs.data?.at(-1);

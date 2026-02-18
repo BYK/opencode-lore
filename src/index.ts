@@ -62,11 +62,20 @@ export const NuumPlugin: Plugin = async (ctx) => {
   }
 
   return {
-    // Disable built-in compaction — we own the context window
+    // Disable built-in compaction and register hidden worker agents
     config: async (input) => {
-      (input as Record<string, unknown>).compaction = {
-        auto: false,
-        prune: false,
+      const cfg = input as Record<string, unknown>;
+      cfg.compaction = { auto: false, prune: false };
+      cfg.agent = {
+        ...(cfg.agent as Record<string, unknown> | undefined),
+        "nuum-distill": {
+          hidden: true,
+          description: "Nuum memory distillation worker",
+        },
+        "nuum-curator": {
+          hidden: true,
+          description: "Nuum knowledge curator worker",
+        },
       };
     },
 

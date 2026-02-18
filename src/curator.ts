@@ -6,15 +6,20 @@ import { CURATOR_SYSTEM, curatorUser } from "./prompt";
 
 type Client = ReturnType<typeof createOpencodeClient>;
 
-let workerSessionID: string | undefined;
+const workerSessions = new Map<string, string>();
 
-async function ensureWorkerSession(client: Client): Promise<string> {
-  if (workerSessionID) return workerSessionID;
+async function ensureWorkerSession(
+  client: Client,
+  parentID: string,
+): Promise<string> {
+  const existing = workerSessions.get(parentID);
+  if (existing) return existing;
   const session = await client.session.create({
-    body: { title: "[nuum] curator worker" },
+    body: { parentID, title: "nuum curator" },
   });
-  workerSessionID = session.data!.id;
-  return workerSessionID;
+  const id = session.data!.id;
+  workerSessions.set(parentID, id);
+  return id;
 }
 
 type CuratorOp =
@@ -79,22 +84,23 @@ export async function run(input: {
     messages: text,
     existing: existingForPrompt,
   });
-  const sessionID = await ensureWorkerSession(input.client);
+  const workerID = await ensureWorkerSession(input.client, input.sessionID);
   const model = input.model ?? cfg.model;
   const parts = [
     { type: "text" as const, text: `${CURATOR_SYSTEM}\n\n${userContent}` },
   ];
 
   await input.client.session.prompt({
-    path: { id: sessionID },
+    path: { id: workerID },
     body: {
       parts,
+      agent: "nuum-curator",
       ...(model ? { model } : {}),
     },
   });
 
   const msgs = await input.client.session.messages({
-    path: { id: sessionID },
+    path: { id: workerID },
     query: { limit: 2 },
   });
   const last = msgs.data?.at(-1);
