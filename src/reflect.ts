@@ -1,0 +1,146 @@
+import { tool } from "@opencode-ai/plugin/tool";
+import * as temporal from "./temporal";
+import * as ltm from "./ltm";
+import { db, ensureProject } from "./db";
+
+type Distillation = {
+  id: string;
+  narrative: string;
+  facts: string;
+  generation: number;
+  created_at: number;
+  session_id: string;
+};
+
+function searchDistillations(input: {
+  projectPath: string;
+  query: string;
+  sessionID?: string;
+  limit?: number;
+}): Distillation[] {
+  const pid = ensureProject(input.projectPath);
+  const limit = input.limit ?? 10;
+  // Search distillation narratives and facts with LIKE since we don't have FTS on them
+  const terms = input.query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
+  if (!terms.length) return [];
+
+  const conditions = terms
+    .map(() => "(LOWER(narrative) LIKE ? OR LOWER(facts) LIKE ?)")
+    .join(" AND ");
+  const params: string[] = [];
+  for (const term of terms) {
+    params.push(`%${term}%`, `%${term}%`);
+  }
+
+  const query = input.sessionID
+    ? `SELECT * FROM distillations WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
+    : `SELECT * FROM distillations WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
+  const allParams = input.sessionID
+    ? [pid, input.sessionID, ...params, limit]
+    : [pid, ...params, limit];
+
+  return db()
+    .query(query)
+    .all(...allParams) as Distillation[];
+}
+
+function formatResults(input: {
+  temporalResults: temporal.TemporalMessage[];
+  distillationResults: Distillation[];
+  knowledgeResults: ltm.KnowledgeEntry[];
+}): string {
+  const sections: string[] = [];
+
+  if (input.knowledgeResults.length) {
+    const entries = input.knowledgeResults
+      .map((k) => `[${k.category}] ${k.title}: ${k.content}`)
+      .join("\n");
+    sections.push(`## Long-term Knowledge\n${entries}`);
+  }
+
+  if (input.distillationResults.length) {
+    const entries = input.distillationResults
+      .map((d) => {
+        const facts = JSON.parse(d.facts) as string[];
+        return `${d.narrative}\n${facts.map((f) => `  - ${f}`).join("\n")}`;
+      })
+      .join("\n\n");
+    sections.push(`## Distilled History\n${entries}`);
+  }
+
+  if (input.temporalResults.length) {
+    const entries = input.temporalResults
+      .map((m) => {
+        const preview =
+          m.content.length > 500 ? m.content.slice(0, 500) + "..." : m.content;
+        return `[${m.role}] (session: ${m.session_id.slice(0, 8)}...) ${preview}`;
+      })
+      .join("\n\n");
+    sections.push(`## Raw Message Matches\n${entries}`);
+  }
+
+  if (!sections.length) return "No results found for this query.";
+  return sections.join("\n\n");
+}
+
+export function createRecallTool(projectPath: string): ReturnType<typeof tool> {
+  return tool({
+    description:
+      "Search your memory across all sessions for this project. Use this when you need to recall decisions, file paths, patterns, user preferences, or anything from previous work. Searches long-term knowledge, distilled history, and raw message archives.",
+    args: {
+      query: tool.schema
+        .string()
+        .describe(
+          "What to search for — be specific. Include keywords, file names, or concepts.",
+        ),
+      scope: tool.schema
+        .enum(["all", "session", "project", "knowledge"])
+        .optional()
+        .describe(
+          "Search scope: 'all' (default) searches everything, 'session' searches current session only, 'project' searches all sessions in this project, 'knowledge' searches only long-term knowledge.",
+        ),
+    },
+    async execute(args, context) {
+      const scope = args.scope ?? "all";
+      const sid = context.sessionID;
+
+      const temporalResults =
+        scope === "knowledge"
+          ? []
+          : temporal.search({
+              projectPath,
+              query: args.query,
+              sessionID: scope === "session" ? sid : undefined,
+              limit: 10,
+            });
+
+      const distillationResults =
+        scope === "knowledge"
+          ? []
+          : searchDistillations({
+              projectPath,
+              query: args.query,
+              sessionID: scope === "session" ? sid : undefined,
+              limit: 5,
+            });
+
+      const knowledgeResults =
+        scope === "session"
+          ? []
+          : ltm.search({
+              query: args.query,
+              projectPath,
+              limit: 10,
+            });
+
+      return formatResults({
+        temporalResults,
+        distillationResults,
+        knowledgeResults,
+      });
+    },
+  });
+}

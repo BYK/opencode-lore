@@ -1,0 +1,27 @@
+{
+  "name": "opencode-nuum",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Three-tier memory architecture for OpenCode — distillation, not summarization",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "bun run tsc --noEmit",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.1.0"
+  },
+  "dependencies": {
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.1.39",
+    "@opencode-ai/sdk": "^1.1.39",
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.8.0"
+  }
+}
