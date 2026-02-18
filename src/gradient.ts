@@ -2,6 +2,7 @@ import type { Message, Part } from "@opencode-ai/sdk";
 import { db, ensureProject } from "./db";
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
+import { normalize } from "./markdown";
 
 type MessageWithParts = { info: Message; parts: Part[] };
 
@@ -87,7 +88,12 @@ function stripToolOutputs(parts: Part[]): Part[] {
 }
 
 function stripToTextOnly(parts: Part[]): Part[] {
-  return parts.filter((p) => p.type === "text");
+  return parts
+    .filter((p) => p.type === "text")
+    .map((p) => ({
+      ...p,
+      text: normalize(p.text),
+    })) as Part[];
 }
 
 // Build a synthetic message pair containing the distilled history

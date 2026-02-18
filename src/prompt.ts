@@ -1,3 +1,18 @@
+import type { Root } from "mdast";
+import {
+  serialize,
+  normalize,
+  inline,
+  h,
+  p,
+  ul,
+  lip,
+  liph,
+  strong,
+  t,
+  root,
+} from "./markdown";
+
 // All prompts are locked down — they are our core value offering.
 // Do not make these configurable.
 
@@ -138,46 +153,56 @@ export function formatDistillations(
   }>,
 ): string {
   if (!distillations.length) return "";
-  const sections: string[] = [];
 
   const meta = distillations.filter((d) => d.generation > 0);
   const recent = distillations.filter((d) => d.generation === 0);
+  const children: Root["children"] = [h(2, "Session History")];
 
   if (meta.length) {
-    const block = meta
-      .map((d) => {
-        const facts = d.facts.map((f) => `- ${f}`).join("\n");
-        return `${d.narrative}\n${facts}`;
-      })
-      .join("\n\n");
-    sections.push(`### Earlier Work (summarized)\n${block}`);
+    children.push(h(3, "Earlier Work (summarized)"));
+    for (const d of meta) {
+      const narrative = inline(d.narrative);
+      if (narrative) children.push(p(narrative));
+      const facts = d.facts.map(inline).filter(Boolean);
+      if (facts.length) children.push(ul(facts.map(lip)));
+    }
   }
 
   if (recent.length) {
-    const block = recent
-      .map((d) => {
-        const facts = d.facts.map((f) => `- ${f}`).join("\n");
-        return `${d.narrative}\n${facts}`;
-      })
-      .join("\n\n");
-    sections.push(`### Recent Work (distilled)\n${block}`);
+    children.push(h(3, "Recent Work (distilled)"));
+    for (const d of recent) {
+      const narrative = inline(d.narrative);
+      if (narrative) children.push(p(narrative));
+      const facts = d.facts.map(inline).filter(Boolean);
+      if (facts.length) children.push(ul(facts.map(lip)));
+    }
   }
 
-  return `## Session History\n\n${sections.join("\n\n")}`;
+  return serialize(root(...children));
 }
 
 export function formatKnowledge(
   entries: Array<{ category: string; title: string; content: string }>,
 ): string {
   if (!entries.length) return "";
+
   const grouped: Record<string, Array<{ title: string; content: string }>> = {};
   for (const e of entries) {
     const group = grouped[e.category] ?? (grouped[e.category] = []);
     group.push(e);
   }
-  const sections = Object.entries(grouped).map(([category, items]) => {
-    const block = items.map((i) => `- **${i.title}**: ${i.content}`).join("\n");
-    return `### ${category.charAt(0).toUpperCase() + category.slice(1)}\n${block}`;
-  });
-  return `## Long-term Knowledge\n\n${sections.join("\n\n")}`;
+
+  const children: Root["children"] = [h(2, "Long-term Knowledge")];
+  for (const [category, items] of Object.entries(grouped)) {
+    children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
+    children.push(
+      ul(
+        items.map((i) =>
+          liph(strong(inline(i.title)), t(": " + inline(i.content))),
+        ),
+      ),
+    );
+  }
+
+  return serialize(root(...children));
 }
