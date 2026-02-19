@@ -132,8 +132,16 @@ function cleanParts(parts: Part[]): Part[] {
       part.type !== "text" ||
       (part as Extract<Part, { type: "text" }>).text.trim().length > 0,
   );
-  // If all parts were stripped, return as-is to avoid producing a zero-part message
-  // (toModelMessages skips messages with no parts, breaking conversation alternation)
+  // If all parts were stripped (e.g. a user message that was purely build-switch synthetic
+  // content), keep a minimal placeholder so the message survives toModelMessages.
+  // Without this, the message gets dropped and the conversation ends with an assistant message,
+  // causing Anthropic's "does not support assistant message prefill" error.
+  if (filtered.length === 0 && parts.length > 0) {
+    const first = parts[0];
+    if (first.type === "text") {
+      return [{ ...first, text: "..." } as Part];
+    }
+  }
   return filtered.length > 0 ? filtered : parts;
 }
 

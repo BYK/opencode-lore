@@ -182,6 +182,19 @@ export const NuumPlugin: Plugin = async (ctx) => {
       });
       output.messages.splice(0, output.messages.length, ...result.messages);
 
+      // Verify conversation ends with a user message (Anthropic rejects otherwise)
+      const last = result.messages.at(-1);
+      if (last && last.info.role !== "user") {
+        console.error(
+          "[nuum] WARN: transform produced conversation ending with",
+          last.info.role,
+          "id:",
+          last.info.id,
+          "parts:",
+          last.parts.map((p) => p.type),
+        );
+      }
+
       // If we hit safety layers, trigger urgent distillation
       if (result.layer >= 2 && sessionID) {
         backgroundDistill(sessionID);
