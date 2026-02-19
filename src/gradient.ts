@@ -102,18 +102,20 @@ function loadDistillations(
   }));
 }
 
-// Remove ephemeral <system-reminder> wrappers OpenCode adds to queued user messages.
-// These are applied in-memory before the plugin transform fires and would confuse the model
-// if left in the raw window — it echoes the wrapper format in its output.
+// Strip all <system-reminder>...</system-reminder> blocks from message text.
+// For the user-message wrapper pattern, extracts the actual user text.
+// For all other reminders (build-switch, plan reminders, etc.), drops them entirely.
+// These tags are added by OpenCode in-memory or persisted as synthetic parts —
+// leaving them in the raw window causes the model to echo the format.
 function stripSystemReminders(text: string): string {
   return text
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>\n?/g, (match) => {
-      // Extract just the user's actual message from inside the wrapper
       const inner = match.match(
         /The user sent the following message:\n([\s\S]*?)\n\nPlease address/,
       );
       return inner ? inner[1].trim() + "\n" : "";
     })
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
@@ -145,7 +147,7 @@ function stripToTextOnly(parts: Part[]): Part[] {
     .filter((p) => p.type === "text")
     .map((p) => ({
       ...p,
-      text: normalize(p.text),
+      text: normalize(stripSystemReminders(p.text)),
     })) as Part[];
 }
 
@@ -300,7 +302,7 @@ export function transform(input: {
   );
   const nuclearRaw = input.messages.slice(-3).map((m) => ({
     info: m.info,
-    parts: stripToTextOnly(m.parts),
+    parts: stripToTextOnly(cleanParts(m.parts)),
   }));
   const nuclearRawTokens = nuclearRaw.reduce(
     (sum, m) => sum + estimateMessage(m),
