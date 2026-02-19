@@ -1,85 +1,150 @@
 import type { Root } from "mdast";
-import {
-  serialize,
-  normalize,
-  inline,
-  h,
-  p,
-  ul,
-  lip,
-  liph,
-  strong,
-  t,
-  root,
-} from "./markdown";
+import { serialize, inline, h, ul, liph, strong, t, root } from "./markdown";
 
 // All prompts are locked down — they are our core value offering.
 // Do not make these configurable.
 
-export const DISTILLATION_SYSTEM = `You are a memory distillation agent. Your job is to compress a conversation segment into structured output while preserving operational intelligence.
+export const DISTILLATION_SYSTEM = `You are a memory observer. Your observations will be the ONLY information an AI assistant has about past interactions. Produce a dense, dated event log — not a summary.
 
-Produce a JSON object with exactly two fields:
+CRITICAL: DISTINGUISH USER ASSERTIONS FROM QUESTIONS
 
-"narrative": 1-3 sentences describing what happened. Past tense. Focus on outcomes and decisions, not the process of getting there.
+When the user TELLS you something about themselves, mark it as an assertion (🔴):
+- "I have two kids" → 🔴 (14:30) User stated has two kids
+- "I work at Acme Corp" → 🔴 (14:31) User stated works at Acme Corp
 
-"facts": An array of strings. Each fact is a specific, actionable detail the agent needs to continue working. Each fact must be self-contained (understandable without the narrative).
+When the user ASKS about something, mark it as a question (🟡):
+- "Can you help me with X?" → 🟡 (15:00) User asked for help with X
 
-RULES FOR FACTS — PRESERVE:
-- File paths with line numbers when relevant
-- Specific values, thresholds, configuration details
-- Decisions and their rationale (the "why", not just the "what")
-- User preferences and stated patterns
-- Error messages and their root cause + solution
-- Environment details (env vars, build tools, deploy targets)
-- Approaches that were tried and FAILED, with why they failed (prefix with "FAILED:")
-- Anything that would require tool calls to rediscover
+User assertions are AUTHORITATIVE — the user is the source of truth about their own life.
 
-RULES FOR FACTS — DROP:
-- The detailed back-and-forth of debugging (keep only the conclusion and any failed approaches worth remembering)
-- Verbose tool output (keep only the conclusion)
-- Social exchanges and acknowledgments
-- Redundant restatements of the same information
-- Intermediate reasoning that led to a final decision already captured
+TEMPORAL ANCHORING — CRITICAL FOR TEMPORAL REASONING:
 
-Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
+Each observation has up to two timestamps:
+1. BEGINNING: The time the statement was made — ALWAYS include this as (HH:MM)
+2. END: The referenced date, if the content refers to a different time — add as "(meaning DATE)" or "(estimated DATE)"
+
+ONLY add "(meaning DATE)" when you can derive an actual date:
+- "last week", "yesterday", "next month" → compute and add the date
+- "recently", "a while ago", "soon" → too vague, omit the end date
+
+ALWAYS put the date annotation at the END of the observation line.
+
+GOOD: (09:15) User will visit parents this weekend. (meaning Jun 17-18, 2025)
+GOOD: (09:15) User's friend had a birthday party last month. (estimated May 2025)
+GOOD: (09:15) User prefers hiking in the mountains.
+BAD: (09:15) User prefers hiking. (meaning Jun 15, 2025)  ← no time reference, don't add date
+
+If an observation contains MULTIPLE events, split into SEPARATE lines, each with its own date.
+
+STATE CHANGES — make supersession explicit:
+- "User will use X (replacing Y)" — not just "User will use X"
+- "User moved to Berlin (no longer in London)"
+
+DETAILS TO ALWAYS PRESERVE:
+- Names, handles, usernames (@username, "Dr. Smith")
+- Numbers, counts, quantities (4 items, 3 sessions, $120)
+- Measurements, percentages (5kg, 20% improvement, 85% accuracy)
+- Sequences and orderings (steps 1-5, lucky numbers: 7 14 23)
+- Prices, dates, times, durations
+- Locations and distinguishing attributes
+- User's specific role (presenter, volunteer, organizer — not just "attended")
+- Exact phrasing when unusual ("movement session" for exercise)
+
+ASSISTANT-GENERATED CONTENT — THIS IS CRITICAL:
+
+When the assistant produces lists, recommendations, explanations, recipes, schedules, creative content, or any structured output — record EVERY ITEM with its distinguishing details. The user WILL ask about specific items later.
+
+BAD: 🟡 Assistant recommended 5 dessert spots in Orlando.
+GOOD: 🟡 Assistant recommended dessert spots: Sugar Factory (Icon Park, giant milkshakes), Wondermade (Sanford, gourmet marshmallows), Gideon's Bakehouse (Disney Springs, cookies), Farris & Foster's (unique flavors), Kilwins (handmade fudge)
+
+BAD: 🟡 Assistant listed work-from-home jobs for seniors.
+GOOD: 🟡 Assistant listed 10 WFH jobs for seniors: 1. Virtual assistant, 2. Online tutor, 3. Freelance writer, 4. Social media manager, 5. Customer service rep, 6. Bookkeeper, 7. Transcriptionist, 8. Web designer, 9. Data entry, 10. Consultant
+
+BAD: 🟡 Assistant explained refining processes.
+GOOD: 🟡 Assistant explained Lake Charles refinery processes: atmospheric distillation, fluid catalytic cracking (FCC), alkylation, hydrotreating
+
+Rules for assistant content:
+- Record EACH item in a list with at least one distinguishing attribute
+- For numbered lists, preserve the EXACT ordering (1st, 2nd, 3rd...)
+- For recipes: preserve specific quantities, ratios, temperatures, times
+- For recommendations: preserve names, locations, prices, key features
+- For creative content (songs, stories, poems): preserve titles, key phrases, character names, structural details
+- For technical explanations: preserve specific values, percentages, formulas, tool/library names
+- Ordered lists must keep their numbering — users ask "what was the 7th item?"
+- Use 🟡 priority but NEVER skip assistant-generated details to save space
+
+ENUMERATABLE ENTITIES — always flag for cross-session aggregation:
+When the user mentions attending events, buying things, meeting people, completing tasks — mark with entity type so these can be aggregated across sessions:
+🔴 [event-attended] User attended Rachel+Mike's wedding (vineyard in Napa, Aug 12, 2023)
+🔴 [item-purchased] User bought Sony WH-1000XM5 headphones ($280, replaced old Bose)
+This makes it possible to answer "how many weddings did I attend?" by aggregating across sessions.
+
+PRIORITY LEVELS:
+- 🔴 High: user assertions, stated facts, preferences, goals, enumeratable entities
+- 🟡 Medium: questions asked, context, assistant-generated content with full detail
+- 🟢 Low: minor conversational context, greetings, acknowledgments
+
+OUTPUT FORMAT — output ONLY observations, no preamble:
+
+<observations>
+Date: Jan 15, 2026
+* 🔴 (09:15) User stated has two kids: Emma (12) and Jake (9)
+* 🔴 (09:16) User's anniversary is March 15
+* 🟡 (09:20) User asked how to optimize database queries
+* 🔴 [event-attended] (10:00) User attended company holiday party as a presenter (gave talk on microservices)
+* 🔴 (11:30) User will visit parents this weekend. (meaning Jan 17-18, 2026)
+* 🟡 (14:00) Agent debugging auth issue — found missing null check in auth.ts:45, applied fix, tests pass
+* 🟡 (14:30) Assistant recommended 5 hotels: 1. Grand Plaza (near station, $180), 2. Seaside Inn (pet-friendly, $120), 3. Mountain Lodge (pool, free breakfast, $95), 4. Harbor View (historic, walkable, $150), 5. Zen Garden (quietest, spa, $200)
+* 🔴 (15:00) User switched from Python to TypeScript for the project (no longer using Python)
+</observations>`;
 
 export function distillationUser(input: {
-  priorNarrative?: string;
+  priorObservations?: string;
+  date: string;
   messages: string;
 }): string {
-  const context = input.priorNarrative
-    ? `Brief context for orientation (what happened before this segment — do NOT include this in your output):\n${input.priorNarrative}`
+  const context = input.priorObservations
+    ? `Previous observations (do NOT repeat these — your new observations will be appended):\n${input.priorObservations}\n\n---`
     : "This is the beginning of the session.";
   return `${context}
 
----
-Conversation segment to distill:
+Session date: ${input.date}
 
-${input.messages}`;
+Conversation to observe:
+
+${input.messages}
+
+Extract new observations. Output ONLY an <observations> block.`;
 }
 
-export const RECURSIVE_SYSTEM = `You are a memory distillation agent performing recursive compression. You are given previously distilled conversation segments. Compress them into a single higher-level distillation.
+export const RECURSIVE_SYSTEM = `You are a memory reflector. You are given a set of observations from multiple conversation segments. Your job is to reorganize, streamline, and compress them into a single refined observation log that will become the agent's entire memory going forward.
 
-Merge related facts. Drop facts superseded by later segments (e.g. if a value was changed, keep only the final value). Keep facts about failed approaches — these prevent repeating mistakes.
+IMPORTANT: Your reflections ARE the entirety of the assistant's memory. Any information you omit is permanently forgotten. Do not leave out anything important.
 
-Produce a JSON object with exactly two fields:
+REFLECTION RULES:
+- Preserve ALL dates and timestamps — temporal context is critical
+- Condense older observations more aggressively; retain more detail for recent ones
+- Combine related items (e.g., "agent called view tool 5 times on file x" → single line)
+- Merge duplicate facts, keeping the most specific version
+- Drop observations superseded by later info (if value changed, keep only final value)
+- When consolidating, USER ASSERTIONS take precedence over questions about the same topic
+- Preserve all enumeratable entities [entity-type] — these are needed for aggregation questions
+- For enumeratable entities spanning multiple segments, create an explicit aggregation:
+  🔴 [event-attended] User attended 3 weddings total: Rachel+Mike (vineyard, Aug 2023), Emily+Sarah (garden, Sep 2023), Jen+Tom (Oct 8, 2023)
 
-"narrative": 2-4 sentences summarizing the combined work. Higher level than individual distillations. Past tense.
+Keep the same format: dated sections with priority-tagged observations.
 
-"facts": An array of strings. Only the most operationally relevant facts that span across segments. Merge duplicates. Prefer facts that would be hardest to rediscover.
-
-Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
+Output ONLY an <observations> block with the consolidated observations.`;
 
 export function recursiveUser(
-  distillations: Array<{ narrative: string; facts: string[] }>,
+  distillations: Array<{ observations: string }>,
 ): string {
-  const entries = distillations.map((d, i) => {
-    const facts = d.facts.map((f) => `  - ${f}`).join("\n");
-    return `Segment ${i + 1}:\nNarrative: ${d.narrative}\nFacts:\n${facts}`;
-  });
-  return `Distilled segments to compress (chronological order):
+  const entries = distillations.map(
+    (d, i) => `Segment ${i + 1}:\n${d.observations}`,
+  );
+  return `Observation segments to consolidate (chronological order):
 
-${entries.join("\n\n")}`;
+${entries.join("\n\n---\n\n")}`;
 }
 
 export const CURATOR_SYSTEM = `You are a long-term memory curator. Your job is to extract durable knowledge from a conversation that should persist across sessions.
@@ -144,11 +209,11 @@ Recent conversation to extract knowledge from:
 ${input.messages}`;
 }
 
-// Format distillations for injection into the message context
+// Format distillations for injection into the message context.
+// Observations are plain event-log text — inject them directly under a header.
 export function formatDistillations(
   distillations: Array<{
-    narrative: string;
-    facts: string[];
+    observations: string;
     generation: number;
   }>,
 ): string {
@@ -156,29 +221,23 @@ export function formatDistillations(
 
   const meta = distillations.filter((d) => d.generation > 0);
   const recent = distillations.filter((d) => d.generation === 0);
-  const children: Root["children"] = [h(2, "Session History")];
+  const sections: string[] = ["## Session History"];
 
   if (meta.length) {
-    children.push(h(3, "Earlier Work (summarized)"));
+    sections.push("### Earlier Work (summarized)");
     for (const d of meta) {
-      const narrative = inline(d.narrative);
-      if (narrative) children.push(p(narrative));
-      const facts = d.facts.map(inline).filter(Boolean);
-      if (facts.length) children.push(ul(facts.map(lip)));
+      sections.push(d.observations.trim());
     }
   }
 
   if (recent.length) {
-    children.push(h(3, "Recent Work (distilled)"));
+    sections.push("### Recent Work (distilled)");
     for (const d of recent) {
-      const narrative = inline(d.narrative);
-      if (narrative) children.push(p(narrative));
-      const facts = d.facts.map(inline).filter(Boolean);
-      if (facts.length) children.push(ul(facts.map(lip)));
+      sections.push(d.observations.trim());
     }
   }
 
-  return serialize(root(...children));
+  return sections.join("\n\n");
 }
 
 export function formatKnowledge(

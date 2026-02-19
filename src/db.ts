@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { join } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const MIGRATIONS: string[] = [
   `
@@ -118,7 +118,11 @@ const MIGRATIONS: string[] = [
     version INTEGER NOT NULL
   );
 
-  INSERT INTO schema_version (version) VALUES (${SCHEMA_VERSION});
+  INSERT INTO schema_version (version) VALUES (1);
+  `,
+  `
+  -- Version 2: Replace narrative+facts with observations text
+  ALTER TABLE distillations ADD COLUMN observations TEXT NOT NULL DEFAULT '';
   `,
 ];
 
@@ -155,12 +159,13 @@ function migrate(database: Database) {
         }
       )?.version ?? 0)
     : 0;
+  if (current >= MIGRATIONS.length) return;
   for (let i = current; i < MIGRATIONS.length; i++) {
     database.exec(MIGRATIONS[i]);
   }
-  if (current > 0 && current < MIGRATIONS.length) {
-    database.exec(`UPDATE schema_version SET version = ${MIGRATIONS.length}`);
-  }
+  // Update version to latest. Migration 0 inserts version=1 via its own INSERT,
+  // but subsequent migrations don't update it, so always normalize to MIGRATIONS.length.
+  database.exec(`UPDATE schema_version SET version = ${MIGRATIONS.length}`);
 }
 
 export function close() {

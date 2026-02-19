@@ -6,8 +6,7 @@ import { serialize, inline, h, p, ul, lip, liph, t, root } from "./markdown";
 
 type Distillation = {
   id: string;
-  narrative: string;
-  facts: string;
+  observations: string;
   generation: number;
   created_at: number;
   session_id: string;
@@ -29,16 +28,16 @@ function searchDistillations(input: {
   if (!terms.length) return [];
 
   const conditions = terms
-    .map(() => "(LOWER(narrative) LIKE ? OR LOWER(facts) LIKE ?)")
+    .map(() => "LOWER(observations) LIKE ?")
     .join(" AND ");
   const params: string[] = [];
   for (const term of terms) {
-    params.push(`%${term}%`, `%${term}%`);
+    params.push(`%${term}%`);
   }
 
   const query = input.sessionID
-    ? `SELECT * FROM distillations WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
-    : `SELECT * FROM distillations WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
+    ? `SELECT id, observations, generation, created_at, session_id FROM distillations WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
+    : `SELECT id, observations, generation, created_at, session_id FROM distillations WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
   const allParams = input.sessionID
     ? [pid, input.sessionID, ...params, limit]
     : [pid, ...params, limit];
@@ -69,9 +68,7 @@ function formatResults(input: {
   if (input.distillationResults.length) {
     children.push(h(2, "Distilled History"));
     for (const d of input.distillationResults) {
-      const facts = JSON.parse(d.facts) as string[];
-      children.push(p(inline(d.narrative)));
-      if (facts.length) children.push(ul(facts.map((f) => lip(inline(f)))));
+      children.push(p(inline(d.observations)));
     }
   }
 

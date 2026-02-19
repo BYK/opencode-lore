@@ -68,8 +68,7 @@ export function resetCalibration() {
 
 type Distillation = {
   id: string;
-  narrative: string;
-  facts: string[];
+  observations: string;
   generation: number;
   token_count: number;
   created_at: number;
@@ -82,24 +81,12 @@ function loadDistillations(
 ): Distillation[] {
   const pid = ensureProject(projectPath);
   const query = sessionID
-    ? "SELECT * FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC"
-    : "SELECT * FROM distillations WHERE project_id = ? ORDER BY created_at ASC";
+    ? "SELECT id, observations, generation, token_count, created_at, session_id FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC"
+    : "SELECT id, observations, generation, token_count, created_at, session_id FROM distillations WHERE project_id = ? ORDER BY created_at ASC";
   const params = sessionID ? [pid, sessionID] : [pid];
-  const rows = db()
+  return db()
     .query(query)
-    .all(...params) as Array<{
-    id: string;
-    narrative: string;
-    facts: string;
-    generation: number;
-    token_count: number;
-    created_at: number;
-    session_id: string;
-  }>;
-  return rows.map((r) => ({
-    ...r,
-    facts: JSON.parse(r.facts) as string[],
-  }));
+    .all(...params) as Distillation[];
 }
 
 // Strip all <system-reminder>...</system-reminder> blocks from message text.
@@ -160,18 +147,159 @@ function stripToolOutputs(parts: Part[]): Part[] {
 }
 
 function stripToTextOnly(parts: Part[]): Part[] {
-  return parts
+  const stripped = parts
     .filter((p) => p.type === "text")
     .map((p) => ({
       ...p,
       text: normalize(stripSystemReminders(p.text)),
-    })) as Part[];
+    }))
+    .filter((p) => p.text.trim().length > 0) as Part[];
+  // Guard against empty result — keep a placeholder so the message survives
+  // toModelMessages and the conversation doesn't end with an assistant message.
+  if (stripped.length === 0 && parts.length > 0) {
+    const first = parts.find((p) => p.type === "text");
+    if (first) return [{ ...first, text: "..." } as Part];
+  }
+  return stripped;
+}
+
+// --- Phase 2: Temporal anchoring at read time ---
+
+function formatRelativeTime(date: Date, now: Date): string {
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (diffDays === 0) return "today";
+  if (diffDays === 1) return "yesterday";
+  if (diffDays < 7) return `${diffDays} days ago`;
+  if (diffDays < 14) return "1 week ago";
+  if (diffDays < 30) return `${Math.floor(diffDays / 7)} weeks ago`;
+  if (diffDays < 60) return "1 month ago";
+  if (diffDays < 365) return `${Math.floor(diffDays / 30)} months ago`;
+  return `${Math.floor(diffDays / 365)} year${Math.floor(diffDays / 365) > 1 ? "s" : ""} ago`;
+}
+
+function parseDateFromContent(s: string): Date | null {
+  // "Month Day, Year" e.g. "January 15, 2026"
+  const simple = s.match(/([A-Z][a-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+  if (simple) {
+    const d = new Date(`${simple[1]} ${simple[2]}, ${simple[3]}`);
+    if (!isNaN(d.getTime())) return d;
+  }
+  // "Month D-D, Year" range — use start
+  const range = s.match(/([A-Z][a-z]+)\s+(\d{1,2})-\d{1,2},?\s+(\d{4})/);
+  if (range) {
+    const d = new Date(`${range[1]} ${range[2]}, ${range[3]}`);
+    if (!isNaN(d.getTime())) return d;
+  }
+  // "late/early/mid Month Year"
+  const vague = s.match(/(late|early|mid)[- ]?([A-Z][a-z]+)\s+(\d{4})/i);
+  if (vague) {
+    const day =
+      vague[1].toLowerCase() === "early"
+        ? 7
+        : vague[1].toLowerCase() === "late"
+          ? 23
+          : 15;
+    const d = new Date(`${vague[2]} ${day}, ${vague[3]}`);
+    if (!isNaN(d.getTime())) return d;
+  }
+  return null;
+}
+
+// Expand "(meaning DATE)" and "(estimated DATE)" annotations with a relative offset.
+// Past future-intent lines get "(likely already happened)" appended.
+function expandInlineEstimatedDates(text: string, now: Date): string {
+  return text.replace(
+    /\(((?:meaning|estimated)\s+)([^)]+\d{4})\)/gi,
+    (match, prefix: string, dateContent: string) => {
+      const d = parseDateFromContent(dateContent);
+      if (!d) return match;
+      const rel = formatRelativeTime(d, now);
+      // Detect future-intent by looking backwards on the same line
+      const matchIdx = text.indexOf(match);
+      const lineStart = text.lastIndexOf("\n", matchIdx) + 1;
+      const linePrefix = text.slice(lineStart, matchIdx);
+      const isFutureIntent =
+        /\b(?:will|plans?\s+to|planning\s+to|going\s+to|intends?\s+to)\b/i.test(
+          linePrefix,
+        );
+      if (d < now && isFutureIntent)
+        return `(${prefix}${dateContent} — ${rel}, likely already happened)`;
+      return `(${prefix}${dateContent} — ${rel})`;
+    },
+  );
+}
+
+// Add relative time annotations to "Date: Month D, Year" section headers
+// and gap markers between non-consecutive dates.
+function addRelativeTimeToObservations(text: string, now: Date): string {
+  // First pass: expand inline "(meaning DATE)" annotations
+  const withInline = expandInlineEstimatedDates(text, now);
+
+  // Second pass: annotate date headers and add gap markers
+  const dateHeaderRe = /^(Date:\s*)([A-Z][a-z]+ \d{1,2}, \d{4})$/gm;
+  const found: Array<{
+    index: number;
+    date: Date;
+    full: string;
+    prefix: string;
+    ds: string;
+  }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = dateHeaderRe.exec(withInline)) !== null) {
+    const d = new Date(m[2]);
+    if (!isNaN(d.getTime()))
+      found.push({
+        index: m.index,
+        date: d,
+        full: m[0],
+        prefix: m[1],
+        ds: m[2],
+      });
+  }
+  if (!found.length) return withInline;
+
+  let result = "";
+  let last = 0;
+  for (let i = 0; i < found.length; i++) {
+    const curr = found[i];
+    const prev = found[i - 1];
+    result += withInline.slice(last, curr.index);
+    // Gap marker between non-consecutive dates
+    if (prev) {
+      const gapDays = Math.floor(
+        (curr.date.getTime() - prev.date.getTime()) / 86400000,
+      );
+      if (gapDays > 1) {
+        const gap =
+          gapDays < 7
+            ? `[${gapDays} days later]`
+            : gapDays < 14
+              ? "[1 week later]"
+              : gapDays < 30
+                ? `[${Math.floor(gapDays / 7)} weeks later]`
+                : gapDays < 60
+                  ? "[1 month later]"
+                  : `[${Math.floor(gapDays / 30)} months later]`;
+        result += `\n${gap}\n\n`;
+      }
+    }
+    result += `${curr.prefix}${curr.ds} (${formatRelativeTime(curr.date, now)})`;
+    last = curr.index + curr.full.length;
+  }
+  result += withInline.slice(last);
+  return result;
 }
 
 // Build a synthetic message pair containing the distilled history
 function distilledPrefix(distillations: Distillation[]): MessageWithParts[] {
   if (!distillations.length) return [];
-  const formatted = formatDistillations(distillations);
+  const now = new Date();
+  const annotated = distillations.map((d) => ({
+    ...d,
+    observations: addRelativeTimeToObservations(d.observations, now),
+  }));
+  const formatted = formatDistillations(annotated);
   if (!formatted) return [];
   return [
     {

@@ -1,0 +1,573 @@
+Mode: nuum
+Model: claude-sonnet-4-6
+Questions: 500 (offset=0)
+Concurrency: 10
+Output: eval/results/nuum_oracle.jsonl
+
+[1/500] gpt4_385a5000 (temporal-reasoning) answer="The marigolds were started first. The marigolds arrived on M" - 37s, ~18314s left
+[2/500] gpt4_2312f94c (temporal-reasoning) answer="The **Dell XPS 13** came first — it was pre-ordered on Janua" - 55s, ~13637s left
+[3/500] bbf86515 (temporal-reasoning) answer="'Turbocharged Tuesdays' was on June 14th, and 'Rack Fest' wa" - 57s, ~9512s left
+[4/500] 2a1811e2 (temporal-reasoning) answer="The Holi celebration was on February 26th, and the Sunday ma" - 64s, ~7972s left
+[5/500] 0bb5a684 (temporal-reasoning) answer="You attended the workshop on January 10th, and your team mee" - 65s, ~6437s left
+[6/500] gpt4_2655b836 (temporal-reasoning) answer="Based on the session summaries, after the first service on M" - 75s, ~6184s left
+[7/500] 2c63a862 (temporal-reasoning) answer="Based on the summaries, you started working with Rachel on *" - 97s, ~6822s left
+[8/500] gpt4_76048e76 (temporal-reasoning) answer="Based on the summaries, you took care of the **bike first** " - 99s, ~6081s left
+[9/500] gpt4_0b2f1d21 (temporal-reasoning) answer="Based on the summaries, the coffee maker was purchased appro" - 101s, ~5506s left
+[10/500] gpt4_6ed717ea (temporal-reasoning) answer="Based on the summaries, the **training pads for Luna** were " - 107s, ~5266s left
+[11/500] 08f4fc43 (temporal-reasoning) answer="Based on the summaries, the Sunday mass at St. Mary's Church" - 113s, ~5017s left
+[12/500] gpt4_70e84552 (temporal-reasoning) answer="Based on the distilled summaries, there is no mention of tri" - 125s, ~5082s left
+[13/500] gpt4_93159ced (temporal-reasoning) answer="I don't know. The summaries mention you have 9 years of prof" - 141s, ~5288s left
+[14/500] gpt4_5dcc0aab (temporal-reasoning) answer="You cleaned your white Adidas sneakers last month (using soa" - 141s, ~4901s left
+[15/500] b9cfe692 (temporal-reasoning) answer="Based on the summaries:
+
+- **The Seven Husbands of Evelyn Hu" - 187s, ~6053s left
+[16/500] gpt4_2487a7cb (temporal-reasoning) answer="You attended the **'Data Analysis using Python' webinar** fi" - 225s, ~6817s left
+[17/500] gpt4_2d58bcd6 (temporal-reasoning) answer="Based on the session summaries, you read all three fiction n" - 231s, ~6575s left
+[18/500] gpt4_65aabe59 (temporal-reasoning) answer="Based on the information available, you set up the **smart t" - 237s, ~6359s left
+[19/500] c8090214 (temporal-reasoning) answer="Based on the summaries:
+
+- The Holiday Market was attended a" - 239s, ~6063s left
+[20/500] 982b5123 (temporal-reasoning) answer="Based on the summaries provided, I don't know how many month" - 253s, ~6065s left
+[21/500] a3838d2b (temporal-reasoning) answer="Based on the information available, there is no record of an" - 258s, ~5881s left
+[22/500] gpt4_483dd43c (temporal-reasoning) answer="Based on the session summaries, you started **Game of Throne" - 267s, ~5795s left
+[23/500] gpt4_2c50253f (temporal-reasoning) answer="On Tuesdays and Thursdays, you wake up **15 minutes earlier*" - 284s, ~5894s left
+[24/500] c9f37c46 (temporal-reasoning) answer="Based on the summaries, you got into stand-up comedy 3 month" - 289s, ~5728s left
+[25/500] e4e14d04 (temporal-reasoning) answer="Based on the summaries, I can't determine this precisely. Se" - 293s, ~5576s left
+[26/500] gpt4_4edbafa2 (temporal-reasoning) answer="Based on the distilled summaries, you ran out of Sweet Baby " - 293s, ~5351s left
+[27/500] cc6d1ec1 (temporal-reasoning) answer="Based on the summaries, you had been birdwatching for approx" - 314s, ~5494s left
+[28/500] f0853d11 (temporal-reasoning) answer="I don't know. The summaries contain no mention of a 'Coastal" - 316s, ~5328s left
+[29/500] d01c6aa8 (temporal-reasoning) answer="Based on the summaries, you have been living in the United S" - 322s, ~5234s left
+[30/500] gpt4_b4a80587 (temporal-reasoning) answer="Based on the session summaries, this cannot be determined wi" - 324s, ~5080s left
+[31/500] gpt4_d9af6064 (temporal-reasoning) answer="Based on the summaries, you set up the **new router first** " - 332s, ~5026s left
+[32/500] gpt4_7de946e7 (temporal-reasoning) answer="Based on the summaries, you dealt with the **persistent coug" - 344s, ~5035s left
+[33/500] gpt4_8c8961ae (temporal-reasoning) answer="You took the solo trip to Thailand first (2022), followed by" - 344s, ~4873s left
+[34/500] 993da5e2 (temporal-reasoning) answer="Based on the summaries, the area rug was acquired about a mo" - 352s, ~4830s left
+[35/500] dcfa8644 (temporal-reasoning) answer="The Adidas running shoes were purchased on **January 10th**," - 384s, ~5106s left
+[36/500] gpt4_4cd9eba1 (temporal-reasoning) answer="The student started attending pre-departure orientation sess" - 393s, ~5063s left
+[37/500] gpt4_d31cdae3 (temporal-reasoning) answer="Based on the summaries, this cannot be determined with certa" - 404s, ~5052s left
+[38/500] gpt4_2f56ae70 (temporal-reasoning) answer="Based on the summaries, you started using **Disney+** most r" - 422s, ~5134s left
+[39/500] gpt4_88806d6e (temporal-reasoning) answer="Based on the summaries, **Tom** was met first. You previousl" - 424s, ~5010s left
+[40/500] gpt4_93f6379c (temporal-reasoning) answer="You joined **'Page Turners'** first. You joined it the week " - 434s, ~4990s left
+[41/500] gpt4_9a159967 (temporal-reasoning) answer="Based on the summaries:
+
+- **March**: United Airlines (Chica" - 448s, ~5015s left
+[42/500] a3045048 (temporal-reasoning) answer="You ordered the Shutterfly photo album on **April 15th**, an" - 448s, ~4885s left
+[43/500] 6613b389 (temporal-reasoning) answer="Rachel got engaged on May 15th, and your anniversary is July" - 458s, ~4868s left
+[44/500] gpt4_c27434e8 (temporal-reasoning) answer="Based on the summaries, you started the **Ferrari 288 GTO** " - 478s, ~4955s left
+[45/500] gpt4_213fd887 (temporal-reasoning) answer="Based on the summaries, you joined the recreational volleyba" - 528s, ~5343s left
+[46/500] gpt4_2f584639 (temporal-reasoning) answer="Based on the session summary, the photo album for your mom w" - 546s, ~5393s left
+[47/500] gpt4_78cf46a3 (temporal-reasoning) answer="The narrator **lost their phone charger** first.
+
+- Charger " - 551s, ~5306s left
+[48/500] gpt4_5438fa52 (temporal-reasoning) answer="Based on the summaries provided, there is no mention of you " - 562s, ~5296s left
+[49/500] 8c18457d (temporal-reasoning) answer="The summaries don't mention anything about a brother's gradu" - 567s, ~5216s left
+[50/500] gpt4_cd90e484 (temporal-reasoning) answer="The previous conversations don't mention anything about new " - 583s, ~5244s left
+[51/500] b29f3365 (temporal-reasoning) answer="I don't know. There's no information in the previous convers" - 591s, ~5201s left
+[52/500] gpt4_1a1dc16d (temporal-reasoning) answer="The meeting with Rachel (April 10th) happened before the pri" - 593s, ~5109s left
+[53/500] gpt4_0a05b494 (temporal-reasoning) answer="You met the **Australian tourist** first. You encountered hi" - 593s, ~5002s left
+[54/500] 982b5123_abs (temporal-reasoning) answer="There is no mention of Sacramento or an Airbnb booking in Sa" - 605s, ~5001s left
+[55/500] gpt4_93159ced_abs (temporal-reasoning) answer="Based on the information in the summaries, you don't work at" - 616s, ~4980s left
+[56/500] gpt4_fe651585 (temporal-reasoning) answer="Based on the summaries, **Alex** became a parent first. Alex" - 646s, ~5119s left
+[57/500] c8090214_abs (temporal-reasoning) answer="There is no mention of an iPad purchase in any of the conver" - 660s, ~5128s left
+[58/500] gpt4_c27434e8_abs (temporal-reasoning) answer="Based on the summaries provided, you started the **Ferrari 2" - 670s, ~5105s left
+[59/500] gpt4_70e84552_abs (temporal-reasoning) answer="Based on the summaries, there is no mention of purchasing th" - 672s, ~5021s left
+[60/500] b5ef892d (multi-session) answer="Based on the summaries, you've spent **3 days** camping in t" - 692s, ~5074s left
+[61/500] e831120c (multi-session) answer="Based on the session summaries:
+
+- **MCU (22 films):** appro" - 722s, ~5197s left
+[62/500] gpt4_59c863d7 (multi-session) answer="Based on the session summaries, you have worked on or acquir" - 758s, ~5353s left
+[63/500] 3a704032 (multi-session) answer="Based on the summaries, I can identify plants you acquired r" - 763s, ~5291s left
+[64/500] dd2973ad (multi-session) answer="Based on the summaries, there's no information about what ti" - 764s, ~5206s left
+[65/500] gpt4_f2262a51 (multi-session) answer="Based on the summaries, you have visited **3 different docto" - 767s, ~5133s left
+[66/500] 0a995998 (multi-session) answer="Based on the summaries, you have **2 items** to pick up:
+
+1." - 793s, ~5215s left
+[67/500] aae3761f (multi-session) answer="Based on the session summaries, I can only identify **two** " - 811s, ~5243s left
+[68/500] gpt4_fe651585_abs (temporal-reasoning) answer="I don't have any information about Tom in the provided summa" - 815s, ~5178s left
+[69/500] 6cb6f249 (multi-session) answer="Based on the summaries, you took two social media breaks:
+
+-" - 821s, ~5129s left
+[70/500] gpt4_d84a3211 (multi-session) answer="Based on the information shared across our conversations, he" - 840s, ~5163s left
+[71/500] 6d550036 (multi-session) answer="Based on the session summaries, you have led or are currentl" - 874s, ~5281s left
+[72/500] 46a3abf7 (multi-session) answer="Based on the session summaries, you have **3 tanks**:
+
+1. A " - 877s, ~5211s left
+[73/500] c4a1ceb8 (multi-session) answer="Based on the conversation summaries, the citrus fruits menti" - 908s, ~5313s left
+[74/500] 36b9f61e (multi-session) answer="Based on the summaries, two luxury purchases are mentioned:
+" - 993s, ~5715s left
+[75/500] d23cf73b (multi-session) answer="Based on the summaries, you've explored **3 different cuisin" - 1017s, ~5766s left
+[76/500] 28dc39ac (multi-session) answer="Based on the session summaries, here are the confirmed play " - 1059s, ~5911s left
+[77/500] 7024f17c (multi-session) answer="I don't know. The previous conversation contains no informat" - 1063s, ~5838s left
+[78/500] gpt4_2f8be40d (multi-session) answer="Based on the summaries, you've attended **2 weddings** this " - 1070s, ~5786s left
+[79/500] 80ec1f4f (multi-session) answer="Based on the summaries, you visited **2** venues in February" - 1095s, ~5836s left
+[80/500] gpt4_15e38248 (multi-session) answer="Based on the summaries, here are the furniture items you bou" - 1103s, ~5792s left
+[81/500] gpt4_7fce9456 (multi-session) answer="Based on the summaries, you viewed at least **3 properties**" - 1105s, ~5717s left
+[82/500] gpt4_a56e767c (multi-session) answer="[TIMEOUT]" - 1121s, ~5716s left
+[83/500] 2e6d26dc (multi-session) answer="Based on the summaries, **4 babies** (or sets of babies) wer" - 1127s, ~5665s left
+[84/500] 2318644b (multi-session) answer="Based on the previous sessions, you spent **over $300/night*" - 1160s, ~5744s left
+[85/500] 88432d0a (multi-session) answer="Based on the summaries, here are the baking instances within" - 1194s, ~5830s left
+[86/500] d682f1a2 (multi-session) answer="Based on the session summaries, you've used **2** different " - 1214s, ~5846s left
+[87/500] eeda8a6d (multi-session) answer="Based on the summaries provided, only **one aquarium** is me" - 1230s, ~5841s left
+[88/500] 2ce6a0f2 (multi-session) answer="Based on the summaries, you attended **3** art-related event" - 1277s, ~5979s left
+[89/500] gpt4_31ff4165 (multi-session) answer="Based on the session summaries, you use **3 health-related d" - 1297s, ~5991s left
+[90/500] b3c15d39 (multi-session) answer="Based on the summaries, you ordered the replacement remote s" - 1311s, ~5974s left
+[91/500] gpt4_2ba83207 (multi-session) answer="Based on the session summaries, **Thrive Market** is where y" - 1311s, ~5894s left
+[92/500] gpt4_d12ceb0e (multi-session) answer="[TIMEOUT]" - 1384s, ~6137s left
+[93/500] a9f6b44c (multi-session) answer="Based on the summaries, **1 bike** was serviced in March: yo" - 1400s, ~6127s left
+[94/500] 00ca467f (multi-session) answer="Based on the summaries, you had **1 confirmed doctor's appoi" - 1402s, ~6056s left
+[95/500] gpt4_5501fe77 (multi-session) answer="[TIMEOUT]" - 1404s, ~5986s left
+[96/500] 9d25d4e0 (multi-session) answer="Based on the session summaries, you acquired **3 pieces** in" - 1446s, ~6087s left
+[97/500] 2788b940 (multi-session) answer="Based on the summaries, you attend **5 fitness classes** in " - 1481s, ~6154s left
+[98/500] 60bf93ed (multi-session) answer="[TIMEOUT]" - 1499s, ~6150s left
+[99/500] 129d1232 (multi-session) answer="[TIMEOUT]" - 1501s, ~6081s left
+[100/500] gpt4_194be4b3 (multi-session) answer="Based on the summaries, you own at least **3 instruments**:
+" - 1519s, ~6077s left
+[101/500] 60472f9c (multi-session) answer="Based on the session summaries, you have been working on **2" - 1519s, ~6003s left
+[102/500] 5a7937c8 (multi-session) answer="Based on the session summaries, you participated in faith-re" - 1540s, ~6007s left
+[103/500] gpt4_e05b82a6 (multi-session) answer="Based on the summaries, here's what's recorded:
+
+- **SeaWorl" - 1582s, ~6097s left
+[104/500] 2b8f3739 (multi-session) answer="Based on the summaries, here are your recorded market sales:" - 1645s, ~6264s left
+[105/500] edced276 (multi-session) answer="Based on the summaries: **15 days total** — 10 days in Hawai" - 1655s, ~6227s left
+[106/500] gpt4_731e37d7 (multi-session) answer="Based on the information available, here are the confirmed p" - 1663s, ~6183s left
+[107/500] d851d5ba (multi-session) answer="Based on the summaries, here are your confirmed charity fund" - 1698s, ~6236s left
+[108/500] gpt4_ab202e7f (multi-session) answer="Based on the session summaries, you replaced or fixed **4** " - 1720s, ~6243s left
+[109/500] bf659f65 (multi-session) answer="Based on the session summaries, only **1** — the EP *Midnigh" - 1726s, ~6192s left
+[110/500] e3038f8c (multi-session) answer="Based on the information across your sessions, here's the ta" - 1728s, ~6127s left
+[111/500] c2ac3c61 (multi-session) answer="Based on the summaries, you have completed **3 courses** on " - 1752s, ~6140s left
+[112/500] gpt4_372c3eed (multi-session) answer="Based on the summaries:
+
+- **High school**: Arcadia High Sch" - 1766s, ~6119s left
+[113/500] 10d9b85a (multi-session) answer="Based on the available information, only **1 event** is reco" - 1768s, ~6056s left
+[114/500] eeda8a6d_abs (multi-session) answer="I don't know. Based on the summaries, you have a **20-gallon" - 1776s, ~6014s left
+[115/500] gpt4_2f91af09 (multi-session) answer="I don't know. The summaries only mention one specific piece " - 1812s, ~6067s left
+[116/500] 1a8a66a6 (multi-session) answer="Based on the summaries, you currently have **2** magazine su" - 1833s, ~6067s left
+[117/500] 6aeb4375 (knowledge-update) answer="Based on the summaries, you have tried **4 Korean restaurant" - 1865s, ~6105s left
+[118/500] 60bf93ed_abs (multi-session) answer="I don't know. There is no information in the summaries about" - 1865s, ~6037s left
+[119/500] 830ce83f (knowledge-update) answer="Based on the session summaries, Rachel initially moved to Ch" - 1869s, ~5983s left
+[120/500] 80ec1f4f_abs (multi-session) answer="Based on the information in the summaries, I have no record " - 1877s, ~5944s left
+[121/500] 88432d0a_abs (multi-session) answer="Based on the session summaries provided, there is no mention" - 1893s, ~5929s left
+[122/500] 852ce960 (knowledge-update) answer="You were pre-approved for **$350,000** from Wells Fargo." - 1905s, ~5902s left
+[123/500] 81507db6 (multi-session) answer="Based on the summaries, you **missed** Jack's eighth grade g" - 1907s, ~5845s left
+[124/500] 71315a70 (knowledge-update) answer="Based on the most recent session (Session 2), you have **10-" - 1909s, ~5789s left
+[125/500] 89941a93 (knowledge-update) answer="You currently own **3 bikes**: a road bike, a mountain bike," - 1909s, ~5727s left
+[126/500] 6a1eabeb (knowledge-update) answer="Based on the session summaries, your most recent personal be" - 1917s, ~5691s left
+[127/500] 945e3d21 (knowledge-update) answer="Based on the session summaries, you attend yoga classes **th" - 1937s, ~5690s left
+[128/500] gpt4_372c3eed_abs (multi-session) answer="Based on the available information, you **haven't completed " - 1941s, ~5642s left
+[129/500] 184da446 (knowledge-update) answer="Based on the summaries, you've read **220 pages** (as of Ses" - 1948s, ~5602s left
+[130/500] d7c942c3 (knowledge-update) answer="Yes, your mom shares the same grocery list **app** as you — " - 1954s, ~5562s left
+[131/500] edced276_abs (multi-session) answer="Based on the summaries, there is no mention of Seattle in an" - 1954s, ~5505s left
+[132/500] 9ea5eabc (knowledge-update) answer="Your most recent family trip was to **Paris**." - 1956s, ~5453s left
+[133/500] ce6d2d27 (knowledge-update) answer="You take your cocktail-making class on **Fridays**." - 1975s, ~5449s left
+[134/500] 07741c44 (knowledge-update) answer="Based on the session summaries, your old sneakers are stored" - 1982s, ~5414s left
+[135/500] 031748ae (knowledge-update) answer="Based on the summaries, there's a slight inconsistency betwe" - 1989s, ~5378s left
+[136/500] 0f05491a (knowledge-update) answer="Based on the conversation history, there's a slight inconsis" - 1990s, ~5327s left
+[137/500] a1eacc2a (knowledge-update) answer="You have written **7 short stories** in the three months sin" - 1990s, ~5274s left
+[138/500] 4d6b87c8 (knowledge-update) answer="Based on the previous conversations, your to-watch list has " - 2003s, ~5254s left
+[139/500] 08e075c7 (knowledge-update) answer="Based on the most recent session, you've been using your Fit" - 2004s, ~5206s left
+[140/500] b6019101 (knowledge-update) answer="Based on the most recent session (Session 2), you watched **" - 2007s, ~5161s left
+[141/500] 6071bd76 (knowledge-update) answer="You switched to **more water per tablespoon** — from 6 ounce" - 2012s, ~5123s left
+[142/500] 2698e78f (knowledge-update) answer="Based on the most recent session (Session 2), you see Dr. Sm" - 2022s, ~5098s left
+[143/500] 45dc21b6 (knowledge-update) answer="Based on the session summaries, you have tried **3** of Emma" - 2025s, ~5055s left
+[144/500] c4ea545c (knowledge-update) answer="Yes. You previously went to the gym **3 times a week** (Tues" - 2026s, ~5008s left
+[145/500] 5a4f22c0 (knowledge-update) answer="Rachel is currently working at **TechCorp**." - 2028s, ~4965s left
+[146/500] f9e8c073 (knowledge-update) answer="Based on the summaries, there's a discrepancy between the tw" - 2032s, ~4927s left
+[147/500] e493bb7c (knowledge-update) answer="Based on Session 2, the 'Ethereal Dreams' painting by Emma T" - 2033s, ~4881s left
+[148/500] 01493427 (knowledge-update) answer="You mentioned having **17 new postcards** to catalog since r" - 2049s, ~4872s left
+[149/500] 41698283 (knowledge-update) answer="Based on the session summaries, your most recently purchased" - 2050s, ~4829s left
+[150/500] 72e3ee87 (knowledge-update) answer="You have completed **50 episodes** of the Crash Course Scien" - 2053s, ~4790s left
+[151/500] 6a27ffc2 (knowledge-update) answer="Based on the most recent session (Session 2), you have compl" - 2061s, ~4762s left
+[152/500] e61a7584 (knowledge-update) answer="Based on the most recent session (Session 2), you've had Lun" - 2069s, ~4737s left
+[153/500] 618f13b2 (knowledge-update) answer="Based on the most recent session (as of 2023-05-23), you had" - 2072s, ~4699s left
+[154/500] 1cea1afa (knowledge-update) answer="Based on the most recent session (2023-05-25), you had **600" - 2073s, ~4657s left
+[155/500] 18bc8abd (knowledge-update) answer="Based on the most recent session (Session 2), your favorite " - 2078s, ~4626s left
+[156/500] 8fb83627 (knowledge-update) answer="Based on the most recent session, you have completed **5 iss" - 2079s, ~4584s left
+[157/500] 7a87bd0c (knowledge-update) answer="As of today (September 30, 2023), you've been maintaining yo" - 2080s, ~4545s left
+[158/500] 2133c1b5 (knowledge-update) answer="3 months." - 2081s, ~4504s left
+[159/500] db467c8c (knowledge-update) answer="Based on the session summaries, there is a discrepancy betwe" - 2092s, ~4487s left
+[160/500] 7e974930 (knowledge-update) answer="Based on the most recent session (September 30, 2023), you e" - 2102s, ~4467s left
+[161/500] 5831f84d (knowledge-update) answer="Based on the session summaries, you've gone from **12** (Ses" - 2103s, ~4428s left
+[162/500] 4b24c848 (knowledge-update) answer="You've bought **5 tops** from H&M so far (3 mentioned in Ses" - 2105s, ~4392s left
+[163/500] ed4ddc30 (knowledge-update) answer="Based on the session summaries, the most recent count mentio" - 2106s, ~4355s left
+[164/500] b01defab (knowledge-update) answer="Yes, you finished 'The Nightingale' and found it amazing, as" - 2113s, ~4329s left
+[165/500] 0e4e4c46 (knowledge-update) answer="Based on the session summaries, your current highest score i" - 2116s, ~4297s left
+[166/500] 59524333 (knowledge-update) answer="Based on the session summaries, there's a slight inconsisten" - 2118s, ~4262s left
+[167/500] 603deb26 (knowledge-update) answer="Based on the most recent session, you've made a Negroni **10" - 2131s, ~4249s left
+[168/500] affe2881 (knowledge-update) answer="Based on the summaries, you've spotted **32 different bird s" - 2135s, ~4218s left
+[169/500] 0ddfec37 (knowledge-update) answer="Based on the session summaries, you started collecting three" - 2136s, ~4184s left
+[170/500] eace081b (knowledge-update) answer="Based on the summaries, there is no information about where " - 2138s, ~4151s left
+[171/500] e66b632c (knowledge-update) answer="Based on Session 1, your previous personal best for the char" - 2139s, ~4115s left
+[172/500] 22d2cb42 (knowledge-update) answer="You got your guitar serviced at **Rhythm Central** on Main S" - 2159s, ~4117s left
+[173/500] 50635ada (knowledge-update) answer="Based on the session summaries, your previous status was **P" - 2165s, ~4093s left
+[174/500] 7401057b (knowledge-update) answer="Based on the most recent session, you have enough Hilton Hon" - 2177s, ~4078s left
+[175/500] cc5ded98 (knowledge-update) answer="Based on your most recent session, you dedicate **two hours*" - 2178s, ~4046s left
+[176/500] cf22b7bf (knowledge-update) answer="You've lost **10 pounds** over 3 months of consistent gym at" - 2181s, ~4014s left
+[177/500] dfde3500 (knowledge-update) answer="Based on the Session 1 summary, you met with Juan every **We" - 2195s, ~4005s left
+[178/500] a2f3aa27 (knowledge-update) answer="Based on the most recent session (Session 2), you have appro" - 2203s, ~3985s left
+[179/500] f685340e (knowledge-update) answer="Based on the summaries:
+
+- **Previously (Session 1):** You p" - 2203s, ~3951s left
+[180/500] 69fee5aa (knowledge-update) answer="Based on the session summaries, you have **38+ pre-1920 Amer" - 2208s, ~3925s left
+[181/500] c7dc5443 (knowledge-update) answer="Based on the most recent session summary, your volleyball te" - 2211s, ~3897s left
+[182/500] 06db6396 (knowledge-update) answer="You have completed **5 painting projects** since starting pa" - 2217s, ~3874s left
+[183/500] 10e09553 (knowledge-update) answer="You caught **7 largemouth bass** with Alex on the earlier tr" - 2219s, ~3843s left
+[184/500] 42ec0761 (knowledge-update) answer="Yes, based on Session 2, you confirmed you already own a spa" - 2223s, ~3818s left
+[185/500] 3ba21379 (knowledge-update) answer="Based on the most recent session (Session 2), you are curren" - 2226s, ~3790s left
+[186/500] dad224aa (knowledge-update) answer="Based on Session 2, you wake up at **7:30am** on Saturday mo" - 2227s, ~3759s left
+[187/500] ba61f0b9 (knowledge-update) answer="Based on the most recent information (Session 2, where you c" - 2231s, ~3734s left
+[188/500] 5c40ec5b (knowledge-update) answer="Based on the summaries, you haven't met up with Alex yet. As" - 2240s, ~3717s left
+[189/500] c6853660 (knowledge-update) answer="You most recently **increased** your morning coffee limit — " - 2240s, ~3686s left
+[190/500] 26bdc477 (knowledge-update) answer="You have taken your Canon EOS 80D on **3 trips**: Yellowston" - 2248s, ~3668s left
+[191/500] 9bbe84a2 (knowledge-update) answer="Your previous goal was to reach **level 100** before the end" - 2250s, ~3640s left
+[192/500] 2698e78f_abs (knowledge-update) answer="Based on the information in our previous conversations, your" - 2269s, ~3639s left
+[193/500] 0977f2af (knowledge-update) answer="Based on the session summaries, you got an **Instant Pot** b" - 2274s, ~3618s left
+[194/500] 0ddfec37_abs (knowledge-update) answer="The summaries mention **autographed baseballs**, not footbal" - 2278s, ~3593s left
+[195/500] f685340e_abs (knowledge-update) answer="You don't play table tennis — you play **tennis** (not table" - 2292s, ~3585s left
+[196/500] 031748ae_abs (knowledge-update) answer="Based on the previous conversations, you lead **5 engineers*" - 2302s, ~3570s left
+[197/500] 6aeb4375_abs (knowledge-update) answer="I don't know. The previous conversations don't mention any I" - 2303s, ~3542s left
+[198/500] 2133c1b5_abs (knowledge-update) answer="Based on the summaries, you live in **Harajuku**, not Shinju" - 2304s, ~3515s left
+[199/500] 8a2466db (single-session-preference) answer="Based on the previous session, the user is learning Adobe Pr" - 2308s, ~3492s left
+[200/500] 0edc2aef (single-session-preference) answer="I don't have any information about a trip to Miami in our pr" - 2308s, ~3463s left
+[201/500] 75832dbd (single-session-preference) answer="Based on your work in deep learning for medical image analys" - 2313s, ~3441s left
+[202/500] 35a27287 (single-session-preference) answer="I don't have access to your location or real-time event list" - 2315s, ~3415s left
+[203/500] 89941a94 (knowledge-update) answer="Yes, you also have a **road bike** and a **hybrid bike** (pu" - 2315s, ~3387s left
+[204/500] afdc33df (single-session-preference) answer="Based on the previous conversations, I don't have specific i" - 2325s, ~3373s left
+[205/500] 195a1a1b (single-session-preference) answer="Based on your previous conversation, here are some evening a" - 2325s, ~3346s left
+[206/500] 32260d93 (single-session-preference) answer="Based on your interest in comedy and storytelling, I'd sugge" - 2327s, ~3320s left
+[207/500] 54026fce (single-session-preference) answer="Based on our previous conversation, you've already explored " - 2331s, ~3299s left
+[208/500] 6b7dfb22 (single-session-preference) answer="Based on our previous conversation, you mentioned that **soc" - 2331s, ~3273s left
+[209/500] caf03d32 (single-session-preference) answer="Based on what I know about you, here are some targeted tips:" - 2335s, ~3251s left
+[210/500] 06878be2 (single-session-preference) answer="Based on your setup (Sony A7R IV, 24-70mm f/2.8, Godox V1, G" - 2335s, ~3225s left
+[211/500] 06f04340 (single-session-preference) answer="Based on your previous conversations, you have **fresh basil" - 2335s, ~3199s left
+[212/500] 07741c45 (knowledge-update) answer="Based on the previous conversations, your old sneakers are s" - 2343s, ~3183s left
+[213/500] d24813b1 (single-session-preference) answer="Based on your baking history, a few solid options:
+
+- **Lemo" - 2353s, ~3171s left
+[214/500] 1a1907b4 (single-session-preference) answer="Based on your recent mixology adventure, you've already got " - 2353s, ~3145s left
+[215/500] 09d032c9 (single-session-preference) answer="Based on the previous conversations, there's no specific inf" - 2355s, ~3122s left
+[216/500] 38146c39 (single-session-preference) answer="Based on the previous conversations, I can see you enjoy exp" - 2357s, ~3100s left
+[217/500] 505af2f5 (single-session-preference) answer="Based on your previous conversations, you already make a hom" - 2363s, ~3082s left
+[218/500] d6233ab6 (single-session-preference) answer="I don't have any information about a high school reunion in " - 2381s, ~3081s left
+[219/500] b6025781 (single-session-preference) answer="Based on your previous meal prep, you've tried:
+- Grilled ch" - 2388s, ~3063s left
+[220/500] 57f827a0 (single-session-preference) answer="Based on the previous conversation summaries, I don't have a" - 2391s, ~3044s left
+[221/500] b0479f84 (single-session-preference) answer="Based on your viewing history (*Our Planet*, *Free Solo*, *T" - 2391s, ~3019s left
+[222/500] 1d4e3b97 (single-session-preference) answer="Based on the previous conversation, you replaced your bike's" - 2418s, ~3028s left
+[223/500] 75f70248 (single-session-preference) answer="Based on the previous conversation, yes, your living room co" - 2418s, ~3003s left
+[224/500] a89d7624 (single-session-preference) answer="Based on our previous conversations, you're already familiar" - 2426s, ~2989s left
+[225/500] 1c0ddc50 (single-session-preference) answer="Based on the conversation history, the user has a **40-minut" - 2426s, ~2965s left
+[226/500] 89527b6b (single-session-assistant) answer="The session summary doesn't include a description of the Ple" - 2442s, ~2961s left
+[227/500] 07b6f563 (single-session-preference) answer="Based on our previous conversation, you have an **iPhone 13 " - 2442s, ~2937s left
+[228/500] 7161e7e2 (single-session-assistant) answer="Based on the previous session, **Admon** was assigned to wor" - 2444s, ~2916s left
+[229/500] 1da05512 (single-session-preference) answer="Based on our conversation, I don't have enough information a" - 2446s, ~2895s left
+[230/500] e9327a54 (single-session-assistant) answer="Based on our previous conversation, the dessert spot with gi" - 2454s, ~2881s left
+[231/500] fca70973 (single-session-preference) answer="Based on your previous visits to Disneyland, Knott's Berry F" - 2454s, ~2858s left
+[232/500] 95228167 (single-session-preference) answer="Based on your situation (upgrading from a Strat to a Les Pau" - 2454s, ~2835s left
+[233/500] c4f10528 (single-session-assistant) answer="The restaurant is **Miss Bee Providore**, located near Ciham" - 2488s, ~2851s left
+[234/500] 1903aded (single-session-assistant) answer="The 7th job in the list was **Transcriptionist**." - 2488s, ~2829s left
+[235/500] 6ae235be (single-session-assistant) answer="Based on our previous conversation, the Lake Charles refiner" - 2488s, ~2806s left
+[236/500] 0a34ad58 (single-session-preference) answer="Based on the previous conversation, here are some reassuring" - 2498s, ~2795s left
+[237/500] 7e00a6cb (single-session-assistant) answer="The hostel near the Red Light District that was recommended " - 2500s, ~2775s left
+[238/500] dc439ea3 (single-session-assistant) answer="Based on our previous conversation, the **Hoop Dance** is th" - 2500s, ~2753s left
+[239/500] 4c36ccef (single-session-assistant) answer="The romantic restaurant recommended was **Roscioli**, locate" - 2502s, ~2733s left
+[240/500] 0e5e2d1a (single-session-assistant) answer="The study published in *Music and Medicine* had **38 subject" - 2504s, ~2713s left
+[241/500] 488d3006 (single-session-assistant) answer="The hiking trail recommended was the **GR-90**, a circular t" - 2510s, ~2698s left
+[242/500] ceb54acb (single-session-assistant) answer="The four alternatives I suggested were:
+
+1. **Sexual fixatio" - 2510s, ~2676s left
+[243/500] fea54f57 (single-session-assistant) answer="I don't know. There's no information in the distilled summar" - 2511s, ~2655s left
+[244/500] 8464fc84 (single-session-assistant) answer="Based on our previous conversation, the deli near the Vatica" - 2519s, ~2643s left
+[245/500] cc539528 (single-session-assistant) answer="Based on our previous conversation, the back-end languages r" - 2525s, ~2628s left
+[246/500] 8aef76bc (single-session-assistant) answer="I don't know. The previous conversation summary doesn't incl" - 2527s, ~2609s left
+[247/500] 58470ed2 (single-session-assistant) answer="Based on the distilled summary, I don't have that specific d" - 2529s, ~2590s left
+[248/500] 1d4da289 (single-session-assistant) answer="In our previous conversation, I didn't actually specify part" - 2531s, ~2572s left
+[249/500] 8cf51dda (single-session-assistant) answer="Based on our previous conversation, the three objectives out" - 2531s, ~2551s left
+[250/500] f523d9fe (single-session-assistant) answer="Yes, you used **Doc Martin** as your example." - 2535s, ~2535s left
+[251/500] 3249768e (single-session-assistant) answer="The fifth bottle recommended for gin-based cocktails was **A" - 2535s, ~2515s left
+[252/500] 2bf43736 (single-session-assistant) answer="Based on the previous conversation, **Chapter 4** of Part 2," - 2547s, ~2507s left
+[253/500] 18dcd5a5 (single-session-assistant) answer="I don't know. The distilled summaries provided don't contain" - 2549s, ~2489s left
+[254/500] 71a3fd6b (single-session-assistant) answer="The phone number for Speyer Tourismus Marketing GmbH provide" - 2555s, ~2475s left
+[255/500] e8a79c70 (single-session-assistant) answer="For a classic French omelette, the recipe calls for **2-3 eg" - 2557s, ~2457s left
+[256/500] 6222b6eb (single-session-assistant) answer="Based on our previous conversation, **6S** (Second Simulatio" - 2561s, ~2441s left
+[257/500] 1b9b7252 (single-session-assistant) answer="The website mentioned was **Mindful.org**, which featured fr" - 2561s, ~2422s left
+[258/500] 1568498a (single-session-assistant) answer="After 27...Bd5+, White played **28. Kg3**." - 2565s, ~2406s left
+[259/500] 3e321797 (single-session-assistant) answer="Based on the previous conversation, you should leave the tom" - 2583s, ~2404s left
+[260/500] 70b3e69b (single-session-assistant) answer="The Spanish-Catalan singer-songwriter mentioned who publicly" - 2583s, ~2385s left
+[261/500] fca762bc (single-session-assistant) answer="The app that uses mnemonics to help memorize words and phras" - 2585s, ~2367s left
+[262/500] d596882b (single-session-assistant) answer="Based on our previous conversation, the vegan eatery with mu" - 2587s, ~2350s left
+[263/500] e982271f (single-session-assistant) answer="The last venue mentioned in the list was **Revolution Hall**" - 2589s, ~2333s left
+[264/500] a40e080f (single-session-assistant) answer="The two companies I mentioned were **Patagonia** and **South" - 2591s, ~2316s left
+[265/500] 51b23612 (single-session-assistant) answer="The Soviet cartoon mentioned in our previous conversation wa" - 2595s, ~2301s left
+[266/500] 352ab8bd (single-session-assistant) answer="The HAMT agent achieved approximately **~20% framerate impro" - 2601s, ~2288s left
+[267/500] 8752c811 (single-session-assistant) answer="The 27th parameter on that list was **Sound effects**." - 2603s, ~2272s left
+[268/500] 5809eb10 (single-session-assistant) answer="Construction of the house began in **2014**." - 2606s, ~2256s left
+[269/500] 8b9d4367 (single-session-assistant) answer="Based on our previous conversation, the company you're refer" - 2607s, ~2239s left
+[270/500] 41275add (single-session-assistant) answer="The Mayo Clinic video recommended was **"How to Sit Properly" - 2609s, ~2223s left
+[271/500] e3fc4d6e (single-session-assistant) answer="Based on the previous conversation, the President's Chief Ad" - 2609s, ~2205s left
+[272/500] 4388e9dd (single-session-assistant) answer="I don't know. There's no information about a comedy movie sc" - 2611s, ~2189s left
+[273/500] 4baee567 (single-session-assistant) answer="Based on our previous conversation, the Chiefs hosted the Ja" - 2615s, ~2175s left
+[274/500] 561fabcd (single-session-assistant) answer="Based on our previous conversation, the Radiation Amplified " - 2617s, ~2159s left
+[275/500] 7a8d0b71 (single-session-assistant) answer="The budget allocated for influencer marketing in the DHL Wel" - 2619s, ~2143s left
+[276/500] ac031881 (single-session-assistant) answer="I don't know. There's no information in the provided summari" - 2621s, ~2127s left
+[277/500] 16c90bf4 (single-session-assistant) answer="Based on our previous conversation, I specifically recommend" - 2624s, ~2112s left
+[278/500] c7cf7dfd (single-session-assistant) answer="The India-based store recommended was **Nostalgia**." - 2625s, ~2096s left
+[279/500] c8f1aeed (single-session-assistant) answer="The state mentioned as an example was **Pennsylvania**, whic" - 2627s, ~2081s left
+[280/500] b759caee (single-session-assistant) answer="The UK-based designer who works with unusual gemstones is **" - 2628s, ~2065s left
+[281/500] 28bcfaac (single-session-assistant) answer="The free website recommended for music theory lessons and ex" - 2632s, ~2051s left
+[282/500] e48988bc (single-session-assistant) answer="The company mentioned was **Patagonia**. They were highlight" - 2635s, ~2037s left
+[283/500] 778164c6 (single-session-assistant) answer="The Jamaican dish I recommended with snapper was **Escovitch" - 2639s, ~2024s left
+[284/500] 65240037 (single-session-assistant) answer="The recommended dilution ratio is **1:10** — one part tea tr" - 2641s, ~2009s left
+[285/500] eaca4986 (single-session-assistant) answer="Based on the distilled summary, I don't have information abo" - 2642s, ~1993s left
+[286/500] 1de5cff2 (single-session-assistant) answer="The brand you're thinking of is **Veja**, which uses wild ru" - 2644s, ~1978s left
+[287/500] e47becba (single-session-user) answer="You graduated with a degree in **Business Administration**." - 2650s, ~1966s left
+[288/500] 118b2229 (single-session-user) answer="Your daily commute is **45 minutes each way**." - 2651s, ~1952s left
+[289/500] 51a45a95 (single-session-user) answer="You found the $5 coffee creamer coupon unexpectedly in your " - 2652s, ~1936s left
+[290/500] 6ade9755 (single-session-user) answer="You take yoga classes at **Serenity Yoga** studio." - 2659s, ~1926s left
+[291/500] 58bf7951 (single-session-user) answer="You attended a production of **The Glass Menagerie** at your" - 2660s, ~1910s left
+[292/500] 5d3d2817 (single-session-user) answer="You were previously a **marketing specialist at a small star" - 2666s, ~1899s left
+[293/500] 58ef2f1c (single-session-user) answer="Based on the previous conversation, you volunteered at the *" - 2666s, ~1883s left
+[294/500] 6f9b354f (single-session-user) answer="You repainted your bedroom walls a lighter shade of gray." - 2682s, ~1879s left
+[295/500] c960da58 (single-session-user) answer="You have **20 playlists** on Spotify." - 2686s, ~1867s left
+[296/500] 726462e0 (single-session-user) answer="The discount was **10%** on your first purchase from the new" - 2686s, ~1851s left
+[297/500] f8c5f88b (single-session-user) answer="You bought your new tennis racket from a sports store downto" - 2688s, ~1837s left
+[298/500] 3b6f954b (single-session-user) answer="You attended the **University of Melbourne** for your study " - 2694s, ~1826s left
+[299/500] ad7109d1 (single-session-user) answer="Your internet plan is **500 Mbps**." - 2694s, ~1811s left
+[300/500] 1e043500 (single-session-user) answer="Your Spotify playlist is called **'Summer Vibes'**." - 2709s, ~1806s left
+[301/500] af8d2e46 (single-session-user) answer="Based on the summaries, your Costa Rica trip had **7 shirts*" - 2711s, ~1792s left
+[302/500] 8ebdbe50 (single-session-user) answer="You completed a **Data Science certification** last month (a" - 2719s, ~1783s left
+[303/500] 7527f7e2 (single-session-user) answer="You spent **$800** on a designer handbag the previous month." - 2719s, ~1768s left
+[304/500] 94f70d80 (single-session-user) answer="It took you **4 hours** to assemble the IKEA bookshelf." - 2719s, ~1753s left
+[305/500] c5e8278d (single-session-user) answer="Your last name before the change was **Johnson**." - 2721s, ~1740s left
+[306/500] c8c3f81d (single-session-user) answer="Your favorite running shoe brand is **Nike**." - 2723s, ~1726s left
+[307/500] 75499fd8 (single-session-user) answer="Your dog Max is a **Golden Retriever**." - 2723s, ~1712s left
+[308/500] 95bcc1c8 (single-session-user) answer="You watched **10 amateur comedians** perform at the open mic" - 2727s, ~1700s left
+[309/500] 37d43f65 (single-session-user) answer="You upgraded your laptop RAM to **16GB**." - 2736s, ~1691s left
+[310/500] 66f24dbb (single-session-user) answer="You bought your sister a **yellow dress** and a **pair of ea" - 2738s, ~1678s left
+[311/500] 853b0a1d (single-session-user) answer="You were **18 years old** — your grandmother gave you the si" - 2738s, ~1664s left
+[312/500] 0862e8bf (single-session-user) answer="Your cat's name is **Luna**." - 2742s, ~1652s left
+[313/500] d52b4f67 (single-session-user) answer="Your cousin's wedding was held at the **Grand Ballroom**." - 2744s, ~1639s left
+[314/500] 6b168ec8 (single-session-user) answer="You own **three bikes**: a Trek Emonda (road bike), a mounta" - 2750s, ~1629s left
+[315/500] 21436231 (single-session-user) answer="You caught **12 largemouth bass** on your last Lake Michigan" - 2752s, ~1616s left
+[316/500] b86304ba (single-session-user) answer="Based on the previous conversation, the flea market art find" - 2752s, ~1602s left
+[317/500] caf9ead2 (single-session-user) answer="It took approximately **5 hours** to move everything into th" - 2754s, ~1590s left
+[318/500] dccbc061 (single-session-user) answer="You previously identified as a **staunch atheist**." - 2762s, ~1581s left
+[319/500] a06e4cfe (single-session-user) answer="Your preferred ratio is **3:1 gin-to-vermouth** with a dash " - 2762s, ~1567s left
+[320/500] 60d45044 (single-session-user) answer="Based on the previous conversation, your favorite rice is **" - 2762s, ~1554s left
+[321/500] 8550ddae (single-session-user) answer="Based on the session summary, you tried a **lavender gin fiz" - 2768s, ~1543s left
+[322/500] 3f1e9474 (single-session-user) answer="You didn't have a conversation *with* someone about destiny " - 2770s, ~1531s left
+[323/500] 25e5aa4f (single-session-user) answer="You completed your Bachelor's degree in Computer Science at " - 2772s, ~1519s left
+[324/500] 577d4d32 (single-session-user) answer="You stop checking work emails and messages at **7pm**." - 2774s, ~1507s left
+[325/500] 15745da0 (single-session-user) answer="Based on the summary, you've been collecting vintage cameras" - 2774s, ~1494s left
+[326/500] e01b8e2f (single-session-user) answer="You went to **Hawaii** with your family for a week last mont" - 2782s, ~1485s left
+[327/500] bc8a6e93 (single-session-user) answer="You made a **lemon blueberry cake** for your niece's birthda" - 2782s, ~1472s left
+[328/500] ec81a493 (single-session-user) answer="The poster is described as a limited edition of **500 copies" - 2788s, ~1462s left
+[329/500] 001be529 (single-session-user) answer="Based on the session summary, your asylum application was ap" - 2790s, ~1450s left
+[330/500] ccb36322 (single-session-user) answer="Based on the previous conversation, you've been using **Spot" - 2790s, ~1437s left
+[331/500] 4fd1909e (single-session-user) answer="You attended the Imagine Dragons concert at the **Xfinity Ce" - 2792s, ~1426s left
+[332/500] 86b68151 (single-session-user) answer="You bought your new bookshelf from **IKEA**." - 2794s, ~1414s left
+[333/500] b320f3f8 (single-session-user) answer="You bought a rare blue **Snaggletooth** action figure from a" - 2798s, ~1403s left
+[334/500] 76d63226 (single-session-user) answer="Your new Samsung TV is **55 inches**." - 2802s, ~1393s left
+[335/500] 8a137a7f (single-session-user) answer="Based on the summaries, you didn't replace a bulb in your be" - 2806s, ~1382s left
+[336/500] 545bd2b5 (single-session-user) answer="You've been averaging **2 hours per day** on Instagram over " - 2806s, ~1370s left
+[337/500] 4100d0a0 (single-session-user) answer="Based on the previous conversation, you have mixed **Irish a" - 2808s, ~1358s left
+[338/500] 8e9d538c (single-session-user) answer="You found **17 skeins** of worsted weight yarn in your stash" - 2810s, ~1347s left
+[339/500] 29f2956b (single-session-user) answer="You practice guitar for **30 minutes** every day." - 2816s, ~1337s left
+[340/500] c19f7a0b (single-session-user) answer="You usually get home from work around **6:30 pm** on weeknig" - 2820s, ~1327s left
+[341/500] 86f00804 (single-session-user) answer="You're currently reading **The Seven Husbands of Evelyn Hugo" - 2820s, ~1315s left
+[342/500] 311778f1 (single-session-user) answer="You spent approximately **10 hours** watching documentaries " - 2822s, ~1304s left
+[343/500] 36580ce8 (single-session-user) answer="You initially thought your **bronchitis** was just a cold." - 2834s, ~1297s left
+[344/500] a82c026e (single-session-user) answer="You beat the final boss in the **Dark Souls 3 DLC** last wee" - 2836s, ~1286s left
+[345/500] faba32e5 (single-session-user) answer="Alex marinated the BBQ ribs in special sauce for **24 hours*" - 2836s, ~1274s left
+[346/500] c14c00dd (single-session-user) answer="Based on the previous conversation, you use a **lavender sce" - 2840s, ~1264s left
+[347/500] 1faac195 (single-session-user) answer="Emily lives in **Denver**." - 2842s, ~1253s left
+[348/500] f4f1d8a4 (single-session-user) answer="Your sister gave you the new stand mixer as a birthday gift." - 2848s, ~1244s left
+[349/500] 19b5f2b3 (single-session-user) answer="You previously traveled solo around Japan for **two weeks**." - 2852s, ~1234s left
+[350/500] 0862e8bf_abs (single-session-user) answer="I don't know. The previous conversations only mention your c" - 2852s, ~1222s left
+[351/500] f4f1d8a4_abs (single-session-user) answer="Based on the previous conversation summaries, there's no men" - 2854s, ~1212s left
+[352/500] 19b5f2b3_abs (single-session-user) answer="Based on the summaries, there's no mention of how long you w" - 2856s, ~1201s left
+[353/500] 29f2956b_abs (single-session-user) answer="Based on the previous conversations, there is no mention of " - 2864s, ~1193s left
+[354/500] bc8a6e93_abs (single-session-user) answer="The summaries don't mention anything about your uncle's birt" - 2866s, ~1182s left
+[355/500] 71017276 (temporal-reasoning) answer="I don't know. The summaries don't mention when you met with " - 2868s, ~1172s left
+[356/500] 15745da0_abs (single-session-user) answer="Based on the summary, you've been collecting **vintage camer" - 2876s, ~1163s left
+[357/500] 3d86fd0a (single-session-user) answer="You met Sophia at a **coffee shop in the city**." - 2880s, ~1154s left
+[358/500] gpt4_b5700ca9 (temporal-reasoning) answer="You attended the Maundy Thursday service on April 6, 2023. T" - 2881s, ~1143s left
+[359/500] gpt4_59149c77 (temporal-reasoning) answer="I don't know. The summaries mention your MoMA visit but cont" - 2891s, ~1135s left
+[360/500] gpt4_e072b769 (temporal-reasoning) answer="Based on the available information, I don't know when you st" - 2893s, ~1125s left
+[361/500] af082822 (temporal-reasoning) answer="Based on the summary, you attended the Nordstrom friends and" - 2897s, ~1115s left
+[362/500] gpt4_f49edff3 (temporal-reasoning) answer="Based on the summaries:
+
+1. **Helped friend prepare the nurs" - 2905s, ~1107s left
+[363/500] 9a707b81 (temporal-reasoning) answer="The baking class was on **2022/03/20**, and the birthday cak" - 2915s, ~1100s left
+[364/500] b46e15ed (temporal-reasoning) answer="Looking at the charity events in the summaries:
+
+- **2023-02" - 2923s, ~1092s left
+[365/500] gpt4_1d4ab0c9 (temporal-reasoning) answer="From 2023-03-22 (started watering) to 2023-04-15 (first harv" - 2927s, ~1082s left
+[366/500] gpt4_4929293a (temporal-reasoning) answer="Michael's engagement party happened first (2023/05/06), foll" - 2931s, ~1073s left
+[367/500] gpt4_6dc9b45b (temporal-reasoning) answer="You attended SIFF on 2021-06-01, which was approximately **4" - 2937s, ~1064s left
+[368/500] 0bc8ad92 (temporal-reasoning) answer="Based on the summaries, your last museum visit with a friend" - 2941s, ~1055s left
+[369/500] gpt4_1d80365e (temporal-reasoning) answer="Based on the summaries, your solo Yosemite trip ran from **2" - 2947s, ~1046s left
+[370/500] gpt4_fa19884c (temporal-reasoning) answer="Based on the summaries, I don't have enough information to a" - 2951s, ~1037s left
+[371/500] gpt4_8279ba02 (temporal-reasoning) answer="Based on the session summary, you got your smoker on or arou" - 2951s, ~1026s left
+[372/500] gpt4_7f6b06db (temporal-reasoning) answer="Based on the session summaries, your three trips in order fr" - 2957s, ~1017s left
+[373/500] gpt4_18c2b244 (temporal-reasoning) answer="Chronological order:
+
+1. **Used BOGO coupon on Luvs diapers " - 2969s, ~1011s left
+[374/500] gpt4_7a0daae1 (temporal-reasoning) answer="I don't know. The summaries mention you bought a new tennis " - 2973s, ~1002s left
+[375/500] gpt4_468eb063 (temporal-reasoning) answer="Based on the session date of 2023/04/11, you met Emma **9 da" - 2979s, ~993s left
+[376/500] 0db4c65d (temporal-reasoning) answer="From 2022-12-28 to 2023-01-15 = **18 days**." - 2988s, ~985s left
+[377/500] gpt4_1e4a8aeb (temporal-reasoning) answer="The workshop was on **2023-04-15** and the tomato saplings w" - 2991s, ~976s left
+[378/500] 4dfccbf7 (temporal-reasoning) answer="Both events occurred in the same conversation/session — you " - 2991s, ~965s left
+[379/500] gpt4_1916e0ea (temporal-reasoning) answer="I don't have enough information to answer this. The summarie" - 2994s, ~956s left
+[380/500] gpt4_61e13b3c (temporal-reasoning) answer="Based on the information available, I can only identify one " - 2999s, ~947s left
+[381/500] gpt4_4fc4f797 (temporal-reasoning) answer="Based on the available information, I cannot determine exact" - 3029s, ~946s left
+[382/500] 370a8ff4 (temporal-reasoning) answer="From flu recovery (January 19, 2023) to the 10th outdoor jog" - 3031s, ~936s left
+[383/500] 2ebe6c90 (temporal-reasoning) answer="Based on the summaries, you started 'The Nightingale' on **2" - 3037s, ~928s left
+[384/500] 8077ef71 (temporal-reasoning) answer="The networking event was on **Wednesday, March 9, 2022**. To" - 3051s, ~922s left
+[385/500] gpt4_4ef30696 (temporal-reasoning) answer="Based on the session summaries:
+
+- Finished 'The Nightingale" - 3068s, ~916s left
+[386/500] gpt4_a1b77f9c (temporal-reasoning) answer="Based on the session summaries:
+
+- **The Nightingale**: Star" - 3074s, ~908s left
+[387/500] gpt4_ec93e27f (temporal-reasoning) answer="Based on the summaries, your most recent trip was a **train*" - 3074s, ~898s left
+[388/500] gpt4_e061b84f (temporal-reasoning) answer="From earliest to latest:
+
+1. **Spring Sprint Triathlon** – J" - 3083s, ~890s left
+[389/500] gpt4_45189cb4 (temporal-reasoning) answer="Based on the summaries, you watched two sports events in Jan" - 3091s, ~882s left
+[390/500] 6e984301 (temporal-reasoning) answer="Based on the available information, I cannot determine exact" - 3093s, ~872s left
+[391/500] gpt4_7abb270c (temporal-reasoning) answer="Based on the summaries, I only have records of **three** mus" - 3109s, ~867s left
+[392/500] gpt4_af6db32f (temporal-reasoning) answer="Based on the session summary, you watched the Super Bowl on " - 3115s, ~858s left
+[393/500] gpt4_74aed68e (temporal-reasoning) answer="Based on the summaries:
+
+- Spark plugs replaced: **2023-02-1" - 3115s, ~848s left
+[394/500] gpt4_21adecb5 (temporal-reasoning) answer="Based on the summaries:
+
+- Undergraduate degree completed: *" - 3119s, ~839s left
+[395/500] bcbe585f (temporal-reasoning) answer="The workshop was on April 1, 2023, and today is May 1, 2023 " - 3125s, ~831s left
+[396/500] gpt4_7ddcf75f (temporal-reasoning) answer="Based on the session summary, your whitewater rafting trip w" - 3129s, ~822s left
+[397/500] gpt4_85da3956 (temporal-reasoning) answer="Based on the session date of July 15, 2023, the Summer Night" - 3139s, ~814s left
+[398/500] 5e1b23de (temporal-reasoning) answer="The photography workshop was on 2023/11/01, and today's date" - 3139s, ~804s left
+[399/500] gpt4_a2d1d1f6 (temporal-reasoning) answer="You harvested your first batch of fresh herbs **3 days ago**" - 3141s, ~795s left
+[400/500] gpt4_8e165409 (temporal-reasoning) answer="Based on the summaries, the spider plant was repotted on **2" - 3145s, ~786s left
+[401/500] gpt4_98f46fc6 (temporal-reasoning) answer="Based on the summaries, the charity bake sale came first (Ma" - 3147s, ~777s left
+[402/500] gpt4_7bc6cf22 (temporal-reasoning) answer="Based on the session date of March 20, 2023, and today's dat" - 3159s, ~770s left
+[403/500] eac54adc (temporal-reasoning) answer="Based on the summaries, I don't have the exact date you laun" - 3169s, ~763s left
+[404/500] gpt4_d6585ce8 (temporal-reasoning) answer="Based on the summaries, here is the chronological order of y" - 3175s, ~754s left
+[405/500] gpt4_e414231e (temporal-reasoning) answer="Both events occurred on the same day — **2023-03-15** — so *" - 3179s, ~746s left
+[406/500] gpt4_68e94287 (temporal-reasoning) answer="Based on the summaries, the **vegan chili recipe post** happ" - 3181s, ~737s left
+[407/500] gpt4_b0863698 (temporal-reasoning) answer="Based on the information provided, you completed the 5K char" - 3181s, ~727s left
+[408/500] gpt4_f420262c (temporal-reasoning) answer="Based on the session summaries, the airlines you flew with i" - 3187s, ~719s left
+[409/500] gpt4_e061b84g (temporal-reasoning) answer="Two weeks ago (around June 17, 2023), you participated in a " - 3195s, ~711s left
+[410/500] 71017277 (temporal-reasoning) answer="Based on the session summary, last Saturday (2023-03-04) you" - 3207s, ~704s left
+[411/500] 2ebe6c92 (temporal-reasoning) answer="Based on the session summaries, you finished **'The Nighting" - 3209s, ~695s left
+[412/500] gpt4_7ca326fa (temporal-reasoning) answer="Based on the summaries, there is no person named **Alex** wh" - 3215s, ~687s left
+[413/500] gpt4_e414231f (temporal-reasoning) answer="Based on the summaries, you worked on both bikes the past we" - 3221s, ~679s left
+[414/500] gpt4_4929293b (temporal-reasoning) answer="Based on the summaries, there is no event from a relative th" - 3225s, ~670s left
+[415/500] gpt4_1e4a8aec (temporal-reasoning) answer="Based on the summaries, approximately two weeks ago (around " - 3229s, ~661s left
+[416/500] gpt4_468eb064 (temporal-reasoning) answer="You had lunch with **Emma**, a freelance writer and potentia" - 3231s, ~652s left
+[417/500] gpt4_fa19884d (temporal-reasoning) answer="Based on the distilled summaries, I don't have any informati" - 3243s, ~646s left
+[418/500] gpt4_59149c78 (temporal-reasoning) answer="Based on the summaries, two weeks ago (around January 18, 20" - 3251s, ~638s left
+[419/500] 9a707b82 (temporal-reasoning) answer="Based on the session dated 2022/04/10, you mentioned baking " - 3252s, ~629s left
+[420/500] gpt4_8279ba03 (temporal-reasoning) answer="Based on the summaries, you bought a **smoker** 10 days ago " - 3258s, ~620s left
+[421/500] eac54add (temporal-reasoning) answer="Four weeks ago (around March 1, 2023), you signed your **fir" - 3258s, ~611s left
+[422/500] gpt4_f420262d (temporal-reasoning) answer="Based on the summaries provided, there is no mention of a fl" - 3264s, ~603s left
+[423/500] 4dfccbf8 (temporal-reasoning) answer="Based on the summaries, you started ukulele lessons with Rac" - 3270s, ~595s left
+[424/500] b46e15ee (temporal-reasoning) answer="Based on the session summaries, a month ago (around mid-Marc" - 3272s, ~586s left
+[425/500] gpt4_d6585ce9 (temporal-reasoning) answer="Last Saturday was 2023-04-15, which doesn't match any event " - 3277s, ~578s left
+[426/500] gpt4_b5700ca0 (temporal-reasoning) answer="You attended a **Maundy Thursday service at an Episcopal Chu" - 3284s, ~570s left
+[427/500] 6e984302 (temporal-reasoning) answer="Four weeks ago (around 2023-03-04), you purchased a **modeli" - 3286s, ~562s left
+[428/500] d3ab962e (multi-session) answer="Based on the summaries:
+
+- **Weekend 1** (around 2022-09-17)" - 3292s, ~554s left
+[429/500] a11281a2 (multi-session) answer="The summaries don't include specific information about a two" - 3300s, ~546s left
+[430/500] 0bc8ad93 (temporal-reasoning) answer="Based on the session summaries, two months ago (around Janua" - 3302s, ~537s left
+[431/500] 85fa3a3f (multi-session) answer="Based on the summaries:
+
+- Stainless steel food bowl: $15
+- " - 3304s, ~529s left
+[432/500] 1f2b8d4f (multi-session) answer="Based on the session summaries, your luxury black leather he" - 3308s, ~521s left
+[433/500] 2311e44b (multi-session) answer="Based on the session summaries, 'The Nightingale' is 440 pag" - 3310s, ~512s left
+[434/500] 4f54b7c9 (multi-session) answer="Based on the summaries, you have **5** antique/vintage famil" - 3312s, ~504s left
+[435/500] cc06de0d (multi-session) answer="The taxi ride ($12) cost **$6 more** than your usual daily t" - 3316s, ~495s left
+[436/500] gpt4_68e94288 (temporal-reasoning) answer="5 days ago (2023-03-15), you completed the **#PlankChallenge" - 3320s, ~487s left
+[437/500] d905b33f (multi-session) answer="You got a **20% discount** on the book — it was originally $" - 3324s, ~479s left
+[438/500] e6041065 (multi-session) answer="Based on your past trip experience, you wore **2 out of the " - 3340s, ~473s left
+[439/500] 9aaed6a3 (multi-session) answer="Based on the session summaries, your SaveMart grocery trip w" - 3348s, ~465s left
+[440/500] 51c32626 (multi-session) answer="Based on the session summaries, the exact submission date of" - 3348s, ~457s left
+[441/500] 681a1674 (multi-session) answer="Based on the session summaries, you didn't re-watch multiple" - 3350s, ~448s left
+[442/500] f35224e0 (multi-session) answer="Based on the summaries, you had listened to approximately **" - 3352s, ~440s left
+[443/500] 60036106 (multi-session) answer="Based on the previous sessions:
+
+- **Facebook ad campaign**:" - 3356s, ~432s left
+[444/500] 6456829e (multi-session) answer="Based on the summaries, there's no information about how man" - 3358s, ~424s left
+[445/500] 7405e8b1 (multi-session) answer="Yes. You received **40% off** your first HelloFresh order, c" - 3360s, ~415s left
+[446/500] a4996e51 (multi-session) answer="Based on your previous conversations, during peak campaign s" - 3370s, ~408s left
+[447/500] 3c1045c8 (multi-session) answer="Based on the information available, you are **32 years old**" - 3374s, ~400s left
+[448/500] e25c3b8d (multi-session) answer="Based on the session summaries, the original price of the ha" - 3376s, ~392s left
+[449/500] 4bc144e2 (multi-session) answer="Based on your previous conversations:
+
+- **Car wash**: $15 (" - 3386s, ~385s left
+[450/500] 4adc0475 (multi-session) answer="Based on the summaries, you have **3 goals** and **2 assists" - 3390s, ~377s left
+[451/500] 5025383b (multi-session) answer="Based on the session summaries, your two hobbies that led yo" - 3398s, ~369s left
+[452/500] ef66a6e5 (multi-session) answer="Based on the summaries, you have played **2** sports competi" - 3406s, ~362s left
+[453/500] 3fdac837 (multi-session) answer="Based on the summaries:
+
+- **Japan**: April 15–22 = **7 days" - 3408s, ~354s left
+[454/500] a1cc6108 (multi-session) answer="Based on the information available, you were approximately *" - 3408s, ~345s left
+[455/500] 8979f9ec (multi-session) answer="You got **3 meals** from the chicken fajitas and **5 meals**" - 3412s, ~337s left
+[456/500] 77eafa52 (multi-session) answer="The initial quote from Sakura Travel Agency was **$2,500**, " - 3416s, ~330s left
+[457/500] 720133ac (multi-session) answer="Based on the summaries, Lola's vet visit cost **$50** and fl" - 3418s, ~322s left
+[458/500] 0100672e (multi-session) answer="I don't know. The summaries don't include any information ab" - 3428s, ~314s left
+[459/500] 91b15a6e (multi-session) answer="Based on the summaries, I can only partially answer this. Th" - 3430s, ~306s left
+[460/500] 9ee3ecd6 (multi-session) answer="Based on the previous conversations, you need **300 Beauty I" - 3432s, ~298s left
+[461/500] a96c20ee (multi-session) answer="Based on the session summaries, you presented your poster at" - 3438s, ~291s left
+[462/500] bb7c3b45 (multi-session) answer="Based on the information from your previous sessions, you sa" - 3453s, ~284s left
+[463/500] 3fe836c9 (multi-session) answer="The pre-approval amount was $350,000 and the final sale pric" - 3465s, ~277s left
+[464/500] 27016adc (multi-session) answer="The planned renovations ($20,000) represent **10%** of the r" - 3467s, ~269s left
+[465/500] 0ea62687 (multi-session) answer="A few months ago your car was getting **30 mpg** city, compa" - 3467s, ~261s left
+[466/500] 92a0aa75 (multi-session) answer="There's a discrepancy in the recorded information. In one se" - 3469s, ~253s left
+[467/500] 6c49646a (multi-session) answer="Based on the summaries, I only have information about **one " - 3473s, ~245s left
+[468/500] 1c549ce4 (multi-session) answer="Based on the summaries, you purchased:
+
+- **Car cover**: $12" - 3475s, ~238s left
+[469/500] 61f8c8f8 (multi-session) answer="You improved your 5K time by **10 minutes**, going from 45 m" - 3493s, ~231s left
+[470/500] 67e0d0f2 (multi-session) answer="Based on the summaries, you've completed **20 online courses" - 3493s, ~223s left
+[471/500] ef9cf60a (multi-session) answer="Based on the session summary, you haven't spent anything yet" - 3497s, ~215s left
+[472/500] ba358f49 (multi-session) answer="Based on the summaries, you are **32 years old** and Rachel " - 3499s, ~208s left
+[473/500] 09ba9854 (multi-session) answer="Based on the information from your conversation:
+
+- **Train " - 3507s, ~200s left
+[474/500] 73d42213 (multi-session) answer="Based on the session summaries, the exact time you arrived a" - 3511s, ~193s left
+[475/500] 099778bb (multi-session) answer="Women hold **20%** of the leadership positions at your compa" - 3513s, ~185s left
+[476/500] 60159905 (multi-session) answer="Based on the information available, you have attended **2** " - 3517s, ~177s left
+[477/500] 1192316e (multi-session) answer="Based on the summaries, your morning routine takes **1 hour*" - 3525s, ~170s left
+[478/500] d6062bb9 (multi-session) answer="I don't know. The summaries only mention a TikTok video of L" - 3531s, ~163s left
+[479/500] 55241a1f (multi-session) answer="Based on the available information, I only know that your Fa" - 3533s, ~155s left
+[480/500] a3332713 (multi-session) answer="Based on the information available, I only have a record of " - 3541s, ~148s left
+[481/500] c18a7dc8 (multi-session) answer="Based on the session information, you graduated from college" - 3547s, ~140s left
+[482/500] bc149d6b (multi-session) answer="Based on the session summaries, I can identify two feed purc" - 3553s, ~133s left
+[483/500] 8cf4d046 (multi-session) answer="Based on your academic records:
+
+- **Undergraduate (Universi" - 3553s, ~125s left
+[484/500] 157a136e (multi-session) answer="Based on the summaries, your grandma is **43 years older** t" - 3555s, ~118s left
+[485/500] a346bb18 (multi-session) answer="You exceeded your target time by **12 minutes** (actual: 4h " - 3566s, ~110s left
+[486/500] f0e564bc (multi-session) answer="Based on the summaries, you spent **$800** on the Coach hand" - 3567s, ~103s left
+[487/500] a08a253f (multi-session) answer="Based on the session summaries, you attend fitness classes *" - 3574s, ~95s left
+[488/500] 078150f1 (multi-session) answer="You raised **$50 more** than your initial goal — you raised " - 3576s, ~88s left
+[489/500] e56a43b9 (multi-session) answer="Based on the session summaries, you have reached **500 point" - 3580s, ~81s left
+[490/500] 87f22b4a (multi-session) answer="Based on the session summary, the exact egg sales revenue fi" - 3581s, ~73s left
+[491/500] 8e91e7d9 (multi-session) answer="Based on the information from our previous conversations, yo" - 3592s, ~66s left
+[492/500] 21d02d0d (multi-session) answer="Based on the summaries, you missed **2** fun runs in March d" - 3592s, ~58s left
+[493/500] 2311e44b_abs (multi-session) answer="I don't know. The summaries mention you were reading 'Sapien" - 3594s, ~51s left
+[494/500] efc3f7c2 (multi-session) answer="Based on the session summaries, on Fridays you wake up at **" - 3596s, ~44s left
+[495/500] e5ba910e_abs (multi-session) answer="Based on the summaries, I only have information about your S" - 3602s, ~36s left
+[496/500] a96c20ee_abs (multi-session) answer="Based on the summaries, you presented your poster at a resea" - 3608s, ~29s left
+[497/500] 37f165cf (multi-session) answer="Based on the summaries, I only have information about one fi" - 3608s, ~22s left
+[498/500] 6456829e_abs (multi-session) answer="Based on the summaries, I only have information about your *" - 3612s, ~15s left
+[499/500] 09ba9854_abs (multi-session) answer="Based on the previous conversation:
+
+- Airport Limousine Bus" - 3616s, ~7s left
+[500/500] ba358f49_abs (multi-session) answer="I don't know. The summaries mention Rachel is the user's fri" - 3616s, ~0s left
+
+Done! 500 questions in 3615.8s
+Output: eval/results/nuum_oracle.jsonl
