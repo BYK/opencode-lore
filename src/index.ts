@@ -209,6 +209,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
 
       // Persist gradient stats into the last user message's text part metadata.
       // This fires a message.part.updated SSE event so the UI can read it reactively.
+      // We use raw fetch because the plugin receives a v1 SDK client which lacks the part API.
       if (sessionID && statsPart && lastUserMsg) {
         const nuumMeta = {
           layer: result.layer,
@@ -220,12 +221,22 @@ export const NuumPlugin: Plugin = async (ctx) => {
           rawBudget: result.rawBudget,
           updatedAt: Date.now(),
         };
+        const url = new URL(
+          `/session/${sessionID}/message/${lastUserMsg.info.id}/part/${statsPart.id}`,
+          ctx.serverUrl,
+        );
+        const updatedPart = {
+          ...(statsPart as Record<string, unknown>),
+          metadata: {
+            ...((statsPart as { metadata?: Record<string, unknown> }).metadata ?? {}),
+            nuum: nuumMeta,
+          },
+        };
         // Fire-and-forget — don't block the transform
-        ctx.client.part.update({
-          sessionID,
-          messageID: lastUserMsg.info.id,
-          partID: statsPart.id,
-          part: { ...statsPart, metadata: { ...((statsPart as any).metadata ?? {}), nuum: nuumMeta } },
+        fetch(url, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updatedPart),
         }).catch((e: unknown) => {
           console.error("[nuum] failed to write gradient stats to part metadata:", e);
         });

@@ -483,7 +483,7 @@ function tryFit(input: {
   rawBudget: number;
   strip: "none" | "old-tools" | "all-tools";
   protectedTurns?: number;
-}): Omit<TransformResult, "layer"> | null {
+}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget"> | null {
   // If distilled prefix exceeds its budget, fail this layer
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
