@@ -125,7 +125,7 @@ export async function run(input: {
         content: op.content,
         session: input.sessionID,
         scope: op.scope,
-        crossProject: op.crossProject,
+        crossProject: op.crossProject ?? true,
       });
       created++;
     } else if (op.op === "update") {

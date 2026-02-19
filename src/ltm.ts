@@ -41,7 +41,7 @@ export function create(input: {
       input.title,
       input.content,
       input.session ?? null,
-      input.crossProject ? 1 : 0,
+      (input.crossProject ?? true) ? 1 : 0,
       now,
       now,
     );
