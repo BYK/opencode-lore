@@ -105,7 +105,7 @@ Produce a JSON array of operations:
     "title": "Short descriptive title",
     "content": "Detailed knowledge entry",
     "scope": "project" | "global",
-    "crossProject": false
+    "crossProject": true
   },
   {
     "op": "update",
