@@ -120,12 +120,21 @@ function stripSystemReminders(text: string): string {
 }
 
 function cleanParts(parts: Part[]): Part[] {
-  return parts.map((part) => {
+  const cleaned = parts.map((part) => {
     if (part.type !== "text") return part;
-    const cleaned = stripSystemReminders(part.text);
-    if (cleaned === part.text) return part;
-    return { ...part, text: cleaned } as Part;
+    const text = stripSystemReminders(part.text);
+    if (text === part.text) return part;
+    return { ...part, text } as Part;
   });
+  // Filter out text parts that became empty after stripping
+  const filtered = cleaned.filter(
+    (part) =>
+      part.type !== "text" ||
+      (part as Extract<Part, { type: "text" }>).text.trim().length > 0,
+  );
+  // If all parts were stripped, return as-is to avoid producing a zero-part message
+  // (toModelMessages skips messages with no parts, breaking conversation alternation)
+  return filtered.length > 0 ? filtered : parts;
 }
 
 function stripToolOutputs(parts: Part[]): Part[] {
