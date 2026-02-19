@@ -175,6 +175,12 @@ export const NuumPlugin: Plugin = async (ctx) => {
       if (!output.messages.length) return;
 
       const sessionID = output.messages[0]?.info.sessionID;
+
+      // Capture the last user message's first text part before transform modifies the array.
+      // We'll write nuum gradient stats into its metadata so the context inspector can show them.
+      const lastUserMsg = [...output.messages].reverse().find((m) => m.info.role === "user");
+      const statsPart = lastUserMsg?.parts.find((p) => p.type === "text");
+
       const result = transform({
         messages: output.messages,
         projectPath,
@@ -199,6 +205,30 @@ export const NuumPlugin: Plugin = async (ctx) => {
       // If we hit safety layers, trigger urgent distillation
       if (result.layer >= 2 && sessionID) {
         backgroundDistill(sessionID);
+      }
+
+      // Persist gradient stats into the last user message's text part metadata.
+      // This fires a message.part.updated SSE event so the UI can read it reactively.
+      if (sessionID && statsPart && lastUserMsg) {
+        const nuumMeta = {
+          layer: result.layer,
+          distilledTokens: result.distilledTokens,
+          rawTokens: result.rawTokens,
+          totalTokens: result.totalTokens,
+          usable: result.usable,
+          distilledBudget: result.distilledBudget,
+          rawBudget: result.rawBudget,
+          updatedAt: Date.now(),
+        };
+        // Fire-and-forget — don't block the transform
+        ctx.client.part.update({
+          sessionID,
+          messageID: lastUserMsg.info.id,
+          partID: statsPart.id,
+          part: { ...statsPart, metadata: { ...((statsPart as any).metadata ?? {}), nuum: nuumMeta } },
+        }).catch((e: unknown) => {
+          console.error("[nuum] failed to write gradient stats to part metadata:", e);
+        });
       }
     },
 

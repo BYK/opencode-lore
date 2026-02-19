@@ -363,6 +363,10 @@ export type TransformResult = {
   distilledTokens: number;
   rawTokens: number;
   totalTokens: number;
+  // Budget context (for display in context inspector)
+  usable: number;
+  distilledBudget: number;
+  rawBudget: number;
 };
 
 // Signal that we need urgent distillation
@@ -400,7 +404,7 @@ export function transform(input: {
     rawBudget,
     strip: "none",
   });
-  if (layer1) return { ...layer1, layer: 1 };
+  if (layer1) return { ...layer1, layer: 1, usable, distilledBudget, rawBudget };
 
   // Layer 2: Strip tool outputs from older messages, keep last 2 turns
   const layer2 = tryFit({
@@ -414,7 +418,7 @@ export function transform(input: {
   });
   if (layer2) {
     urgentDistillation = true;
-    return { ...layer2, layer: 2 };
+    return { ...layer2, layer: 2, usable, distilledBudget, rawBudget };
   }
 
   // Layer 3: Strip ALL tool outputs, drop oldest distillations
@@ -434,7 +438,7 @@ export function transform(input: {
   });
   if (layer3) {
     urgentDistillation = true;
-    return { ...layer3, layer: 3 };
+    return { ...layer3, layer: 3, usable, distilledBudget, rawBudget };
   }
 
   // Layer 4: Nuclear — last 3 distillations, last 3 raw messages, text only
@@ -460,6 +464,9 @@ export function transform(input: {
     distilledTokens: nuclearPrefixTokens,
     rawTokens: nuclearRawTokens,
     totalTokens: nuclearPrefixTokens + nuclearRawTokens,
+    usable,
+    distilledBudget,
+    rawBudget,
   };
 }
 
