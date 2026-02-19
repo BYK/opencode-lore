@@ -102,6 +102,30 @@ function loadDistillations(
   }));
 }
 
+// Remove ephemeral <system-reminder> wrappers OpenCode adds to queued user messages.
+// These are applied in-memory before the plugin transform fires and would confuse the model
+// if left in the raw window — it echoes the wrapper format in its output.
+function stripSystemReminders(text: string): string {
+  return text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>\n?/g, (match) => {
+      // Extract just the user's actual message from inside the wrapper
+      const inner = match.match(
+        /The user sent the following message:\n([\s\S]*?)\n\nPlease address/,
+      );
+      return inner ? inner[1].trim() + "\n" : "";
+    })
+    .trim();
+}
+
+function cleanParts(parts: Part[]): Part[] {
+  return parts.map((part) => {
+    if (part.type !== "text") return part;
+    const cleaned = stripSystemReminders(part.text);
+    if (cleaned === part.text) return part;
+    return { ...part, text: cleaned } as Part;
+  });
+}
+
 function stripToolOutputs(parts: Part[]): Part[] {
   return parts.map((part) => {
     if (part.type !== "tool") return part;
@@ -332,20 +356,21 @@ function tryFit(input: {
   // Must keep at least 1 raw message — otherwise this layer fails
   if (!raw.length) return null;
 
-  // Apply tool output stripping to messages outside the protected zone
+  // Apply system-reminder stripping + optional tool output stripping
   const processed = raw.map((msg, idx) => {
     const fromEnd = raw.length - idx;
     const isProtected =
       input.strip === "none" ||
       (input.strip === "old-tools" && fromEnd <= protectedTurns * 2);
-    if (isProtected) return msg;
-    return {
-      info: msg.info,
-      parts:
-        input.strip === "all-tools"
-          ? stripToolOutputs(msg.parts)
-          : stripToolOutputs(msg.parts),
-    };
+    const parts = isProtected
+      ? cleanParts(msg.parts)
+      : cleanParts(
+          input.strip === "all-tools"
+            ? stripToolOutputs(msg.parts)
+            : stripToolOutputs(msg.parts),
+        );
+    const changed = parts !== msg.parts;
+    return changed ? { info: msg.info, parts } : msg;
   });
 
   const total = input.prefixTokens + rawTokens;
