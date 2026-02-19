@@ -58,53 +58,50 @@ function detectSegments(
   return segments;
 }
 
+function formatTime(ms: number): string {
+  const d = new Date(ms);
+  const h = d.getHours().toString().padStart(2, "0");
+  const m = d.getMinutes().toString().padStart(2, "0");
+  return `${h}:${m}`;
+}
+
 function messagesToText(messages: TemporalMessage[]): string {
-  return messages.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
+  return messages
+    .map((m) => `[${m.role}] (${formatTime(m.created_at)}) ${m.content}`)
+    .join("\n\n");
 }
 
 type DistillationResult = {
-  narrative: string;
-  facts: string[];
+  observations: string;
 };
 
 function parseDistillationResult(text: string): DistillationResult | null {
-  const cleaned = text
-    .trim()
-    .replace(/^```json?\s*/i, "")
-    .replace(/\s*```$/i, "");
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (typeof parsed.narrative !== "string" || !Array.isArray(parsed.facts))
-      return null;
-    return {
-      narrative: parsed.narrative,
-      facts: parsed.facts.filter((f: unknown) => typeof f === "string"),
-    };
-  } catch {
-    return null;
-  }
+  // Extract content from <observations>...</observations> block
+  const match = text.match(/<observations>([\s\S]*?)<\/observations>/i);
+  const observations = match ? match[1].trim() : text.trim();
+  if (!observations) return null;
+  return { observations };
 }
 
-// Get the most recent narrative for context
-function latestNarrative(
+// Get the most recent observations for context
+function latestObservations(
   projectPath: string,
   sessionID: string,
 ): string | undefined {
   const pid = ensureProject(projectPath);
   const row = db()
     .query(
-      "SELECT narrative FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT 1",
+      "SELECT observations FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT 1",
     )
-    .get(pid, sessionID) as { narrative: string } | null;
-  return row?.narrative;
+    .get(pid, sessionID) as { observations: string } | null;
+  return row?.observations || undefined;
 }
 
 export type Distillation = {
   id: string;
   project_id: string;
   session_id: string;
-  narrative: string;
-  facts: string[];
+  observations: string;
   source_ids: string[];
   generation: number;
   token_count: number;
@@ -114,27 +111,26 @@ export type Distillation = {
 function storeDistillation(input: {
   projectPath: string;
   sessionID: string;
-  narrative: string;
-  facts: string[];
+  observations: string;
   sourceIDs: string[];
   generation: number;
 }): string {
   const pid = ensureProject(input.projectPath);
   const id = crypto.randomUUID();
-  const factsJson = JSON.stringify(input.facts);
   const sourceJson = JSON.stringify(input.sourceIDs);
-  const tokens = Math.ceil((input.narrative.length + factsJson.length) / 4);
+  const tokens = Math.ceil(input.observations.length / 4);
   db()
     .query(
-      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, source_ids, generation, token_count, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
       pid,
       input.sessionID,
-      input.narrative,
-      factsJson,
+      "", // legacy column — kept for schema compat
+      "[]", // legacy column — kept for schema compat
+      input.observations,
       sourceJson,
       input.generation,
       tokens,
@@ -158,14 +154,13 @@ function loadGen0(projectPath: string, sessionID: string): Distillation[] {
   const pid = ensureProject(projectPath);
   const rows = db()
     .query(
-      "SELECT * FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0 ORDER BY created_at ASC",
+      "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0 ORDER BY created_at ASC",
     )
     .all(pid, sessionID) as Array<{
     id: string;
     project_id: string;
     session_id: string;
-    narrative: string;
-    facts: string;
+    observations: string;
     source_ids: string;
     generation: number;
     token_count: number;
@@ -173,7 +168,6 @@ function loadGen0(projectPath: string, sessionID: string): Distillation[] {
   }>;
   return rows.map((r) => ({
     ...r,
-    facts: JSON.parse(r.facts) as string[],
     source_ids: JSON.parse(r.source_ids) as string[],
   }));
 }
@@ -248,10 +242,20 @@ async function distillSegment(input: {
   messages: TemporalMessage[];
   model?: { providerID: string; modelID: string };
 }): Promise<DistillationResult | null> {
-  const prior = latestNarrative(input.projectPath, input.sessionID);
+  const prior = latestObservations(input.projectPath, input.sessionID);
   const text = messagesToText(input.messages);
+  // Derive session date from first message timestamp
+  const first = input.messages[0];
+  const date = first
+    ? new Date(first.created_at).toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      })
+    : "unknown date";
   const userContent = distillationUser({
-    priorNarrative: prior,
+    priorObservations: prior,
+    date,
     messages: text,
   });
 
@@ -287,8 +291,7 @@ async function distillSegment(input: {
   storeDistillation({
     projectPath: input.projectPath,
     sessionID: input.sessionID,
-    narrative: result.narrative,
-    facts: result.facts,
+    observations: result.observations,
     sourceIDs: input.messages.map((m) => m.id),
     generation: 0,
   });
@@ -341,8 +344,7 @@ async function metaDistill(input: {
   storeDistillation({
     projectPath: input.projectPath,
     sessionID: input.sessionID,
-    narrative: result.narrative,
-    facts: result.facts,
+    observations: result.observations,
     sourceIDs: allSourceIDs,
     generation: maxGen + 1,
   });

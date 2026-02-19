@@ -180,20 +180,21 @@ export const NuumPlugin: Plugin = async (ctx) => {
         projectPath,
         sessionID,
       });
-      output.messages.splice(0, output.messages.length, ...result.messages);
-
-      // Verify conversation ends with a user message (Anthropic rejects otherwise)
-      const last = result.messages.at(-1);
-      if (last && last.info.role !== "user") {
+      // Ensure conversation ends with a user message — providers reject assistant prefill.
+      // Drop trailing non-user messages as a safety net.
+      while (
+        result.messages.length > 0 &&
+        result.messages.at(-1)!.info.role !== "user"
+      ) {
+        const dropped = result.messages.pop()!;
         console.error(
-          "[nuum] WARN: transform produced conversation ending with",
-          last.info.role,
-          "id:",
-          last.info.id,
-          "parts:",
-          last.parts.map((p) => p.type),
+          "[nuum] WARN: dropping trailing",
+          dropped.info.role,
+          "message to prevent prefill error. id:",
+          dropped.info.id,
         );
       }
+      output.messages.splice(0, output.messages.length, ...result.messages);
 
       // If we hit safety layers, trigger urgent distillation
       if (result.layer >= 2 && sessionID) {

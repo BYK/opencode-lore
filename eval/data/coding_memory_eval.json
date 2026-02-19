@@ -1,0 +1,122 @@
+[
+  {
+    "session_id": "ses_391dfe776ffejfpVRHHJAo3MLh",
+    "session_label": "nuum-dev",
+    "question": "What was the initial token overrun issue that was investigated at the start of this session?",
+    "answer": "The gradient context manager was using a hardcoded overhead estimate (FIRST_TURN_OVERHEAD = 15000) instead of calibrating against actual token usage. The fix was to add EMA-based calibration using real input token counts from message.updated events.",
+    "question_type": "early-detail",
+    "message_index": 15
+  },
+  {
+    "session_id": "ses_391dfe776ffejfpVRHHJAo3MLh",
+    "session_label": "nuum-dev",
+    "question": "What was the specific FTS5 search bug that was fixed in ltm.ts?",
+    "answer": "The FTS5 search in ltm.ts was missing prefix matching. The fix was adding a ftsQuery() function that appends * suffix for prefix matching.",
+    "question_type": "early-detail",
+    "message_index": 1
+  },
+  {
+    "session_id": "ses_391dfe776ffejfpVRHHJAo3MLh",
+    "session_label": "nuum-dev",
+    "question": "What was the system-reminder leak bug and which commit fixed it?",
+    "answer": "OpenCode's build-switch.txt contains literal <system-reminder> tags that leak into the nuum gradient raw window. Layer 4's stripToTextOnly didn't apply cleanParts, so these tags survived stripping. The fix was committed as c054f64.",
+    "question_type": "mid-detail",
+    "message_index": 112
+  },
+  {
+    "session_id": "ses_391dfe776ffejfpVRHHJAo3MLh",
+    "session_label": "nuum-dev",
+    "question": "What was the crossProject configuration issue with nuum and what was the fix?",
+    "answer": "CuratorOp.crossProject is typed as boolean|undefined. The expression `value ? 1 : 0` treats undefined as falsy, so omitted fields silently stored cross_project=0 despite the prompt defaulting to true. Fix: use `value !== false ? 1 : 0` so undefined maps to 1.",
+    "question_type": "mid-detail",
+    "message_index": 114
+  },
+  {
+    "session_id": "ses_391dfe776ffejfpVRHHJAo3MLh",
+    "session_label": "nuum-dev",
+    "question": "How many existing knowledge entries were there and what change was made to them regarding cross-project visibility?",
+    "answer": "There were 43 existing knowledge entries. All were bulk-updated to cross_project=1 so they would be shared across projects.",
+    "question_type": "mid-detail",
+    "message_index": 115
+  },
+  {
+    "session_id": "ses_38a242967ffeiY2pRS7Qbh1x11",
+    "session_label": "sentry-cli",
+    "question": "What was the SQLiteError bug found when testing the Sentry CLI list commands, and what was its root cause?",
+    "answer": "Running `project list sentry/` crashed with SQLiteError: ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint in setPaginationCursor (db/utils.ts:118). Root cause: pagination_cursors table had single-column PK (command_key TEXT PRIMARY KEY) but code expected composite PK [command_key, context] — schema drift from an older build.",
+    "question_type": "early-detail",
+    "message_index": 10
+  },
+  {
+    "session_id": "ses_38a242967ffeiY2pRS7Qbh1x11",
+    "session_label": "sentry-cli",
+    "question": "What was the PR number and title that was being tested in this session?",
+    "answer": "PR #262: feat(list): add pagination and consistent target parsing to all list commands",
+    "question_type": "early-detail",
+    "message_index": 0
+  },
+  {
+    "session_id": "ses_38a242967ffeiY2pRS7Qbh1x11",
+    "session_label": "sentry-cli",
+    "question": "What was the test plan created for testing the CLI list commands?",
+    "answer": "5 items: 1. Check dev setup (auth, env, build), 2. Test project list (auto-detect, explicit org/project, org-all, bare-slug, --json, --cursor, --platform), 3. Test issue list (auto-detect, explicit org/project, org-all, bare-slug, --json, --cursor, --query, --sort), 4. Test team list, 5. Test repo list",
+    "question_type": "early-detail",
+    "message_index": 8
+  },
+  {
+    "session_id": "ses_38a242967ffeiY2pRS7Qbh1x11",
+    "session_label": "sentry-cli",
+    "question": "What Sentry organizations were accessible for testing and which one was selected as the primary test org?",
+    "answer": "4 orgs: Sentry EU (sentry-eu), sentry-s4s2 (sentry-s4s2), Sentry ST (sentry-st), Sentry (sentry). The sentry org was selected as primary for testing.",
+    "question_type": "early-detail",
+    "message_index": 5
+  },
+  {
+    "session_id": "ses_38a242967ffeiY2pRS7Qbh1x11",
+    "session_label": "sentry-cli",
+    "question": "How many pre-existing test failures were there locally and what were the root causes?",
+    "answer": "131 test failures locally. Root causes: DB schema drift (pagination_cursors table PK mismatch), mock setup issues, and null vs undefined return values.",
+    "question_type": "mid-detail",
+    "message_index": 40
+  },
+  {
+    "session_id": "ses_38a242967ffeiY2pRS7Qbh1x11",
+    "session_label": "sentry-cli",
+    "question": "What worktree path was the Sentry CLI project being tested in?",
+    "answer": "/home/byk/.local/share/opencode/worktree/0e8c2f3bbe145a3280d6fb6ed900a5121f382cf0/glowing-cactus/",
+    "question_type": "early-detail",
+    "message_index": 10
+  },
+  {
+    "session_id": "ses_389c23eddffeDeyoiOTNxMrPTr",
+    "session_label": "auth-api",
+    "question": "What was the API endpoint migration discussed at the start of this session?",
+    "answer": "Migration from /users/me/ endpoint to /auth/ endpoint for getting the authenticated user's own information. The /users/me/ endpoint had issues and /auth/ was discovered as the correct replacement.",
+    "question_type": "early-detail",
+    "message_index": 0
+  },
+  {
+    "session_id": "ses_389c23eddffeDeyoiOTNxMrPTr",
+    "session_label": "auth-api",
+    "question": "What new CLI command was proposed to be added for checking authentication status?",
+    "answer": "A `sentry auth whoami` command that would show the currently authenticated user's information using the /auth/ endpoint.",
+    "question_type": "early-detail",
+    "message_index": 0
+  },
+  {
+    "session_id": "ses_389c23eddffeDeyoiOTNxMrPTr",
+    "session_label": "auth-api",
+    "question": "What commit removed the /users/me/ dependency and what was its PR number?",
+    "answer": "Commit 600cf9a with PR #207: feat(auth): add token command and remove /users/me/ dependency",
+    "question_type": "early-detail",
+    "message_index": 2
+  },
+  {
+    "session_id": "ses_389c23eddffeDeyoiOTNxMrPTr",
+    "session_label": "auth-api",
+    "question": "What function was used for getting the control silo URL and what was it for?",
+    "answer": "getControlSiloUrl() in sentry-client.ts. It returns always sentry.io for SaaS or the custom URL for self-hosted. Used for routing auth-related API calls to the correct endpoint.",
+    "question_type": "early-detail",
+    "message_index": 8
+  }
+]

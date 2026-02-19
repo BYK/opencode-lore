@@ -1,0 +1,41 @@
+Evaluating: eval/results/baseline_oracle.jsonl
+Reference: eval/data/longmemeval_oracle.json
+Output: eval/results/baseline_oracle.eval.jsonl
+Questions: 500, Concurrency: 10
+
+[20/500] 14/20 correct (70.0%) - 61s
+[40/500] 28/40 correct (70.0%) - 120s
+[60/500] 39/60 correct (65.0%) - 166s
+[80/500] 51/80 correct (63.7%) - 208s
+[100/500] 65/100 correct (65.0%) - 265s
+[120/500] 82/120 correct (68.3%) - 305s
+[140/500] 98/140 correct (70.0%) - 351s
+[160/500] 113/160 correct (70.6%) - 391s
+[180/500] 132/180 correct (73.3%) - 451s
+[200/500] 145/200 correct (72.5%) - 516s
+[220/500] 156/220 correct (70.9%) - 578s
+[240/500] 169/240 correct (70.4%) - 642s
+[260/500] 188/260 correct (72.3%) - 683s
+[280/500] 206/280 correct (73.6%) - 722s
+[300/500] 222/300 correct (74.0%) - 773s
+[320/500] 236/320 correct (73.8%) - 843s
+[340/500] 250/340 correct (73.5%) - 894s
+[360/500] 262/360 correct (72.8%) - 964s
+[380/500] 272/380 correct (71.6%) - 1035s
+[400/500] 286/400 correct (71.5%) - 1108s
+[420/500] 299/420 correct (71.2%) - 1184s
+[440/500] 314/440 correct (71.4%) - 1265s
+[460/500] 331/460 correct (72.0%) - 1305s
+[480/500] 348/480 correct (72.5%) - 1332s
+[500/500] 363/500 correct (72.6%) - 1399s
+
+=== Results ===
+abstention: 16/30 (53.3%)
+knowledge-update: 61/72 (84.7%)
+multi-session: 93/121 (76.9%)
+single-session-assistant: 51/56 (91.1%)
+single-session-preference: 14/30 (46.7%)
+single-session-user: 46/64 (71.9%)
+temporal-reasoning: 82/127 (64.6%)
+
+Overall: 363/500 (72.6%)
