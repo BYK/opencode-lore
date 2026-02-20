@@ -3,6 +3,7 @@ import { config } from "./config";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import { CURATOR_SYSTEM, curatorUser } from "./prompt";
+import { workerSessionIDs } from "./distillation";
 
 type Client = ReturnType<typeof createOpencodeClient>;
 
@@ -19,6 +20,7 @@ async function ensureWorkerSession(
   });
   const id = session.data!.id;
   workerSessions.set(parentID, id);
+  workerSessionIDs.add(id);
   return id;
 }
 
