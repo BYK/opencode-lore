@@ -1,94 +1,124 @@
 # opencode-lore
 
-A memory plugin for OpenCode that gives the assistant persistent long-term memory across coding sessions.
+> **Experimental** — This plugin is under active development. APIs, storage format, and behavior may change.
+
+A memory plugin for [OpenCode](https://opencode.ai) that gives the assistant persistent long-term memory across coding sessions. Instead of losing context when the conversation grows beyond the model's window, lore distills what happened into a searchable observation log and curated knowledge base.
+
+## Why
+
+Coding agents forget. Once a conversation exceeds the context window, earlier decisions, bug fixes, and architectural choices vanish. The default approach — summarize-and-compact — loses exactly the operational details agents need: file paths, error messages, commit hashes, the *reason* behind a decision. After a few compaction passes, the agent knows you "discussed authentication" but can't actually continue the work.
+
+Lore takes a different approach: **distillation, not summarization**. It extracts timestamped observations with priority tags, preserves exact numbers and code references, and maintains a curated knowledge base that persists across sessions.
 
 ## How it works
 
-Nuum uses a three-tier memory architecture:
+Lore uses a three-tier memory architecture:
 
-1. **Temporal storage** — every message is stored in a local SQLite FTS5 database, searchable on demand via the `recall` tool
+1. **Temporal storage** — every message is stored in a local SQLite FTS5 database, searchable on demand via the `recall` tool.
 
-2. **Distillation** — when the context window fills up, recent messages are distilled into an observation log (dated, timestamped, priority-tagged entries). Older distillations are recursively merged to prevent unbounded growth.
+2. **Distillation** — messages are incrementally distilled into an observation log (dated, timestamped, priority-tagged entries). When segments accumulate, older distillations are recursively merged to prevent unbounded growth. The observer prompt is tuned to preserve exact numbers, bug fixes, file paths, and assistant-generated content.
 
-3. **Long-term knowledge** — a curated knowledge base of facts, patterns, and decisions that matter across projects, maintained by the curator agent.
+3. **Long-term knowledge** — a curated knowledge base of facts, patterns, decisions, and gotchas that matter across projects, maintained by a background curator agent.
 
-The gradient context manager decides how much of each tier to include in each turn, calibrating overhead dynamically using real token counts.
+A **gradient context manager** decides how much of each tier to include in each turn, using a 4-layer safety system that calibrates overhead dynamically from real API token counts. This handles the unpredictable context consumption of coding agents (large tool outputs, system prompts, injected instructions) better than a fixed-budget approach.
 
-## Evaluation
+## Benchmarks
 
-### LongMemEval (General Memory Benchmark)
+> Scores below are on Claude Sonnet 4 (claude-sonnet-4-6). Results may vary with other models.
 
-500-question subset of [LongMemEval](https://github.com/xiaowu0162/LongMemEval), tested in oracle mode (full message history provided). Measures whether lore's memory architecture helps or hurts compared to a baseline with no memory plugin.
+### General memory recall
 
-| Question type             | Baseline | Lore v1 | Lore v2 |
-|---------------------------|----------|---------|---------|
-| single-session-user       | 70%      | 94%     | 94%     |
-| single-session-preference | 47%      | 87%     | 87%     |
-| single-session-assistant  | 91%      | 84%     | 96%     |
-| multi-session             | 75%      | 65%     | 85%     |
-| knowledge-update          | 83%      | 81%     | 92%     |
-| temporal-reasoning        | 63%      | 60%     | 82%     |
-| **Overall**               | **72.6%**| **73.8%**| **88.0%** |
+500-question evaluation using the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benchmark (ICLR 2025), tested in oracle mode (full message history provided as conversation context).
 
-Lore v2 improves 15.4pp over baseline. The v1→v2 jump on single-session-assistant (+12pp) and multi-session (+20pp) came from strengthening the observer prompt to capture assistant-generated content (lists, decisions, filenames) rather than just user actions.
+| Category                  | No plugin | Lore    |
+|---------------------------|-----------|---------|
+| Single-session (user)     | 71.9%     | 93.8%   |
+| Single-session (prefs)    | 46.7%     | 86.7%   |
+| Single-session (assistant)| 91.1%     | 96.4%   |
+| Multi-session             | 76.9%     | 85.1%   |
+| Knowledge updates         | 84.7%     | 93.1%   |
+| Temporal reasoning        | 64.6%     | 81.9%   |
+| Abstention                | 53.3%     | 86.7%   |
+| **Overall**               | **72.6%** | **88.0%** |
 
-### Coding Session Recall (Real Sessions)
+### Coding session recall
 
-15 questions across 3 real coding sessions (lore development, sentry-cli, auth-api). Each question asks about a specific fact from the session — tested against three memory conditions:
+15 questions across 3 real coding sessions, each asking about a specific fact from the conversation. Compared against OpenCode's default behavior (last ~80K tokens of context).
 
-- **oracle**: full raw message history in context (upper bound)
-- **default**: last ~80k tokens of messages only (standard OpenCode, no plugin)
-- **lore**: lore's gradient context (distillations + LTM injection)
+| Metric         | Default | Lore         |
+|----------------|---------|--------------|
+| Score          | 10/15   | **14/15**    |
+| Accuracy       | 66.7%   | **93.3%**    |
 
-| Session    | Oracle | Default | Nuum  |
-|------------|--------|---------|-------|
-| nuum-dev   | 60%    | 60%     | 60%   |
-| sentry-cli | 80%    | 80%     | 80%   |
-| auth-api   | 60%    | 40%     | 80%   |
-| **Overall**| **60%**| **60%** | **73%** |
+Lore's advantage is largest on early/mid-session details that fall outside the recent-context window — facts like which PR was being tested, why an endpoint was changed, how many rows were updated, or what a specific bug's root cause was. The `recall` tool covers gaps where the distilled observations lack fine-grained detail.
 
-Lore beats default by 13 percentage points overall. The advantage is largest on early-session details that fall outside the recent-context window — facts like which PR was being tested, why an endpoint was changed, or what the specific bug root cause was. Default answered "I don't know" on several of these; lore's observation log captured them.
+## How we got here
 
-Nuum's limitation: high-level observation summaries can miss fine-grained implementation details. The `recall` tool handles those cases via on-demand full-text search across the raw message archive.
+This plugin was built in a few intense sessions. Some highlights from the journey:
+
+**v1 — structured distillation.** The initial version used a `{ narrative, facts }` JSON format. It worked well for single-session preference recall (+40pp over baseline) but *regressed* on multi-session and temporal reasoning — the structured format was too rigid and lost temporal context.
+
+**Markdown injection.** Property-based testing with fast-check revealed that user-generated content in facts (code fences, heading markers, thematic breaks) could break the markdown structure of the injected context, confusing the model.
+
+**The splice fix.** A critical bug: OpenCode's plugin system passes message arrays by reference, but lore was *reassigning* the array (`output.messages = newArray`) instead of *mutating* it in place. The caller never saw the transform. Fix: `output.messages.splice(0, output.messages.length, ...result)`. This single line made the gradient context manager actually work.
+
+**v2 — observation logs.** Inspired by Mastra's observer/reflector architecture, we switched to plain-text timestamped observation logs with priority tags. This was the breakthrough — LongMemEval jumped from 73.8% to 88.0%. The key insight: dated event logs preserve temporal relationships that structured JSON destroys.
+
+**Prompt refinements.** The final push from 80% to 93.3% on coding recall came from two observer prompt additions: "EXACT NUMBERS — NEVER APPROXIMATE" (the observer was rounding counts) and "BUG FIXES — ALWAYS RECORD" (early-session fixes were being compressed away during reflection).
 
 ## Installation
 
 ### Prerequisites
 
-- OpenCode
-- Bun
+- [OpenCode](https://opencode.ai)
+- [Bun](https://bun.sh)
 
 ### Setup
 
 1. Clone this repository
 
-2. Build the plugin:
-   ```
-   bun run build
+2. Add the plugin to your OpenCode plugins directory (`~/.config/opencode/plugins/lore.ts`):
+   ```ts
+   export { LorePlugin as default } from "opencode-lore";
    ```
 
-3. Register it in your OpenCode config (usually `~/.config/opencode/config.json`):
+3. Add the dependency to `~/.config/opencode/package.json`:
    ```json
    {
-     "plugins": ["/path/to/opencode-lore/plugin.js"]
+     "dependencies": {
+       "opencode-lore": "file:/path/to/opencode-lore"
+     }
    }
    ```
 
-4. Restart OpenCode.
+4. Install and restart OpenCode:
+   ```
+   cd ~/.config/opencode && bun install
+   ```
 
 ## What gets stored
 
-- **Session observations**: timestamped event log of each conversation — what the user asked, what was done, decisions made, errors found
-- **Long-term knowledge**: patterns, gotchas, and architectural decisions curated across sessions
-- **Raw messages**: full message history in FTS5-indexed SQLite for the `recall` tool
+All data lives locally in `~/.local/share/opencode-lore/lore.db`:
+
+- **Session observations** — timestamped event log of each conversation: what was asked, what was done, decisions made, errors found
+- **Long-term knowledge** — patterns, gotchas, and architectural decisions curated across sessions and projects
+- **Raw messages** — full message history in FTS5-indexed SQLite for the `recall` tool
 
 ## The `recall` tool
 
-The assistant gets a `recall` tool that searches across all three tiers. Use it to look up specific past details:
+The assistant gets a `recall` tool that searches across stored messages and knowledge. It's used automatically when the distilled context doesn't have enough detail:
 
-- "Recall what we decided about auth"
-- "Recall the error from yesterday's session"
-- "Recall my database schema"
+- "What did we decide about auth last week?"
+- "What was the error from the migration?"
+- "What's my database schema convention?"
+
+## References
+
+- [How we solved the agent memory problem](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) — Sanity's blog post on their Nuum memory system for Miriad, which articulated the "distillation, not summarization" philosophy that shaped this project
+- [Mastra Observational Memory](https://mastra.ai/research/observational-memory) — the observer/reflector architecture that inspired lore's v2 distillation approach
+- [Mastra Memory source](https://github.com/mastra-ai/mastra/tree/main/packages/memory) — reference implementation
+- [LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory](https://arxiv.org/abs/2410.10813) — the evaluation benchmark (ICLR 2025)
+- [OpenCode](https://opencode.ai) — the coding agent this plugin extends
 
 ## License
 
