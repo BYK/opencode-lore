@@ -1,0 +1,41 @@
+Evaluating: eval/results/nuum_oracle_v2.jsonl
+Reference: eval/data/longmemeval_oracle.json
+Output: eval/results/nuum_oracle_v2.jsonl.eval
+Questions: 500, Concurrency: 10
+
+[20/500] 18/20 correct (90.0%) - 26s
+[40/500] 35/40 correct (87.5%) - 81s
+[60/500] 52/60 correct (86.7%) - 103s
+[80/500] 68/80 correct (85.0%) - 125s
+[100/500] 85/100 correct (85.0%) - 149s
+[120/500] 102/120 correct (85.0%) - 169s
+[140/500] 121/140 correct (86.4%) - 193s
+[160/500] 140/160 correct (87.5%) - 236s
+[180/500] 156/180 correct (86.7%) - 264s
+[200/500] 174/200 correct (87.0%) - 292s
+[220/500] 192/220 correct (87.3%) - 322s
+[240/500] 210/240 correct (87.5%) - 352s
+[260/500] 229/260 correct (88.1%) - 380s
+[280/500] 247/280 correct (88.2%) - 407s
+[300/500] 266/300 correct (88.7%) - 448s
+[320/500] 284/320 correct (88.8%) - 503s
+[340/500] 299/340 correct (87.9%) - 531s
+[360/500] 315/360 correct (87.5%) - 574s
+[380/500] 331/380 correct (87.1%) - 604s
+[400/500] 345/400 correct (86.3%) - 631s
+[420/500] 363/420 correct (86.4%) - 661s
+[440/500] 381/440 correct (86.6%) - 698s
+[460/500] 399/460 correct (86.7%) - 720s
+[480/500] 416/480 correct (86.7%) - 758s
+[500/500] 433/500 correct (86.6%) - 790s
+
+=== Results ===
+abstention: 26/30 (86.7%)
+knowledge-update: 65/72 (90.3%)
+multi-session: 104/121 (86.0%)
+single-session-assistant: 53/56 (94.6%)
+single-session-preference: 26/30 (86.7%)
+single-session-user: 55/64 (85.9%)
+temporal-reasoning: 104/127 (81.9%)
+
+Overall: 433/500 (86.6%)

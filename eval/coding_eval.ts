@@ -198,40 +198,6 @@ async function promptAndWait(
   return "[TIMEOUT]";
 }
 
-// --- Context builders ---
-function buildOracle(
-  msgs: Array<{ role: string; content: string; tokens: number }>,
-  messageIndex: number,
-  windowBudget: number = 60000,
-): string {
-  const center = Math.min(messageIndex + 10, msgs.length - 1);
-  const low = Math.max(0, center - 60);
-  const high = Math.min(msgs.length - 1, center + 60);
-
-  let lo = low;
-  let hi = high;
-  let total = 0;
-  for (let i = lo; i <= hi; i++) total += msgs[i].tokens;
-  while (total > windowBudget && lo < hi) {
-    if (Math.abs(lo - center) >= Math.abs(hi - center)) {
-      total -= msgs[lo].tokens;
-      lo++;
-    } else {
-      total -= msgs[hi].tokens;
-      hi--;
-    }
-  }
-
-  const window = msgs.slice(lo, hi + 1);
-  const prefix =
-    lo > 0
-      ? `[Note: ${lo} earlier messages and ${msgs.length - hi - 1} later messages not shown]\n\n`
-      : msgs.length - hi - 1 > 0
-        ? `[Note: ${msgs.length - hi - 1} later messages not shown]\n\n`
-        : "";
-  return prefix + window.map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
-}
-
 // OpenCode's compaction prompt — same wording used in session/compaction.ts
 const COMPACTION_PROMPT =
   "Provide a detailed prompt for continuing our conversation above. Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next considering new session will not have access to our conversation.";
@@ -252,12 +218,36 @@ Your summary should be comprehensive enough to provide context but concise enoug
 async function compactSession(
   msgs: Array<{ role: string; content: string; created_at: number }>,
 ): Promise<string> {
-  const conversation = msgs
-    .map((m) => `[${m.role}]: ${m.content}`)
-    .join("\n\n");
-  const prompt = `${conversation}\n\n${COMPACTION_PROMPT}`;
-  const sid = await createSession();
-  return promptAndWait(sid, prompt, { system: COMPACTION_SYSTEM });
+  // Chunk messages into segments that fit within context (~80K tokens, rough char/4 estimate).
+  // Each chunk is compacted with the prior summary carried forward, mimicking iterative compaction.
+  const CHUNK_TOKEN_LIMIT = 80_000;
+  const segments: string[] = [];
+  let current: string[] = [];
+  let tokens = 0;
+  for (const m of msgs) {
+    const line = `[${m.role}]: ${m.content}`;
+    const est = Math.ceil(line.length / 4);
+    if (tokens + est > CHUNK_TOKEN_LIMIT && current.length > 0) {
+      segments.push(current.join("\n\n"));
+      current = [];
+      tokens = 0;
+    }
+    current.push(line);
+    tokens += est;
+  }
+  if (current.length) segments.push(current.join("\n\n"));
+
+  let summary = "";
+  for (let i = 0; i < segments.length; i++) {
+    const prior = summary
+      ? `Here is a summary of the conversation so far:\n\n${summary}\n\n---\n\nContinuation of the conversation:\n\n`
+      : "";
+    const prompt = `${prior}${segments[i]}\n\n${COMPACTION_PROMPT}`;
+    const sid = await createSession();
+    console.log(`    Compacting chunk ${i + 1}/${segments.length}...`);
+    summary = await promptAndWait(sid, prompt, { system: COMPACTION_SYSTEM });
+  }
+  return summary;
 }
 
 function buildNuum(distillations: Array<{ observations: string }>): string {
@@ -360,13 +350,8 @@ Answer concisely. If after checking both observations and recall you still can't
 async function processQuestion(
   q: Question,
   mode: string,
-  msgs: Array<{
-    role: string;
-    content: string;
-    tokens: number;
-    created_at: number;
-  }>,
   nuumContext: string,
+  msgs: Array<{ role: string; content: string; tokens: number; created_at: number }>
 ): Promise<{
   question: string;
   answer: string;
@@ -385,9 +370,21 @@ async function processQuestion(
     return { question: q.question, answer: q.answer, hypothesis, mode };
   }
 
-  // Default mode: static context window, no tools
-  const context = buildDefault(msgs);
-  const prompt = `Here is context from a previous coding session:\n\n${context}\n\nQuestion: ${q.question}\n\nAnswer concisely:`;
+  // Default mode: static tail window of last ~80K tokens (simulating OpenCode's recency-biased context)
+  const TAIL_BUDGET = 80_000;
+  let tailTokens = 0;
+  let cutoff = msgs.length;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    tailTokens += msgs[i].tokens;
+    if (tailTokens > TAIL_BUDGET) {
+      cutoff = i + 1;
+      break;
+    }
+  }
+  const tailContext = msgs.slice(cutoff).map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
+  const dropped = msgs.length - (msgs.length - cutoff);
+  const prefix = dropped > 0 ? `[Note: ${dropped} earlier messages were compacted/lost from context]\n\n` : "";
+  const prompt = `Here is context from a past coding session:\n\n${prefix}${tailContext}\n\nQuestion: ${q.question}\n\nAnswer concisely:`;
   const hypothesis = await promptAndWait(sid, prompt, {
     system: QA_SYSTEM,
     agent: "nuum-distill",
@@ -453,7 +450,6 @@ const sessionCache = new Map<
       created_at: number;
     }>;
     nuum: string;
-    compacted: string;
   }
 >();
 
@@ -484,14 +480,7 @@ for (const sid of sessionIDs) {
     console.log(`  Nuum context: ${nuum.length} chars`);
   }
 
-  let compacted = "";
-  if (needDefault) {
-    console.log(`  Running compaction summary...`);
-    compacted = await compactSession(msgs);
-    console.log(`  Compacted context: ${compacted.length} chars`);
-  }
-
-  sessionCache.set(sid, { msgs, nuum, compacted });
+  sessionCache.set(sid, { msgs, nuum });
 }
 
 console.log("");
@@ -520,7 +509,7 @@ await pool(
   work,
   async ({ q, mode }) => {
     const session = sessionCache.get(q.session_id)!;
-    const result = await processQuestion(q, mode, session.msgs, session.nuum);
+    const result = await processQuestion(q, mode, session.nuum, session.msgs);
     const label = await judge(q.question, q.answer, result.hypothesis);
     const entry = {
       session_label: q.session_label,
