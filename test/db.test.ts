@@ -21,7 +21,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(1);
+    expect(row.version).toBe(2);
   });
 
   test("ensureProject creates and returns id", () => {

@@ -31,7 +31,7 @@ async function ensureWorkerSession(
   const existing = workerSessions.get(parentID);
   if (existing) return existing;
   const session = await client.session.create({
-    body: { parentID, title: "nuum distillation" },
+    body: { parentID, title: "lore distillation" },
   });
   const id = session.data!.id;
   workerSessions.set(parentID, id);
@@ -248,7 +248,7 @@ export async function run(input: {
   const orphans = resetOrphans(input.projectPath, input.sessionID);
   if (orphans > 0) {
     console.error(
-      `[nuum] Reset ${orphans} orphaned messages for re-observation`,
+      `[lore] Reset ${orphans} orphaned messages for re-observation`,
     );
   }
 
@@ -339,7 +339,7 @@ async function distillSegment(input: {
     path: { id: workerID },
     body: {
       parts,
-      agent: "nuum-distill",
+      agent: "lore-distill",
       ...(model ? { model } : {}),
     },
   });
@@ -390,7 +390,7 @@ async function metaDistill(input: {
     path: { id: workerID },
     body: {
       parts,
-      agent: "nuum-distill",
+      agent: "lore-distill",
       ...(model ? { model } : {}),
     },
   });

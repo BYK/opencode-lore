@@ -5,7 +5,7 @@ const MODEL = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
 
 const DB_PATH =
   process.env.NUUM_DB ??
-  `${process.env.HOME}/.local/share/opencode-nuum/nuum.db`;
+  `${process.env.HOME}/.local/share/opencode-lore/lore.db`;
 
 // Find sessions with undistilled messages
 function findUndistilledSessions(): Array<{
@@ -61,19 +61,19 @@ if (!sessions.length) {
 }
 
 // For each session, trigger distillation by sending a dummy prompt to a child session.
-// The nuum plugin will pick it up on session.idle.
+// The lore plugin will pick it up on session.idle.
 // Actually, we can just call the distillation directly via the API by sending
 // a special message that triggers the plugin.
 
 // Simpler approach: the eval already has on-demand distillation. Let's just
 // trigger distillation for each session by creating a temporary session and
-// using the nuum-distill agent directly.
+// using the lore-distill agent directly.
 
 // Actually, the simplest approach: just mark the session as needing distillation
 // and let the plugin handle it on next session.idle. But that requires user activity.
 
 // Real approach: use the same on-demand distillation from the eval, but store
-// the results in the nuum DB.
+// the results in the lore DB.
 
 import { parseArgs } from "util";
 
@@ -129,7 +129,7 @@ async function promptAndWait(
     body: JSON.stringify({
       parts: [{ type: "text", text: `${system}\n\n${text}` }],
       model: MODEL,
-      agent: "nuum-distill",
+      agent: "lore-distill",
     }),
   });
 
@@ -248,7 +248,7 @@ for (const session of targets) {
     const match = response.match(/<observations>([\s\S]*?)<\/observations>/i);
     const observations = match ? match[1].trim() : response.trim();
 
-    // Store in nuum DB
+    // Store in lore DB
     const distId = crypto.randomUUID();
     const sourceJson = JSON.stringify(segment.map((m) => m.id));
     const tokens = Math.ceil(observations.length / 4);

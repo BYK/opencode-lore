@@ -16,7 +16,7 @@ async function ensureWorkerSession(
   const existing = workerSessions.get(parentID);
   if (existing) return existing;
   const session = await client.session.create({
-    body: { parentID, title: "nuum curator" },
+    body: { parentID, title: "lore curator" },
   });
   const id = session.data!.id;
   workerSessions.set(parentID, id);
@@ -96,7 +96,7 @@ export async function run(input: {
     path: { id: workerID },
     body: {
       parts,
-      agent: "nuum-curator",
+      agent: "lore-curator",
       ...(model ? { model } : {}),
     },
   });

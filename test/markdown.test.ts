@@ -66,123 +66,52 @@ describe("normalize", () => {
 });
 
 describe("formatDistillations", () => {
-  test("output === normalize(output) — AST serializer produces already-normalized markdown", () => {
+  test("output contains all observation text", () => {
     fc.assert(
       fc.property(
         fc.array(
           fc.record({
-            narrative: hostile,
-            facts: fc.array(
-              hostile.filter((s) => s.trim().length > 0),
-              {
-                minLength: 1,
-                maxLength: 5,
-              },
-            ),
+            observations: hostile.filter((s) => s.trim().length > 0),
             generation: fc.oneof(fc.constant(0), fc.constant(1)),
           }),
           { minLength: 1, maxLength: 3 },
         ),
         (distillations) => {
           const result = formatDistillations(distillations);
-          if (!result) return;
-          expect(normalize(result)).toBe(result);
+          for (const d of distillations) {
+            expect(result).toContain(d.observations.trim());
+          }
         },
       ),
       { numRuns: 500 },
     );
   });
 
-  test("listItem count matches total fact count", () => {
-    fc.assert(
-      fc.property(
-        fc.array(
-          fc.record({
-            narrative: hostile,
-            facts: fc.array(
-              hostile.filter((s) => s.trim().length > 0),
-              {
-                minLength: 1,
-                maxLength: 5,
-              },
-            ),
-            generation: fc.constant(0 as const),
-          }),
-          { minLength: 1, maxLength: 3 },
-        ),
-        (distillations) => {
-          const result = formatDistillations(distillations);
-          if (!result) return;
-          const total = distillations.reduce(
-            (sum, d) => sum + d.facts.length,
-            0,
-          );
-          expect(countListItems(result)).toBe(total);
-        },
-      ),
-      { numRuns: 500 },
-    );
+  test("separates gen-0 and gen-1 under correct headers", () => {
+    const result = formatDistillations([
+      { observations: "Early work summary", generation: 1 },
+      { observations: "Recent observation", generation: 0 },
+    ]);
+    expect(result).toContain("### Earlier Work (summarized)");
+    expect(result).toContain("### Recent Work (distilled)");
+    expect(result).toContain("Early work summary");
+    expect(result).toContain("Recent observation");
   });
 
-  test("regression: code fence in fact stays in list", () => {
+  test("gen-0 only shows Recent Work header", () => {
     const result = formatDistillations([
-      {
-        narrative: "Normal narrative",
-        facts: [
-          "Changed from:\n```ts\nold code\n```\nto new code",
-          "Second fact",
-        ],
-        generation: 0,
-      },
+      { observations: "Some observation", generation: 0 },
     ]);
-    expect(countListItems(result)).toBe(2);
+    expect(result).toContain("### Recent Work (distilled)");
+    expect(result).not.toContain("Earlier Work");
   });
 
-  test("regression: heading in fact does not become a heading", () => {
+  test("gen-1 only shows Earlier Work header", () => {
     const result = formatDistillations([
-      {
-        narrative: "Work done",
-        facts: ["# This looks like a heading", "Normal fact"],
-        generation: 0,
-      },
+      { observations: "Summarized work", generation: 1 },
     ]);
-    // The heading marker should be escaped, not rendered as a heading node
-    const tree = proc.parse(result);
-    const headings = tree.children.filter(
-      (n) => n.type === "heading" && (n as { depth: number }).depth === 1,
-    );
-    expect(headings.length).toBe(0);
-  });
-
-  test("regression: thematic break in narrative is escaped", () => {
-    const result = formatDistillations([
-      {
-        narrative: "---",
-        facts: ["some fact"],
-        generation: 0,
-      },
-    ]);
-    const tree = proc.parse(result);
-    const breaks = tree.children.filter((n) => n.type === "thematicBreak");
-    expect(breaks.length).toBe(0);
-  });
-
-  test("regression: numbered list marker in fact stays in list", () => {
-    const result = formatDistillations([
-      {
-        narrative: "Work done",
-        facts: ["1. This looks like an ordered list", "2. Second item"],
-        generation: 0,
-      },
-    ]);
-    // All items remain as unordered list items, count is 2
-    expect(countListItems(result)).toBe(2);
-    // No ordered lists in the output
-    const tree = proc.parse(result);
-    const ordered = tree.children.filter(
-      (n) => n.type === "list" && (n as { ordered: boolean }).ordered === true,
-    );
-    expect(ordered.length).toBe(0);
+    expect(result).toContain("### Earlier Work (summarized)");
+    expect(result).not.toContain("Recent Work");
   });
 
   test("handles empty input", () => {

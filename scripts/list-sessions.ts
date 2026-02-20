@@ -1,5 +1,5 @@
 /**
- * List sessions in nuum's temporal storage with distillation status.
+ * List sessions in lore's temporal storage with distillation status.
  *
  * Usage:
  *   bun run scripts/list-sessions.ts [--project <path>] [--all]

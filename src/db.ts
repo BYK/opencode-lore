@@ -129,7 +129,7 @@ const MIGRATIONS: string[] = [
 function dataDir() {
   const xdg = process.env.XDG_DATA_HOME;
   const base = xdg || join(process.env.HOME || "~", ".local", "share");
-  return join(base, "opencode-nuum");
+  return join(base, "opencode-lore");
 }
 
 let instance: Database | undefined;
@@ -138,7 +138,7 @@ export function db(): Database {
   if (instance) return instance;
   const dir = dataDir();
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, "nuum.db");
+  const path = join(dir, "lore.db");
   instance = new Database(path, { create: true });
   instance.exec("PRAGMA journal_mode = WAL");
   instance.exec("PRAGMA foreign_keys = ON");

@@ -40,7 +40,7 @@ export function config(): NuumConfig {
 }
 
 export async function load(directory: string): Promise<NuumConfig> {
-  const paths = [`${directory}/.opencode/nuum.json`, `${directory}/nuum.json`];
+  const paths = [`${directory}/.opencode/lore.json`, `${directory}/lore.json`];
   for (const path of paths) {
     const file = Bun.file(path);
     if (await file.exists()) {

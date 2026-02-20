@@ -1,16 +1,16 @@
 /**
- * Run nuum distillation on a past (or active) session.
+ * Run lore distillation on a past (or active) session.
  *
  * Usage:
  *   bun run scripts/distill-session.ts <sessionID> [--project <path>] [--url <server-url>]
  *
  * Options:
  *   <sessionID>         Required. The OpenCode session ID to distill.
- *   --project <path>    Project path for nuum context. Defaults to cwd.
+ *   --project <path>    Project path for lore context. Defaults to cwd.
  *   --url <url>         OpenCode server URL. Defaults to http://localhost:4096.
  *   --dry-run           Show pending message count but don't distill.
  *
- * The session must already have messages stored in nuum's temporal DB.
+ * The session must already have messages stored in lore's temporal DB.
  * If you need to backfill temporal storage first, use backfill-session.ts.
  */
 
@@ -43,7 +43,7 @@ const serverUrl = values.url!;
 const dryRun = values["dry-run"];
 const force = values.force;
 
-// Load nuum config and init DB
+// Load lore config and init DB
 await load(projectPath);
 ensureProject(projectPath);
 

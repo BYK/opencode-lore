@@ -2,7 +2,7 @@
   {
     "session_id": "ses_391dfe776ffejfpVRHHJAo3MLh",
     "session_label": "nuum-dev",
-    "question": "What technique did the nuum gradient context manager add for tracking actual token overhead, and what two parameters does the calibrate() function take?",
+    "question": "What technique did the lore gradient context manager add for tracking actual token overhead, and what two parameters does the calibrate() function take?",
     "answer": "The gradient added EMA (exponential moving average) calibration. The calibrate() function takes actualInput (real input tokens from the API response) and messageEstimate (the gradient's own estimate of message tokens).",
     "question_type": "early-detail",
     "message_index": 15
@@ -34,7 +34,7 @@
   {
     "session_id": "ses_391dfe776ffejfpVRHHJAo3MLh",
     "session_label": "nuum-dev",
-    "question": "What was the system-reminder leak bug in the nuum gradient and which code path was responsible?",
+    "question": "What was the system-reminder leak bug in the lore gradient and which code path was responsible?",
     "answer": "OpenCode's build-switch.txt contains literal <system-reminder> tags that are persisted as synthetic parts. The gradient's Layer 4 stripToTextOnly path did not apply cleanParts(), so these system-reminder blocks survived stripping and leaked into the raw context window.",
     "question_type": "mid-detail",
     "message_index": 112

@@ -11,7 +11,7 @@ const { values } = parseArgs({
   options: {
     data: { type: "string", default: "eval/data/coding_memory_eval.json" },
     out: { type: "string", default: "eval/results/coding_eval.jsonl" },
-    mode: { type: "string", default: "all" }, // "default", "nuum", or "all"
+    mode: { type: "string", default: "all" }, // "default", "lore", or "all"
     concurrency: { type: "string", default: "3" },
   },
 });
@@ -31,7 +31,7 @@ type Question = {
 // --- DB access ---
 const DB_PATH =
   process.env.NUUM_DB ??
-  `${process.env.HOME}/.local/share/opencode-nuum/nuum.db`;
+  `${process.env.HOME}/.local/share/opencode-lore/lore.db`;
 
 function getTemporalMessages(sessionID: string): Array<{
   role: string;
@@ -155,7 +155,7 @@ async function promptAndWait(
   const body: Record<string, unknown> = {
     parts: [{ type: "text", text: options?.system ? `${options.system}\n\n${text}` : text }],
     model: MODEL,
-    agent: options?.agent ?? "nuum-distill",
+    agent: options?.agent ?? "lore-distill",
   };
   await fetch(`${BASE_URL}/session/${sessionID}/prompt_async`, {
     method: "POST",
@@ -250,7 +250,7 @@ async function compactSession(
   return summary;
 }
 
-function buildNuum(distillations: Array<{ observations: string }>): string {
+function buildLore(distillations: Array<{ observations: string }>): string {
   if (!distillations.length)
     return "[No distilled observations available for this session]";
   return distillations
@@ -350,7 +350,7 @@ Answer concisely. If after checking both observations and recall you still can't
 async function processQuestion(
   q: Question,
   mode: string,
-  nuumContext: string,
+  loreContext: string,
   msgs: Array<{ role: string; content: string; tokens: number; created_at: number }>
 ): Promise<{
   question: string;
@@ -360,10 +360,10 @@ async function processQuestion(
 }> {
   const sid = await createSession();
 
-  if (mode === "nuum") {
+  if (mode === "lore") {
     // Nuum mode: distilled observations as context + recall tool available.
-    // Use default agent (not nuum-distill) so the recall tool is registered.
-    const prompt = `Here are distilled observations from a past coding session:\n\n${nuumContext}\n\nQuestion: ${q.question}\n\nAnswer concisely. If the observations don't have enough detail, use the recall tool to search for it.`;
+    // Use default agent (not lore-distill) so the recall tool is registered.
+    const prompt = `Here are distilled observations from a past coding session:\n\n${loreContext}\n\nQuestion: ${q.question}\n\nAnswer concisely. If the observations don't have enough detail, use the recall tool to search for it.`;
     const hypothesis = await promptAndWait(sid, prompt, {
       system: QA_SYSTEM_WITH_RECALL,
     });
@@ -387,7 +387,7 @@ async function processQuestion(
   const prompt = `Here is context from a past coding session:\n\n${prefix}${tailContext}\n\nQuestion: ${q.question}\n\nAnswer concisely:`;
   const hypothesis = await promptAndWait(sid, prompt, {
     system: QA_SYSTEM,
-    agent: "nuum-distill",
+    agent: "lore-distill",
   });
   return { question: q.question, answer: q.answer, hypothesis, mode };
 }
@@ -449,14 +449,14 @@ const sessionCache = new Map<
       tokens: number;
       created_at: number;
     }>;
-    nuum: string;
+    lore: string;
   }
 >();
 
 const sessionIDs = [...new Set(questions.map((q) => q.session_id))];
 purgeEvalMessages(sessionIDs);
 const needDefault = targetMode === "all" || targetMode === "default";
-const needNuum = targetMode === "all" || targetMode === "nuum";
+const needLore = targetMode === "all" || targetMode === "lore";
 for (const sid of sessionIDs) {
   console.log(`Loading session ${sid.substring(0, 16)}...`);
   const msgs = getTemporalMessages(sid);
@@ -464,23 +464,23 @@ for (const sid of sessionIDs) {
     `  ${msgs.length} messages, ${msgs.reduce((s, m) => s + m.tokens, 0)} tokens`,
   );
 
-  let nuum = "";
-  if (needNuum) {
+  let lore = "";
+  if (needLore) {
     const distillations = getDistillations(sid);
     if (
       distillations.length > 0 &&
       distillations.some((d) => d.observations?.trim())
     ) {
       console.log(`  Using ${distillations.length} existing distillation(s)`);
-      nuum = buildNuum(distillations);
+      lore = buildLore(distillations);
     } else {
       console.log(`  No existing distillations — running on-demand observer...`);
-      nuum = await distillOnDemand(msgs);
+      lore = await distillOnDemand(msgs);
     }
-    console.log(`  Nuum context: ${nuum.length} chars`);
+    console.log(`  Lore context: ${lore.length} chars`);
   }
 
-  sessionCache.set(sid, { msgs, nuum });
+  sessionCache.set(sid, { msgs, lore });
 }
 
 console.log("");
@@ -489,7 +489,7 @@ console.log("");
 type WorkItem = { q: Question; mode: string };
 const work: WorkItem[] = [];
 const modes =
-  targetMode === "all" ? ["default", "nuum"] : [targetMode];
+  targetMode === "all" ? ["default", "lore"] : [targetMode];
 for (const q of questions) {
   for (const mode of modes) {
     work.push({ q, mode });
@@ -509,7 +509,7 @@ await pool(
   work,
   async ({ q, mode }) => {
     const session = sessionCache.get(q.session_id)!;
-    const result = await processQuestion(q, mode, session.nuum, session.msgs);
+    const result = await processQuestion(q, mode, session.lore, session.msgs);
     const label = await judge(q.question, q.answer, result.hypothesis);
     const entry = {
       session_label: q.session_label,

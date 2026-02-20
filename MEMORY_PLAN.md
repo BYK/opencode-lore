@@ -10,8 +10,8 @@ Based on: LongMemEval oracle evaluation (Feb 2026) + Mastra Observational Memory
 | System             | Overall | SSU   | SSP   | SSA   | Abst  | KU    | Multi | Temp  |
 | ------------------ | ------- | ----- | ----- | ----- | ----- | ----- | ----- | ----- |
 | Mastra OM (5-mini) | 94.87%  | —     | —     | —     | —     | —     | —     | —     |
-| **Nuum v2**        | **88.0%** | 93.8% | 86.7% | 96.4% | 86.7% | 93.1% | 85.1% | 81.9% |
-| Nuum v1            | 73.8%  | 93.8% | 86.7% | 83.9% | 76.7% | 83.3% | 64.5% | 59.1% |
+| **Lore v2**        | **88.0%** | 93.8% | 86.7% | 96.4% | 86.7% | 93.1% | 85.1% | 81.9% |
+| Lore v1            | 73.8%  | 93.8% | 86.7% | 83.9% | 76.7% | 83.3% | 64.5% | 59.1% |
 | Baseline (no mem)  | 72.6%  | 71.9% | 46.7% | 91.1% | 53.3% | 84.7% | 76.9% | 64.6% |
 
 Key: SSU=single-session-user, SSP=single-session-preference, SSA=single-session-assistant,
@@ -21,12 +21,12 @@ Abst=abstention, KU=knowledge-update, Multi=multi-session, Temp=temporal-reasoni
 
 | System               | Score              | Delta   | Notes                                                 |
 | -------------------- | ------------------ | ------- | ----------------------------------------------------- |
-| **Nuum v2 final**    | **14/15 (93.3%)**  | +26.7pp | Refined observer prompts + backfilled distillations   |
-| Nuum v2 + recall     | 12/15 (80.0%)      | +13.3pp | Recall tool + backfill, before prompt refinements     |
-| Nuum v2 (obs only)   | 12/15 (80.0%)      | +13.3pp | Observations only, no recall tool in eval             |
+| **Lore v2 final**    | **14/15 (93.3%)**  | +26.7pp | Refined observer prompts + backfilled distillations   |
+| Lore v2 + recall     | 12/15 (80.0%)      | +13.3pp | Recall tool + backfill, before prompt refinements     |
+| Lore v2 (obs only)   | 12/15 (80.0%)      | +13.3pp | Observations only, no recall tool in eval             |
 | Default OpenCode     | 10/15 (66.7%)      | —       | 80K token tail window (recency-biased context)        |
 
-Final head-to-head (nuum 93.3% vs default 66.7%):
+Final head-to-head (lore 93.3% vs default 66.7%):
 Nuum wins 5, Default wins 1, Both correct 9, Both fail 0.
 
 Nuum uniquely wins: crossProject type, FTS5 bug fix, bulk-update count (43), eval session
@@ -132,10 +132,10 @@ strongest improvement from Phase 1+2.
 
 ## What NOT to change
 
-- **LTM curator system** — nuum's unique advantage. OM has no cross-session durable knowledge.
+- **LTM curator system** — lore's unique advantage. OM has no cross-session durable knowledge.
 - **Gradient 4-layer safety system** — more robust than OM's fixed two-block layout for
   coding agents with unpredictable tool call sizes.
-- **Plugin architecture** — nuum operates as an OpenCode plugin, swappable and configurable.
+- **Plugin architecture** — lore operates as an OpenCode plugin, swappable and configurable.
 
 ---
 

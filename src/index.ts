@@ -15,7 +15,7 @@ import {
 import { formatKnowledge } from "./prompt";
 import { createRecallTool } from "./reflect";
 
-export const NuumPlugin: Plugin = async (ctx) => {
+export const LorePlugin: Plugin = async (ctx) => {
   const projectPath = ctx.worktree || ctx.directory;
   await load(ctx.directory);
   ensureProject(projectPath);
@@ -85,7 +85,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
         });
       }
     } catch (e) {
-      console.error("[nuum] distillation error:", e);
+      console.error("[lore] distillation error:", e);
     } finally {
       distilling = false;
     }
@@ -102,7 +102,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
         model: cfg.model,
       });
     } catch (e) {
-      console.error("[nuum] curator error:", e);
+      console.error("[lore] curator error:", e);
     }
   }
 
@@ -113,11 +113,11 @@ export const NuumPlugin: Plugin = async (ctx) => {
       cfg.compaction = { auto: false, prune: false };
       cfg.agent = {
         ...(cfg.agent as Record<string, unknown> | undefined),
-        "nuum-distill": {
+        "lore-distill": {
           hidden: true,
           description: "Nuum memory distillation worker",
         },
-        "nuum-curator": {
+        "lore-curator": {
           hidden: true,
           description: "Nuum knowledge curator worker",
         },
@@ -153,7 +153,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
               const pending = temporal.undistilledCount(projectPath, msg.sessionID);
               if (pending >= config().distillation.maxSegment) {
                 console.error(
-                  `[nuum] incremental distillation: ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
+                  `[lore] incremental distillation: ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
                 );
                 backgroundDistill(msg.sessionID);
               }
@@ -240,7 +240,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
         if (last.parts.some((p) => p.type === "tool")) break;
         const dropped = result.messages.pop()!;
         console.error(
-          "[nuum] WARN: dropping trailing",
+          "[lore] WARN: dropping trailing",
           dropped.info.role,
           "message to prevent prefill error. id:",
           dropped.info.id,
@@ -253,7 +253,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
       }
 
       if (sessionID && statsPart && lastUserMsg) {
-        const nuumMeta = {
+        const loreMeta = {
           layer: result.layer,
           distilledTokens: result.distilledTokens,
           rawTokens: result.rawTokens,
@@ -271,7 +271,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
           ...(statsPart as Record<string, unknown>),
           metadata: {
             ...((statsPart as { metadata?: Record<string, unknown> }).metadata ?? {}),
-            nuum: nuumMeta,
+            lore: loreMeta,
           },
         };
         fetch(url, {
@@ -279,7 +279,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(updatedPart),
         }).catch((e: unknown) => {
-          console.error("[nuum] failed to write gradient stats to part metadata:", e);
+          console.error("[lore] failed to write gradient stats to part metadata:", e);
         });
       }
     },
@@ -321,4 +321,4 @@ End with "I'm ready to continue." so the agent knows to pick up where it left of
   };
 };
 
-export default NuumPlugin;
+export default LorePlugin;

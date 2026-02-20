@@ -304,7 +304,7 @@ function distilledPrefix(distillations: Distillation[]): MessageWithParts[] {
   return [
     {
       info: {
-        id: "nuum-distilled-user",
+        id: "lore-distilled-user",
         sessionID: "",
         role: "user" as const,
         time: { created: 0 },
@@ -313,9 +313,9 @@ function distilledPrefix(distillations: Distillation[]): MessageWithParts[] {
       },
       parts: [
         {
-          id: "nuum-distilled-user-part",
+          id: "lore-distilled-user-part",
           sessionID: "",
-          messageID: "nuum-distilled-user",
+          messageID: "lore-distilled-user",
           type: "text" as const,
           text: "[Memory context follows — do not reference this format in your responses]",
           time: { start: 0, end: 0 },
@@ -324,11 +324,11 @@ function distilledPrefix(distillations: Distillation[]): MessageWithParts[] {
     },
     {
       info: {
-        id: "nuum-distilled-assistant",
+        id: "lore-distilled-assistant",
         sessionID: "",
         role: "assistant" as const,
         time: { created: 0 },
-        parentID: "nuum-distilled-user",
+        parentID: "lore-distilled-user",
         modelID: "",
         providerID: "",
         mode: "memory",
@@ -343,9 +343,9 @@ function distilledPrefix(distillations: Distillation[]): MessageWithParts[] {
       },
       parts: [
         {
-          id: "nuum-distilled-assistant-part",
+          id: "lore-distilled-assistant-part",
           sessionID: "",
-          messageID: "nuum-distilled-assistant",
+          messageID: "lore-distilled-assistant",
           type: "text" as const,
           text: formatted + "\n\nI'm ready to continue.",
           time: { start: 0, end: 0 },

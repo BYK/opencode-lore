@@ -16,7 +16,7 @@ const { values } = parseArgs({
     limit: { type: "string", default: "0" },
     offset: { type: "string", default: "0" },
     concurrency: { type: "string", default: "5" },
-    mode: { type: "string", default: "baseline" }, // "baseline" or "nuum"
+    mode: { type: "string", default: "baseline" }, // "baseline" or "lore"
   },
 });
 
@@ -265,8 +265,8 @@ async function processBaseline(
   return { question_id: q.question_id, hypothesis };
 }
 
-// --- Process one question (nuum observation mode) ---
-async function processNuum(
+// --- Process one question (lore observation mode) ---
+async function processLore(
   q: Question,
 ): Promise<{ question_id: string; hypothesis: string }> {
   // Step 1: Observe each session
@@ -335,7 +335,7 @@ let completed = 0;
 const startTime = Date.now();
 const writer = Bun.file(values.out!).writer();
 
-const processFn = mode === "nuum" ? processNuum : processBaseline;
+const processFn = mode === "lore" ? processLore : processBaseline;
 
 await pool(
   questions,
