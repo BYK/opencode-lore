@@ -126,6 +126,44 @@ export function markDistilled(ids: string[]) {
     .run(...ids);
 }
 
+// Sanitize a natural-language query for FTS5 MATCH.
+// FTS5 treats punctuation as operators: - = NOT, . = column filter, " = phrase, etc.
+// Strip everything except word chars and whitespace, split into tokens, append * for
+// prefix matching. Exported so ltm.ts can reuse it instead of maintaining a duplicate.
+export function ftsQuery(raw: string): string {
+  const words = raw
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return '""'; // empty match-nothing sentinel
+  return words.map((w) => `${w}*`).join(" ");
+}
+
+// LIKE-based fallback for when FTS5 fails unexpectedly.
+function searchLike(input: {
+  pid: string;
+  query: string;
+  sessionID?: string;
+  limit: number;
+}): TemporalMessage[] {
+  const terms = input.query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
+  if (!terms.length) return [];
+  const conditions = terms.map(() => "LOWER(content) LIKE ?").join(" AND ");
+  const likeParams = terms.map((t) => `%${t}%`);
+  const query = input.sessionID
+    ? `SELECT * FROM temporal_messages WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
+    : `SELECT * FROM temporal_messages WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
+  const params = input.sessionID
+    ? [input.pid, input.sessionID, ...likeParams, input.limit]
+    : [input.pid, ...likeParams, input.limit];
+  return db()
+    .query(query)
+    .all(...params) as TemporalMessage[];
+}
+
 export function search(input: {
   projectPath: string;
   query: string;
@@ -134,8 +172,8 @@ export function search(input: {
 }): TemporalMessage[] {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 20;
-  // FTS5 query with project filtering via join
-  const query = input.sessionID
+  const q = ftsQuery(input.query);
+  const ftsSQL = input.sessionID
     ? `SELECT m.* FROM temporal_messages m
        JOIN temporal_fts f ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ?
@@ -145,11 +183,21 @@ export function search(input: {
        WHERE f.content MATCH ? AND m.project_id = ?
        ORDER BY rank LIMIT ?`;
   const params = input.sessionID
-    ? [input.query, pid, input.sessionID, limit]
-    : [input.query, pid, limit];
-  return db()
-    .query(query)
-    .all(...params) as TemporalMessage[];
+    ? [q, pid, input.sessionID, limit]
+    : [q, pid, limit];
+  try {
+    return db()
+      .query(ftsSQL)
+      .all(...params) as TemporalMessage[];
+  } catch {
+    // FTS5 still choked (edge case) — fall back to LIKE search
+    return searchLike({
+      pid,
+      query: input.query,
+      sessionID: input.sessionID,
+      limit,
+    });
+  }
 }
 
 export function count(projectPath: string, sessionID?: string): number {

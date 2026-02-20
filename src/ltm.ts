@@ -1,4 +1,5 @@
 import { db, ensureProject } from "./db";
+import { ftsQuery } from "./temporal";
 
 export type KnowledgeEntry = {
   id: string;
@@ -107,14 +108,34 @@ export function all(): KnowledgeEntry[] {
     .all() as KnowledgeEntry[];
 }
 
-// Prepare a query for FTS5: split into words, append * to each for prefix matching
-function ftsQuery(raw: string): string {
-  const words = raw
-    .replace(/[^\w\s]/g, " ")
+// LIKE-based fallback for when FTS5 fails unexpectedly.
+function searchLike(input: {
+  query: string;
+  projectPath?: string;
+  limit: number;
+}): KnowledgeEntry[] {
+  const terms = input.query
+    .toLowerCase()
     .split(/\s+/)
-    .filter(Boolean);
-  if (!words.length) return raw;
-  return words.map((w) => `${w}*`).join(" ");
+    .filter((t) => t.length > 2);
+  if (!terms.length) return [];
+  const conditions = terms
+    .map(() => "(LOWER(title) LIKE ? OR LOWER(content) LIKE ?)")
+    .join(" AND ");
+  const likeParams = terms.flatMap((t) => [`%${t}%`, `%${t}%`]);
+  if (input.projectPath) {
+    const pid = ensureProject(input.projectPath);
+    return db()
+      .query(
+        `SELECT * FROM knowledge WHERE (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+      )
+      .all(pid, ...likeParams, input.limit) as KnowledgeEntry[];
+  }
+  return db()
+    .query(
+      `SELECT * FROM knowledge WHERE confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+    )
+    .all(...likeParams, input.limit) as KnowledgeEntry[];
 }
 
 export function search(input: {
@@ -126,24 +147,36 @@ export function search(input: {
   const q = ftsQuery(input.query);
   if (input.projectPath) {
     const pid = ensureProject(input.projectPath);
+    try {
+      return db()
+        .query(
+          `SELECT k.* FROM knowledge k
+           WHERE k.rowid IN (SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?)
+           AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
+           AND k.confidence > 0.2
+           ORDER BY k.updated_at DESC LIMIT ?`,
+        )
+        .all(q, pid, limit) as KnowledgeEntry[];
+    } catch {
+      return searchLike({
+        query: input.query,
+        projectPath: input.projectPath,
+        limit,
+      });
+    }
+  }
+  try {
     return db()
       .query(
         `SELECT k.* FROM knowledge k
          WHERE k.rowid IN (SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?)
-         AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
          AND k.confidence > 0.2
          ORDER BY k.updated_at DESC LIMIT ?`,
       )
-      .all(q, pid, limit) as KnowledgeEntry[];
+      .all(q, limit) as KnowledgeEntry[];
+  } catch {
+    return searchLike({ query: input.query, limit });
   }
-  return db()
-    .query(
-      `SELECT k.* FROM knowledge k
-       WHERE k.rowid IN (SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?)
-       AND k.confidence > 0.2
-       ORDER BY k.updated_at DESC LIMIT ?`,
-    )
-    .all(q, limit) as KnowledgeEntry[];
 }
 
 export function get(id: string): KnowledgeEntry | null {
