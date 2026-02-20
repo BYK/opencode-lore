@@ -522,7 +522,7 @@ writer.end();
 const results = (await Bun.file(values.out!).text())
   .trim()
   .split("\n")
-  .map((l) => JSON.parse(l));
+  .flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
 
 console.log("\n=== Results ===");
 for (const mode of modes) {
