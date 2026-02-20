@@ -19,19 +19,26 @@ Abst=abstention, KU=knowledge-update, Multi=multi-session, Temp=temporal-reasoni
 
 ### Coding Memory Eval (15 questions across 3 real OpenCode sessions)
 
-| System               | Score              | Notes                                                              |
-| -------------------- | ------------------ | ------------------------------------------------------------------ |
-| **Nuum v2 + recall** | **93.3%** (14/15)  | Recall tool retrieves temporal messages to fill observation gaps   |
-| Nuum v2 (obs only)   | 80.0% (12/15)      | Wins on early-session recall, prefill error, org count, test failures |
-| Default OpenCode     | 73.3% (11/15)      | Wins on /users/me/ detail (recency bias helps)                     |
+| System               | Score              | Delta   | Notes                                                 |
+| -------------------- | ------------------ | ------- | ----------------------------------------------------- |
+| **Nuum v2 final**    | **14/15 (93.3%)**  | +26.7pp | Refined observer prompts + backfilled distillations   |
+| Nuum v2 + recall     | 12/15 (80.0%)      | +13.3pp | Recall tool + backfill, before prompt refinements     |
+| Nuum v2 (obs only)   | 12/15 (80.0%)      | +13.3pp | Observations only, no recall tool in eval             |
+| Default OpenCode     | 10/15 (66.7%)      | —       | 80K token tail window (recency-biased context)        |
 
-Nuum + recall vs default head-to-head: nuum wins 4, default wins 1, both correct 10, both fail 0.
-Only remaining failure: "43 knowledge entries" — nuum said 50 (factual error in observation).
+Final head-to-head (nuum 93.3% vs default 66.7%):
+Nuum wins 5, Default wins 1, Both correct 9, Both fail 0.
+
+Nuum uniquely wins: crossProject type, FTS5 bug fix, bulk-update count (43), eval session
+pollution, orgs count — all early/mid-session details lost from default's tail window.
+
+Default uniquely wins: test failures count (131 vs 130 — observer captured both measurements
+from different segments, model picked the later one).
 
 Sessions tested:
-- nuum-dev (790 msgs, 422k tokens, 11 distillations, 32.6k obs chars) — good coverage
-- sentry-cli (199 msgs, 141k tokens, 0 persistent distillations) — on-demand only
-- auth-api (226 msgs, 95k tokens, 1 distillation, 4k obs chars) — very sparse
+- nuum-dev (919 msgs, 483k tokens, 19 distillations, 92k obs chars) — fully backfilled
+- sentry-cli (199 msgs, 141k tokens, 4 distillations, 21k obs chars) — backfilled
+- auth-api (226 msgs, 95k tokens, 5 distillations, 24k obs chars) — backfilled
 
 ---
 
@@ -47,6 +54,36 @@ strengthening assistant content preservation rules in observer prompt.
 
 `addRelativeTimeToObservations` and `expandInlineEstimatedDates` inject "(5 weeks ago)"
 annotations and gap markers at read time. Temporal-reasoning: 59.1% → 81.9%.
+
+## Phase 3: Incremental distillation — DONE
+
+Triggers `backgroundDistill` when undistilled message count exceeds `maxSegment` (default 50)
+after each completed assistant message (index.ts message.updated handler). This keeps each
+distillation segment small and high-fidelity, preventing the oversized first-batch problem
+(306 msgs in one segment) that caused early detail loss.
+
+Also implemented:
+- **Backfill script** (eval/backfill.ts): segments historical sessions into 50-msg batches
+  and stores gen-0 distillations via the OpenCode prompt API.
+- **Child session skip** (index.ts): `shouldSkip()` checks for parentID and caches result,
+  preventing eval/worker child sessions from polluting temporal storage.
+- **Eval purge** (eval/coding_eval.ts): `purgeEvalMessages()` cleans small eval sessions
+  from temporal storage before each run. Rebuilds FTS5 index after content table deletes.
+
+## Phase 4: Observer prompt refinements — DONE
+
+Added to DISTILLATION_SYSTEM:
+- **EXACT NUMBERS — NEVER APPROXIMATE**: Record verbatim counts from the conversation at
+  the time stated; never substitute a later count. Fixed bulk-update "43 vs 50" failure.
+- **BUG FIXES AND CODE CHANGES — HIGH PRIORITY**: Record bug, root cause, fix (with file
+  paths), and outcome regardless of position in conversation. Fixed FTS5 prefix matching
+  bug capture.
+
+Added to RECURSIVE_SYSTEM:
+- **EXACT NUMBERS**: When segments conflict on a number, keep the earlier/original one.
+- **EARLY-SESSION CONTENT**: Bug fixes from session start must survive reflection.
+
+Result: +13.3pp on coding eval (80.0% → 93.3%).
 
 ## Stability fixes — DONE
 
@@ -66,40 +103,14 @@ annotations and gap markers at read time. Temporal-reasoning: 59.1% → 81.9%.
   index.ts safety net drops trailing non-tool assistant messages.
 - **crossProject default** (a2a2b21): `op.crossProject !== false` instead of
   `op.crossProject ? 1 : 0` to handle undefined correctly.
+- **FTS5 content-sync purge** (1d02e1d): rebuild FTS index after content table deletes;
+  direct DELETE from FTS5 content-sync tables causes SQLITE_CORRUPT_VTAB.
+- **Eval contamination** (763ee8f): child session skip + purgeEvalMessages prevents
+  eval Q&A from polluting temporal storage and recall results.
 
 ---
 
-## Phase 3: Incremental distillation — NEXT
-
-**Problem:** Nuum distills in batch on session.idle, which creates two issues:
-
-1. **Giant first segments**: The nuum-dev session's first distillation covers 306 messages
-   in 5,084 chars. Early details (like the FTS5 bug at message 1) get lost in compression.
-   Both modes fail on this question.
-
-2. **No distillation for active sessions**: sentry-cli has 199 messages and 141k tokens but
-   zero stored distillations. Each eval run must re-distill on-demand. auth-api has only
-   1 distillation covering 224 messages at very low fidelity (4k chars).
-
-3. **Latency**: Observations aren't available until the session goes idle, so recall
-   can't find recent work within the same session.
-
-**Plan:**
-
-- Observe incrementally every ~20-30 messages (~30k tokens) via message count tracking,
-  not just on session.idle. Each segment stays within maxSegment (50 msgs) for high fidelity.
-- Append-only: new observations append to existing for that session rather than re-distilling.
-- Reflection threshold: when total observation size exceeds ~40k tokens, trigger metaDistill
-  (recursive merge).
-- Backfill: add a CLI command or startup hook to distill historical sessions that have
-  temporal messages but no distillations.
-
-**Expected impact:** Fix the FTS5 question (smaller segments = higher fidelity on early
-messages). Fix sparse auth-api coverage. Eliminate on-demand distillation in eval.
-
----
-
-## Phase 4: Cross-session entity merging — FUTURE
+## Phase 5: Cross-session entity merging — FUTURE
 
 **Problem:** Distilling sessions independently loses enumeratable entities that span sessions.
 "How many weddings did I attend?" fails if each wedding was in a separate session.
@@ -114,25 +125,8 @@ messages). Fix sparse auth-api coverage. Eliminate on-demand distillation in eva
   than creating duplicates.
 
 **Expected impact:** Partial recovery of multi-session category (currently 85.1%, was 64.5%
-in v1). Ceiling ~94% (Mastra OM's best). Lower priority than Phase 3 since multi-session
-is already the strongest improvement from Phase 1+2.
-
----
-
-## Phase 5: Observer prompt refinements — ONGOING
-
-**Known gaps from coding eval failures:**
-
-1. **Exact number preservation**: Nuum said "50 entries" instead of "43" for the bulk-update
-   count question. Observer prompt should emphasize preserving exact counts when stated.
-
-2. **Very early session detail**: Events in the first few messages of a session get
-   compressed more aggressively because they're in the oldest distillation segment. Phase 3
-   (incremental distillation) addresses this structurally; prompt refinements can help too.
-
-3. **Sparse session handling**: When a session has very few observations relative to its
-   message count, the recall tool should surface this gap so the model knows to look harder
-   or qualify uncertainty.
+in v1). Ceiling ~94% (Mastra OM's best). Lower priority since multi-session is already the
+strongest improvement from Phase 1+2.
 
 ---
 
@@ -153,5 +147,5 @@ is already the strongest improvement from Phase 1+2.
 - Oracle dataset: eval/data/longmemeval_oracle.json (500 questions)
 - Coding eval dataset: eval/data/coding_memory_eval.json (15 questions, 3 sessions)
 - Eval harness: eval/harness.ts (LongMemEval), eval/coding_eval.ts (coding)
-- Eval judge: eval/evaluate.ts
+- Backfill: eval/backfill.ts
 - Results: eval/results/
