@@ -1,140 +1,144 @@
 # Nuum Memory Improvement Plan
 
-Based on: LongMemEval oracle evaluation (Feb 2026) + Mastra Observational Memory analysis.
+Based on: LongMemEval oracle evaluation (Feb 2026) + Mastra Observational Memory analysis
++ coding memory eval on real OpenCode sessions.
 
-## Benchmark Results (baseline)
+## Benchmark Results
 
-| System                    | Model          | LongMemEval | Dataset       |
-| ------------------------- | -------------- | ----------- | ------------- |
-| Mastra OM                 | gpt-5-mini     | 94.87%      | longmemeval_s |
-| Mastra OM                 | gpt-4o         | 84.23%      | longmemeval_s |
-| **Nuum (post-Phase-1+2)** | **Sonnet 4.6** | **TBD**     | **oracle**    |
-| Nuum (original)           | Sonnet 4.6     | 73.8%       | oracle        |
-| Baseline (full context)   | Sonnet 4.6     | 72.6%       | oracle        |
+### LongMemEval (500 questions, Sonnet 4.6)
 
-### Nuum oracle breakdown (pre-improvement)
+| System             | Overall | SSU   | SSP   | SSA   | Abst  | KU    | Multi | Temp  |
+| ------------------ | ------- | ----- | ----- | ----- | ----- | ----- | ----- | ----- |
+| Mastra OM (5-mini) | 94.87%  | —     | —     | —     | —     | —     | —     | —     |
+| **Nuum v2**        | **88.0%** | 93.8% | 86.7% | 96.4% | 86.7% | 93.1% | 85.1% | 81.9% |
+| Nuum v1            | 73.8%  | 93.8% | 86.7% | 83.9% | 76.7% | 83.3% | 64.5% | 59.1% |
+| Baseline (no mem)  | 72.6%  | 71.9% | 46.7% | 91.1% | 53.3% | 84.7% | 76.9% | 64.6% |
 
-| Category                  | Baseline | Nuum  | Delta    |
-| ------------------------- | -------- | ----- | -------- |
-| single-session-user       | 71.9%    | 93.8% | +21.9    |
-| single-session-preference | 46.7%    | 86.7% | +40.0    |
-| abstention                | 53.3%    | 76.7% | +23.4    |
-| knowledge-update          | 84.7%    | 83.3% | -1.4     |
-| single-session-assistant  | 91.1%    | 83.9% | -7.1     |
-| multi-session             | 76.9%    | 64.5% | -12.4    |
-| temporal-reasoning        | 64.6%    | 59.1% | -5.5     |
-| **Overall**               | 72.6%    | 73.8% | **+1.2** |
+Key: SSU=single-session-user, SSP=single-session-preference, SSA=single-session-assistant,
+Abst=abstention, KU=knowledge-update, Multi=multi-session, Temp=temporal-reasoning.
 
-### Three failure patterns identified
+### Coding Memory Eval (15 questions across 3 real OpenCode sessions)
 
-1. **Cross-session aggregation loss** (multi-session -12.4%): Distillation compresses each
-   session independently. Items mentioned briefly ("attended a wedding as background context")
-   get dropped. Questions like "how many total?" undercount across sessions.
+| System          | Score    | Notes                                          |
+| --------------- | -------- | ---------------------------------------------- |
+| **Nuum v2**     | **80.0%** (12/15) | Wins on early-session recall, prefill error, org count, test failures |
+| Default OpenCode | 73.3% (11/15) | Wins on /users/me/ detail (recency bias helps) |
 
-2. **Temporal precision loss** (temporal-reasoning -5.5%): Exact dates ("February 14") get
-   compressed to vague relative terms ("early February"). Ordering and duration questions fail.
+Head-to-head: nuum wins 3, default wins 2, both correct 9, both fail 1.
 
-3. **Assistant output detail loss** (single-session-assistant -7.1%): Current prompt treats
-   assistant-generated content as "verbose output." Specific details (colors, names, shift
-   schedules, recommendations with attributes) get dropped.
+Sessions tested:
+- nuum-dev (776 msgs, 416k tokens, 11 distillations, 32.6k obs chars) — good coverage
+- sentry-cli (199 msgs, 141k tokens, 0 persistent distillations) — on-demand only
+- auth-api (226 msgs, 95k tokens, 1 distillation, 4k obs chars) — very sparse
 
 ---
 
-## Phase 1: Observation-log format (DONE — post re-eval)
+## Phase 1: Observation-log format — DONE
 
-**What changed:**
+Replaced `{ narrative, facts }` JSON with OM-style dated timestamped event-log text.
+Priority tags (🔴/🟡/🟢), entity markers, exact quantities, assistant content preservation.
 
-- `prompt.ts`: `DISTILLATION_SYSTEM` replaced with OM-style Observer extraction instructions.
-  Output format changed from `{ narrative, facts }` JSON to dated timestamped event-log text.
-- `prompt.ts`: `RECURSIVE_SYSTEM` replaced with OM-style Reflector instructions that merge
-  and prune observations while preserving the event-log format.
-- `prompt.ts`: `distillationUser` and `recursiveUser` updated for new format.
-- `prompt.ts`: `formatDistillations` updated to inject observation text directly (no markdown
-  narrative+facts rendering).
-- `distillation.ts`: `parseDistillationResult` replaced with `parseObservations` (string, not JSON).
-  `storeDistillation` stores `observations TEXT` instead of `narrative + facts`.
-- `db.ts`: Migration v2 adds `observations TEXT` column to `distillations`, drops `narrative`/`facts`.
-- `eval/harness.ts`: `processNuum` updated to use observation-log format for distillation
-  and context injection.
+Result: +14.2pp on LongMemEval (73.8% → 88.0%). SSA fixed from 83.9% → 96.4% after
+strengthening assistant content preservation rules in observer prompt.
 
-**Key preservation rules added to Observer prompt:**
+## Phase 2: Temporal anchoring at read time — DONE
 
-- All dates in ISO format or `(meaning DATE)` annotations
-- Priority tags: 🔴 user assertions/facts, 🟡 questions/context, 🟢 minor details
-- Enumeratable entities with counts (weddings attended, trips taken, items purchased)
-- Assistant-generated list items with distinguishing attributes per item
-- State changes: "User will use X (replacing Y)"
-- Role/participation: "User was a presenter" not "User attended"
-- Exact quantities, measurements, percentages
+`addRelativeTimeToObservations` and `expandInlineEstimatedDates` inject "(5 weeks ago)"
+annotations and gap markers at read time. Temporal-reasoning: 59.1% → 81.9%.
 
-## Phase 2: Temporal anchoring at read time (DONE — post re-eval)
+## Stability fixes — DONE
 
-**What changed:**
-
-- `gradient.ts`: `addRelativeTimeToObservations(observations, currentDate)` added.
-  Transforms "Date: Jan 15, 2026" → "Date: Jan 15, 2026 (5 weeks ago)".
-  Adds gap markers between non-consecutive dates: "[3 weeks later]".
-- `gradient.ts`: `expandInlineEstimatedDates(observations, currentDate)` added.
-  Transforms "(meaning Jan 31, 2026)" → "(meaning Jan 31, 2026 - 3 weeks ago)".
-  Detects past future-intent observations and adds "(likely already happened)".
-- `gradient.ts`: `distilledPrefix` calls both functions when injecting observations into context.
+- **Infinite tool-call loop** (2bdc4c3): trailing-drop safety net was unconditionally
+  stripping assistant messages including those with tool parts for in-progress agentic steps.
+  Fix: only drop assistant messages with no tool parts. Layer 4 uses cleanParts instead of
+  stripToTextOnly to preserve tool parts.
+- **Worker session isolation** (c7e78ff): shared workerSessionIDs set prevents storing
+  distillation/curator worker session content in temporal storage.
+- **Orphan reset** (c7e78ff): resetOrphans() recovers messages marked distilled by
+  deleted/migrated distillations.
+- **Recall tool description** (2bdc4c3): rewritten to make explicit that visible context is
+  a trimmed window, encouraging proactive recall for anything not currently visible.
+- **System-reminder stripping** (c054f64): cleanParts applied in all gradient layers
+  including Layer 4. Handles both ephemeral wrappers and persisted synthetic parts.
+- **Prefill error** (5fb7ecb): stripToTextOnly inserts placeholder if all parts removed;
+  index.ts safety net drops trailing non-tool assistant messages.
+- **crossProject default** (a2a2b21): `op.crossProject !== false` instead of
+  `op.crossProject ? 1 : 0` to handle undefined correctly.
 
 ---
 
-## Phase 3: Cross-session entity merging (NEXT)
+## Phase 3: Incremental distillation — NEXT
+
+**Problem:** Nuum distills in batch on session.idle, which creates two issues:
+
+1. **Giant first segments**: The nuum-dev session's first distillation covers 306 messages
+   in 5,084 chars. Early details (like the FTS5 bug at message 1) get lost in compression.
+   Both modes fail on this question.
+
+2. **No distillation for active sessions**: sentry-cli has 199 messages and 141k tokens but
+   zero stored distillations. Each eval run must re-distill on-demand. auth-api has only
+   1 distillation covering 224 messages at very low fidelity (4k chars).
+
+3. **Latency**: Observations aren't available until the session goes idle, so recall
+   can't find recent work within the same session.
+
+**Plan:**
+
+- Observe incrementally every ~20-30 messages (~30k tokens) via message count tracking,
+  not just on session.idle. Each segment stays within maxSegment (50 msgs) for high fidelity.
+- Append-only: new observations append to existing for that session rather than re-distilling.
+- Reflection threshold: when total observation size exceeds ~40k tokens, trigger metaDistill
+  (recursive merge).
+- Backfill: add a CLI command or startup hook to distill historical sessions that have
+  temporal messages but no distillations.
+
+**Expected impact:** Fix the FTS5 question (smaller segments = higher fidelity on early
+messages). Fix sparse auth-api coverage. Eliminate on-demand distillation in eval.
+
+---
+
+## Phase 4: Cross-session entity merging — FUTURE
 
 **Problem:** Distilling sessions independently loses enumeratable entities that span sessions.
-A question like "how many weddings did I attend?" fails if each wedding was mentioned in a
-separate session and the per-session distillation didn't flag them as belonging to a set.
+"How many weddings did I attend?" fails if each wedding was in a separate session.
 
 **Plan:**
 
-- **During observation (Observer prompt)**: Flag enumeratable entities explicitly.
-  When the user mentions attending an event, buying something, meeting someone — add a
-  special marker so the Reflector recognizes aggregatable items:
+- **Observer prompt**: Flag enumeratable entities explicitly with ENTITY markers.
   `🔴 [ENTITY:event-attended] User attended Rachel+Mike's wedding (vineyard, Aug 2023)`
-- **During recursive merge (Reflector prompt)**: Explicitly aggregate entity sets.
-  When multiple observations share the same ENTITY tag, produce a consolidation line:
+- **Reflector prompt**: Aggregate entity sets during recursive merge.
   `🔴 User attended 3 weddings total: Rachel+Mike (Aug), Emily+Sarah (Sep), Jen+Tom (Oct 8)`
-- **Curator integration**: When the LTM curator encounters a recurring entity type,
-  update the existing knowledge entry rather than create a new one. "Weddings attended: 3"
-  becomes the durable knowledge entry, updated each session.
+- **Curator integration**: Update existing LTM entries for recurring entity types rather
+  than creating duplicates.
 
-**Expected impact:** Partial recovery of multi-session -12.4%. The ceiling appears to be
-~87% (OM's best with gpt-5-mini) since some cross-session aggregation is inherently ambiguous
-after compression.
+**Expected impact:** Partial recovery of multi-session category (currently 85.1%, was 64.5%
+in v1). Ceiling ~94% (Mastra OM's best). Lower priority than Phase 3 since multi-session
+is already the strongest improvement from Phase 1+2.
 
 ---
 
-## Phase 4: Incremental distillation (FUTURE)
+## Phase 5: Observer prompt refinements — ONGOING
 
-**Problem:** Nuum currently distills in batch at session end (or on urgent trigger). OM
-observes continuously every ~30k tokens of new messages, keeping observations current.
+**Known gaps from coding eval failures:**
 
-**Plan:**
+1. **Exact number preservation**: Nuum said "50 entries" instead of "43" for the bulk-update
+   count question. Observer prompt should emphasize preserving exact counts when stated.
 
-- Hook into `message.updated` SSE events in `index.ts` for incremental observation.
-  Don't wait for session to end — observe every ~20-30 messages (~30k tokens).
-- Append-only observations: new observations append to existing for that session rather
-  than re-distilling everything.
-- Reflection on threshold: when total observation size exceeds ~40k tokens, trigger
-  `metaDistill` (recursive merge / reflection).
-- This is a bigger architectural change to the distillation pipeline.
+2. **Very early session detail**: Events in the first few messages of a session get
+   compressed more aggressively because they're in the oldest distillation segment. Phase 3
+   (incremental distillation) addresses this structurally; prompt refinements can help too.
 
-**Note:** The batch approach currently works. Incremental distillation improves latency
-(observations available sooner) and quality (each batch processes less context, higher
-compression ratio), but isn't blocking on correctness.
+3. **Sparse session handling**: When a session has very few observations relative to its
+   message count, the recall tool should surface this gap so the model knows to look harder
+   or qualify uncertainty.
 
 ---
 
 ## What NOT to change
 
-- **LTM curator system** — nuum's unique advantage for coding agents. OM has no equivalent
-  of cross-session durable knowledge (decisions, patterns, gotchas, preferences).
+- **LTM curator system** — nuum's unique advantage. OM has no cross-session durable knowledge.
 - **Gradient 4-layer safety system** — more robust than OM's fixed two-block layout for
   coding agents with unpredictable tool call sizes.
-- **Facts array for curator** — for LTM curator input, structured facts are still useful.
-  The observation format and fact extraction for curator purposes can coexist.
 - **Plugin architecture** — nuum operates as an OpenCode plugin, swappable and configurable.
 
 ---
@@ -145,6 +149,7 @@ compression ratio), but isn't blocking on correctness.
 - Mastra OM research: https://mastra.ai/research/observational-memory
 - LongMemEval: https://arxiv.org/abs/2410.10813
 - Oracle dataset: eval/data/longmemeval_oracle.json (500 questions)
-- Eval harness: eval/harness.ts
+- Coding eval dataset: eval/data/coding_memory_eval.json (15 questions, 3 sessions)
+- Eval harness: eval/harness.ts (LongMemEval), eval/coding_eval.ts (coding)
 - Eval judge: eval/evaluate.ts
 - Results: eval/results/

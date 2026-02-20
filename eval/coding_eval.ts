@@ -11,7 +11,7 @@ const { values } = parseArgs({
   options: {
     data: { type: "string", default: "eval/data/coding_memory_eval.json" },
     out: { type: "string", default: "eval/results/coding_eval.jsonl" },
-    mode: { type: "string", default: "all" }, // "oracle", "default", "nuum", or "all"
+    mode: { type: "string", default: "all" }, // "default", "nuum", or "all"
     concurrency: { type: "string", default: "3" },
   },
 });
@@ -58,7 +58,6 @@ function getDistillations(
   sessionID: string,
 ): Array<{ observations: string; created_at: number }> {
   const d = new Database(DB_PATH, { readonly: true });
-  // Get the project_id for this session
   const projectRow = d
     .query(
       "SELECT DISTINCT project_id FROM temporal_messages WHERE session_id = ? LIMIT 1",
@@ -103,15 +102,22 @@ async function createSession(): Promise<string> {
   return res.id;
 }
 
+type MessageInfo = {
+  info: { id: string; role: string; time: { created: number; updated: number } };
+  parts: Array<{ type: string; text?: string; tool?: string; state?: { status: string } }>;
+};
+
+// Wait for the model to finish responding. Handles multi-turn tool use by waiting until
+// the last assistant message has stabilized (no new messages and has a text part).
 async function promptAndWait(
   sessionID: string,
   text: string,
-  system?: string,
+  options?: { system?: string; agent?: string },
 ): Promise<string> {
   const body: Record<string, unknown> = {
-    parts: [{ type: "text", text: system ? `${system}\n\n${text}` : text }],
+    parts: [{ type: "text", text: options?.system ? `${options.system}\n\n${text}` : text }],
     model: MODEL,
-    agent: "nuum-distill",
+    agent: options?.agent ?? "nuum-distill",
   };
   await fetch(`${BASE_URL}/session/${sessionID}/prompt_async`, {
     method: "POST",
@@ -120,23 +126,36 @@ async function promptAndWait(
   });
 
   const deadline = Date.now() + MAX_WAIT;
+  let stableCount = 0;
+  let lastMsgCount = 0;
+
   while (Date.now() < deadline) {
     await Bun.sleep(POLL_INTERVAL);
     const msgs = await fetch(`${BASE_URL}/session/${sessionID}/message`).then(
-      (r) =>
-        r.json() as Promise<
-          Array<{
-            info: { role: string };
-            parts: Array<{ type: string; text?: string }>;
-          }>
-        >,
+      (r) => r.json() as Promise<MessageInfo[]>,
     );
+
+    // Check if the response has settled: assistant message with text, not followed by more activity
     const assistants = msgs.filter((m) => m.info.role === "assistant");
     if (assistants.length > 0) {
       const last = assistants[assistants.length - 1];
-      const text = last.parts.find((p) => p.type === "text");
-      if (text?.text) return text.text.trim();
+      const hasText = last.parts.some((p) => p.type === "text" && p.text?.trim());
+      const hasPendingTool = last.parts.some(
+        (p) => p.type === "tool" && p.state?.status !== "completed",
+      );
+
+      // If the last assistant has text and no pending tools, and message count is stable, we're done
+      if (hasText && !hasPendingTool) {
+        if (msgs.length === lastMsgCount) stableCount++;
+        else stableCount = 0;
+        // Wait for 2 stable polls to be sure tool results aren't still arriving
+        if (stableCount >= 1) {
+          const text = last.parts.find((p) => p.type === "text" && p.text?.trim());
+          if (text?.text) return text.text.trim();
+        }
+      }
     }
+    lastMsgCount = msgs.length;
   }
   return "[TIMEOUT]";
 }
@@ -147,32 +166,15 @@ function buildOracle(
   messageIndex: number,
   windowBudget: number = 60000,
 ): string {
-  // Use a focused window around messageIndex to keep context within model limits.
-  // Take up to windowBudget tokens centered around messageIndex (±50 messages).
   const center = Math.min(messageIndex + 10, msgs.length - 1);
   const low = Math.max(0, center - 60);
   const high = Math.min(msgs.length - 1, center + 60);
 
-  // Trim to fit windowBudget
-  let start = low;
-  let end = high;
-  let total = 0;
-  for (let i = center; i >= low || i <= high; ) {
-    // Expand outward from center
-    if (i >= 0 && i < msgs.length) total += msgs[i].tokens;
-    if (total > windowBudget) break;
-    // Already covered all in range
-    if (i <= low && i >= high) break;
-    if (i > low) { i--; start = i; } else { i++; end = i; }
-  }
-
-  // Simple slice: take messages from low..high fitting in budget by shrinking from edges
   let lo = low;
   let hi = high;
-  total = 0;
+  let total = 0;
   for (let i = lo; i <= hi; i++) total += msgs[i].tokens;
   while (total > windowBudget && lo < hi) {
-    // Prefer dropping from the farther edge of center
     if (Math.abs(lo - center) >= Math.abs(hi - center)) {
       total -= msgs[lo].tokens;
       lo++;
@@ -196,7 +198,6 @@ function buildDefault(
   msgs: Array<{ role: string; content: string; tokens: number }>,
   budget: number = 80000,
 ): string {
-  // Take the last N messages that fit in budget (simulating default OpenCode context window)
   let total = 0;
   let cutoff = msgs.length;
   for (let i = msgs.length - 1; i >= 0; i--) {
@@ -246,7 +247,6 @@ Output ONLY an <observations> block with timestamped observations.`;
 async function distillOnDemand(
   msgs: Array<{ role: string; content: string; created_at: number }>,
 ): Promise<string> {
-  // Chunk messages into segments of ~20k tokens to fit observer context
   const segments: string[] = [];
   let current: string[] = [];
   let tokens = 0;
@@ -281,7 +281,7 @@ async function distillOnDemand(
     const userMsg = `${prior}Session date: ${date}\n\nConversation to observe:\n\n${segment}\n\nExtract new observations. Output ONLY an <observations> block.`;
 
     const sid = await createSession();
-    const response = await promptAndWait(sid, userMsg, DISTILL_SYSTEM);
+    const response = await promptAndWait(sid, userMsg, { system: DISTILL_SYSTEM });
     const match = response.match(/<observations>([\s\S]*?)<\/observations>/i);
     const obs = match ? match[1].trim() : response.trim();
     allObservations += (allObservations ? "\n" : "") + obs;
@@ -289,8 +289,18 @@ async function distillOnDemand(
   return allObservations;
 }
 
-// --- QA system prompt ---
+// --- QA system prompts ---
 const QA_SYSTEM = `You are a helpful coding assistant answering questions about past coding sessions. Answer concisely based on the context provided. If the information is not present in the context, say "I don't know."`;
+
+const QA_SYSTEM_WITH_RECALL = `You are a helpful coding assistant answering questions about past coding sessions.
+
+You have two sources of information:
+1. Distilled observations provided in the context below
+2. A "recall" tool that searches raw message archives and long-term knowledge
+
+IMPORTANT: If the distilled observations don't contain enough detail to answer the question confidently, USE THE RECALL TOOL to search for the specific information. Try different search queries if the first doesn't return useful results.
+
+Answer concisely. If after checking both observations and recall you still can't find the answer, say "I don't know."`;
 
 // --- Process one question ---
 async function processQuestion(
@@ -309,24 +319,25 @@ async function processQuestion(
   hypothesis: string;
   mode: string;
 }> {
-  let context: string;
-  switch (mode) {
-    case "oracle":
-      context = buildOracle(msgs, q.message_index);
-      break;
-    case "default":
-      context = buildDefault(msgs);
-      break;
-    case "nuum":
-      context = nuumContext;
-      break;
-    default:
-      throw new Error(`Unknown mode: ${mode}`);
+  const sid = await createSession();
+
+  if (mode === "nuum") {
+    // Nuum mode: distilled observations as context + recall tool available.
+    // Use default agent (not nuum-distill) so the recall tool is registered.
+    const prompt = `Here are distilled observations from a past coding session:\n\n${nuumContext}\n\nQuestion: ${q.question}\n\nAnswer concisely. If the observations don't have enough detail, use the recall tool to search for it.`;
+    const hypothesis = await promptAndWait(sid, prompt, {
+      system: QA_SYSTEM_WITH_RECALL,
+    });
+    return { question: q.question, answer: q.answer, hypothesis, mode };
   }
 
+  // Default mode: static context window, no tools
+  const context = buildDefault(msgs);
   const prompt = `Here is context from a previous coding session:\n\n${context}\n\nQuestion: ${q.question}\n\nAnswer concisely:`;
-  const sid = await createSession();
-  const hypothesis = await promptAndWait(sid, prompt, QA_SYSTEM);
+  const hypothesis = await promptAndWait(sid, prompt, {
+    system: QA_SYSTEM,
+    agent: "nuum-distill",
+  });
   return { question: q.question, answer: q.answer, hypothesis, mode };
 }
 
@@ -340,7 +351,9 @@ async function judge(
 ): Promise<boolean> {
   const prompt = `Question: ${question}\nReference answer: ${reference}\nHypothesis: ${hypothesis}\n\nDoes the hypothesis correctly answer the question?`;
   const sid = await createSession();
-  const response = await promptAndWait(sid, prompt, JUDGE_SYSTEM);
+  const response = await promptAndWait(sid, prompt, {
+    system: JUDGE_SYSTEM,
+  });
   return response.toLowerCase().startsWith("yes");
 }
 
@@ -397,7 +410,6 @@ for (const sid of sessionIDs) {
     `  ${msgs.length} messages, ${msgs.reduce((s, m) => s + m.tokens, 0)} tokens`,
   );
 
-  // Check for existing distillations
   const distillations = getDistillations(sid);
   let nuum: string;
   if (
@@ -420,7 +432,7 @@ console.log("");
 type WorkItem = { q: Question; mode: string };
 const work: WorkItem[] = [];
 const modes =
-  targetMode === "all" ? ["oracle", "default", "nuum"] : [targetMode];
+  targetMode === "all" ? ["default", "nuum"] : [targetMode];
 for (const q of questions) {
   for (const mode of modes) {
     work.push({ q, mode });
