@@ -16,6 +16,14 @@ type TemporalMessage = temporal.TemporalMessage;
 // Worker sessions keyed by parent session ID — hidden children, one per source session
 const workerSessions = new Map<string, string>();
 
+// Set of worker session IDs — used to skip storage and distillation for worker sessions
+// Exported so curator.ts can register its own worker sessions here too
+export const workerSessionIDs = new Set<string>();
+
+export function isWorkerSession(sessionID: string): boolean {
+  return workerSessionIDs.has(sessionID);
+}
+
 async function ensureWorkerSession(
   client: Client,
   parentID: string,
@@ -27,6 +35,7 @@ async function ensureWorkerSession(
   });
   const id = session.data!.id;
   workerSessions.set(parentID, id);
+  workerSessionIDs.add(id);
   return id;
 }
 
@@ -180,13 +189,69 @@ function removeDistillations(ids: string[]) {
     .run(...ids);
 }
 
+// Reset messages that were marked distilled by a previous format/run but aren't
+// covered by any current distillation. This happens when distillations are deleted
+// (e.g., format migration from v1 to v2) but the temporal messages keep distilled=1.
+function resetOrphans(projectPath: string, sessionID: string): number {
+  const pid = ensureProject(projectPath);
+  // Collect all message IDs referenced by existing distillations
+  const rows = db()
+    .query(
+      "SELECT source_ids FROM distillations WHERE project_id = ? AND session_id = ?",
+    )
+    .all(pid, sessionID) as Array<{ source_ids: string }>;
+  const covered = new Set<string>();
+  for (const r of rows) {
+    for (const id of JSON.parse(r.source_ids) as string[]) covered.add(id);
+  }
+  if (rows.length === 0) {
+    // No distillations at all — reset everything to undistilled
+    const result = db()
+      .query(
+        "UPDATE temporal_messages SET distilled = 0 WHERE project_id = ? AND session_id = ? AND distilled = 1",
+      )
+      .run(pid, sessionID);
+    return result.changes;
+  }
+  // Find orphans: marked distilled but not in any source_ids
+  const distilled = db()
+    .query(
+      "SELECT id FROM temporal_messages WHERE project_id = ? AND session_id = ? AND distilled = 1",
+    )
+    .all(pid, sessionID) as Array<{ id: string }>;
+  const orphans = distilled.filter((m) => !covered.has(m.id)).map((m) => m.id);
+  if (!orphans.length) return 0;
+  // Reset in batches to avoid SQLite parameter limit
+  const batch = 500;
+  for (let i = 0; i < orphans.length; i += batch) {
+    const chunk = orphans.slice(i, i + batch);
+    const placeholders = chunk.map(() => "?").join(",");
+    db()
+      .query(
+        `UPDATE temporal_messages SET distilled = 0 WHERE id IN (${placeholders})`,
+      )
+      .run(...chunk);
+  }
+  return orphans.length;
+}
+
 // Main distillation entry point — called on session.idle or when urgent
 export async function run(input: {
   client: Client;
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
+  /** Skip minMessages threshold check — distill whatever is pending */
+  force?: boolean;
 }): Promise<{ rounds: number; distilled: number }> {
+  // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
+  const orphans = resetOrphans(input.projectPath, input.sessionID);
+  if (orphans > 0) {
+    console.error(
+      `[nuum] Reset ${orphans} orphaned messages for re-observation`,
+    );
+  }
+
   const cfg = config();
   const maxRounds = 3;
   let rounds = 0;
@@ -195,7 +260,12 @@ export async function run(input: {
   for (let round = 0; round < maxRounds; round++) {
     // Check if there are enough undistilled messages
     const pending = temporal.undistilled(input.projectPath, input.sessionID);
-    if (pending.length < cfg.distillation.minMessages && round === 0) break;
+    if (
+      !input.force &&
+      pending.length < cfg.distillation.minMessages &&
+      round === 0
+    )
+      break;
 
     if (pending.length > 0) {
       const segments = detectSegments(pending, cfg.distillation.maxSegment);
