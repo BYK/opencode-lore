@@ -142,8 +142,54 @@ async function promptAndWait(
 }
 
 // --- Context builders ---
-function buildOracle(msgs: Array<{ role: string; content: string }>): string {
-  return msgs.map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
+function buildOracle(
+  msgs: Array<{ role: string; content: string; tokens: number }>,
+  messageIndex: number,
+  windowBudget: number = 60000,
+): string {
+  // Use a focused window around messageIndex to keep context within model limits.
+  // Take up to windowBudget tokens centered around messageIndex (±50 messages).
+  const center = Math.min(messageIndex + 10, msgs.length - 1);
+  const low = Math.max(0, center - 60);
+  const high = Math.min(msgs.length - 1, center + 60);
+
+  // Trim to fit windowBudget
+  let start = low;
+  let end = high;
+  let total = 0;
+  for (let i = center; i >= low || i <= high; ) {
+    // Expand outward from center
+    if (i >= 0 && i < msgs.length) total += msgs[i].tokens;
+    if (total > windowBudget) break;
+    // Already covered all in range
+    if (i <= low && i >= high) break;
+    if (i > low) { i--; start = i; } else { i++; end = i; }
+  }
+
+  // Simple slice: take messages from low..high fitting in budget by shrinking from edges
+  let lo = low;
+  let hi = high;
+  total = 0;
+  for (let i = lo; i <= hi; i++) total += msgs[i].tokens;
+  while (total > windowBudget && lo < hi) {
+    // Prefer dropping from the farther edge of center
+    if (Math.abs(lo - center) >= Math.abs(hi - center)) {
+      total -= msgs[lo].tokens;
+      lo++;
+    } else {
+      total -= msgs[hi].tokens;
+      hi--;
+    }
+  }
+
+  const window = msgs.slice(lo, hi + 1);
+  const prefix =
+    lo > 0
+      ? `[Note: ${lo} earlier messages and ${msgs.length - hi - 1} later messages not shown]\n\n`
+      : msgs.length - hi - 1 > 0
+        ? `[Note: ${msgs.length - hi - 1} later messages not shown]\n\n`
+        : "";
+  return prefix + window.map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
 }
 
 function buildDefault(
@@ -266,7 +312,7 @@ async function processQuestion(
   let context: string;
   switch (mode) {
     case "oracle":
-      context = buildOracle(msgs);
+      context = buildOracle(msgs, q.message_index);
       break;
     case "default":
       context = buildDefault(msgs);

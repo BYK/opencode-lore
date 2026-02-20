@@ -45,15 +45,15 @@
     "question": "Why did the eval test sessions appear in the OpenCode session history, and what was the fix?",
     "answer": "Eval sessions were created as top-level root sessions, so they appeared in the TUI history. The fix was to create a single evalRoot session at startup and pass its ID as parentID when creating each eval session, so they become child sessions that the TUI filters out.",
     "question_type": "mid-detail",
-    "message_index": 60
+    "message_index": 392
   },
   {
     "session_id": "ses_391dfe776ffejfpVRHHJAo3MLh",
     "session_label": "nuum-dev",
-    "question": "What was the assistant message prefill error in the nuum gradient, and which Layer 4 code path was identified as the primary cause?",
-    "answer": "The assistant message prefill error occurred when the gradient produced a conversation ending with an assistant message instead of a user message. The primary cause was stripToTextOnly() in Layer 4 having no empty-array guard — it could empty a trailing user message's parts, causing toModelMessages to drop it, leaving the conversation ending with an assistant message.",
+    "question": "What was the 'assistant message prefill' error that recurred later in this session, and what two-layer fix was applied?",
+    "answer": "The error occurs when the gradient produces a conversation ending with an assistant message instead of a user message. The two-layer fix was: (1) gradient.ts: stripToTextOnly now inserts a '...' placeholder if all parts would be removed after system-reminder stripping, preventing empty user messages; (2) index.ts: added a safety net that drops any trailing assistant messages to recover a valid message order.",
     "question_type": "late-detail",
-    "message_index": 400
+    "message_index": 505
   },
   {
     "session_id": "ses_38a242967ffeiY2pRS7Qbh1x11",
@@ -90,8 +90,8 @@
   {
     "session_id": "ses_38a242967ffeiY2pRS7Qbh1x11",
     "session_label": "sentry-cli",
-    "question": "What fix was applied to the pagination_cursors table schema drift bug, and what new PR was created for it?",
-    "answer": "A migration was added that detects if pagination_cursors was created with a single-column PK and drops+recreates it with the correct composite PK on (command_key, context). This was submitted as PR #265.",
+    "question": "What migration was added to fix the pagination_cursors schema drift bug?",
+    "answer": "A migration was added that detects if the pagination_cursors table was created with a single-column PK on command_key and drops and recreates it with the correct composite PK on (command_key, context).",
     "question_type": "mid-detail",
     "message_index": 45
   },
@@ -107,7 +107,7 @@
     "session_id": "ses_389c23eddffeDeyoiOTNxMrPTr",
     "session_label": "auth-api",
     "question": "Why was /users/me/ problematic for getting the authenticated user's own information, and what endpoint was used instead?",
-    "answer": "/users/me/ is an organization-scoped endpoint on the region silo and returns 403 for OAuth tokens, or silently returns region data when called on the control silo. The /auth/ endpoint was used instead, as it is available on the control silo and works with all token types.",
+    "answer": "/users/me/ returns 403 for OAuth tokens and doesn't work reliably for all token types. The /auth/ endpoint was used instead because it works with all token types including OAuth.",
     "question_type": "early-detail",
     "message_index": 0
   },
