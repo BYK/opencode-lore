@@ -115,11 +115,11 @@ export const LorePlugin: Plugin = async (ctx) => {
         ...(cfg.agent as Record<string, unknown> | undefined),
         "lore-distill": {
           hidden: true,
-          description: "Nuum memory distillation worker",
+          description: "Lore memory distillation worker",
         },
         "lore-curator": {
           hidden: true,
-          description: "Nuum knowledge curator worker",
+          description: "Lore knowledge curator worker",
         },
       };
     },
