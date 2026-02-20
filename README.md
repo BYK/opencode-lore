@@ -2,21 +2,19 @@
 
 > **Experimental** — This plugin is under active development. APIs, storage format, and behavior may change.
 
-A memory plugin for [OpenCode](https://opencode.ai) that gives the assistant persistent long-term memory across coding sessions. Instead of losing context when the conversation grows beyond the model's window, lore distills what happened into a searchable observation log and curated knowledge base.
+An implementation of [Sanity's Nuum](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) memory architecture and [Mastra's Observational Memory](https://mastra.ai/research/observational-memory) system as a plugin for [OpenCode](https://opencode.ai). Both projects pioneered the idea that coding agents need **distillation, not summarization** — preserving operational intelligence (file paths, error messages, exact decisions) rather than narrative summaries that lose the details agents need to keep working. This plugin brings those ideas to OpenCode.
 
 ## Why
 
-Coding agents forget. Once a conversation exceeds the context window, earlier decisions, bug fixes, and architectural choices vanish. The default approach — summarize-and-compact — loses exactly the operational details agents need: file paths, error messages, commit hashes, the *reason* behind a decision. After a few compaction passes, the agent knows you "discussed authentication" but can't actually continue the work.
-
-Lore takes a different approach: **distillation, not summarization**. It extracts timestamped observations with priority tags, preserves exact numbers and code references, and maintains a curated knowledge base that persists across sessions.
+Coding agents forget. Once a conversation exceeds the context window, earlier decisions, bug fixes, and architectural choices vanish. The default approach — summarize-and-compact — loses exactly the operational details agents need. After a few compaction passes, the agent knows you "discussed authentication" but can't actually continue the work.
 
 ## How it works
 
-Lore uses a three-tier memory architecture:
+Lore uses a three-tier memory architecture (following [Nuum's design](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem)):
 
 1. **Temporal storage** — every message is stored in a local SQLite FTS5 database, searchable on demand via the `recall` tool.
 
-2. **Distillation** — messages are incrementally distilled into an observation log (dated, timestamped, priority-tagged entries). When segments accumulate, older distillations are recursively merged to prevent unbounded growth. The observer prompt is tuned to preserve exact numbers, bug fixes, file paths, and assistant-generated content.
+2. **Distillation** — messages are incrementally distilled into an observation log (dated, timestamped, priority-tagged entries), following [Mastra's observer/reflector pattern](https://mastra.ai/research/observational-memory). When segments accumulate, older distillations are recursively merged to prevent unbounded growth. The observer prompt is tuned to preserve exact numbers, bug fixes, file paths, and assistant-generated content.
 
 3. **Long-term knowledge** — a curated knowledge base of facts, patterns, decisions, and gotchas that matter across projects, maintained by a background curator agent.
 
@@ -54,15 +52,13 @@ Lore's advantage is largest on early/mid-session details that fall outside the r
 
 ## How we got here
 
-This plugin was built in a few intense sessions. Some highlights from the journey:
+This plugin was built in a few intense sessions. Some highlights:
 
-**v1 — structured distillation.** The initial version used a `{ narrative, facts }` JSON format. It worked well for single-session preference recall (+40pp over baseline) but *regressed* on multi-session and temporal reasoning — the structured format was too rigid and lost temporal context.
+**v1 — structured distillation.** The initial version used Nuum's `{ narrative, facts }` JSON format. It worked well for single-session preference recall (+40pp over baseline) but *regressed* on multi-session and temporal reasoning — the structured format was too rigid and lost temporal context.
 
 **Markdown injection.** Property-based testing with fast-check revealed that user-generated content in facts (code fences, heading markers, thematic breaks) could break the markdown structure of the injected context, confusing the model.
 
-**The splice fix.** A critical bug: OpenCode's plugin system passes message arrays by reference, but lore was *reassigning* the array (`output.messages = newArray`) instead of *mutating* it in place. The caller never saw the transform. Fix: `output.messages.splice(0, output.messages.length, ...result)`. This single line made the gradient context manager actually work.
-
-**v2 — observation logs.** Inspired by Mastra's observer/reflector architecture, we switched to plain-text timestamped observation logs with priority tags. This was the breakthrough — LongMemEval jumped from 73.8% to 88.0%. The key insight: dated event logs preserve temporal relationships that structured JSON destroys.
+**v2 — observation logs.** Switching to Mastra's observer/reflector architecture with plain-text timestamped observation logs was the breakthrough — LongMemEval jumped from 73.8% to 88.0%. The key insight: dated event logs preserve temporal relationships that structured JSON destroys.
 
 **Prompt refinements.** The final push from 80% to 93.3% on coding recall came from two observer prompt additions: "EXACT NUMBERS — NEVER APPROXIMATE" (the observer was rounding counts) and "BUG FIXES — ALWAYS RECORD" (early-session fixes were being compressed away during reflection).
 
@@ -71,30 +67,32 @@ This plugin was built in a few intense sessions. Some highlights from the journe
 ### Prerequisites
 
 - [OpenCode](https://opencode.ai)
-- [Bun](https://bun.sh)
 
 ### Setup
 
-1. Clone this repository
+Add `opencode-lore` to the `plugin` array in your project's `opencode.json`:
 
-2. Add the plugin to your OpenCode plugins directory (`~/.config/opencode/plugins/lore.ts`):
-   ```ts
-   export { LorePlugin as default } from "opencode-lore";
-   ```
+```json
+{
+  "plugin": [
+    "opencode-lore"
+  ]
+}
+```
 
-3. Add the dependency to `~/.config/opencode/package.json`:
-   ```json
-   {
-     "dependencies": {
-       "opencode-lore": "file:/path/to/opencode-lore"
-     }
-   }
-   ```
+Restart OpenCode and the plugin will be installed automatically.
 
-4. Install and restart OpenCode:
-   ```
-   cd ~/.config/opencode && bun install
-   ```
+#### Development setup
+
+To use a local clone instead of the published package:
+
+```json
+{
+  "plugin": [
+    "file:///absolute/path/to/opencode-lore"
+  ]
+}
+```
 
 ## What gets stored
 
@@ -112,13 +110,13 @@ The assistant gets a `recall` tool that searches across stored messages and know
 - "What was the error from the migration?"
 - "What's my database schema convention?"
 
-## References
+## Standing on the shoulders of
 
-- [How we solved the agent memory problem](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) — Sanity's blog post on their Nuum memory system for Miriad, which articulated the "distillation, not summarization" philosophy that shaped this project
-- [Mastra Observational Memory](https://mastra.ai/research/observational-memory) — the observer/reflector architecture that inspired lore's v2 distillation approach
-- [Mastra Memory source](https://github.com/mastra-ai/mastra/tree/main/packages/memory) — reference implementation
-- [LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory](https://arxiv.org/abs/2410.10813) — the evaluation benchmark (ICLR 2025)
-- [OpenCode](https://opencode.ai) — the coding agent this plugin extends
+- [How we solved the agent memory problem](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) — Simen Svale at Sanity on the Nuum memory architecture: three-tier storage, distillation not summarization, recursive compression. The foundation this plugin is built on.
+- [Mastra Observational Memory](https://mastra.ai/research/observational-memory) — the observer/reflector architecture and the switch from structured JSON to timestamped observation logs that made v2 work.
+- [Mastra Memory source](https://github.com/mastra-ai/mastra/tree/main/packages/memory) — reference implementation.
+- [LongMemEval](https://arxiv.org/abs/2410.10813) — the evaluation benchmark (ICLR 2025) we used to measure progress.
+- [OpenCode](https://opencode.ai) — the coding agent this plugin extends.
 
 ## License
 
