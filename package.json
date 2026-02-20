@@ -25,5 +25,23 @@
     "@types/bun": "^1.2.0",
     "fast-check": "^4.5.3",
     "typescript": "^5.8.0"
-  }
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BYK/opencode-lore.git"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "memory",
+    "agent",
+    "distillation",
+    "llm"
+  ],
+  "author": "BYK"
 }
