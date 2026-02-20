@@ -79,6 +79,44 @@ function getDistillations(
   return rows;
 }
 
+
+// Purge temporal messages from eval sessions to prevent recall tool contamination.
+// Eval sessions are small (≤5 messages) and not in the test dataset.
+function purgeEvalMessages(testSessionIDs: string[]) {
+  const d = new Database(DB_PATH);
+  const testSet = new Set(testSessionIDs);
+
+  // Find small sessions (≤5 messages) that aren't test sessions
+  const sessions = d
+    .query(
+      'SELECT session_id, count(*) as c FROM temporal_messages GROUP BY session_id HAVING c <= 5',
+    )
+    .all() as Array<{ session_id: string; c: number }>;
+  const toDelete = sessions.filter((s) => !testSet.has(s.session_id));
+  if (!toDelete.length) {
+    d.close();
+    return;
+  }
+
+  // Delete in batches
+  const batch = 100;
+  let deleted = 0;
+  for (let i = 0; i < toDelete.length; i += batch) {
+    const chunk = toDelete.slice(i, i + batch).map((s) => s.session_id);
+    const placeholders = chunk.map(() => '?').join(',');
+    // Delete from FTS first (content-sync table needs manual delete)
+    d.query(
+      `DELETE FROM temporal_fts WHERE rowid IN (SELECT rowid FROM temporal_messages WHERE session_id IN (${placeholders}))`,
+    ).run(...chunk);
+    d.query(
+      `DELETE FROM temporal_messages WHERE session_id IN (${placeholders})`,
+    ).run(...chunk);
+    deleted += chunk.length;
+  }
+  d.close();
+  console.log(`Purged ${deleted} eval sessions (${toDelete.reduce((s, x) => s + x.c, 0)} messages) from temporal storage`);
+}
+
 // --- Eval root session (hidden from UI) ---
 let evalRoot: string;
 
@@ -403,6 +441,7 @@ const sessionCache = new Map<
 >();
 
 const sessionIDs = [...new Set(questions.map((q) => q.session_id))];
+purgeEvalMessages(sessionIDs);
 for (const sid of sessionIDs) {
   console.log(`Loading session ${sid.substring(0, 16)}...`);
   const msgs = getTemporalMessages(sid);
