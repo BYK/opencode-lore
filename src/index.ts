@@ -26,6 +26,28 @@ export const NuumPlugin: Plugin = async (ctx) => {
   // Track active sessions for distillation
   const activeSessions = new Set<string>();
 
+  // Sessions to skip for temporal storage and distillation. Includes worker sessions
+  // (distillation, curator) and child sessions (eval, any other children).
+  // Checked once per session ID and cached to avoid repeated API calls.
+  const skipSessions = new Set<string>();
+
+  async function shouldSkip(sessionID: string): Promise<boolean> {
+    if (distillation.isWorkerSession(sessionID)) return true;
+    if (skipSessions.has(sessionID)) return true;
+    if (activeSessions.has(sessionID)) return false; // already known good
+    // First encounter — check if this is a child session
+    try {
+      const session = await ctx.client.session.get({ path: { id: sessionID } });
+      if (session.data?.parentID) {
+        skipSessions.add(sessionID);
+        return true;
+      }
+    } catch {
+      // If we can't fetch session info, don't skip
+    }
+    return false;
+  }
+
   // Background distillation — debounced, non-blocking
   let distilling = false;
   async function backgroundDistill(sessionID: string, force?: boolean) {
@@ -87,14 +109,12 @@ export const NuumPlugin: Plugin = async (ctx) => {
       };
     },
 
-    // Store all messages in temporal DB for full-text search and distillation
+    // Store all messages in temporal DB for full-text search and distillation.
+    // Skips child sessions (eval, worker) to prevent pollution.
     event: async ({ event }) => {
       if (event.type === "message.updated") {
         const msg = event.properties.info;
-        // Skip worker sessions — storing their content would pollute temporal storage
-        // with distillation prompts and responses, and cause recursive distillation
-        if (distillation.isWorkerSession(msg.sessionID)) return;
-        // Fetch parts for this message
+        if (await shouldSkip(msg.sessionID)) return;
         try {
           const full = await ctx.client.session.message({
             path: { id: msg.sessionID, messageID: msg.id },
@@ -110,9 +130,6 @@ export const NuumPlugin: Plugin = async (ctx) => {
 
             // Incremental distillation: when undistilled messages accumulate past
             // maxSegment, distill immediately instead of waiting for session.idle.
-            // This keeps each distillation segment small and high-fidelity.
-            // Only trigger on completed assistant messages (not mid-stream user input)
-            // to avoid distilling during active agentic loops.
             if (
               msg.role === "assistant" &&
               msg.tokens &&
@@ -126,7 +143,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
                 backgroundDistill(msg.sessionID);
               }
 
-              // Calibrate overhead estimate using real token counts from completed assistant messages
+              // Calibrate overhead estimate using real token counts
               const allMsgs = await ctx.client.session.messages({
                 path: { id: msg.sessionID },
               });
@@ -147,8 +164,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
 
       if (event.type === "session.idle") {
         const sessionID = event.properties.sessionID;
-        // Skip worker sessions — they don't have user content to distill
-        if (distillation.isWorkerSession(sessionID)) return;
+        if (await shouldSkip(sessionID)) return;
         if (!activeSessions.has(sessionID)) return;
 
         // Run background distillation for any remaining undistilled messages
@@ -168,7 +184,6 @@ export const NuumPlugin: Plugin = async (ctx) => {
 
     // Inject LTM knowledge into system prompt
     "experimental.chat.system.transform": async (input, output) => {
-      // Cache model limits for the gradient transform
       if (input.model?.limit) {
         setModelLimits(input.model.limit);
       }
@@ -194,8 +209,6 @@ export const NuumPlugin: Plugin = async (ctx) => {
 
       const sessionID = output.messages[0]?.info.sessionID;
 
-      // Capture the last user message's first text part before transform modifies the array.
-      // We'll write nuum gradient stats into its metadata so the context inspector can show them.
       const lastUserMsg = [...output.messages].reverse().find((m) => m.info.role === "user");
       const statsPart = lastUserMsg?.parts.find((p) => p.type === "text");
 
@@ -204,12 +217,6 @@ export const NuumPlugin: Plugin = async (ctx) => {
         projectPath,
         sessionID,
       });
-      // Ensure conversation ends with a user message — providers reject assistant prefill.
-      // Only drop trailing assistant messages that have no tool parts: those are safe to remove
-      // (e.g. the synthetic distilled-prefix assistant, or stale completed turns).
-      // Assistant messages that contain tool parts must be preserved — they represent an
-      // in-progress agentic loop where the model needs to see its own tool calls and results.
-      // Dropping them would cause the model to re-invoke the same tools, creating an infinite loop.
       while (
         result.messages.length > 0 &&
         result.messages.at(-1)!.info.role !== "user"
@@ -226,14 +233,10 @@ export const NuumPlugin: Plugin = async (ctx) => {
       }
       output.messages.splice(0, output.messages.length, ...result.messages);
 
-      // If we hit safety layers, trigger urgent distillation
       if (result.layer >= 2 && sessionID) {
         backgroundDistill(sessionID);
       }
 
-      // Persist gradient stats into the last user message's text part metadata.
-      // This fires a message.part.updated SSE event so the UI can read it reactively.
-      // We use raw fetch because the plugin receives a v1 SDK client which lacks the part API.
       if (sessionID && statsPart && lastUserMsg) {
         const nuumMeta = {
           layer: result.layer,
@@ -256,7 +259,6 @@ export const NuumPlugin: Plugin = async (ctx) => {
             nuum: nuumMeta,
           },
         };
-        // Fire-and-forget — don't block the transform
         fetch(url, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
