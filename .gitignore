@@ -4,3 +4,6 @@ dist/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Large eval benchmark data (download separately)
+eval/data/longmemeval_*.json
