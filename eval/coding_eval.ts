@@ -98,23 +98,23 @@ function purgeEvalMessages(testSessionIDs: string[]) {
     return;
   }
 
-  // Delete in batches
+  // Delete content table rows in batches, then rebuild FTS index.
+  // FTS5 content-sync tables don't support direct DELETE — must rebuild after content changes.
   const batch = 100;
   let deleted = 0;
+  const totalMsgs = toDelete.reduce((s, x) => s + x.c, 0);
   for (let i = 0; i < toDelete.length; i += batch) {
     const chunk = toDelete.slice(i, i + batch).map((s) => s.session_id);
     const placeholders = chunk.map(() => '?').join(',');
-    // Delete from FTS first (content-sync table needs manual delete)
-    d.query(
-      `DELETE FROM temporal_fts WHERE rowid IN (SELECT rowid FROM temporal_messages WHERE session_id IN (${placeholders}))`,
-    ).run(...chunk);
     d.query(
       `DELETE FROM temporal_messages WHERE session_id IN (${placeholders})`,
     ).run(...chunk);
     deleted += chunk.length;
   }
+  // Rebuild FTS index to reflect deleted rows
+  d.query("INSERT INTO temporal_fts(temporal_fts) VALUES('rebuild')").run();
   d.close();
-  console.log(`Purged ${deleted} eval sessions (${toDelete.reduce((s, x) => s + x.c, 0)} messages) from temporal storage`);
+  console.log(`Purged ${deleted} eval sessions (${totalMsgs} messages) from temporal storage`);
 }
 
 // --- Eval root session (hidden from UI) ---
