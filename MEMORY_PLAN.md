@@ -19,15 +19,17 @@ Abst=abstention, KU=knowledge-update, Multi=multi-session, Temp=temporal-reasoni
 
 ### Coding Memory Eval (15 questions across 3 real OpenCode sessions)
 
-| System          | Score    | Notes                                          |
-| --------------- | -------- | ---------------------------------------------- |
-| **Nuum v2**     | **80.0%** (12/15) | Wins on early-session recall, prefill error, org count, test failures |
-| Default OpenCode | 73.3% (11/15) | Wins on /users/me/ detail (recency bias helps) |
+| System               | Score              | Notes                                                              |
+| -------------------- | ------------------ | ------------------------------------------------------------------ |
+| **Nuum v2 + recall** | **93.3%** (14/15)  | Recall tool retrieves temporal messages to fill observation gaps   |
+| Nuum v2 (obs only)   | 80.0% (12/15)      | Wins on early-session recall, prefill error, org count, test failures |
+| Default OpenCode     | 73.3% (11/15)      | Wins on /users/me/ detail (recency bias helps)                     |
 
-Head-to-head: nuum wins 3, default wins 2, both correct 9, both fail 1.
+Nuum + recall vs default head-to-head: nuum wins 4, default wins 1, both correct 10, both fail 0.
+Only remaining failure: "43 knowledge entries" — nuum said 50 (factual error in observation).
 
 Sessions tested:
-- nuum-dev (776 msgs, 416k tokens, 11 distillations, 32.6k obs chars) — good coverage
+- nuum-dev (790 msgs, 422k tokens, 11 distillations, 32.6k obs chars) — good coverage
 - sentry-cli (199 msgs, 141k tokens, 0 persistent distillations) — on-demand only
 - auth-api (226 msgs, 95k tokens, 1 distillation, 4k obs chars) — very sparse
 
