@@ -173,6 +173,16 @@ For technical/coding content:
 - Preserve specific values, thresholds, config details
 - Preserve approaches that failed and why
 
+EXACT NUMBERS — NEVER APPROXIMATE:
+When the conversation states a specific count, record that EXACT number — do not round, estimate, or substitute a count you see later.
+BAD: ~130 test failures
+GOOD: 131 test failures (1902 pass, 131 fail, 1 error across 100 files)
+
+BUG FIXES — ALWAYS RECORD:
+Every bug fix is important regardless of where it appears. Record the specific bug, root cause, fix applied (with file paths), and outcome.
+BAD: Fixed an FTS5 search bug
+GOOD: FTS5 was doing exact term matching instead of prefix matching in ltm.ts. Fix: added ftsQuery() that appends * to each term for prefix matching.
+
 Output ONLY an <observations> block with timestamped observations.`;
 
 for (const session of targets) {

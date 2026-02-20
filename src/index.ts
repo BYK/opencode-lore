@@ -35,7 +35,12 @@ export const NuumPlugin: Plugin = async (ctx) => {
     if (distillation.isWorkerSession(sessionID)) return true;
     if (skipSessions.has(sessionID)) return true;
     if (activeSessions.has(sessionID)) return false; // already known good
-    // First encounter — check if this is a child session
+    // First encounter — check if this is a child session.
+    // session.get() uses exact storage key lookup and only works with full IDs
+    // (e.g. "ses_384e7de8dffeBDc4Z3dK9kfx1k"). Message events deliver short IDs
+    // (e.g. "ses_384e7de8dffe") which cause session.get() to fail with NotFound.
+    // Fall back to the session list to find a session whose full ID starts with
+    // the short ID, then check its parentID.
     try {
       const session = await ctx.client.session.get({ path: { id: sessionID } });
       if (session.data?.parentID) {
@@ -43,7 +48,17 @@ export const NuumPlugin: Plugin = async (ctx) => {
         return true;
       }
     } catch {
-      // If we can't fetch session info, don't skip
+      // session.get failed (likely short ID) — search list for matching full ID
+      try {
+        const list = await ctx.client.session.list();
+        const match = list.data?.find((s) => s.id.startsWith(sessionID));
+        if (match?.parentID) {
+          skipSessions.add(sessionID);
+          return true;
+        }
+      } catch {
+        // If we can't fetch session info, don't skip
+      }
     }
     return false;
   }
