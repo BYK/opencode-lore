@@ -50,6 +50,29 @@ DETAILS TO ALWAYS PRESERVE:
 - User's specific role (presenter, volunteer, organizer — not just "attended")
 - Exact phrasing when unusual ("movement session" for exercise)
 
+EXACT NUMBERS — NEVER APPROXIMATE:
+
+When the conversation states a specific count, record that EXACT number — do not round, estimate, or substitute a count you see later. If the same quantity appears with different values at different times, record each with its timestamp.
+
+BAD: All existing entries bulk-updated to cross_project=1 (50 entries)  ← wrong: mixed up with a later count
+GOOD: 43 knowledge entries bulk-updated to cross_project=1 via SQL UPDATE  ← exact number from the operation
+
+BAD: ~130 test failures
+GOOD: 131 test failures (1902 pass, 131 fail, 1 error across 100 files)  ← preserve exact counts
+
+BUG FIXES AND CODE CHANGES — HIGH PRIORITY:
+
+Every bug fix, code change, or technical decision is important regardless of where it appears in the conversation. Early-session fixes are just as valuable as later ones.
+
+For each fix, record:
+- The specific bug/problem (what went wrong)
+- The root cause (why it went wrong)
+- The fix applied (what changed, with file paths and line numbers)
+- The outcome (tests pass, deployed, etc.)
+
+BAD: 🟡 Fixed an FTS5 search bug
+GOOD: 🟡 FTS5 was doing exact term matching instead of prefix matching in ltm.ts. Fix: added ftsQuery() function that appends * to each search term for prefix matching. Committed as [hash].
+
 ASSISTANT-GENERATED CONTENT — THIS IS CRITICAL:
 
 When the assistant produces lists, recommendations, explanations, recipes, schedules, creative content, or any structured output — record EVERY ITEM with its distinguishing details. The user WILL ask about specific items later.
@@ -131,6 +154,10 @@ REFLECTION RULES:
 - Preserve all enumeratable entities [entity-type] — these are needed for aggregation questions
 - For enumeratable entities spanning multiple segments, create an explicit aggregation:
   🔴 [event-attended] User attended 3 weddings total: Rachel+Mike (vineyard, Aug 2023), Emily+Sarah (garden, Sep 2023), Jen+Tom (Oct 8, 2023)
+
+EXACT NUMBERS: When two segments report different numbers for what seems like the same thing, keep the number from the earlier/original observation — it's likely the correct one from the actual event. Later references may be from memory or approximation.
+
+EARLY-SESSION CONTENT: Bug fixes, code changes, and decisions from the start of a session are just as important as later work. Never drop them just because the segment is short or old. If the first segment contains a specific bug fix with file paths and root cause, it MUST survive into the reflection.
 
 Keep the same format: dated sections with priority-tagged observations.
 

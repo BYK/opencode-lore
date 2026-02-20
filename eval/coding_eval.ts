@@ -232,26 +232,32 @@ function buildOracle(
   return prefix + window.map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
 }
 
-function buildDefault(
-  msgs: Array<{ role: string; content: string; tokens: number }>,
-  budget: number = 80000,
-): string {
-  let total = 0;
-  let cutoff = msgs.length;
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    total += msgs[i].tokens;
-    if (total > budget) {
-      cutoff = i + 1;
-      break;
-    }
-  }
-  const kept = msgs.slice(cutoff);
-  const dropped = msgs.length - kept.length;
-  const prefix =
-    dropped > 0
-      ? `[Note: ${dropped} earlier messages were compacted/lost from context]\n\n`
-      : "";
-  return prefix + kept.map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
+// OpenCode's compaction prompt — same wording used in session/compaction.ts
+const COMPACTION_PROMPT =
+  "Provide a detailed prompt for continuing our conversation above. Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next considering new session will not have access to our conversation.";
+
+const COMPACTION_SYSTEM = `You are a helpful AI assistant tasked with summarizing conversations.
+
+When asked to summarize, provide a detailed but concise summary of the conversation. 
+Focus on information that would be helpful for continuing the conversation, including:
+- What was done
+- What is currently being worked on
+- Which files are being modified
+- What needs to be done next
+- Key user requests, constraints, or preferences that should persist
+- Important technical decisions and why they were made
+
+Your summary should be comprehensive enough to provide context but concise enough to be quickly understood.`;
+
+async function compactSession(
+  msgs: Array<{ role: string; content: string; created_at: number }>,
+): Promise<string> {
+  const conversation = msgs
+    .map((m) => `[${m.role}]: ${m.content}`)
+    .join("\n\n");
+  const prompt = `${conversation}\n\n${COMPACTION_PROMPT}`;
+  const sid = await createSession();
+  return promptAndWait(sid, prompt, { system: COMPACTION_SYSTEM });
 }
 
 function buildNuum(distillations: Array<{ observations: string }>): string {
@@ -275,10 +281,20 @@ Record EVERY item in lists/recommendations with distinguishing details. Preserve
 
 For technical/coding content:
 - Preserve file paths with line numbers
-- Preserve error messages and root causes  
+- Preserve error messages and root causes
 - Preserve architecture decisions and rationale
 - Preserve specific values, thresholds, config details
 - Preserve approaches that failed and why
+
+EXACT NUMBERS — NEVER APPROXIMATE:
+When the conversation states a specific count, record that EXACT number — do not round, estimate, or substitute a count you see later.
+BAD: ~130 test failures
+GOOD: 131 test failures (1902 pass, 131 fail, 1 error across 100 files)
+
+BUG FIXES — ALWAYS RECORD:
+Every bug fix is important regardless of where it appears. Record the specific bug, root cause, fix applied (with file paths), and outcome.
+BAD: Fixed an FTS5 search bug
+GOOD: FTS5 was doing exact term matching instead of prefix matching in ltm.ts. Fix: added ftsQuery() that appends * to each term for prefix matching.
 
 Output ONLY an <observations> block with timestamped observations.`;
 
@@ -437,11 +453,14 @@ const sessionCache = new Map<
       created_at: number;
     }>;
     nuum: string;
+    compacted: string;
   }
 >();
 
 const sessionIDs = [...new Set(questions.map((q) => q.session_id))];
 purgeEvalMessages(sessionIDs);
+const needDefault = targetMode === "all" || targetMode === "default";
+const needNuum = targetMode === "all" || targetMode === "nuum";
 for (const sid of sessionIDs) {
   console.log(`Loading session ${sid.substring(0, 16)}...`);
   const msgs = getTemporalMessages(sid);
@@ -449,20 +468,30 @@ for (const sid of sessionIDs) {
     `  ${msgs.length} messages, ${msgs.reduce((s, m) => s + m.tokens, 0)} tokens`,
   );
 
-  const distillations = getDistillations(sid);
-  let nuum: string;
-  if (
-    distillations.length > 0 &&
-    distillations.some((d) => d.observations?.trim())
-  ) {
-    console.log(`  Using ${distillations.length} existing distillation(s)`);
-    nuum = buildNuum(distillations);
-  } else {
-    console.log(`  No existing distillations — running on-demand observer...`);
-    nuum = await distillOnDemand(msgs);
+  let nuum = "";
+  if (needNuum) {
+    const distillations = getDistillations(sid);
+    if (
+      distillations.length > 0 &&
+      distillations.some((d) => d.observations?.trim())
+    ) {
+      console.log(`  Using ${distillations.length} existing distillation(s)`);
+      nuum = buildNuum(distillations);
+    } else {
+      console.log(`  No existing distillations — running on-demand observer...`);
+      nuum = await distillOnDemand(msgs);
+    }
+    console.log(`  Nuum context: ${nuum.length} chars`);
   }
-  console.log(`  Nuum context: ${nuum.length} chars`);
-  sessionCache.set(sid, { msgs, nuum });
+
+  let compacted = "";
+  if (needDefault) {
+    console.log(`  Running compaction summary...`);
+    compacted = await compactSession(msgs);
+    console.log(`  Compacted context: ${compacted.length} chars`);
+  }
+
+  sessionCache.set(sid, { msgs, nuum, compacted });
 }
 
 console.log("");
