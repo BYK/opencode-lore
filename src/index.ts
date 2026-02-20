@@ -89,6 +89,9 @@ export const NuumPlugin: Plugin = async (ctx) => {
     event: async ({ event }) => {
       if (event.type === "message.updated") {
         const msg = event.properties.info;
+        // Skip worker sessions — storing their content would pollute temporal storage
+        // with distillation prompts and responses, and cause recursive distillation
+        if (distillation.isWorkerSession(msg.sessionID)) return;
         // Fetch parts for this message
         try {
           const full = await ctx.client.session.message({
@@ -131,6 +134,8 @@ export const NuumPlugin: Plugin = async (ctx) => {
 
       if (event.type === "session.idle") {
         const sessionID = event.properties.sessionID;
+        // Skip worker sessions — they don't have user content to distill
+        if (distillation.isWorkerSession(sessionID)) return;
         if (!activeSessions.has(sessionID)) return;
 
         // Run background distillation
@@ -187,11 +192,17 @@ export const NuumPlugin: Plugin = async (ctx) => {
         sessionID,
       });
       // Ensure conversation ends with a user message — providers reject assistant prefill.
-      // Drop trailing non-user messages as a safety net.
+      // Only drop trailing assistant messages that have no tool parts: those are safe to remove
+      // (e.g. the synthetic distilled-prefix assistant, or stale completed turns).
+      // Assistant messages that contain tool parts must be preserved — they represent an
+      // in-progress agentic loop where the model needs to see its own tool calls and results.
+      // Dropping them would cause the model to re-invoke the same tools, creating an infinite loop.
       while (
         result.messages.length > 0 &&
         result.messages.at(-1)!.info.role !== "user"
       ) {
+        const last = result.messages.at(-1)!;
+        if (last.parts.some((p) => p.type === "tool")) break;
         const dropped = result.messages.pop()!;
         console.error(
           "[nuum] WARN: dropping trailing",

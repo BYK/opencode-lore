@@ -441,9 +441,13 @@ export function transform(input: {
     return { ...layer3, layer: 3, usable, distilledBudget, rawBudget };
   }
 
-  // Layer 4: Nuclear — last 3 distillations, last 3 raw messages, text only
+  // Layer 4: Emergency — last 2 distillations, last 3 raw messages with tool parts intact.
+  // We do NOT strip tool parts here: doing so would cause an infinite tool-call loop because
+  // the model would lose sight of its own in-progress tool calls and re-invoke them endlessly.
+  // Instead, we aggressively drop old messages and rely on the `recall` tool (which the model
+  // is always instructed to use) to retrieve any older details it needs.
   urgentDistillation = true;
-  const nuclearDistillations = distillations.slice(-3);
+  const nuclearDistillations = distillations.slice(-2);
   const nuclearPrefix = distilledPrefix(nuclearDistillations);
   const nuclearPrefixTokens = nuclearPrefix.reduce(
     (sum, m) => sum + estimateMessage(m),
@@ -451,7 +455,7 @@ export function transform(input: {
   );
   const nuclearRaw = input.messages.slice(-3).map((m) => ({
     info: m.info,
-    parts: stripToTextOnly(cleanParts(m.parts)),
+    parts: cleanParts(m.parts),
   }));
   const nuclearRawTokens = nuclearRaw.reduce(
     (sum, m) => sum + estimateMessage(m),

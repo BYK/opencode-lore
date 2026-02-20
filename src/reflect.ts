@@ -96,7 +96,7 @@ function formatResults(input: {
 export function createRecallTool(projectPath: string): ReturnType<typeof tool> {
   return tool({
     description:
-      "Search your memory across all sessions for this project. Use this when you need to recall decisions, file paths, patterns, user preferences, or anything from previous work. Searches long-term knowledge, distilled history, and raw message archives.",
+      "Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn't in your current context: file paths, past decisions, user preferences, prior approaches, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don't have the information. Searches long-term knowledge, distilled history, and raw message archives.",
     args: {
       query: tool.schema
         .string()
