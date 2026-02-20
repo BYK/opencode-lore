@@ -28,13 +28,14 @@ export const NuumPlugin: Plugin = async (ctx) => {
 
   // Background distillation — debounced, non-blocking
   let distilling = false;
-  async function backgroundDistill(sessionID: string) {
+  async function backgroundDistill(sessionID: string, force?: boolean) {
     if (distilling) return;
     distilling = true;
     try {
       const cfg = config();
       const pending = temporal.undistilledCount(projectPath, sessionID);
       if (
+        force ||
         pending >= cfg.distillation.minMessages ||
         needsUrgentDistillation()
       ) {
@@ -43,6 +44,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
           projectPath,
           sessionID,
           model: cfg.model,
+          force,
         });
       }
     } catch (e) {
@@ -106,18 +108,29 @@ export const NuumPlugin: Plugin = async (ctx) => {
             activeSessions.add(msg.sessionID);
             if (msg.role === "user") turnsSinceCuration++;
 
-            // Calibrate overhead estimate using real token counts from completed assistant messages
+            // Incremental distillation: when undistilled messages accumulate past
+            // maxSegment, distill immediately instead of waiting for session.idle.
+            // This keeps each distillation segment small and high-fidelity.
+            // Only trigger on completed assistant messages (not mid-stream user input)
+            // to avoid distilling during active agentic loops.
             if (
               msg.role === "assistant" &&
               msg.tokens &&
               (msg.tokens.input > 0 || msg.tokens.cache.read > 0)
             ) {
-              // Fetch all messages in the session to estimate what we sent
+              const pending = temporal.undistilledCount(projectPath, msg.sessionID);
+              if (pending >= config().distillation.maxSegment) {
+                console.error(
+                  `[nuum] incremental distillation: ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
+                );
+                backgroundDistill(msg.sessionID);
+              }
+
+              // Calibrate overhead estimate using real token counts from completed assistant messages
               const allMsgs = await ctx.client.session.messages({
                 path: { id: msg.sessionID },
               });
               if (allMsgs.data) {
-                // Estimate all messages that were sent as input (exclude the assistant msg itself)
                 const withParts = allMsgs.data
                   .filter((m) => m.info.id !== msg.id)
                   .map((m) => ({ info: m.info, parts: m.parts }));
@@ -138,7 +151,7 @@ export const NuumPlugin: Plugin = async (ctx) => {
         if (distillation.isWorkerSession(sessionID)) return;
         if (!activeSessions.has(sessionID)) return;
 
-        // Run background distillation
+        // Run background distillation for any remaining undistilled messages
         backgroundDistill(sessionID);
 
         // Run curator periodically
