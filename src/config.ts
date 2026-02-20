@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const NuumConfig = z.object({
+export const LoreConfig = z.object({
   model: z
     .object({
       providerID: z.string(),
@@ -31,24 +31,24 @@ export const NuumConfig = z.object({
   crossProject: z.boolean().default(true),
 });
 
-export type NuumConfig = z.infer<typeof NuumConfig>;
+export type LoreConfig = z.infer<typeof LoreConfig>;
 
-let current: NuumConfig = NuumConfig.parse({});
+let current: LoreConfig = LoreConfig.parse({});
 
-export function config(): NuumConfig {
+export function config(): LoreConfig {
   return current;
 }
 
-export async function load(directory: string): Promise<NuumConfig> {
+export async function load(directory: string): Promise<LoreConfig> {
   const paths = [`${directory}/.opencode/lore.json`, `${directory}/lore.json`];
   for (const path of paths) {
     const file = Bun.file(path);
     if (await file.exists()) {
       const raw = await file.json();
-      current = NuumConfig.parse(raw);
+      current = LoreConfig.parse(raw);
       return current;
     }
   }
-  current = NuumConfig.parse({});
+  current = LoreConfig.parse({});
   return current;
 }

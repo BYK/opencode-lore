@@ -125,7 +125,7 @@ function formatHistory(q: Question): string {
   return parts.join("\n");
 }
 
-// --- Nuum observation prompts (Phase 1+2: observation-log format) ---
+// --- Lore observation prompts (Phase 1+2: observation-log format) ---
 const DISTILL_SYSTEM = `You are a memory observer. Your observations will be the ONLY information an AI assistant has about past interactions. Produce a dense, dated event log — not a summary.
 
 CRITICAL: DISTINGUISH USER ASSERTIONS FROM QUESTIONS

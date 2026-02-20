@@ -361,7 +361,7 @@ async function processQuestion(
   const sid = await createSession();
 
   if (mode === "lore") {
-    // Nuum mode: distilled observations as context + recall tool available.
+    // Lore mode: distilled observations as context + recall tool available.
     // Use default agent (not lore-distill) so the recall tool is registered.
     const prompt = `Here are distilled observations from a past coding session:\n\n${loreContext}\n\nQuestion: ${q.question}\n\nAnswer concisely. If the observations don't have enough detail, use the recall tool to search for it.`;
     const hypothesis = await promptAndWait(sid, prompt, {
