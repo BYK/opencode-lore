@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { db, close, ensureProject } from "../src/db";
 import * as temporal from "../src/temporal";
+import { ftsQuery } from "../src/temporal";
 import type { Message, Part } from "@opencode-ai/sdk";
 
 const PROJECT = "/test/temporal/project";
@@ -159,5 +160,46 @@ describe("temporal", () => {
     });
     // Should not increase count since content is empty
     expect(temporal.count(PROJECT, "sess-1")).toBe(3);
+  });
+
+  describe("ftsQuery sanitization", () => {
+    test("plain words get prefix wildcard", () => {
+      expect(ftsQuery("OAuth PKCE flow")).toBe("OAuth* PKCE* flow*");
+    });
+
+    test("hyphenated terms: dash stripped, not treated as NOT operator", () => {
+      // "opencode-nuum" would crash FTS5 as "opencode NOT nuum"
+      expect(ftsQuery("opencode-nuum")).toBe("opencode* nuum*");
+      expect(ftsQuery("three-tier")).toBe("three* tier*");
+    });
+
+    test("dot in domain name: dot stripped, not treated as column filter", () => {
+      // "sanity.io" would crash FTS5 as column-filter syntax
+      expect(ftsQuery("sanity.io")).toBe("sanity* io*");
+    });
+
+    test("other punctuation stripped", () => {
+      expect(ftsQuery("what's the fix?")).toBe("what* s* the* fix*");
+    });
+
+    test("empty string returns sentinel", () => {
+      expect(ftsQuery("")).toBe('""');
+    });
+
+    test("search does not throw on hyphenated query", () => {
+      // These previously crashed with SQLiteError
+      expect(() =>
+        temporal.search({ projectPath: PROJECT, query: "opencode-nuum" }),
+      ).not.toThrow();
+      expect(() =>
+        temporal.search({ projectPath: PROJECT, query: "three-tier" }),
+      ).not.toThrow();
+    });
+
+    test("search does not throw on domain name query", () => {
+      expect(() =>
+        temporal.search({ projectPath: PROJECT, query: "sanity.io article" }),
+      ).not.toThrow();
+    });
   });
 });

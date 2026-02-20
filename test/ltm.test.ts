@@ -103,4 +103,32 @@ describe("ltm", () => {
     const found = entries.find((e) => e.id === id);
     expect(found).toBeUndefined();
   });
+
+  describe("search: FTS sanitization and fallback", () => {
+    test("search does not throw on hyphenated query", () => {
+      // "opencode-nuum" previously crashed with: no such column: nuum
+      expect(() =>
+        ltm.search({ query: "opencode-nuum", projectPath: PROJECT }),
+      ).not.toThrow();
+      expect(() =>
+        ltm.search({ query: "three-tier", projectPath: PROJECT }),
+      ).not.toThrow();
+    });
+
+    test("search does not throw on domain name query", () => {
+      // "sanity.io" previously crashed with: fts5 syntax error near "."
+      expect(() =>
+        ltm.search({ query: "sanity.io memory", projectPath: PROJECT }),
+      ).not.toThrow();
+    });
+
+    test("search still finds results with punctuation in query", () => {
+      // "OAuth2-PKCE" strips to "OAuth2* PKCE*" — both words are in "Auth strategy" entry
+      const results = ltm.search({
+        query: "OAuth2-PKCE",
+        projectPath: PROJECT,
+      });
+      expect(results.length).toBeGreaterThan(0);
+    });
+  });
 });
