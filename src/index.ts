@@ -224,9 +224,6 @@ export const LorePlugin: Plugin = async (ctx) => {
 
       const sessionID = output.messages[0]?.info.sessionID;
 
-      const lastUserMsg = [...output.messages].reverse().find((m) => m.info.role === "user");
-      const statsPart = lastUserMsg?.parts.find((p) => p.type === "text");
-
       const result = transform({
         messages: output.messages,
         projectPath,
@@ -251,6 +248,12 @@ export const LorePlugin: Plugin = async (ctx) => {
       if (result.layer >= 2 && sessionID) {
         backgroundDistill(sessionID);
       }
+
+      // Look up statsPart AFTER the transform so the PATCHed text is clean
+      // (system-reminder wrappers stripped). Looking up before would persist
+      // ephemeral system-reminder content, making it visible in the UI.
+      const lastUserMsg = [...output.messages].reverse().find((m) => m.info.role === "user");
+      const statsPart = lastUserMsg?.parts.find((p) => p.type === "text");
 
       if (sessionID && statsPart && lastUserMsg) {
         const loreMeta = {
