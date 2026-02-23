@@ -94,6 +94,17 @@ To use a local clone instead of the published package:
 }
 ```
 
+## What to expect
+
+Once Lore is active, you should notice several changes:
+
+- **Higher cache reuse** — Lore keeps your context stable across turns, so the provider cache hits more often. You'll see higher cache read rates and lower costs.
+- **No more compactions** — Lore disables the built-in compaction system and replaces it with incremental distillation. Your context never gets wiped and rebuilt from a lossy summary.
+- **Steady context usage around 70–80%** — the gradient context manager dynamically balances distilled history, raw messages, and knowledge to keep you in the sweet spot — enough room for the model to work, but no wasted context.
+- **Agent doesn't degrade in long sessions** — instead of getting progressively dumber as compaction loses details, the agent stays sharp because distillation preserves the operational facts that matter.
+- **Better recall across and within sessions** — the agent remembers specific details from earlier in the conversation and from previous sessions, including file paths, decisions, error messages, and why things were done a certain way.
+- **Automatic `AGENTS.md` export** — Lore periodically exports curated knowledge to an `AGENTS.md` file in your repo. This is the [universal format](https://agenticaistandard.org/) read by 16+ AI coding tools (Codex, Jules, Cursor, Copilot, Windsurf, and more), so the knowledge benefits every tool — not just OpenCode.
+
 ## What gets stored
 
 All data lives locally in `~/.local/share/opencode-lore/lore.db`:

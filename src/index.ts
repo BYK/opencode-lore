@@ -1,6 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { load, config } from "./config";
-import { ensureProject } from "./db";
+import { ensureProject, isFirstRun } from "./db";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as distillation from "./distillation";
@@ -20,7 +20,18 @@ import { createRecallTool } from "./reflect";
 export const LorePlugin: Plugin = async (ctx) => {
   const projectPath = ctx.worktree || ctx.directory;
   await load(ctx.directory);
+  let firstRun = isFirstRun();
   ensureProject(projectPath);
+
+  if (firstRun) {
+    ctx.client.tui.showToast({
+      body: {
+        message: "Lore is active — your agent will get smarter every session",
+        variant: "success",
+        duration: 5000,
+      },
+    }).catch(() => {});
+  }
 
   // Prune any corrupted/oversized knowledge entries left by the AGENTS.md
   // backslash-escaping bug or curator hallucinations. Sets confidence → 0
@@ -209,6 +220,18 @@ export const LorePlugin: Plugin = async (ctx) => {
 
     // Inject LTM knowledge into system prompt — relevance-ranked and budget-capped.
     "experimental.chat.system.transform": async (input, output) => {
+      // One-time first-run note so the agent acknowledges Lore is active.
+      // Cleared after first injection to avoid repeating on subsequent turns.
+      if (firstRun) {
+        output.system.push(
+          "[Lore plugin] This is the first time Lore has been activated. " +
+          "Briefly let the user know that Lore is now active and their " +
+          "coding agent will get progressively smarter on this codebase " +
+          "over time as knowledge accumulates across sessions.",
+        );
+        firstRun = false;
+      }
+
       if (input.model?.limit) {
         setModelLimits(input.model.limit);
       }
