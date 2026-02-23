@@ -12,6 +12,8 @@ export const LoreConfig = z.object({
       distilled: z.number().min(0.05).max(0.5).default(0.25),
       raw: z.number().min(0.1).max(0.7).default(0.4),
       output: z.number().min(0.1).max(0.5).default(0.25),
+      /** Max fraction of usable context reserved for LTM system-prompt injection. Default: 0.10 (10%). */
+      ltm: z.number().min(0.02).max(0.3).default(0.10),
     })
     .default({}),
   distillation: z
@@ -29,6 +31,14 @@ export const LoreConfig = z.object({
     })
     .default({}),
   crossProject: z.boolean().default(true),
+  agentsFile: z
+    .object({
+      /** Set to false to disable all AGENTS.md export/import behaviour. */
+      enabled: z.boolean().default(true),
+      /** Path to the agents file, relative to the project root. */
+      path: z.string().default("AGENTS.md"),
+    })
+    .default({}),
 });
 
 export type LoreConfig = z.infer<typeof LoreConfig>;
@@ -40,14 +50,11 @@ export function config(): LoreConfig {
 }
 
 export async function load(directory: string): Promise<LoreConfig> {
-  const paths = [`${directory}/.opencode/lore.json`, `${directory}/lore.json`];
-  for (const path of paths) {
-    const file = Bun.file(path);
-    if (await file.exists()) {
-      const raw = await file.json();
-      current = LoreConfig.parse(raw);
-      return current;
-    }
+  const file = Bun.file(`${directory}/.lore.json`);
+  if (await file.exists()) {
+    const raw = await file.json();
+    current = LoreConfig.parse(raw);
+    return current;
   }
   current = LoreConfig.parse({});
   return current;

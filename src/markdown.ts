@@ -40,6 +40,35 @@ export function normalize(md: string): string {
   return processor.stringify(processor.parse(once));
 }
 
+/**
+ * Unescape a markdown-serialized inline string back to plain text.
+ *
+ * remark's serializer escapes special characters with backslashes
+ * (e.g. `<` → `\<`, `*` → `\*`, `\` → `\\`). When we read content
+ * back from an AGENTS.md file we must unescape it so it round-trips
+ * cleanly — otherwise each export/import cycle doubles the escapes.
+ *
+ * Uses remark's own parser to extract the text value, which handles
+ * all escape sequences correctly.
+ */
+export function unescapeMarkdown(md: string): string {
+  const tree = processor.parse(md);
+  // Collect all text node values from the first paragraph
+  const texts: string[] = [];
+  const para = tree.children[0];
+  if (para && para.type === "paragraph") {
+    for (const child of para.children) {
+      if (child.type === "text") texts.push(child.value);
+      else if (child.type === "strong" || child.type === "emphasis") {
+        for (const gc of child.children) {
+          if (gc.type === "text") texts.push(gc.value);
+        }
+      }
+    }
+  }
+  return texts.join("") || md;
+}
+
 // --- Node builders ---
 
 export function h(depth: 1 | 2 | 3 | 4 | 5 | 6, value: string): Heading {

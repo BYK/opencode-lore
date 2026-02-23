@@ -5,6 +5,9 @@ import {
   setModelLimits,
   calibrate,
   resetCalibration,
+  setLtmTokens,
+  getLtmTokens,
+  getLtmBudget,
 } from "../src/gradient";
 import type { Message, Part } from "@opencode-ai/sdk";
 
@@ -141,5 +144,65 @@ describe("gradient", () => {
     });
     expect(result.rawTokens).toBeGreaterThan(0);
     expect(result.totalTokens).toBe(result.distilledTokens + result.rawTokens);
+  });
+});
+
+describe("gradient — LTM budget coordination", () => {
+  beforeAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0, 0); // zero overhead for these tests
+  });
+
+  test("getLtmBudget returns fraction of usable context", () => {
+    // usable = 10_000 - 2_000 - 0 (overhead) = 8_000
+    // ltm fraction 0.10 → 800 tokens
+    const budget = getLtmBudget(0.10);
+    expect(budget).toBe(800);
+  });
+
+  test("getLtmBudget respects different fractions", () => {
+    expect(getLtmBudget(0.25)).toBe(2_000);
+    expect(getLtmBudget(0.05)).toBe(400);
+  });
+
+  test("setLtmTokens / getLtmTokens round-trip", () => {
+    setLtmTokens(1_500);
+    expect(getLtmTokens()).toBe(1_500);
+    setLtmTokens(0);
+    expect(getLtmTokens()).toBe(0);
+  });
+
+  test("LTM tokens are deducted from usable context in transform()", () => {
+    setLtmTokens(2_000); // inject 2K LTM tokens
+    // usable before LTM = 8_000; after = 6_000
+    // rawBudget = floor(6_000 * 0.4) = 2_400
+    const messages = [
+      makeMsg("ltm-1", "user", "A".repeat(100)),
+      makeMsg("ltm-2", "assistant", "B".repeat(100)),
+    ];
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "ltm-sess",
+    });
+    expect(result.usable).toBe(6_000);
+    setLtmTokens(0); // reset
+  });
+
+  test("LTM token deduction triggers lower layers when budget is tight", () => {
+    // Inject enough LTM tokens to leave almost no room for messages
+    setLtmTokens(7_500); // usable after LTM = 500 tokens — very tight
+    const messages = Array.from({ length: 6 }, (_, i) =>
+      makeMsg(`tight-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(300)),
+    );
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "tight-sess",
+    });
+    // Should escalate beyond layer 1 due to budget pressure
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+    expect(result.messages.length).toBeGreaterThan(0);
+    setLtmTokens(0); // reset
   });
 });
