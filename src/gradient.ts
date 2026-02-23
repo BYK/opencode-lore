@@ -40,9 +40,35 @@ const FIRST_TURN_OVERHEAD = 15_000;
 // Null = not yet calibrated (first turn). Updated after every assistant response.
 let calibratedOverhead: number | null = null;
 
+// LTM tokens injected via system transform hook this turn.
+// Set by setLtmTokens() after the system hook runs; consumed by transform().
+let ltmTokens = 0;
+
 export function setModelLimits(limits: { context: number; output: number }) {
   contextLimit = limits.context || 200_000;
   outputReserved = Math.min(limits.output || 32_000, 32_000);
+}
+
+/** Called by the system transform hook after formatting LTM knowledge. */
+export function setLtmTokens(tokens: number) {
+  ltmTokens = tokens;
+}
+
+/** Returns the current LTM token count (for tests and diagnostics). */
+export function getLtmTokens(): number {
+  return ltmTokens;
+}
+
+/**
+ * Returns the token budget available for LTM system-prompt injection.
+ * This is the usable context (after output + overhead) multiplied by
+ * the configured ltm budget fraction. Call this from the system transform
+ * hook to cap how many tokens formatKnowledge may use.
+ */
+export function getLtmBudget(ltmFraction: number): number {
+  const overhead = calibratedOverhead ?? FIRST_TURN_OVERHEAD;
+  const usable = Math.max(0, contextLimit - outputReserved - overhead);
+  return Math.floor(usable * ltmFraction);
 }
 
 // Called after each assistant message completes with real token usage data.
@@ -385,7 +411,11 @@ export function transform(input: {
   const cfg = config();
   const overhead = getOverhead();
   // Usable = full context minus output reservation minus fixed overhead (system + tools)
-  const usable = contextLimit - outputReserved - overhead;
+  // minus LTM tokens already injected into the system prompt this turn.
+  const usable = Math.max(
+    0,
+    contextLimit - outputReserved - overhead - ltmTokens,
+  );
   const distilledBudget = Math.floor(usable * cfg.budget.distilled);
   const rawBudget = Math.floor(usable * cfg.budget.raw);
 

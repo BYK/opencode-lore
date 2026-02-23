@@ -189,20 +189,31 @@ Do NOT extract:
 - Temporary state (current branch, in-progress work)
 - Information that will change frequently
 
+BREVITY IS CRITICAL — each entry must be concise:
+- content MUST be under 500 words (roughly 2000 characters)
+- Focus on the actionable insight, not the full story behind it
+- If a pattern requires more detail, split into multiple focused entries
+- Omit code examples unless a single short snippet is essential
+- Never include full file contents, large diffs, or complete command outputs
+
+crossProject flag:
+- Default is true — most useful knowledge is worth sharing across projects
+- Set crossProject to false for things that are meaningless outside this specific repo (e.g. a config path, a project-local naming convention that conflicts with your usual style)
+
 Produce a JSON array of operations:
 [
   {
     "op": "create",
     "category": "decision" | "pattern" | "preference" | "architecture" | "gotcha",
     "title": "Short descriptive title",
-    "content": "Detailed knowledge entry",
+    "content": "Concise knowledge entry — under 500 words",
     "scope": "project" | "global",
     "crossProject": true
   },
   {
     "op": "update",
     "id": "existing-entry-id",
-    "content": "Updated content",
+    "content": "Updated content — under 500 words",
     "confidence": 0.0-1.0
   },
   {
@@ -267,13 +278,38 @@ export function formatDistillations(
   return sections.join("\n\n");
 }
 
+// Rough token estimate used for budget-gating knowledge entries.
+// Consistent with gradient.ts: ~4 chars per token.
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
 export function formatKnowledge(
   entries: Array<{ category: string; title: string; content: string }>,
+  maxTokens?: number,
 ): string {
   if (!entries.length) return "";
 
+  // Apply token budget: greedily include entries (already sorted by confidence
+  // DESC from the DB query) until the budget is exhausted. Overhead accounts for
+  // the section heading and per-entry markdown scaffolding (~50 chars each).
+  let included = entries;
+  if (maxTokens !== undefined) {
+    const HEADER_OVERHEAD = 50; // "## Long-term Knowledge\n### Category\n"
+    let used = HEADER_OVERHEAD;
+    const fitting: typeof entries = [];
+    for (const e of entries) {
+      const cost = estimateTokens(e.title + e.content) + 10; // per-entry bullet overhead
+      if (used + cost > maxTokens) continue; // skip; keep trying smaller entries
+      fitting.push(e);
+      used += cost;
+    }
+    included = fitting;
+    if (!included.length) return "";
+  }
+
   const grouped: Record<string, Array<{ title: string; content: string }>> = {};
-  for (const e of entries) {
+  for (const e of included) {
     const group = grouped[e.category] ?? (grouped[e.category] = []);
     group.push(e);
   }

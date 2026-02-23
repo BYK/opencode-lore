@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import fc from "fast-check";
 import { remark } from "remark";
-import { normalize } from "../src/markdown";
+import { normalize, unescapeMarkdown } from "../src/markdown";
 import { formatDistillations, formatKnowledge } from "../src/prompt";
 
 const proc = remark();
@@ -193,5 +193,83 @@ describe("formatKnowledge", () => {
 
   test("handles empty input", () => {
     expect(formatKnowledge([])).toBe("");
+  });
+
+  test("token budget — only includes entries that fit within maxTokens", () => {
+    const entries = Array.from({ length: 20 }, (_, i) => ({
+      category: "pattern",
+      title: `Entry ${i}`,
+      content: "A".repeat(400), // ~100 tokens each
+    }));
+    // Budget of 500 tokens — should fit only a few
+    const result = formatKnowledge(entries, 500);
+    const items = countListItems(result);
+    expect(items).toBeGreaterThan(0);
+    expect(items).toBeLessThan(20);
+    // Total size should be roughly within budget
+    expect(Math.ceil(result.length / 4)).toBeLessThanOrEqual(600); // some slack for headers
+  });
+
+  test("token budget — returns empty string when no entries fit", () => {
+    const result = formatKnowledge(
+      [{ category: "pattern", title: "Huge", content: "X".repeat(10_000) }],
+      10, // budget of 10 tokens — nothing fits
+    );
+    expect(result).toBe("");
+  });
+
+  test("token budget — undefined budget includes all entries", () => {
+    const entries = Array.from({ length: 5 }, (_, i) => ({
+      category: "decision",
+      title: `D${i}`,
+      content: "Content",
+    }));
+    const all = formatKnowledge(entries);
+    const budgeted = formatKnowledge(entries, 1_000_000);
+    // Both should produce the same number of items
+    expect(countListItems(all)).toBe(countListItems(budgeted));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unescapeMarkdown
+// ---------------------------------------------------------------------------
+
+describe("unescapeMarkdown", () => {
+  test("unescapes angle brackets escaped by remark", () => {
+    // remark serializes `<T>` as `\<T>` in text nodes
+    expect(unescapeMarkdown("Use Extract\\<T> for narrowing")).toBe(
+      "Use Extract<T> for narrowing",
+    );
+  });
+
+  test("unescapes backslashes", () => {
+    expect(unescapeMarkdown("path\\\\to\\\\file")).toBe("path\\to\\file");
+  });
+
+  test("round-trips through formatKnowledge without escaping expansion", () => {
+    // Simulates the AGENTS.md export → parse → re-import → re-export cycle.
+    // The content should be stable after multiple round-trips.
+    const original = "Use Extract<T, {type: 'foo'}> for type narrowing";
+
+    // First export: serialize to markdown
+    const exported1 = formatKnowledge([{ category: "pattern", title: "T", content: original }]);
+
+    // Parse the bullet back out (as agents-file.ts does), unescaping on read
+    const bulletMatch = exported1.match(/^\*\s+\*\*(.+?)\*\*:\s*(.+)$/m);
+    expect(bulletMatch).not.toBeNull();
+    const parsedContent = unescapeMarkdown(bulletMatch![2].trim());
+
+    // Content after parse+unescape should equal original
+    expect(parsedContent).toBe(original);
+
+    // Second export from unescaped content should be identical to first
+    const exported2 = formatKnowledge([{ category: "pattern", title: "T", content: parsedContent }]);
+    expect(exported2).toBe(exported1);
+  });
+
+  test("handles plain text without escapes unchanged", () => {
+    const plain = "No special characters here";
+    expect(unescapeMarkdown(plain)).toBe(plain);
   });
 });

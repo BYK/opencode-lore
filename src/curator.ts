@@ -5,6 +5,14 @@ import * as ltm from "./ltm";
 import { CURATOR_SYSTEM, curatorUser } from "./prompt";
 import { workerSessionIDs } from "./distillation";
 
+/**
+ * Maximum length (chars) for a single knowledge entry's content.
+ * ~500 tokens. Entries exceeding this are truncated with a notice.
+ * The curator prompt also instructs the model to stay within this limit,
+ * so truncation is a last-resort safety net.
+ */
+const MAX_ENTRY_CONTENT_LENGTH = 2000;
+
 type Client = ReturnType<typeof createOpencodeClient>;
 
 const workerSessions = new Map<string, string>();
@@ -120,11 +128,18 @@ export async function run(input: {
 
   for (const op of ops) {
     if (op.op === "create") {
+      // Truncate oversized content — the model should stay within the prompt's
+      // 500-word limit, but enforce it here as a hard safety net.
+      const content =
+        op.content.length > MAX_ENTRY_CONTENT_LENGTH
+          ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
+            " [truncated — entry too long]"
+          : op.content;
       ltm.create({
         projectPath: op.scope === "project" ? input.projectPath : undefined,
         category: op.category,
         title: op.title,
-        content: op.content,
+        content,
         session: input.sessionID,
         scope: op.scope,
         crossProject: op.crossProject ?? true,
@@ -133,7 +148,12 @@ export async function run(input: {
     } else if (op.op === "update") {
       const entry = ltm.get(op.id);
       if (entry) {
-        ltm.update(op.id, { content: op.content, confidence: op.confidence });
+        const content =
+          op.content !== undefined && op.content.length > MAX_ENTRY_CONTENT_LENGTH
+            ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
+              " [truncated — entry too long]"
+            : op.content;
+        ltm.update(op.id, { content, confidence: op.confidence });
         updated++;
       }
     } else if (op.op === "delete") {

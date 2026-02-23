@@ -11,6 +11,8 @@ import {
   needsUrgentDistillation,
   calibrate,
   estimateMessages,
+  setLtmTokens,
+  getLtmBudget,
 } from "./gradient";
 import { formatKnowledge } from "./prompt";
 import { createRecallTool } from "./reflect";
@@ -19,6 +21,14 @@ export const LorePlugin: Plugin = async (ctx) => {
   const projectPath = ctx.worktree || ctx.directory;
   await load(ctx.directory);
   ensureProject(projectPath);
+
+  // Prune any corrupted/oversized knowledge entries left by the AGENTS.md
+  // backslash-escaping bug or curator hallucinations. Sets confidence → 0
+  // (below the 0.2 query threshold) so they stop polluting the context.
+  const pruned = ltm.pruneOversized(2000);
+  if (pruned > 0) {
+    console.error(`[lore] pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
+  }
 
   // Track user turns for periodic curation
   let turnsSinceCuration = 0;
@@ -197,14 +207,19 @@ export const LorePlugin: Plugin = async (ctx) => {
       }
     },
 
-    // Inject LTM knowledge into system prompt
+    // Inject LTM knowledge into system prompt — relevance-ranked and budget-capped.
     "experimental.chat.system.transform": async (input, output) => {
       if (input.model?.limit) {
         setModelLimits(input.model.limit);
       }
 
-      const entries = ltm.forProject(projectPath, config().crossProject);
-      if (!entries.length) return;
+      const cfg = config();
+      const ltmBudget = getLtmBudget(cfg.budget.ltm);
+      const entries = ltm.forSession(projectPath, input.sessionID, ltmBudget);
+      if (!entries.length) {
+        setLtmTokens(0);
+        return;
+      }
 
       const formatted = formatKnowledge(
         entries.map((e) => ({
@@ -212,9 +227,17 @@ export const LorePlugin: Plugin = async (ctx) => {
           title: e.title,
           content: e.content,
         })),
+        ltmBudget,
       );
+
       if (formatted) {
+        // Track how many tokens we actually consumed so the gradient manager
+        // can deduct them from the usable budget for message injection.
+        const ltmTokenCount = Math.ceil(formatted.length / 4);
+        setLtmTokens(ltmTokenCount);
         output.system.push(formatted);
+      } else {
+        setLtmTokens(0);
       }
     },
 
