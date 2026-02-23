@@ -196,3 +196,14 @@ export function projectId(path: string): string | undefined {
     .get(path) as { id: string } | null;
   return row?.id;
 }
+
+/**
+ * Returns true if Lore has never been used before (no projects in the DB).
+ * Must be called before ensureProject() to get an accurate result.
+ */
+export function isFirstRun(): boolean {
+  const row = db()
+    .query("SELECT COUNT(*) as count FROM projects")
+    .get() as { count: number };
+  return row.count === 0;
+}
