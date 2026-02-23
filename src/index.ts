@@ -312,23 +312,28 @@ export const LorePlugin: Plugin = async (ctx) => {
           rawBudget: result.rawBudget,
           updatedAt: Date.now(),
         };
-        const url = new URL(
-          `/session/${sessionID}/message/${lastUserMsg.info.id}/part/${statsPart.id}`,
-          ctx.serverUrl,
-        );
-        const updatedPart = {
-          ...(statsPart as Record<string, unknown>),
-          metadata: {
-            ...((statsPart as { metadata?: Record<string, unknown> }).metadata ?? {}),
-            lore: loreMeta,
+        // Use the SDK's internal HTTP client so the request goes through
+        // the same base URL, custom fetch, and interceptors that OpenCode
+        // configured — no dependency on ctx.serverUrl being reachable.
+        const httpClient = (ctx.client as any)._client;
+        httpClient.patch({
+          url: "/session/{sessionID}/message/{messageID}/part/{partID}",
+          path: {
+            sessionID,
+            messageID: lastUserMsg.info.id,
+            partID: statsPart.id,
           },
-        };
-        fetch(url, {
-          method: "PATCH",
+          body: {
+            ...(statsPart as Record<string, unknown>),
+            metadata: {
+              ...((statsPart as { metadata?: Record<string, unknown> }).metadata ?? {}),
+              lore: loreMeta,
+            },
+          },
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(updatedPart),
-        }).catch((e: unknown) => {
-          console.error("[lore] failed to write gradient stats to part metadata:", e);
+        }).catch(() => {
+          // Non-critical: gradient stats metadata is for UI display only.
+          // Server may not be reachable (e.g. TUI-only mode). Silently ignore.
         });
       }
     },
