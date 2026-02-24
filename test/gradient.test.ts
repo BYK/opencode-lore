@@ -8,6 +8,7 @@ import {
   setLtmTokens,
   getLtmTokens,
   getLtmBudget,
+  resetPrefixCache,
 } from "../src/gradient";
 import type { Message, Part } from "@opencode-ai/sdk";
 
@@ -75,7 +76,7 @@ beforeAll(() => {
 afterAll(() => close());
 
 describe("gradient", () => {
-  test("passes through small message sets (Layer 1)", () => {
+  test("passes through small message sets unchanged (Layer 0)", () => {
     const messages = [
       makeMsg("g-1", "user", "Hello, how are you?"),
       makeMsg("g-2", "assistant", "I'm ready to help."),
@@ -85,12 +86,14 @@ describe("gradient", () => {
       projectPath: PROJECT,
       sessionID: "grad-sess",
     });
-    expect(result.layer).toBe(1);
-    // Messages should be passed through as-is (no distillations exist)
-    expect(result.messages.length).toBe(2);
+    // Small messages fit within the context budget — layer 0 passthrough
+    expect(result.layer).toBe(0);
+    expect(result.messages).toBe(messages); // same reference — untouched
+    expect(result.distilledTokens).toBe(0);
+    expect(result.rawTokens).toBeGreaterThan(0);
   });
 
-  test("handles many messages without crashing (Layer 1-2)", () => {
+  test("handles many messages without crashing (Layer 0-2)", () => {
     const messages = Array.from({ length: 20 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
       return makeMsg(
@@ -104,7 +107,7 @@ describe("gradient", () => {
       projectPath: PROJECT,
       sessionID: "grad-sess",
     });
-    expect(result.layer).toBeGreaterThanOrEqual(1);
+    expect(result.layer).toBeGreaterThanOrEqual(0);
     expect(result.layer).toBeLessThanOrEqual(4);
     expect(result.messages.length).toBeGreaterThan(0);
     expect(result.totalTokens).toBeGreaterThan(0);
@@ -144,6 +147,26 @@ describe("gradient", () => {
     });
     expect(result.rawTokens).toBeGreaterThan(0);
     expect(result.totalTokens).toBe(result.distilledTokens + result.rawTokens);
+  });
+
+  test("activates gradient mode when context is exhausted", () => {
+    // Force context exhaustion: context=2000, output=500 → usable=1500
+    // Each message ~550 tokens, 6 messages ~3300 tokens > 1500 usable
+    setModelLimits({ context: 2_000, output: 500 });
+    calibrate(0, 0);
+    const messages = Array.from({ length: 6 }, (_, i) => {
+      const role = i % 2 === 0 ? "user" : "assistant";
+      return makeMsg(`exhaust-${i}`, role as "user" | "assistant", "X".repeat(2_000));
+    });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "exhaust-sess",
+    });
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+    // Reset
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0, 0);
   });
 });
 
@@ -200,7 +223,7 @@ describe("gradient — LTM budget coordination", () => {
       projectPath: PROJECT,
       sessionID: "tight-sess",
     });
-    // Should escalate beyond layer 1 due to budget pressure
+    // Should escalate beyond layer 0 due to budget pressure
     expect(result.layer).toBeGreaterThanOrEqual(1);
     expect(result.messages.length).toBeGreaterThan(0);
     setLtmTokens(0); // reset

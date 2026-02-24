@@ -8,5 +8,6 @@ dist/
 # Large eval benchmark data (download separately)
 eval/data/longmemeval_*.json
 
-# Local plans
+# Local plans and agent config
 .plans/
+.opencode/
