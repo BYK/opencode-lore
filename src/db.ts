@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { join } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const MIGRATIONS: string[] = [
   `
@@ -124,6 +124,12 @@ const MIGRATIONS: string[] = [
   -- Version 2: Replace narrative+facts with observations text
   ALTER TABLE distillations ADD COLUMN observations TEXT NOT NULL DEFAULT '';
   `,
+  `
+  -- Version 3: One-time vacuum to reclaim accumulated free pages, and enable
+  -- incremental auto-vacuum so future deletes return pages to the OS.
+  -- VACUUM must run outside a transaction and cannot be in a multi-statement
+  -- exec, so it is handled specially in the migrate() function.
+  `,
 ];
 
 function dataDir() {
@@ -142,9 +148,16 @@ export function db(): Database {
   instance = new Database(path, { create: true });
   instance.exec("PRAGMA journal_mode = WAL");
   instance.exec("PRAGMA foreign_keys = ON");
+  // Return freed pages to the OS incrementally on each transaction commit
+  // instead of accumulating a free-page list that bloats the file.
+  instance.exec("PRAGMA auto_vacuum = INCREMENTAL");
   migrate(instance);
   return instance;
 }
+
+// Index of the migration that performs a one-time VACUUM.
+// VACUUM cannot run inside a transaction, so migrate() handles it specially.
+const VACUUM_MIGRATION_INDEX = 2; // 0-based index of version-3 migration
 
 function migrate(database: Database) {
   const row = database
@@ -161,7 +174,16 @@ function migrate(database: Database) {
     : 0;
   if (current >= MIGRATIONS.length) return;
   for (let i = current; i < MIGRATIONS.length; i++) {
-    database.exec(MIGRATIONS[i]);
+    if (i === VACUUM_MIGRATION_INDEX) {
+      // VACUUM cannot run inside a transaction. Run it directly.
+      // auto_vacuum mode must be set *before* VACUUM — SQLite bakes it into
+      // the file header during the rebuild. After this, every subsequent
+      // startup's "PRAGMA auto_vacuum = INCREMENTAL" is a no-op (already set).
+      database.exec("PRAGMA auto_vacuum = INCREMENTAL");
+      database.exec("VACUUM");
+    } else {
+      database.exec(MIGRATIONS[i]);
+    }
   }
   // Update version to latest. Migration 0 inserts version=1 via its own INSERT,
   // but subsequent migrations don't update it, so always normalize to MIGRATIONS.length.
