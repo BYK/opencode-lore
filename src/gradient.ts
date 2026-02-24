@@ -170,7 +170,8 @@ function loadDistillations(
 // For all other reminders (build-switch, plan reminders, etc.), drops them entirely.
 // These tags are added by OpenCode in-memory or persisted as synthetic parts —
 // leaving them in the raw window causes the model to echo the format.
-function stripSystemReminders(text: string): string {
+// Exported so index.ts can apply the same cleaning before PATCHing part text.
+export function stripSystemReminders(text: string): string {
   return text
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>\n?/g, (match) => {
       const inner = match.match(

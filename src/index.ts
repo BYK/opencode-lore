@@ -14,6 +14,7 @@ import {
   setLtmTokens,
   getLtmBudget,
   setForceMinLayer,
+  stripSystemReminders,
 } from "./gradient";
 import { formatKnowledge } from "./prompt";
 import { createRecallTool } from "./reflect";
@@ -417,6 +418,16 @@ export const LorePlugin: Plugin = async (ctx) => {
           rawBudget: result.rawBudget,
           updatedAt: Date.now(),
         };
+
+        // Strip <system-reminder> wrappers from the part text before PATCHing.
+        // On layer 0 the messages are never passed through cleanParts(), so
+        // statsPart.text may still contain the ephemeral system-reminder wrapper
+        // that OpenCode injects around user messages. If we send that text back
+        // to the server it gets persisted and shows up in the UI as if the user
+        // wrote it.
+        const rawText = (statsPart as { text: string }).text ?? "";
+        const cleanText = stripSystemReminders(rawText);
+
         // Use the SDK's internal HTTP client so the request goes through
         // the same base URL, custom fetch, and interceptors that OpenCode
         // configured — no dependency on ctx.serverUrl being reachable.
@@ -430,6 +441,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           },
           body: {
             ...(statsPart as Record<string, unknown>),
+            text: cleanText,
             metadata: {
               ...((statsPart as { metadata?: Record<string, unknown> }).metadata ?? {}),
               lore: loreMeta,
