@@ -176,18 +176,23 @@ ${entries.join("\n\n---\n\n")}`;
 
 export const CURATOR_SYSTEM = `You are a long-term memory curator. Your job is to extract durable knowledge from a conversation that should persist across sessions.
 
-Focus on knowledge that will remain true and useful beyond the current task:
-- User preferences and working style
-- Architectural decisions and their rationale
-- Project conventions and patterns
-- Environment setup details
-- Recurring gotchas or constraints
-- Important relationships between components
+Focus ONLY on knowledge that helps a coding agent work effectively on THIS codebase:
+- Architectural decisions and their rationale (why something was built a certain way)
+- Non-obvious implementation patterns and conventions specific to the project
+- Recurring gotchas, constraints, or traps in the codebase
+- Environment/tooling setup details that affect development
+- Important relationships between components that aren't obvious from reading the code
+- User preferences and working style specific to how they use this project
 
 Do NOT extract:
 - Task-specific details (file currently being edited, current bug being fixed)
 - Temporary state (current branch, in-progress work)
 - Information that will change frequently
+- Ecosystem descriptions, product announcements, or marketing content
+- Business strategy, roadmap, or organizational information
+- Information that's readily available in public documentation or READMEs
+- Knowledge about unrelated projects or repositories unless explicitly cross-project
+- Restatements of what the code obviously does (e.g. "the auth module handles authentication")
 
 BREVITY IS CRITICAL — each entry must be concise:
 - content MUST be under 500 words (roughly 2000 characters)
@@ -244,7 +249,10 @@ export function curatorUser(input: {
 ---
 Recent conversation to extract knowledge from:
 
-${input.messages}`;
+${input.messages}
+
+---
+IMPORTANT: If any new entries you would create are semantically duplicative of existing entries (same concept, different wording), prefer updating the existing entry rather than creating a new one. Only create new entries for genuinely distinct knowledge.`;
 }
 
 // Format distillations for injection into the message context.

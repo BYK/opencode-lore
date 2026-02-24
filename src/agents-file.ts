@@ -11,8 +11,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { dirname } from "path";
 import * as ltm from "./ltm";
-import { formatKnowledge } from "./prompt";
-import { unescapeMarkdown } from "./markdown";
+import { serialize, inline, h, ul, liph, strong, t, root, unescapeMarkdown } from "./markdown";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -158,23 +157,40 @@ function buildSection(projectPath: string): string {
   if (!entries.length) {
     return "\n";
   }
-  const formatted = formatKnowledge(
-    entries.map((e) => ({ category: e.category, title: e.title, content: e.content })),
-  );
-  if (!formatted) return "\n";
 
-  // Inject <!-- lore:UUID --> above each bullet line
-  const idByTitle = new Map(entries.map((e) => [e.title, e.id]));
-  const lines = formatted.split("\n");
-  const out: string[] = [""];
-  for (const line of lines) {
-    const bulletMatch = line.match(/^\*\s+\*\*(.+?)\*\*/);
-    if (bulletMatch) {
-      const id = idByTitle.get(bulletMatch[1]);
-      if (id) out.push(`<!-- lore:${id} -->`);
-    }
-    out.push(line);
+  // Group entries by category, preserving DB order (confidence DESC, updated_at DESC).
+  const grouped = new Map<string, typeof entries>();
+  for (const e of entries) {
+    const group = grouped.get(e.category) ?? [];
+    group.push(e);
+    grouped.set(e.category, group);
   }
+
+  // Build the section body by iterating entries directly, emitting each entry
+  // with its own <!-- lore:UUID --> marker. This avoids the title-based Map
+  // deduplication bug where multiple entries with the same title all got the
+  // same UUID marker from the last Map.set() winner.
+  const out: string[] = [""];
+
+  // Section heading
+  out.push("## Long-term Knowledge");
+
+  for (const [category, items] of grouped) {
+    out.push("");
+    out.push(`### ${category.charAt(0).toUpperCase() + category.slice(1)}`);
+    out.push("");
+    for (const entry of items) {
+      out.push(`<!-- lore:${entry.id} -->`);
+      // Render the bullet using remark serializer for proper markdown escaping.
+      // serialize(root(ul([liph(...)]))) produces "* **Title**: content\n".
+      // Trim the trailing newline since we join with \n ourselves.
+      const bullet = serialize(
+        root(ul([liph(strong(inline(entry.title)), t(": " + inline(entry.content)))]))
+      ).trimEnd();
+      out.push(bullet);
+    }
+  }
+
   out.push("");
   return out.join("\n");
 }

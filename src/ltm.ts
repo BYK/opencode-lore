@@ -36,6 +36,33 @@ export function create(input: {
     input.scope === "project" && input.projectPath
       ? ensureProject(input.projectPath)
       : null;
+
+  // Dedup guard: if an entry with the same project_id + title already exists,
+  // update its content instead of inserting a duplicate. This prevents the
+  // curator from creating multiple entries for the same concept across sessions.
+  // Note: when an explicit id is provided (cross-machine import), skip dedup —
+  // the caller (importFromFile) already handles duplicate detection by UUID.
+  if (!input.id) {
+    const existing = (
+      pid !== null
+        ? db()
+            .query(
+              "SELECT id FROM knowledge WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+            )
+            .get(pid, input.title)
+        : db()
+            .query(
+              "SELECT id FROM knowledge WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+            )
+            .get(input.title)
+    ) as { id: string } | null;
+
+    if (existing) {
+      update(existing.id, { content: input.content });
+      return existing.id;
+    }
+  }
+
   const id = input.id ?? uuidv7();
   const now = Date.now();
   db()
