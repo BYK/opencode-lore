@@ -389,12 +389,13 @@ export const LorePlugin: Plugin = async (ctx) => {
       // Layer 0 means all messages fit within the context budget — leave them alone
       // so the append-only sequence stays intact for prompt caching.
       if (result.layer > 0) {
+        // The API requires the conversation to end with a user message.
+        // Always drop trailing non-user messages — even assistant messages with
+        // tool parts. A hard API error is worse than the model re-invoking a tool.
         while (
           result.messages.length > 0 &&
           result.messages.at(-1)!.info.role !== "user"
         ) {
-          const last = result.messages.at(-1)!;
-          if (last.parts.some((p) => p.type === "tool")) break;
           const dropped = result.messages.pop()!;
           console.error(
             "[lore] WARN: dropping trailing",
