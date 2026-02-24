@@ -722,8 +722,27 @@ export function transform(input: {
   const maxInput = contextLimit - outputReserved;
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
 
+  // True when we have real API token data from a previous turn in this session.
+  // When false (first turn / session change), chars/4 estimates can undercount by
+  // up to 1.8x — so tryFit output must be validated with a safety multiplier before
+  // being used, to prevent sending an apparently-fitting window that actually overflows.
+  const calibrated = lastKnownInput > 0 && sid === lastKnownSessionID;
+
+  // On uncalibrated turns, apply this multiplier to tryFit's estimated total to
+  // approximate the real token count. 1.5 is conservative but not so aggressive
+  // that it forces layer 4 on modestly-sized sessions.
+  const UNCALIBRATED_SAFETY = 1.5;
+
+  // Returns true if the tryFit result is safe to use: either we have calibrated
+  // data (exact) or the estimated total * safety factor fits within maxInput.
+  function fitsWithSafetyMargin(result: { totalTokens: number } | null): boolean {
+    if (!result) return false;
+    if (calibrated) return true;
+    return result.totalTokens * UNCALIBRATED_SAFETY <= maxInput;
+  }
+
   let expectedInput: number;
-  if (lastKnownInput > 0 && sid === lastKnownSessionID) {
+  if (calibrated) {
     // Exact approach: prior API count + estimate of only the new messages.
     const newMsgCount = Math.max(0, input.messages.length - lastKnownMessageCount);
     const newMsgTokens = newMsgCount > 0
@@ -793,7 +812,7 @@ export function transform(input: {
           rawBudget,
           strip: "none",
         });
-    if (layer1) return { ...layer1, layer: 1, usable, distilledBudget, rawBudget };
+    if (fitsWithSafetyMargin(layer1)) return { ...layer1!, layer: 1, usable, distilledBudget, rawBudget };
   }
 
   // Layer 1 didn't fit (or was force-skipped) — reset the raw window cache.
@@ -812,9 +831,9 @@ export function transform(input: {
       strip: "old-tools",
       protectedTurns: 2,
     });
-    if (layer2) {
+    if (fitsWithSafetyMargin(layer2)) {
       urgentDistillation = true;
-      return { ...layer2, layer: 2, usable, distilledBudget, rawBudget };
+      return { ...layer2!, layer: 2, usable, distilledBudget, rawBudget };
     }
   }
 
@@ -833,9 +852,9 @@ export function transform(input: {
     rawBudget: Math.floor(usable * 0.55),
     strip: "all-tools",
   });
-  if (layer3) {
+  if (fitsWithSafetyMargin(layer3)) {
     urgentDistillation = true;
-    return { ...layer3, layer: 3, usable, distilledBudget, rawBudget };
+    return { ...layer3!, layer: 3, usable, distilledBudget, rawBudget };
   }
 
   // Layer 4: Emergency — last 2 distillations, last 3 raw messages with tool parts intact.
