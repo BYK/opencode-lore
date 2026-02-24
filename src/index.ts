@@ -13,6 +13,7 @@ import {
   estimateMessages,
   setLtmTokens,
   getLtmBudget,
+  setForceMinLayer,
 } from "./gradient";
 import { formatKnowledge } from "./prompt";
 import { createRecallTool } from "./reflect";
@@ -197,7 +198,9 @@ export const LorePlugin: Plugin = async (ctx) => {
                 backgroundDistill(msg.sessionID);
               }
 
-              // Calibrate overhead estimate using real token counts
+              // Calibrate overhead estimate using real token counts.
+              // Also store the exact input count + message count for the proactive
+              // layer-0 decision (avoids full chars/4 re-estimation each turn).
               const allMsgs = await ctx.client.session.messages({
                 path: { id: msg.sessionID },
               });
@@ -207,12 +210,58 @@ export const LorePlugin: Plugin = async (ctx) => {
                   .map((m) => ({ info: m.info, parts: m.parts }));
                 const msgEstimate = estimateMessages(withParts);
                 const actualInput = msg.tokens.input + msg.tokens.cache.read;
-                calibrate(actualInput, msgEstimate);
+                calibrate(actualInput, msgEstimate, msg.sessionID, withParts.length);
               }
             }
           }
         } catch {
           // Message may not be fetchable yet during streaming
+        }
+      }
+
+      if (event.type === "session.error") {
+        // Detect "prompt is too long" API errors and auto-recover:
+        // 1. Force the gradient transform to escalate on the next call (skip layer 0/1)
+        // 2. Force distillation to capture all temporal data before compaction
+        // 3. Trigger compaction so the session recovers without user intervention
+        const error = (event.properties as Record<string, unknown>).error as
+          | { name?: string; data?: { message?: string } }
+          | undefined;
+        const isPromptTooLong =
+          error?.name === "APIError" &&
+          typeof error?.data?.message === "string" &&
+          (error.data.message.includes("prompt is too long") ||
+            error.data.message.includes("context length exceeded") ||
+            error.data.message.includes("maximum context length"));
+
+        if (isPromptTooLong) {
+          const sessionID = (event.properties as Record<string, unknown>).sessionID as
+            | string
+            | undefined;
+          console.error(
+            `[lore] detected 'prompt too long' error — forcing distillation + compaction (session: ${sessionID?.substring(0, 16)})`,
+          );
+          // Force layer 2 on next transform — layers 0 and 1 were already too large.
+          setForceMinLayer(2);
+
+          if (sessionID) {
+            // Force distillation to capture all undistilled messages before
+            // compaction replaces the session message history.
+            await backgroundDistill(sessionID, true);
+
+            // Trigger compaction automatically — the compacting hook will inject
+            // Lore's custom distillation-aware prompt.
+            try {
+              const sessions = await ctx.client.session.list();
+              const session = sessions.data?.find((s) => s.id.startsWith(sessionID));
+              if (session) {
+                // providerID/modelID are optional — omit to use the session's current model
+                await ctx.client.session.summarize({ path: { id: session.id } });
+              }
+            } catch (e) {
+              console.error("[lore] auto-compaction failed:", e);
+            }
+          }
         }
       }
 
@@ -394,8 +443,17 @@ export const LorePlugin: Plugin = async (ctx) => {
       }
     },
 
-    // Replace compaction prompt with distillation-aware prompt when manual /compact is used
+    // Replace compaction prompt with distillation-aware prompt when manual /compact is used.
+    // Also force distillation first so all temporal data is captured before compaction
+    // replaces the session message history.
     "experimental.session.compacting": async (input, output) => {
+      // Force distillation to capture any undistilled messages. This is critical:
+      // compaction will replace all messages with a summary, so we must persist
+      // everything to Lore's temporal store before that happens.
+      if (input.sessionID && activeSessions.has(input.sessionID)) {
+        await backgroundDistill(input.sessionID, true);
+      }
+
       const entries = ltm.forProject(projectPath, config().crossProject);
       const knowledge = entries.length
         ? formatKnowledge(

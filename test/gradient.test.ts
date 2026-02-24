@@ -10,6 +10,7 @@ import {
   getLtmBudget,
   resetPrefixCache,
   resetRawWindowCache,
+  setForceMinLayer,
 } from "../src/gradient";
 import type { Message, Part } from "@opencode-ai/sdk";
 
@@ -351,5 +352,122 @@ describe("gradient — LTM budget coordination", () => {
     expect(result.layer).toBeGreaterThanOrEqual(1);
     expect(result.messages.length).toBeGreaterThan(0);
     setLtmTokens(0); // reset
+  });
+});
+
+describe("gradient — force escalation (reactive error recovery)", () => {
+  beforeAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0, 0);
+    resetPrefixCache();
+    resetRawWindowCache();
+  });
+
+  test("setForceMinLayer(2) skips layers 0 and 1", () => {
+    // Messages that would normally fit in layer 0 (tiny)
+    const messages = [
+      makeMsg("fe-1", "user", "hello", "force-sess"),
+      makeMsg("fe-2", "assistant", "hi", "force-sess"),
+    ];
+    setForceMinLayer(2);
+    const result = transform({ messages, projectPath: PROJECT, sessionID: "force-sess" });
+    // Despite tiny messages, force min layer should push to at least layer 2
+    expect(result.layer).toBeGreaterThanOrEqual(2);
+    // After one use, the flag is consumed — next call should behave normally
+    const result2 = transform({ messages, projectPath: PROJECT, sessionID: "force-sess" });
+    expect(result2.layer).toBe(0);
+  });
+
+  test("forceMinLayer is one-shot — cleared after single use", () => {
+    const messages = [
+      makeMsg("os-1", "user", "test", "oneshot-sess"),
+      makeMsg("os-2", "assistant", "ok", "oneshot-sess"),
+    ];
+    setForceMinLayer(1);
+    // First call consumes the flag
+    const r1 = transform({ messages, projectPath: PROJECT, sessionID: "oneshot-sess" });
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+    // Second call — no flag, tiny messages → layer 0
+    const r2 = transform({ messages, projectPath: PROJECT, sessionID: "oneshot-sess" });
+    expect(r2.layer).toBe(0);
+  });
+
+  test("resetCalibration clears forceMinLayer", () => {
+    setForceMinLayer(3);
+    resetCalibration();
+    calibrate(0, 0); // re-establish zero overhead after reset
+    const messages = [
+      makeMsg("rc-1", "user", "hello", "rc-sess"),
+      makeMsg("rc-2", "assistant", "world", "rc-sess"),
+    ];
+    // After reset+recalibrate, flag is gone — tiny messages → layer 0
+    const result = transform({ messages, projectPath: PROJECT, sessionID: "rc-sess" });
+    expect(result.layer).toBe(0);
+  });
+});
+
+describe("gradient — exact token tracking (proactive layer 0)", () => {
+  const SESSION = "exact-tok-sess";
+
+  beforeAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    resetCalibration();
+    resetPrefixCache();
+    resetRawWindowCache();
+  });
+
+  test("uses exact lastKnownInput for layer 0 check when session matches", () => {
+    const messages = [
+      makeMsg("et-1", "user", "A".repeat(500), SESSION),
+      makeMsg("et-2", "assistant", "B".repeat(500), SESSION),
+    ];
+    // Simulate a prior API response: 3000 tokens in, 2 messages
+    // (overhead 0 so actual = message estimate)
+    calibrate(3_000, 3_000, SESSION, 2);
+
+    // Now add one new message (~130 tokens: 500/4 + 20)
+    const withNew = [...messages, makeMsg("et-3", "user", "C".repeat(500), SESSION)];
+    // expectedInput = 3000 + ~130 = ~3130 << maxInput (8000) → layer 0
+    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    expect(result.layer).toBe(0);
+    expect(result.messages).toBe(withNew); // same reference
+  });
+
+  test("falls back to chars/4 estimate when session changes", () => {
+    // calibrate was for SESSION, but we transform a different session
+    calibrate(3_000, 3_000, SESSION, 2);
+    const messages = [
+      makeMsg("diff-1", "user", "A".repeat(200), "other-sess"),
+      makeMsg("diff-2", "assistant", "B".repeat(200), "other-sess"),
+    ];
+    // Fallback: messageTokens + overhead(0) + ltm(0) = ~110 << 8000 → still layer 0
+    const result = transform({ messages, projectPath: PROJECT, sessionID: "other-sess" });
+    expect(result.layer).toBe(0);
+  });
+
+  test("exact tracking prevents overflow: near-limit session stays layer 0", () => {
+    // maxInput = 10000 - 2000 = 8000
+    // Set lastKnownInput close to limit but within budget
+    calibrate(7_800, 7_800, SESSION, 10);
+    // New message: very short (~25 tokens)
+    const messages = Array.from({ length: 10 }, (_, i) =>
+      makeMsg(`near-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
+    );
+    const withNew = [...messages, makeMsg("near-new", "user", "hi", SESSION)];
+    // expectedInput ≈ 7800 + 25 = 7825 ≤ 8000 → layer 0
+    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    expect(result.layer).toBe(0);
+  });
+
+  test("exact tracking escalates when new messages push over limit", () => {
+    // lastKnownInput = 7900, maxInput = 8000, new message ~600 tokens
+    calibrate(7_900, 7_900, SESSION, 10);
+    const messages = Array.from({ length: 10 }, (_, i) =>
+      makeMsg(`over-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(100), SESSION),
+    );
+    const withHuge = [...messages, makeMsg("over-huge", "user", "Y".repeat(2_200), SESSION)];
+    // expectedInput ≈ 7900 + 570 = 8470 > 8000 → escalate
+    const result = transform({ messages: withHuge, projectPath: PROJECT, sessionID: SESSION });
+    expect(result.layer).toBeGreaterThanOrEqual(1);
   });
 });

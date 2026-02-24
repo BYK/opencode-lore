@@ -40,12 +40,35 @@ const FIRST_TURN_OVERHEAD = 15_000;
 // Null = not yet calibrated (first turn). Updated after every assistant response.
 let calibratedOverhead: number | null = null;
 
+// --- Exact token tracking ---
+// Stores the real input token count from the last successful API response.
+// Used for the layer 0 passthrough decision: instead of estimating the full
+// message array with chars/4, we take the exact count from the previous turn
+// and only estimate the small delta (new messages). 99%+ of the count is
+// exact from the API's own tokenizer, virtually eliminating overflow errors.
+let lastKnownInput = 0;
+let lastKnownLtm = 0;
+let lastKnownSessionID: string | null = null;
+let lastKnownMessageCount = 0;
+
+// --- Force escalation ---
+// Set when the API returns "prompt is too long" — forces the transform to skip
+// layer 0 (and optionally layer 1) on the next call to ensure the context is
+// trimmed enough to fit. Cleared after one use (one-shot).
+let forceMinLayer: SafetyLayer = 0;
+
 // LTM tokens injected via system transform hook this turn.
 // Set by setLtmTokens() after the system hook runs; consumed by transform().
 let ltmTokens = 0;
 
 export function setModelLimits(limits: { context: number; output: number }) {
   contextLimit = limits.context || 200_000;
+  // NOTE: this cap of 32K matches what @ai-sdk/anthropic sends as max_tokens for
+  // claude-opus-4-6 (the SDK doesn't recognise the -6 variant and falls back to
+  // the generic claude-opus-4- pattern with maxOutputTokens=32K).  If the SDK is
+  // updated to send the model's actual limit (128K for opus-4-6), this cap will
+  // become wrong — the effective max input would drop from 168K to 72K but our
+  // budget would still assume 168K.  At that point, remove the cap.
   outputReserved = Math.min(limits.output || 32_000, 32_000);
 }
 
@@ -72,9 +95,22 @@ export function getLtmBudget(ltmFraction: number): number {
 }
 
 // Called after each assistant message completes with real token usage data.
-// actualInput = tokens.input + tokens.cache.read (all tokens that went into the model)
+// actualInput    = tokens.input + tokens.cache.read (all tokens the model saw)
 // messageEstimate = our chars/4 estimate of the messages we sent
-export function calibrate(actualInput: number, messageEstimate: number) {
+// sessionID      = session that produced this response (for exact-tracking validity)
+// messageCount   = number of messages that were sent (for delta estimation)
+export function calibrate(
+  actualInput: number,
+  messageEstimate: number,
+  sessionID?: string,
+  messageCount?: number,
+) {
+  // Store exact counts for the proactive layer 0 decision.
+  lastKnownInput = actualInput;
+  lastKnownLtm = ltmTokens;
+  if (sessionID !== undefined) lastKnownSessionID = sessionID;
+  if (messageCount !== undefined) lastKnownMessageCount = messageCount;
+
   const overhead = Math.max(0, actualInput - messageEstimate);
   // Smooth with EMA (alpha=0.3) once calibrated, or set directly on first call
   calibratedOverhead =
@@ -87,9 +123,23 @@ export function getOverhead(): number {
   return calibratedOverhead ?? FIRST_TURN_OVERHEAD;
 }
 
-// For testing only — reset calibration state
+/**
+ * Force the next transform() call to use at least the given layer.
+ * Called when the API returns "prompt is too long" so the next attempt
+ * trims the context enough to fit within the model's context window.
+ */
+export function setForceMinLayer(layer: SafetyLayer) {
+  forceMinLayer = layer;
+}
+
+// For testing only — reset all calibration and force-escalation state
 export function resetCalibration() {
   calibratedOverhead = null;
+  lastKnownInput = 0;
+  lastKnownLtm = 0;
+  lastKnownSessionID = null;
+  lastKnownMessageCount = 0;
+  forceMinLayer = 0;
 }
 
 type Distillation = {
@@ -657,31 +707,56 @@ export function transform(input: {
   const distilledBudget = Math.floor(usable * cfg.budget.distilled);
   const rawBudget = Math.floor(usable * cfg.budget.raw);
 
+  // --- Force escalation (reactive error recovery) ---
+  // When the API previously rejected with "prompt is too long", skip layers
+  // below the forced minimum to ensure enough trimming on the next attempt.
+  // One-shot: consumed here and reset to 0.
+  const effectiveMinLayer = forceMinLayer;
+  forceMinLayer = 0;
+
   // --- Approach A: Cache-preserving passthrough ---
-  // If all messages fit within the usable budget, return them unmodified.
-  // This preserves the append-only message pattern that prompt caching depends on.
-  // Raw messages are strictly better context than lossy distilled summaries —
-  // distillation only adds value when raw messages can no longer fit.
-  const messageTokens = input.messages.reduce(
-    (sum, m) => sum + estimateMessage(m),
-    0,
-  );
-  if (messageTokens <= usable) {
+  // Use exact token count from the previous API response when available.
+  // Only the delta (messages added since last call) uses chars/4 estimation,
+  // making the layer-0 decision 99%+ accurate from the API's own tokenizer.
+  // maxInput = absolute ceiling the API enforces: input_tokens + max_tokens <= context
+  const maxInput = contextLimit - outputReserved;
+  const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
+
+  let expectedInput: number;
+  if (lastKnownInput > 0 && sid === lastKnownSessionID) {
+    // Exact approach: prior API count + estimate of only the new messages.
+    const newMsgCount = Math.max(0, input.messages.length - lastKnownMessageCount);
+    const newMsgTokens = newMsgCount > 0
+      ? input.messages.slice(-newMsgCount).reduce((s, m) => s + estimateMessage(m), 0)
+      : 0;
+    const ltmDelta = ltmTokens - lastKnownLtm;
+    expectedInput = lastKnownInput + newMsgTokens + ltmDelta;
+  } else {
+    // First turn or session change: fall back to chars/4 + overhead.
+    const messageTokens = input.messages.reduce((s, m) => s + estimateMessage(m), 0);
+    expectedInput = messageTokens + overhead + ltmTokens;
+  }
+
+  if (effectiveMinLayer === 0 && expectedInput <= maxInput) {
+    // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
+    // Raw messages are strictly better context than lossy distilled summaries.
+    const messageTokens = lastKnownInput > 0 && sid === lastKnownSessionID
+      ? expectedInput - (ltmTokens - lastKnownLtm)  // approximate raw portion
+      : expectedInput - overhead - ltmTokens;
     return {
       messages: input.messages,
       layer: 0,
       distilledTokens: 0,
-      rawTokens: messageTokens,
-      totalTokens: messageTokens,
+      rawTokens: Math.max(0, messageTokens),
+      totalTokens: Math.max(0, messageTokens),
       usable,
       distilledBudget,
       rawBudget,
     };
   }
 
-  // --- Gradient mode: context exhausted, compress older messages ---
+  // --- Gradient mode: context exhausted (or force-escalated), compress older messages ---
 
-  const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   const distillations = sid ? loadDistillations(input.projectPath, sid) : [];
 
   // Layer 1 uses the append-only cached prefix (Approach C) to keep the
@@ -699,42 +774,48 @@ export function transform(input: {
   // tryFitStable reuses the previous cutoff when it still fits, keeping the raw
   // window byte-identical across turns for prompt caching. Only advances the
   // cutoff when a genuinely oversized message forces eviction.
-  const layer1 = sid
-    ? tryFitStable({
-        messages: input.messages,
-        prefix: cached.messages,
-        prefixTokens: cached.tokens,
-        distilledBudget,
-        rawBudget,
-        sessionID: sid,
-      })
-    : tryFit({
-        messages: input.messages,
-        prefix: cached.messages,
-        prefixTokens: cached.tokens,
-        distilledBudget,
-        rawBudget,
-        strip: "none",
-      });
-  if (layer1) return { ...layer1, layer: 1, usable, distilledBudget, rawBudget };
+  // Skipped when force-escalated to layer 2+ (previous attempt already failed at this level).
+  if (effectiveMinLayer <= 1) {
+    const layer1 = sid
+      ? tryFitStable({
+          messages: input.messages,
+          prefix: cached.messages,
+          prefixTokens: cached.tokens,
+          distilledBudget,
+          rawBudget,
+          sessionID: sid,
+        })
+      : tryFit({
+          messages: input.messages,
+          prefix: cached.messages,
+          prefixTokens: cached.tokens,
+          distilledBudget,
+          rawBudget,
+          strip: "none",
+        });
+    if (layer1) return { ...layer1, layer: 1, usable, distilledBudget, rawBudget };
+  }
 
-  // Layer 1 didn't fit — reset the raw window cache since the stable window
-  // is too large. Layers 2-4 use full scans and already break the prompt cache.
+  // Layer 1 didn't fit (or was force-skipped) — reset the raw window cache.
+  // Layers 2-4 use full scans and already break the prompt cache.
   rawWindowCache = null;
 
   // Layer 2: Strip tool outputs from older messages, keep last 2 turns
-  const layer2 = tryFit({
-    messages: input.messages,
-    prefix: cached.messages,
-    prefixTokens: cached.tokens,
-    distilledBudget,
-    rawBudget: Math.floor(usable * 0.5), // give raw more room
-    strip: "old-tools",
-    protectedTurns: 2,
-  });
-  if (layer2) {
-    urgentDistillation = true;
-    return { ...layer2, layer: 2, usable, distilledBudget, rawBudget };
+  // Skipped when force-escalated to layer 3+.
+  if (effectiveMinLayer <= 2) {
+    const layer2 = tryFit({
+      messages: input.messages,
+      prefix: cached.messages,
+      prefixTokens: cached.tokens,
+      distilledBudget,
+      rawBudget: Math.floor(usable * 0.5), // give raw more room
+      strip: "old-tools",
+      protectedTurns: 2,
+    });
+    if (layer2) {
+      urgentDistillation = true;
+      return { ...layer2, layer: 2, usable, distilledBudget, rawBudget };
+    }
   }
 
   // Layer 3: Strip ALL tool outputs, drop oldest distillations
