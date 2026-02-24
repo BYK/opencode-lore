@@ -395,12 +395,25 @@ export const LorePlugin: Plugin = async (ctx) => {
       // so the append-only sequence stays intact for prompt caching.
       if (result.layer > 0) {
         // The API requires the conversation to end with a user message.
-        // Always drop trailing non-user messages — even assistant messages with
-        // tool parts. A hard API error is worse than the model re-invoking a tool.
+        // Drop trailing non-user messages, but stop if we hit an assistant message
+        // with an in-progress (non-completed) tool call — dropping it would cause
+        // the model to lose its pending tool invocation and re-issue it in an
+        // infinite loop. A completed tool part is safe to drop; a pending one is not.
         while (
           result.messages.length > 0 &&
           result.messages.at(-1)!.info.role !== "user"
         ) {
+          const last = result.messages.at(-1)!;
+          const hasPendingTool = last.parts.some(
+            (p) => p.type === "tool" && p.state.status !== "completed",
+          );
+          if (hasPendingTool) {
+            console.error(
+              "[lore] WARN: cannot drop trailing assistant message with pending tool call — may cause prefill error. id:",
+              last.info.id,
+            );
+            break;
+          }
           const dropped = result.messages.pop()!;
           console.error(
             "[lore] WARN: dropping trailing",
