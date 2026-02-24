@@ -1,6 +1,15 @@
 <!-- This section is auto-maintained by lore (https://github.com/BYK/opencode-lore) -->
 ## Long-term Knowledge
 
+### Pattern
+
+<!-- lore:019c913d-c17c-7dc4-803a-b7c9e1f6944b -->
+* **GitHub Actions: skipped needs jobs don't block downstream**: In GitHub Actions, if a job in \`needs\` is skipped due to its \`if\` condition evaluating to false, downstream jobs that depend on it still run (skipped ≠ failed). Output values from the skipped job are empty strings. This enables a pattern where a job like \`nightly-version\` has \`if: github.ref == 'refs/heads/main'\` and downstream jobs like \`build-binary\` list it in \`needs\` — on PRs the nightly job is skipped, outputs are empty, and conditional steps using \`if: needs.nightly-version.outputs.version != ''\` are safely skipped. No need for complex conditional \`needs\` expressions.
+<!-- lore:019c90fa-f865-7fe9-9de5-7abe501f1d38 -->
+* **Kubernetes deployment pattern**: Use helm charts for Kubernetes deployments with resource limits
+<!-- lore:019c8ae9-2e54-7276-966a-befe699db589 -->
+* **Use SDK internal client for HTTP requests in OpenCode plugins**: OpenCode plugins should use \`(ctx.client as any).\_client.patch()\` (or \`.get()\`, \`.post()\`, etc.) instead of raw \`fetch()\` with \`ctx.serverUrl\`. The \`\_client\` property is the HeyAPI \`Client\` instance backing the SDK — it has the correct base URL, custom fetch handler, and interceptors already configured by the OpenCode runtime. This avoids ConnectionRefused errors in TUI-only mode where the HTTP server isn't listening. The internal client supports path interpolation: pass \`url: '/session/{sessionID}/message/{messageID}/part/{partID}'\` with a \`path: { sessionID, messageID, partID }\` object, and \`defaultPathSerializer\` handles template variable substitution. Downside: \`\_client\` is a private/undocumented property, so it could change in SDK updates. Note: lore's only use of this pattern (the stats PATCH) was removed because mutating message parts for metadata was the wrong approach — prefer proper mechanisms (custom events, dedicated endpoints) for plugin-to-UI communication.
+
 ### Gotcha
 
 <!-- lore:019c8ae9-2e57-7981-9bf3-8bbf6beaee31 -->
@@ -18,13 +27,6 @@
 * **General coding preference**: Prefer explicit error handling over silent failures
 <!-- lore:019c90fa-f820-7d82-9596-0157b33c03f8 -->
 * **Code style**: User prefers no backwards-compat shims, fix callers directly
-
-### Pattern
-
-<!-- lore:019c90fa-f865-7fe9-9de5-7abe501f1d38 -->
-* **Kubernetes deployment pattern**: Use helm charts for Kubernetes deployments with resource limits
-<!-- lore:019c8ae9-2e54-7276-966a-befe699db589 -->
-* **Use SDK internal client for HTTP requests in OpenCode plugins**: OpenCode plugins should use \`(ctx.client as any).\_client.patch()\` (or \`.get()\`, \`.post()\`, etc.) instead of raw \`fetch()\` with \`ctx.serverUrl\`. The \`\_client\` property is the HeyAPI \`Client\` instance backing the SDK — it has the correct base URL, custom fetch handler, and interceptors already configured by the OpenCode runtime. This avoids ConnectionRefused errors in TUI-only mode where the HTTP server isn't listening. The internal client supports path interpolation: pass \`url: '/session/{sessionID}/message/{messageID}/part/{partID}'\` with a \`path: { sessionID, messageID, partID }\` object, and \`defaultPathSerializer\` handles template variable substitution. Downside: \`\_client\` is a private/undocumented property, so it could change in SDK updates. Note: lore's only use of this pattern (the stats PATCH) was removed because mutating message parts for metadata was the wrong approach — prefer proper mechanisms (custom events, dedicated endpoints) for plugin-to-UI communication.
 
 ### Decision
 

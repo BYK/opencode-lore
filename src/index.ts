@@ -188,7 +188,12 @@ export const LorePlugin: Plugin = async (ctx) => {
             if (
               msg.role === "assistant" &&
               msg.tokens &&
-              (msg.tokens.input > 0 || msg.tokens.cache.read > 0)
+              // Include cache.write: tokens written to cache were fully sent to the
+              // model (they were processed, just not read from a prior cache slot).
+              // Omitting cache.write causes a dramatic undercount on cold-cache turns
+              // where cache.read=0 but 150K+ tokens were written — leading the gradient
+              // to think only 3 tokens went in and passing the full session as layer 0.
+              (msg.tokens.input > 0 || msg.tokens.cache.read > 0 || msg.tokens.cache.write > 0)
             ) {
               const pending = temporal.undistilledCount(projectPath, msg.sessionID);
               if (pending >= config().distillation.maxSegment) {
@@ -201,6 +206,9 @@ export const LorePlugin: Plugin = async (ctx) => {
               // Calibrate overhead estimate using real token counts.
               // Also store the exact input count + message count for the proactive
               // layer-0 decision (avoids full chars/4 re-estimation each turn).
+              // actualInput = all tokens the model processed as input, regardless of
+              // whether they were new (input), read from cache (cache.read), or newly
+              // written to cache (cache.write). All three contribute to the context window.
               const allMsgs = await ctx.client.session.messages({
                 path: { id: msg.sessionID },
               });
@@ -209,7 +217,8 @@ export const LorePlugin: Plugin = async (ctx) => {
                   .filter((m) => m.info.id !== msg.id)
                   .map((m) => ({ info: m.info, parts: m.parts }));
                 const msgEstimate = estimateMessages(withParts);
-                const actualInput = msg.tokens.input + msg.tokens.cache.read;
+                const actualInput =
+                  msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write;
                 calibrate(actualInput, msgEstimate, msg.sessionID, withParts.length);
               }
             }
