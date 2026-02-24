@@ -34,7 +34,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/BYK/opencode-lore.git"
+    "url": "git+https://github.com/BYK/opencode-lore.git"
   },
   "keywords": [
     "opencode",
