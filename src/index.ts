@@ -14,7 +14,6 @@ import {
   setLtmTokens,
   getLtmBudget,
   setForceMinLayer,
-  stripSystemReminders,
 } from "./gradient";
 import { formatKnowledge } from "./prompt";
 import { createRecallTool } from "./reflect";
@@ -399,59 +398,6 @@ export const LorePlugin: Plugin = async (ctx) => {
 
       if (result.layer >= 2 && sessionID) {
         backgroundDistill(sessionID);
-      }
-
-      // Look up statsPart AFTER the transform so the PATCHed text is clean
-      // (system-reminder wrappers stripped). Looking up before would persist
-      // ephemeral system-reminder content, making it visible in the UI.
-      const lastUserMsg = [...output.messages].reverse().find((m) => m.info.role === "user");
-      const statsPart = lastUserMsg?.parts.find((p) => p.type === "text");
-
-      if (sessionID && statsPart && lastUserMsg) {
-        const loreMeta = {
-          layer: result.layer,
-          distilledTokens: result.distilledTokens,
-          rawTokens: result.rawTokens,
-          totalTokens: result.totalTokens,
-          usable: result.usable,
-          distilledBudget: result.distilledBudget,
-          rawBudget: result.rawBudget,
-          updatedAt: Date.now(),
-        };
-
-        // Strip <system-reminder> wrappers from the part text before PATCHing.
-        // On layer 0 the messages are never passed through cleanParts(), so
-        // statsPart.text may still contain the ephemeral system-reminder wrapper
-        // that OpenCode injects around user messages. If we send that text back
-        // to the server it gets persisted and shows up in the UI as if the user
-        // wrote it.
-        const rawText = (statsPart as { text: string }).text ?? "";
-        const cleanText = stripSystemReminders(rawText);
-
-        // Use the SDK's internal HTTP client so the request goes through
-        // the same base URL, custom fetch, and interceptors that OpenCode
-        // configured — no dependency on ctx.serverUrl being reachable.
-        const httpClient = (ctx.client as any)._client;
-        httpClient.patch({
-          url: "/session/{sessionID}/message/{messageID}/part/{partID}",
-          path: {
-            sessionID,
-            messageID: lastUserMsg.info.id,
-            partID: statsPart.id,
-          },
-          body: {
-            ...(statsPart as Record<string, unknown>),
-            text: cleanText,
-            metadata: {
-              ...((statsPart as { metadata?: Record<string, unknown> }).metadata ?? {}),
-              lore: loreMeta,
-            },
-          },
-          headers: { "Content-Type": "application/json" },
-        }).catch(() => {
-          // Non-critical: gradient stats metadata is for UI display only.
-          // Server may not be reachable (e.g. TUI-only mode). Silently ignore.
-        });
       }
     },
 
