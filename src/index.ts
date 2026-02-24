@@ -16,6 +16,7 @@ import {
 } from "./gradient";
 import { formatKnowledge } from "./prompt";
 import { createRecallTool } from "./reflect";
+import { shouldImport, importFromFile, exportToFile } from "./agents-file";
 
 export const LorePlugin: Plugin = async (ctx) => {
   const projectPath = ctx.worktree || ctx.directory;
@@ -31,6 +32,23 @@ export const LorePlugin: Plugin = async (ctx) => {
         duration: 5000,
       },
     }).catch(() => {});
+  }
+
+  // Import from AGENTS.md at startup if it has changed since last export
+  // (hand-written entries, edits from other machines, or merge conflicts).
+  {
+    const cfg = config();
+    if (cfg.agentsFile.enabled) {
+      const filePath = `${projectPath}/${cfg.agentsFile.path}`;
+      if (shouldImport({ projectPath, filePath })) {
+        try {
+          importFromFile({ projectPath, filePath });
+          console.error("[lore] imported knowledge from", cfg.agentsFile.path);
+        } catch (e) {
+          console.error("[lore] agents-file import error:", e);
+        }
+      }
+    }
   }
 
   // Prune any corrupted/oversized knowledge entries left by the AGENTS.md
@@ -233,6 +251,17 @@ export const LorePlugin: Plugin = async (ctx) => {
           }
         } catch (e) {
           console.error("[lore] pruning error:", e);
+        }
+
+        // Export curated knowledge to AGENTS.md after distillation + curation.
+        try {
+          const agentsCfg = cfg.agentsFile;
+          if (agentsCfg.enabled) {
+            const filePath = `${projectPath}/${agentsCfg.path}`;
+            exportToFile({ projectPath, filePath });
+          }
+        } catch (e) {
+          console.error("[lore] agents-file export error:", e);
         }
       }
     },
