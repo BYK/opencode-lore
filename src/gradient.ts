@@ -317,16 +317,9 @@ function addRelativeTimeToObservations(text: string, now: Date): string {
   return result;
 }
 
-// Build a synthetic message pair containing the distilled history
-function distilledPrefix(distillations: Distillation[]): MessageWithParts[] {
-  if (!distillations.length) return [];
-  const now = new Date();
-  const annotated = distillations.map((d) => ({
-    ...d,
-    observations: addRelativeTimeToObservations(d.observations, now),
-  }));
-  const formatted = formatDistillations(annotated);
-  if (!formatted) return [];
+// Build synthetic user/assistant message pair wrapping formatted distillation text.
+// Shared by the cached and non-cached prefix paths.
+function buildPrefixMessages(formatted: string): MessageWithParts[] {
   return [
     {
       info: {
@@ -381,7 +374,141 @@ function distilledPrefix(distillations: Distillation[]): MessageWithParts[] {
   ];
 }
 
-export type SafetyLayer = 1 | 2 | 3 | 4;
+// Build a synthetic message pair containing the distilled history.
+// Non-cached path — used by layers 2-4 which already cause full cache invalidation.
+function distilledPrefix(distillations: Distillation[]): MessageWithParts[] {
+  if (!distillations.length) return [];
+  const now = new Date();
+  const annotated = distillations.map((d) => ({
+    ...d,
+    observations: addRelativeTimeToObservations(d.observations, now),
+  }));
+  const formatted = formatDistillations(annotated);
+  if (!formatted) return [];
+  return buildPrefixMessages(formatted);
+}
+
+// --- Approach C: Append-only distillation prefix cache ---
+//
+// Caches the rendered prefix text per session. When new distillations arrive,
+// only renders the new rows and appends them to the cached text. This keeps
+// the prefix byte-identical between distillation runs, preserving the prompt
+// cache. Only meta-distillation (which rewrites gen-0 rows into gen-1) causes
+// a full re-render — and that happens roughly every 80-100 turns.
+
+type PrefixCache = {
+  /** The session this cache belongs to */
+  sessionID: string;
+  /** ID of the last distillation row included in the cached text */
+  lastDistillationID: string;
+  /** Number of rows that produced the cached text */
+  rowCount: number;
+  /** The rendered text (used to build delta appends) */
+  cachedText: string;
+  /** Ready-to-use message pair */
+  prefixMessages: MessageWithParts[];
+  /** Token estimate of prefixMessages */
+  prefixTokens: number;
+};
+
+let prefixCache: PrefixCache | null = null;
+
+/**
+ * Return the distilled prefix messages, reusing cached content when possible.
+ *
+ * Cache hit  — no new rows: returns the exact same prefixMessages object
+ *              (byte-identical content, prompt cache preserved).
+ * Cache miss — new rows appended: renders only the delta, appends to cached
+ *              text, updates cache.
+ * Full reset — session changed, or rows were rewritten by meta-distillation:
+ *              renders everything from scratch.
+ */
+function distilledPrefixCached(
+  distillations: Distillation[],
+  sessionID: string,
+): { messages: MessageWithParts[]; tokens: number } {
+  if (!distillations.length) {
+    prefixCache = null;
+    return { messages: [], tokens: 0 };
+  }
+
+  const lastRow = distillations[distillations.length - 1];
+
+  // Cache is valid when: same session, row count only grew (no rewrites),
+  // and the last previously-cached row still exists at the same position.
+  const cacheValid =
+    prefixCache !== null &&
+    prefixCache.sessionID === sessionID &&
+    prefixCache.rowCount <= distillations.length &&
+    (prefixCache.rowCount === 0 ||
+      distillations[prefixCache.rowCount - 1]?.id ===
+        prefixCache.lastDistillationID);
+
+  if (cacheValid) {
+    if (prefixCache!.lastDistillationID === lastRow.id) {
+      // No new rows — return cached prefix as-is (byte-identical for prompt cache)
+      return {
+        messages: prefixCache!.prefixMessages,
+        tokens: prefixCache!.prefixTokens,
+      };
+    }
+
+    // New rows appended — render only the delta and append to cached text
+    const newRows = distillations.slice(prefixCache!.rowCount);
+    const now = new Date();
+    const annotated = newRows.map((d) => ({
+      ...d,
+      observations: addRelativeTimeToObservations(d.observations, now),
+    }));
+    const deltaText = formatDistillations(annotated);
+
+    if (deltaText) {
+      const fullText = prefixCache!.cachedText + "\n\n" + deltaText;
+      const messages = buildPrefixMessages(fullText);
+      const tokens = messages.reduce((sum, m) => sum + estimateMessage(m), 0);
+      prefixCache = {
+        sessionID,
+        lastDistillationID: lastRow.id,
+        rowCount: distillations.length,
+        cachedText: fullText,
+        prefixMessages: messages,
+        prefixTokens: tokens,
+      };
+      return { messages, tokens };
+    }
+  }
+
+  // Full re-render: first call, session change, or meta-distillation rewrote rows
+  const now = new Date();
+  const annotated = distillations.map((d) => ({
+    ...d,
+    observations: addRelativeTimeToObservations(d.observations, now),
+  }));
+  const fullText = formatDistillations(annotated);
+  if (!fullText) {
+    prefixCache = null;
+    return { messages: [], tokens: 0 };
+  }
+
+  const messages = buildPrefixMessages(fullText);
+  const tokens = messages.reduce((sum, m) => sum + estimateMessage(m), 0);
+  prefixCache = {
+    sessionID,
+    lastDistillationID: lastRow.id,
+    rowCount: distillations.length,
+    cachedText: fullText,
+    prefixMessages: messages,
+    prefixTokens: tokens,
+  };
+  return { messages, tokens };
+}
+
+// For testing only — reset prefix cache state
+export function resetPrefixCache() {
+  prefixCache = null;
+}
+
+export type SafetyLayer = 0 | 1 | 2 | 3 | 4;
 
 export type TransformResult = {
   messages: MessageWithParts[];
@@ -419,17 +546,49 @@ export function transform(input: {
   const distilledBudget = Math.floor(usable * cfg.budget.distilled);
   const rawBudget = Math.floor(usable * cfg.budget.raw);
 
-  // Find the session ID from messages
+  // --- Approach A: Cache-preserving passthrough ---
+  // If all messages fit within the usable budget, return them unmodified.
+  // This preserves the append-only message pattern that prompt caching depends on.
+  // Raw messages are strictly better context than lossy distilled summaries —
+  // distillation only adds value when raw messages can no longer fit.
+  const messageTokens = input.messages.reduce(
+    (sum, m) => sum + estimateMessage(m),
+    0,
+  );
+  if (messageTokens <= usable) {
+    return {
+      messages: input.messages,
+      layer: 0,
+      distilledTokens: 0,
+      rawTokens: messageTokens,
+      totalTokens: messageTokens,
+      usable,
+      distilledBudget,
+      rawBudget,
+    };
+  }
+
+  // --- Gradient mode: context exhausted, compress older messages ---
+
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   const distillations = sid ? loadDistillations(input.projectPath, sid) : [];
-  const prefix = distilledPrefix(distillations);
-  const prefixTokens = prefix.reduce((sum, m) => sum + estimateMessage(m), 0);
+
+  // Layer 1 uses the append-only cached prefix (Approach C) to keep the
+  // distilled content byte-identical between distillation runs, preserving
+  // the prompt cache. Layers 2-4 already cause full cache invalidation via
+  // tool stripping / message restructuring, so they use the non-cached path.
+  const cached = sid
+    ? distilledPrefixCached(distillations, sid)
+    : (() => {
+        const msgs = distilledPrefix(distillations);
+        return { messages: msgs, tokens: msgs.reduce((sum, m) => sum + estimateMessage(m), 0) };
+      })();
 
   // Layer 1: Normal budget allocation
   const layer1 = tryFit({
     messages: input.messages,
-    prefix,
-    prefixTokens,
+    prefix: cached.messages,
+    prefixTokens: cached.tokens,
     distilledBudget,
     rawBudget,
     strip: "none",
@@ -439,8 +598,8 @@ export function transform(input: {
   // Layer 2: Strip tool outputs from older messages, keep last 2 turns
   const layer2 = tryFit({
     messages: input.messages,
-    prefix,
-    prefixTokens,
+    prefix: cached.messages,
+    prefixTokens: cached.tokens,
     distilledBudget,
     rawBudget: Math.floor(usable * 0.5), // give raw more room
     strip: "old-tools",

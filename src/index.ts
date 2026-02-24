@@ -312,7 +312,9 @@ export const LorePlugin: Plugin = async (ctx) => {
       }
     },
 
-    // Transform message history: distilled prefix + raw recent
+    // Transform message history: distilled prefix + raw recent.
+    // Layer 0 = passthrough (messages fit without compression) — output.messages
+    // is left untouched to preserve the append-only pattern for prompt caching.
     "experimental.chat.messages.transform": async (_input, output) => {
       if (!output.messages.length) return;
 
@@ -323,21 +325,27 @@ export const LorePlugin: Plugin = async (ctx) => {
         projectPath,
         sessionID,
       });
-      while (
-        result.messages.length > 0 &&
-        result.messages.at(-1)!.info.role !== "user"
-      ) {
-        const last = result.messages.at(-1)!;
-        if (last.parts.some((p) => p.type === "tool")) break;
-        const dropped = result.messages.pop()!;
-        console.error(
-          "[lore] WARN: dropping trailing",
-          dropped.info.role,
-          "message to prevent prefill error. id:",
-          dropped.info.id,
-        );
+
+      // Only restructure messages when the gradient transform is active (layers 1-4).
+      // Layer 0 means all messages fit within the context budget — leave them alone
+      // so the append-only sequence stays intact for prompt caching.
+      if (result.layer > 0) {
+        while (
+          result.messages.length > 0 &&
+          result.messages.at(-1)!.info.role !== "user"
+        ) {
+          const last = result.messages.at(-1)!;
+          if (last.parts.some((p) => p.type === "tool")) break;
+          const dropped = result.messages.pop()!;
+          console.error(
+            "[lore] WARN: dropping trailing",
+            dropped.info.role,
+            "message to prevent prefill error. id:",
+            dropped.info.id,
+          );
+        }
+        output.messages.splice(0, output.messages.length, ...result.messages);
       }
-      output.messages.splice(0, output.messages.length, ...result.messages);
 
       if (result.layer >= 2 && sessionID) {
         backgroundDistill(sessionID);
