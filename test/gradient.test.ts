@@ -9,6 +9,7 @@ import {
   getLtmTokens,
   getLtmBudget,
   resetPrefixCache,
+  resetRawWindowCache,
 } from "../src/gradient";
 import type { Message, Part } from "@opencode-ai/sdk";
 
@@ -167,6 +168,129 @@ describe("gradient", () => {
     // Reset
     setModelLimits({ context: 10_000, output: 2_000 });
     calibrate(0, 0);
+  });
+});
+
+describe("gradient — lazy raw window eviction (Approach B)", () => {
+  // context=5000, output=1000 → usable=4000, rawBudget=floor(4000*0.4)=1600
+  // Each ~300-char message ≈ 95 tokens (75 chars/4 + 20 overhead).
+  // 10 messages ≈ 950 tokens — fits in 1600 raw budget, so gradient mode
+  // is reached only when we push things over with large messages.
+  const SESSION = "lazy-evict-sess";
+
+  beforeAll(() => {
+    setModelLimits({ context: 5_000, output: 1_000 });
+    calibrate(0, 0);
+    resetPrefixCache();
+    resetRawWindowCache();
+  });
+
+  test("raw window is stable when the new turn fits", () => {
+    // Build a conversation that exhausts the context so gradient mode fires.
+    // usable=4000; each message ≈ 270 tokens (1000 chars / 4 + 20 overhead).
+    // 16 messages ≈ 4320 > 4000 → gradient fires.
+    // rawBudget=floor(4000*0.4)=1600 → fits ~5 messages (5 × 270 = 1350 ≤ 1600).
+    const base = Array.from({ length: 16 }, (_, i) =>
+      makeMsg(`le-${i}`, i % 2 === 0 ? "user" : "assistant", "A".repeat(1_000), SESSION),
+    );
+
+    const result1 = transform({ messages: base, projectPath: PROJECT, sessionID: SESSION });
+    expect(result1.layer).toBe(1);
+
+    // Identify the first raw message from turn 1
+    const firstRawId1 = result1.messages.find(
+      (m) => m.info.sessionID === SESSION,
+    )?.info.id;
+    expect(firstRawId1).toBeDefined();
+
+    // Turn 2: append one small new message — should NOT evict anything
+    const withNewSmall = [
+      ...base,
+      makeMsg(`le-new-small`, "user", "short", SESSION),
+    ];
+    const result2 = transform({ messages: withNewSmall, projectPath: PROJECT, sessionID: SESSION });
+    expect(result2.layer).toBe(1);
+
+    const firstRawId2 = result2.messages.find(
+      (m) => m.info.sessionID === SESSION,
+    )?.info.id;
+
+    // The raw window should start at the same message — no eviction
+    expect(firstRawId2).toBe(firstRawId1);
+  });
+
+  test("raw window advances only when the new message forces eviction", () => {
+    resetRawWindowCache();
+
+    // context=3000, output=500 → usable=2500, rawBudget=floor(2500*0.4)=1000
+    // Each 400-char message ≈ 120 tokens (400/4 + 20 overhead).
+    // 22 messages ≈ 2640 > 2500 → gradient fires.
+    // rawBudget=1000 → fits ~8 messages (8 × 120 = 960 ≤ 1000).
+    setModelLimits({ context: 3_000, output: 500 });
+    calibrate(0, 0);
+
+    const SESS2 = "lazy-evict-tight";
+    const base = Array.from({ length: 22 }, (_, i) =>
+      makeMsg(`tight-${i}`, i % 2 === 0 ? "user" : "assistant", "B".repeat(400), SESS2),
+    );
+
+    // First call: fills window, records cutoff
+    const r1 = transform({ messages: base, projectPath: PROJECT, sessionID: SESS2 });
+    expect(r1.layer).toBe(1);
+    const firstId1 = r1.messages.find((m) => m.info.sessionID === SESS2)?.info.id;
+
+    // Second call: append a huge message that definitely pushes the pinned window
+    // past rawBudget, forcing eviction of the oldest message.
+    const withHuge = [
+      ...base,
+      makeMsg(`tight-huge`, "user", "C".repeat(3_500), SESS2),
+    ];
+    const r2 = transform({ messages: withHuge, projectPath: PROJECT, sessionID: SESS2 });
+    expect(r2.layer).toBe(1);
+    const firstId2 = r2.messages.find((m) => m.info.sessionID === SESS2)?.info.id;
+
+    // The window must have advanced (old pinned cutoff no longer fits)
+    expect(firstId2).not.toBe(firstId1);
+
+    // Reset back
+    setModelLimits({ context: 5_000, output: 1_000 });
+    calibrate(0, 0);
+  });
+
+  test("raw window cache resets on session change", () => {
+    resetRawWindowCache();
+
+    // context=3000, output=500 → usable=2500, rawBudget=1000
+    // 22 × 400-char messages ≈ 2640 > 2500 → gradient fires
+    setModelLimits({ context: 3_000, output: 500 });
+    calibrate(0, 0);
+
+    const SESS_A = "lazy-sess-a";
+    const SESS_B = "lazy-sess-b";
+
+    const msgsA = Array.from({ length: 22 }, (_, i) =>
+      makeMsg(`sa-${i}`, i % 2 === 0 ? "user" : "assistant", "D".repeat(400), SESS_A),
+    );
+    const msgsB = Array.from({ length: 22 }, (_, i) =>
+      makeMsg(`sb-${i}`, i % 2 === 0 ? "user" : "assistant", "E".repeat(400), SESS_B),
+    );
+
+    const rA = transform({ messages: msgsA, projectPath: PROJECT, sessionID: SESS_A });
+    expect(rA.layer).toBe(1);
+    const firstIdA = rA.messages.find((m) => m.info.sessionID === SESS_A)?.info.id;
+
+    // Switch to a different session — cache must not bleed over
+    const rB = transform({ messages: msgsB, projectPath: PROJECT, sessionID: SESS_B });
+    expect(rB.layer).toBe(1);
+    const firstIdB = rB.messages.find((m) => m.info.sessionID === SESS_B)?.info.id;
+
+    expect(firstIdB).not.toBe(firstIdA);
+    expect(firstIdB?.startsWith("sb-")).toBe(true);
+
+    // Reset
+    setModelLimits({ context: 5_000, output: 1_000 });
+    calibrate(0, 0);
+    resetRawWindowCache();
   });
 });
 

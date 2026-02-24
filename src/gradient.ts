@@ -508,6 +508,117 @@ export function resetPrefixCache() {
   prefixCache = null;
 }
 
+// --- Approach B: Lazy raw window eviction ---
+//
+// Tracks the ID of the first (oldest) message in the previous raw window.
+// On the next turn, if the window starting at that message still fits within
+// the raw budget, the cutoff is pinned — no messages are evicted and the raw
+// window stays byte-identical for caching purposes. Only when the pinned
+// window no longer fits (e.g. a large tool response pushed us over) is the
+// cutoff allowed to advance forward by one message at a time.
+//
+// This eliminates the "window sliding on every turn" problem that was the
+// dominant source of cache misses in gradient mode: each new turn appends a
+// message to the conversation, but the start of the raw window only moves
+// when it must.
+//
+// Reset conditions: session changes, or layer escalates to 2+ (the pinned
+// window was too large even with stripping — something genuinely changed).
+
+type RawWindowCache = {
+  sessionID: string;
+  /** ID of the first message in the pinned raw window */
+  firstMessageID: string;
+};
+
+let rawWindowCache: RawWindowCache | null = null;
+
+export function resetRawWindowCache() {
+  rawWindowCache = null;
+}
+
+/**
+ * Layer-1 tryFit with lazy eviction.
+ *
+ * Attempts to reuse the previous raw window cutoff before falling back to a
+ * full backward scan. If the pinned window fits, returns it unchanged (same
+ * message objects, byte-identical for prompt caching). If it doesn't fit,
+ * delegates to the normal tryFit which finds the new minimal cutoff and
+ * updates the cache.
+ */
+function tryFitStable(input: {
+  messages: MessageWithParts[];
+  prefix: MessageWithParts[];
+  prefixTokens: number;
+  distilledBudget: number;
+  rawBudget: number;
+  sessionID: string;
+}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget"> | null {
+  // If the prefix already overflows its budget there's no point trying.
+  if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
+    return null;
+
+  const cacheValid =
+    rawWindowCache !== null && rawWindowCache.sessionID === input.sessionID;
+
+  if (cacheValid) {
+    const pinnedIdx = input.messages.findIndex(
+      (m) => m.info.id === rawWindowCache!.firstMessageID,
+    );
+
+    if (pinnedIdx !== -1) {
+      // Measure the token cost of the pinned window.
+      const pinnedWindow = input.messages.slice(pinnedIdx);
+      const pinnedTokens = pinnedWindow.reduce(
+        (sum, m) => sum + estimateMessage(m),
+        0,
+      );
+
+      if (pinnedTokens <= input.rawBudget) {
+        // Pinned window still fits — keep it. Apply system-reminder cleanup
+        // only (strip:"none" is the layer-1 mode), returning the same message
+        // object references wherever nothing changed.
+        const processed = pinnedWindow.map((msg) => {
+          const parts = cleanParts(msg.parts);
+          return parts !== msg.parts ? { info: msg.info, parts } : msg;
+        });
+        const total = input.prefixTokens + pinnedTokens;
+        return {
+          messages: [...input.prefix, ...processed],
+          distilledTokens: input.prefixTokens,
+          rawTokens: pinnedTokens,
+          totalTokens: total,
+        };
+      }
+      // Pinned window is too large — fall through to the normal scan below.
+    }
+  }
+
+  // Normal backward scan to find the tightest fitting cutoff.
+  const result = tryFit({
+    messages: input.messages,
+    prefix: input.prefix,
+    prefixTokens: input.prefixTokens,
+    distilledBudget: input.distilledBudget,
+    rawBudget: input.rawBudget,
+    strip: "none",
+  });
+
+  if (result) {
+    // Update the raw window cache: the first non-prefix message is the oldest
+    // raw message in the new window. Pin to its ID for the next turn.
+    const rawStart = result.messages[input.prefix.length];
+    if (rawStart) {
+      rawWindowCache = {
+        sessionID: input.sessionID,
+        firstMessageID: rawStart.info.id,
+      };
+    }
+  }
+
+  return result;
+}
+
 export type SafetyLayer = 0 | 1 | 2 | 3 | 4;
 
 export type TransformResult = {
@@ -584,16 +695,32 @@ export function transform(input: {
         return { messages: msgs, tokens: msgs.reduce((sum, m) => sum + estimateMessage(m), 0) };
       })();
 
-  // Layer 1: Normal budget allocation
-  const layer1 = tryFit({
-    messages: input.messages,
-    prefix: cached.messages,
-    prefixTokens: cached.tokens,
-    distilledBudget,
-    rawBudget,
-    strip: "none",
-  });
+  // Layer 1: Normal budget allocation with lazy raw window eviction (Approach B).
+  // tryFitStable reuses the previous cutoff when it still fits, keeping the raw
+  // window byte-identical across turns for prompt caching. Only advances the
+  // cutoff when a genuinely oversized message forces eviction.
+  const layer1 = sid
+    ? tryFitStable({
+        messages: input.messages,
+        prefix: cached.messages,
+        prefixTokens: cached.tokens,
+        distilledBudget,
+        rawBudget,
+        sessionID: sid,
+      })
+    : tryFit({
+        messages: input.messages,
+        prefix: cached.messages,
+        prefixTokens: cached.tokens,
+        distilledBudget,
+        rawBudget,
+        strip: "none",
+      });
   if (layer1) return { ...layer1, layer: 1, usable, distilledBudget, rawBudget };
+
+  // Layer 1 didn't fit — reset the raw window cache since the stable window
+  // is too large. Layers 2-4 use full scans and already break the prompt cache.
+  rawWindowCache = null;
 
   // Layer 2: Strip tool outputs from older messages, keep last 2 turns
   const layer2 = tryFit({
