@@ -14,6 +14,7 @@ import {
   setLtmTokens,
   getLtmBudget,
   setForceMinLayer,
+  getLastTransformedCount,
 } from "./gradient";
 import { formatKnowledge } from "./prompt";
 import { createRecallTool } from "./reflect";
@@ -219,7 +220,11 @@ export const LorePlugin: Plugin = async (ctx) => {
                 const msgEstimate = estimateMessages(withParts);
                 const actualInput =
                   msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write;
-                calibrate(actualInput, msgEstimate, msg.sessionID, withParts.length);
+                // Use the compressed message count (from the last transform output),
+                // not the total DB count. On layer 0 these are equal. On layers 1-4,
+                // the model only saw the compressed window — calibrate must track that
+                // count so the next turn's delta is computed correctly.
+                calibrate(actualInput, msgEstimate, msg.sessionID, getLastTransformedCount() || withParts.length);
               }
             }
           }
