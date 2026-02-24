@@ -117,6 +117,32 @@ export type Distillation = {
   created_at: number;
 };
 
+/** Load all distillations for a session, oldest first. */
+export function loadForSession(
+  projectPath: string,
+  sessionID: string,
+): Distillation[] {
+  const pid = ensureProject(projectPath);
+  const rows = db()
+    .query(
+      "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC",
+    )
+    .all(pid, sessionID) as Array<{
+    id: string;
+    project_id: string;
+    session_id: string;
+    observations: string;
+    source_ids: string;
+    generation: number;
+    token_count: number;
+    created_at: number;
+  }>;
+  return rows.map((r) => ({
+    ...r,
+    source_ids: JSON.parse(r.source_ids) as string[],
+  }));
+}
+
 function storeDistillation(input: {
   projectPath: string;
   sessionID: string;

@@ -233,43 +233,44 @@ export const LorePlugin: Plugin = async (ctx) => {
         // 1. Force the gradient transform to escalate on the next call (skip layer 0/1)
         // 2. Force distillation to capture all temporal data before compaction
         // 3. Trigger compaction so the session recovers without user intervention
-        const error = (event.properties as Record<string, unknown>).error as
-          | { name?: string; data?: { message?: string } }
+        const rawError = (event.properties as Record<string, unknown>).error;
+        // Diagnostic: log the full error shape so we can verify our detection matches
+        console.error("[lore] session.error received:", JSON.stringify(rawError, null, 2));
+
+        const error = rawError as
+          | { name?: string; message?: string; data?: { message?: string } }
           | undefined;
+        // Match both shapes: error.data.message (APIError wrapper) and error.message (direct)
+        const errorMessage = error?.data?.message ?? error?.message ?? "";
         const isPromptTooLong =
-          error?.name === "APIError" &&
-          typeof error?.data?.message === "string" &&
-          (error.data.message.includes("prompt is too long") ||
-            error.data.message.includes("context length exceeded") ||
-            error.data.message.includes("maximum context length"));
+          typeof errorMessage === "string" &&
+          (errorMessage.includes("prompt is too long") ||
+            errorMessage.includes("context length exceeded") ||
+            errorMessage.includes("maximum context length") ||
+            errorMessage.includes("ContextWindowExceededError") ||
+            errorMessage.includes("too many tokens"));
+
+        console.error(
+          `[lore] session.error isPromptTooLong=${isPromptTooLong} (name=${error?.name}, message=${errorMessage.substring(0, 120)})`,
+        );
 
         if (isPromptTooLong) {
           const sessionID = (event.properties as Record<string, unknown>).sessionID as
             | string
             | undefined;
           console.error(
-            `[lore] detected 'prompt too long' error — forcing distillation + compaction (session: ${sessionID?.substring(0, 16)})`,
+            `[lore] detected 'prompt too long' error — forcing distillation + layer escalation (session: ${sessionID?.substring(0, 16)})`,
           );
           // Force layer 2 on next transform — layers 0 and 1 were already too large.
+          // The gradient at layers 2-4 will compress the context enough for the next turn.
+          // Do NOT call session.summarize() here — it sends all messages to the model,
+          // which would overflow again and create a stuck compaction loop.
           setForceMinLayer(2);
 
           if (sessionID) {
-            // Force distillation to capture all undistilled messages before
-            // compaction replaces the session message history.
+            // Force distillation to capture all undistilled messages into the temporal
+            // store so they're preserved even if the session is later compacted manually.
             await backgroundDistill(sessionID, true);
-
-            // Trigger compaction automatically — the compacting hook will inject
-            // Lore's custom distillation-aware prompt.
-            try {
-              const sessions = await ctx.client.session.list();
-              const session = sessions.data?.find((s) => s.id.startsWith(sessionID));
-              if (session) {
-                // providerID/modelID are optional — omit to use the session's current model
-                await ctx.client.session.summarize({ path: { id: session.id } });
-              }
-            } catch (e) {
-              console.error("[lore] auto-compaction failed:", e);
-            }
           }
         }
       }
@@ -410,16 +411,24 @@ export const LorePlugin: Plugin = async (ctx) => {
       }
     },
 
-    // Replace compaction prompt with distillation-aware prompt when manual /compact is used.
-    // Also force distillation first so all temporal data is captured before compaction
-    // replaces the session message history.
+    // Replace compaction prompt with distillation-aware prompt when /compact is used.
+    // Strategy: run chunked distillation first so all messages are captured in segments
+    // that each fit within the model's context, then inject the pre-computed summaries
+    // as context so the model consolidates them rather than re-reading all raw messages.
+    // This prevents the overflow→compaction→overflow stuck loop.
     "experimental.session.compacting": async (input, output) => {
-      // Force distillation to capture any undistilled messages. This is critical:
-      // compaction will replace all messages with a summary, so we must persist
-      // everything to Lore's temporal store before that happens.
+      // Chunked distillation: split all undistilled messages into segments that each
+      // fit within the model's context window and distill them independently.
+      // This is safe even when the full session exceeds the context limit.
       if (input.sessionID && activeSessions.has(input.sessionID)) {
         await backgroundDistill(input.sessionID, true);
       }
+
+      // Load all distillation summaries produced for this session (oldest first).
+      // These are the chunked observations — the model will consolidate them.
+      const distillations = input.sessionID
+        ? distillation.loadForSession(projectPath, input.sessionID)
+        : [];
 
       const entries = ltm.forProject(projectPath, config().crossProject);
       const knowledge = entries.length
@@ -432,9 +441,24 @@ export const LorePlugin: Plugin = async (ctx) => {
           )
         : "";
 
+      // Inject each distillation chunk as a context string so the model has access
+      // to pre-computed summaries. Even if the raw messages overflow context, these
+      // summaries are compact and will fit.
+      if (distillations.length > 0) {
+        output.context.push(
+          `## Lore Pre-computed Session Summaries\n\nThe following ${distillations.length} summary chunk(s) were pre-computed from the conversation history. Use these as the authoritative source — do not re-summarize the raw messages above if they conflict.\n\n` +
+            distillations
+              .map(
+                (d, i) =>
+                  `### Chunk ${i + 1}${d.generation > 0 ? " (consolidated)" : ""}\n${d.observations}`,
+              )
+              .join("\n\n"),
+        );
+      }
+
       output.prompt = `You are creating a distilled memory summary for an AI coding agent. This summary will be the ONLY context available in the next part of the conversation.
 
-Structure your response as follows:
+${distillations.length > 0 ? "Lore has pre-computed chunked summaries of the session history (injected above as context). Consolidate those summaries into a single coherent narrative. Do NOT re-read or re-summarize the raw conversation messages — trust the pre-computed summaries.\n\n" : ""}Structure your response as follows:
 
 ## Session History
 
