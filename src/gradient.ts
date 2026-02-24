@@ -51,6 +51,18 @@ let lastKnownLtm = 0;
 let lastKnownSessionID: string | null = null;
 let lastKnownMessageCount = 0;
 
+// Number of messages in the most recent transform() output — i.e. how many
+// messages were actually sent to the model. On layer 0 this equals the full
+// session length. On layers 1-4 it equals the compressed window size.
+// Calibration must use this count (not the total DB message count) so that
+// the delta on the next turn reflects only messages added since the last
+// compressed window, not since the last DB snapshot.
+let lastTransformedCount = 0;
+
+export function getLastTransformedCount(): number {
+  return lastTransformedCount;
+}
+
 // --- Force escalation ---
 // Set when the API returns "prompt is too long" — forces the transform to skip
 // layer 0 (and optionally layer 1) on the next call to ensure the context is
@@ -139,6 +151,7 @@ export function resetCalibration() {
   lastKnownLtm = 0;
   lastKnownSessionID = null;
   lastKnownMessageCount = 0;
+  lastTransformedCount = 0;
   forceMinLayer = 0;
 }
 
@@ -691,7 +704,7 @@ export function needsUrgentDistillation(): boolean {
   return v;
 }
 
-export function transform(input: {
+function transformInner(input: {
   messages: MessageWithParts[];
   projectPath: string;
   sessionID?: string;
@@ -888,6 +901,24 @@ export function transform(input: {
     distilledBudget,
     rawBudget,
   };
+}
+
+// Public wrapper: records the compressed message count for calibration.
+// Calibration needs to know how many messages were SENT to the model (the
+// compressed window), not the total DB count. On layer 0 these are equal;
+// on layers 1-4 the compressed window is smaller, and the delta on the next
+// turn must be computed relative to the compressed count — otherwise the
+// expected input on the next turn is anchored to the compressed input token
+// count but the "new messages" delta is computed against the full DB count,
+// making newMsgCount ≈ 0 and causing layer 0 passthrough on an overflowing session.
+export function transform(input: {
+  messages: MessageWithParts[];
+  projectPath: string;
+  sessionID?: string;
+}): TransformResult {
+  const result = transformInner(input);
+  lastTransformedCount = result.messages.length;
+  return result;
 }
 
 // Compute our message-only estimate for a set of messages (for calibration use)
