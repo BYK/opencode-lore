@@ -30,6 +30,14 @@ export const LoreConfig = z.object({
       afterTurns: z.number().min(1).default(10),
     })
     .default({}),
+  pruning: z
+    .object({
+      /** Days to keep distilled temporal messages before pruning. Default: 120. */
+      retention: z.number().min(1).default(120),
+      /** Max total temporal_messages storage in MB before emergency pruning. Default: 1024 (1 GB). */
+      maxStorage: z.number().min(50).default(1024),
+    })
+    .default({}),
   crossProject: z.boolean().default(true),
   agentsFile: z
     .object({

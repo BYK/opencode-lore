@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
 import { db, close, ensureProject } from "../src/db";
 import * as temporal from "../src/temporal";
 import { ftsQuery } from "../src/temporal";
@@ -160,6 +160,127 @@ describe("temporal", () => {
     });
     // Should not increase count since content is empty
     expect(temporal.count(PROJECT, "sess-1")).toBe(3);
+  });
+
+  describe("prune", () => {
+    const PRUNE_PROJECT = "/test/temporal/prune";
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    function insertMessage(
+      id: string,
+      sessionID: string,
+      distilled: 0 | 1,
+      createdAt: number,
+      contentSize = 100,
+    ) {
+      const pid = ensureProject(PRUNE_PROJECT);
+      const content = "x".repeat(contentSize);
+      db()
+        .query(
+          `INSERT OR REPLACE INTO temporal_messages
+           (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+           VALUES (?, ?, ?, 'user', ?, ?, ?, ?, '{}')`,
+        )
+        .run(id, pid, sessionID, content, Math.ceil(contentSize / 4), distilled, createdAt);
+    }
+
+    // Clean the prune project before every test so accumulated rows from
+    // prior test runs (live DB, no isolation) don't interfere with counts.
+    beforeEach(() => {
+      const pid = ensureProject(PRUNE_PROJECT);
+      db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+    });
+
+    test("TTL pass deletes distilled messages older than retention window", () => {
+      const now = Date.now();
+      insertMessage("old-distilled", "sess-p1", 1, now - 130 * DAY_MS); // 130 days old — should be pruned
+      insertMessage("new-distilled", "sess-p1", 1, now - 10 * DAY_MS);  // 10 days old — kept
+      insertMessage("old-undistilled", "sess-p1", 0, now - 130 * DAY_MS); // old but undistilled — never deleted
+
+      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 120, maxStorageMB: 1024 });
+
+      expect(result.ttlDeleted).toBe(1);
+      expect(result.capDeleted).toBe(0);
+
+      const remaining = db()
+        .query("SELECT id FROM temporal_messages WHERE project_id = ?")
+        .all(ensureProject(PRUNE_PROJECT)) as { id: string }[];
+      const ids = remaining.map((r) => r.id);
+      expect(ids).not.toContain("old-distilled");
+      expect(ids).toContain("new-distilled");
+      expect(ids).toContain("old-undistilled");
+    });
+
+    test("size cap pass deletes oldest distilled messages when over limit", () => {
+      const now = Date.now();
+      // 3 distilled messages each ~400 KB — total ~1.2 MB, cap at 1 MB
+      const size = 400 * 1024;
+      insertMessage("cap-old", "sess-p2", 1, now - 5 * DAY_MS, size);
+      insertMessage("cap-mid", "sess-p2", 1, now - 3 * DAY_MS, size);
+      insertMessage("cap-new", "sess-p2", 1, now - 1 * DAY_MS, size);
+      // Undistilled — must never be evicted even when over cap
+      insertMessage("cap-undistilled", "sess-p2", 0, now - 5 * DAY_MS, size);
+
+      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 120, maxStorageMB: 1 });
+
+      expect(result.ttlDeleted).toBe(0); // all within 120 days
+      expect(result.capDeleted).toBeGreaterThan(0);
+
+      // The undistilled message must survive no matter what
+      const remaining = db()
+        .query("SELECT id FROM temporal_messages WHERE project_id = ?")
+        .all(ensureProject(PRUNE_PROJECT)) as { id: string }[];
+      const ids = remaining.map((r) => r.id);
+      expect(ids).toContain("cap-undistilled");
+
+      // The oldest distilled should be the first evicted
+      expect(ids).not.toContain("cap-old");
+    });
+
+    test("undistilled messages are never deleted by either pass", () => {
+      const now = Date.now();
+      // Very old undistilled — TTL pass must not touch it
+      insertMessage("undist-ancient", "sess-p3", 0, now - 365 * DAY_MS);
+      // Over-cap scenario — size cap pass must not touch undistilled
+      insertMessage("undist-large", "sess-p3", 0, now - 1 * DAY_MS, 2 * 1024 * 1024);
+
+      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 1, maxStorageMB: 1 });
+
+      expect(result.ttlDeleted).toBe(0);
+      expect(result.capDeleted).toBe(0);
+
+      const remaining = db()
+        .query("SELECT id FROM temporal_messages WHERE project_id = ?")
+        .all(ensureProject(PRUNE_PROJECT)) as { id: string }[];
+      expect(remaining.map((r) => r.id)).toContain("undist-ancient");
+      expect(remaining.map((r) => r.id)).toContain("undist-large");
+    });
+
+    test("no-op when under both thresholds", () => {
+      const now = Date.now();
+      insertMessage("recent-dist", "sess-p4", 1, now - 1 * DAY_MS);
+      insertMessage("recent-undist", "sess-p4", 0, now - 1 * DAY_MS);
+
+      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 120, maxStorageMB: 1024 });
+
+      expect(result.ttlDeleted).toBe(0);
+      expect(result.capDeleted).toBe(0);
+    });
+
+    test("both passes can fire in same run", () => {
+      const now = Date.now();
+      // Old message caught by TTL
+      insertMessage("both-old", "sess-p5", 1, now - 130 * DAY_MS, 100);
+      // Recent but large messages that push over the cap (after TTL runs)
+      const size = 600 * 1024;
+      insertMessage("both-mid", "sess-p5", 1, now - 5 * DAY_MS, size);
+      insertMessage("both-new", "sess-p5", 1, now - 1 * DAY_MS, size);
+
+      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 120, maxStorageMB: 1 });
+
+      expect(result.ttlDeleted).toBe(1); // both-old caught by TTL
+      expect(result.capDeleted).toBeGreaterThan(0); // at least one of the large ones evicted
+    });
   });
 
   describe("ftsQuery sanitization", () => {

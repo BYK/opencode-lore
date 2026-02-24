@@ -228,3 +228,94 @@ export function undistilledCount(
       .get(...params) as { count: number }
   ).count;
 }
+
+export type PruneResult = {
+  /** Rows deleted by the TTL pass (distilled=1 AND older than retention period). */
+  ttlDeleted: number;
+  /** Rows deleted by the size-cap pass (distilled=1, oldest-first, to get under maxStorage). */
+  capDeleted: number;
+};
+
+/**
+ * Prune temporal messages for a project using a two-pass Hybrid C strategy:
+ *
+ * Pass 1 — TTL: delete messages where distilled=1 AND created_at is older than
+ * retentionDays. This covers normal operation — both distillation and curation
+ * have had ample time to process anything that old.
+ *
+ * Pass 2 — Size cap: if total temporal storage for the project still exceeds
+ * maxStorageMB, delete the oldest distilled=1 messages (regardless of age)
+ * until under the cap.
+ *
+ * Invariant: undistilled messages (distilled=0) are NEVER deleted by either pass.
+ */
+export function prune(input: {
+  projectPath: string;
+  retentionDays: number;
+  maxStorageMB: number;
+}): PruneResult {
+  const database = db();
+  const pid = ensureProject(input.projectPath);
+  const cutoff = Date.now() - input.retentionDays * 24 * 60 * 60 * 1000;
+
+  // Pass 1: TTL — delete distilled messages older than the retention window.
+  // Note: result.changes is inflated by FTS trigger side-effects, so we count
+  // eligible rows before deletion to get the accurate number deleted.
+  const ttlEligible = (
+    database
+      .query(
+        "SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND created_at < ?",
+      )
+      .get(pid, cutoff) as { c: number }
+  ).c;
+  if (ttlEligible > 0) {
+    database
+      .query(
+        "DELETE FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND created_at < ?",
+      )
+      .run(pid, cutoff);
+  }
+  const ttlDeleted = ttlEligible;
+
+  // Pass 2: Size cap — check if total storage for this project exceeds the
+  // limit and if so, evict the oldest distilled messages until under the cap.
+  const maxBytes = input.maxStorageMB * 1024 * 1024;
+  const totalBytes = (
+    database
+      .query("SELECT SUM(LENGTH(content)) as b FROM temporal_messages WHERE project_id = ?")
+      .get(pid) as { b: number | null }
+  ).b ?? 0;
+
+  let capDeleted = 0;
+  if (totalBytes > maxBytes) {
+    // Collect oldest distilled messages until we've accounted for enough bytes
+    // to drop below the cap. Delete them in a single batch.
+    const candidates = database
+      .query(
+        "SELECT id, LENGTH(content) as size FROM temporal_messages WHERE project_id = ? AND distilled = 1 ORDER BY created_at ASC",
+      )
+      .all(pid) as { id: string; size: number }[];
+
+    const toDelete: string[] = [];
+    let freed = 0;
+    const excess = totalBytes - maxBytes;
+    for (const row of candidates) {
+      if (freed >= excess) break;
+      toDelete.push(row.id);
+      freed += row.size;
+    }
+
+    if (toDelete.length) {
+      const placeholders = toDelete.map(() => "?").join(",");
+      database
+        .query(
+          `DELETE FROM temporal_messages WHERE id IN (${placeholders})`,
+        )
+        .run(...toDelete);
+      // toDelete.length is the accurate count — result.changes is inflated by FTS triggers.
+      capDeleted = toDelete.length;
+    }
+  }
+
+  return { ttlDeleted, capDeleted };
+}

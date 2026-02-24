@@ -204,7 +204,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         if (!activeSessions.has(sessionID)) return;
 
         // Run background distillation for any remaining undistilled messages
-        backgroundDistill(sessionID);
+        await backgroundDistill(sessionID);
 
         // Run curator periodically
         const cfg = config();
@@ -212,8 +212,27 @@ export const LorePlugin: Plugin = async (ctx) => {
           cfg.curator.onIdle ||
           turnsSinceCuration >= cfg.curator.afterTurns
         ) {
-          backgroundCurate(sessionID);
+          await backgroundCurate(sessionID);
           turnsSinceCuration = 0;
+        }
+
+        // Prune temporal messages after distillation and curation have run.
+        // Pass 1: TTL — remove distilled messages older than retention period.
+        // Pass 2: Size cap — evict oldest distilled messages if over the limit.
+        // Undistilled messages are never touched.
+        try {
+          const { ttlDeleted, capDeleted } = temporal.prune({
+            projectPath,
+            retentionDays: cfg.pruning.retention,
+            maxStorageMB: cfg.pruning.maxStorage,
+          });
+          if (ttlDeleted > 0 || capDeleted > 0) {
+            console.error(
+              `[lore] pruned temporal messages: ${ttlDeleted} by TTL, ${capDeleted} by size cap`,
+            );
+          }
+        } catch (e) {
+          console.error("[lore] pruning error:", e);
         }
       }
     },
