@@ -618,6 +618,137 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
 });
 
 // ---------------------------------------------------------------------------
+// Trailing-message-drop safety: tool-bearing steps must survive compression
+// (index.ts fix: only drop pure-text trailing assistant messages, not tool ones)
+// ---------------------------------------------------------------------------
+
+// Helper: make an assistant step that has a completed tool call.
+// These steps MUST NOT be dropped by index.ts's trailing-message-drop loop
+// because their tool parts produce user-role tool_result messages at the
+// Anthropic API level — so the conversation already ends with a user message.
+function makeStepWithTool(
+  id: string,
+  parentUserID: string,
+  toolName: string,
+  toolOutput: string,
+  sessionID = "grad-sess",
+): { info: Message; parts: Part[] } {
+  const info: Message = {
+    id,
+    sessionID,
+    role: "assistant",
+    time: { created: Date.now() },
+    parentID: parentUserID,
+    modelID: "claude-sonnet-4-20250514",
+    providerID: "anthropic",
+    mode: "build",
+    path: { cwd: "/test", root: "/test" },
+    cost: 0,
+    tokens: {
+      input: 100,
+      output: 50,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    },
+  };
+  return {
+    info,
+    parts: [
+      {
+        id: `step-start-${id}`,
+        sessionID,
+        messageID: id,
+        type: "step-start",
+      } as Part,
+      {
+        id: `tool-${id}`,
+        sessionID,
+        messageID: id,
+        type: "tool",
+        callID: `call-${id}`,
+        tool: toolName,
+        state: {
+          status: "completed",
+          title: toolName,
+          input: { command: "ls" },
+          output: toolOutput,
+          metadata: {},
+          time: { start: Date.now(), end: Date.now() },
+        },
+      } as unknown as Part,
+      {
+        id: `step-finish-${id}`,
+        sessionID,
+        messageID: id,
+        type: "step-finish",
+        reason: "tool_use",
+        cost: 0,
+        tokens: { input: 50, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
+      } as unknown as Part,
+    ],
+  };
+}
+
+describe("gradient — tool-bearing steps survive compression (index.ts trailing-drop fix)", () => {
+  const SESSION = "tool-drop-sess";
+
+  beforeEach(() => {
+    resetCalibration();
+    resetPrefixCache();
+    resetRawWindowCache();
+    setModelLimits({ context: 5_000, output: 1_000 });
+    calibrate(0, 0);
+    ensureProject(PROJECT);
+  });
+
+  test("gradient output includes tool-bearing agentic steps (not dropped by tryFit)", () => {
+    // Old messages: 40 × 400 chars — forces gradient mode
+    const oldMsgs = Array.from({ length: 40 }, (_, i) =>
+      makeMsg(`td-old-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(400), SESSION),
+    );
+    // Current turn: user + 5 tool-bearing steps
+    const currentUser = makeMsg("td-user", "user", "run the build", SESSION);
+    const steps = Array.from({ length: 5 }, (_, i) =>
+      makeStepWithTool(`td-step-${i}`, "td-user", "bash", "output ".repeat(30) + i, SESSION),
+    );
+    const messages = [...oldMsgs, currentUser, ...steps];
+
+    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+
+    // Must be in gradient mode
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+
+    // All 5 tool-bearing steps must appear in gradient output.
+    // If they're present here, index.ts's new 'hasToolParts' check preserves
+    // them (tool parts → tool_result at API level → no prefill error).
+    const ids = result.messages.map((m) => m.info.id);
+    for (let i = 0; i < 5; i++) {
+      expect(ids).toContain(`td-step-${i}`);
+    }
+  });
+
+  test("tool-bearing trailing steps have tool parts in the gradient output", () => {
+    // Verify the step messages in gradient output actually carry their tool parts
+    // (not stripped), so index.ts can inspect them for the hasToolParts check.
+    const oldMsgs = Array.from({ length: 40 }, (_, i) =>
+      makeMsg(`tp-old-${i}`, i % 2 === 0 ? "user" : "assistant", "Y".repeat(400), SESSION),
+    );
+    const currentUser = makeMsg("tp-user", "user", "do work", SESSION);
+    const lastStep = makeStepWithTool("tp-step-last", "tp-user", "bash", "final output", SESSION);
+    const messages = [...oldMsgs, currentUser, lastStep];
+
+    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+
+    // The last step in the gradient output should retain its tool part
+    const lastInResult = result.messages[result.messages.length - 1]!;
+    expect(lastInResult.info.id).toBe("tp-step-last");
+    const toolParts = lastInResult.parts.filter((p) => p.type === "tool");
+    expect(toolParts.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Calibration oscillation fix (Options C + B)
 // ---------------------------------------------------------------------------
 

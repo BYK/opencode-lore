@@ -395,28 +395,31 @@ export const LorePlugin: Plugin = async (ctx) => {
       // so the append-only sequence stays intact for prompt caching.
       if (result.layer > 0) {
         // The API requires the conversation to end with a user message.
-        // Drop trailing non-user messages, but stop if we hit an assistant message
-        // with an in-progress (non-completed) tool call — dropping it would cause
-        // the model to lose its pending tool invocation and re-issue it in an
-        // infinite loop. A completed tool part is safe to drop; a pending one is not.
+        // Drop trailing pure-text assistant messages (no tool parts), which would
+        // cause an Anthropic "does not support assistant message prefill" error.
+        //
+        // Crucially, assistant messages that contain tool parts (completed OR pending)
+        // must NOT be dropped:
+        // - Completed tool parts: OpenCode's SDK converts these into tool_result blocks
+        //   sent as user-role messages at the API level. The conversation already ends
+        //   with a user message — dropping would strip the entire current agentic turn
+        //   and cause an infinite tool-call loop (the model restarts from scratch).
+        // - Pending tool parts: the tool call hasn't returned yet; dropping would make
+        //   the model re-issue the same tool call on the next turn.
         while (
           result.messages.length > 0 &&
           result.messages.at(-1)!.info.role !== "user"
         ) {
           const last = result.messages.at(-1)!;
-          const hasPendingTool = last.parts.some(
-            (p) => p.type === "tool" && p.state.status !== "completed",
-          );
-          if (hasPendingTool) {
-            console.error(
-              "[lore] WARN: cannot drop trailing assistant message with pending tool call — may cause prefill error. id:",
-              last.info.id,
-            );
+          const hasToolParts = last.parts.some((p) => p.type === "tool");
+          if (hasToolParts) {
+            // Tool parts → tool_result (user-role) at the API level → no prefill error.
+            // Stop dropping; the conversation ends correctly as-is.
             break;
           }
           const dropped = result.messages.pop()!;
           console.error(
-            "[lore] WARN: dropping trailing",
+            "[lore] WARN: dropping trailing pure-text",
             dropped.info.role,
             "message to prevent prefill error. id:",
             dropped.info.id,
