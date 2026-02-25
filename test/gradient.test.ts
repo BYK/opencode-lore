@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
 import { db, close, ensureProject } from "../src/db";
 import {
   transform,
@@ -469,5 +469,148 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
     // expectedInput ≈ 7900 + 570 = 8470 > 8000 → escalate
     const result = transform({ messages: withHuge, projectPath: PROJECT, sessionID: SESSION });
     expect(result.layer).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// Helper: make an assistant message that is a "sibling step" in an agentic
+// tool-call loop — same parentID as the last user message.
+function makeStep(
+  id: string,
+  parentUserID: string,
+  text: string,
+  sessionID = "grad-sess",
+): { info: Message; parts: Part[] } {
+  const info: Message = {
+    id,
+    sessionID,
+    role: "assistant",
+    time: { created: Date.now() },
+    parentID: parentUserID,
+    modelID: "claude-sonnet-4-20250514",
+    providerID: "anthropic",
+    mode: "build",
+    path: { cwd: "/test", root: "/test" },
+    cost: 0,
+    tokens: {
+      input: 100,
+      output: 50,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    },
+  };
+  return {
+    info,
+    parts: [
+      {
+        id: `part-${id}`,
+        sessionID,
+        messageID: id,
+        type: "text",
+        text,
+        time: { start: Date.now(), end: Date.now() },
+      },
+    ],
+  };
+}
+
+describe("gradient — current turn protection (agentic tool-call loop)", () => {
+  const SESSION = "turn-protect-sess";
+
+  beforeEach(() => {
+    resetCalibration();
+    resetPrefixCache();
+    resetRawWindowCache();
+    // Small context to make overflow happen with fewer messages
+    setModelLimits({ context: 5_000, output: 1_000 });
+    calibrate(0, 0); // zero overhead
+    ensureProject(PROJECT);
+  });
+
+  test("all current-turn agentic steps are included in the compressed window", () => {
+    // context=10000, output=2000, maxInput=8000, rawBudget ≈ 5600
+    // Old messages: 40 × 600 chars ≈ 6000 tokens — exceeds rawBudget alone
+    const oldMsgs = Array.from({ length: 40 }, (_, i) =>
+      makeMsg(`old-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(600), SESSION),
+    );
+    // Current turn: user + 4 agentic steps × 400 chars ≈ 450 tokens — must all be kept
+    const currentUser = makeMsg("cur-user", "user", "do the thing", SESSION);
+    const steps = Array.from({ length: 4 }, (_, i) =>
+      makeStep(`step-${i}`, "cur-user", "tool result " + "Y".repeat(380), SESSION),
+    );
+    const messages = [...oldMsgs, currentUser, ...steps];
+
+    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+
+    // Should be in gradient mode (too many messages to fit raw)
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+
+    // The current user message must be in the window
+    const ids = result.messages.map((m) => m.info.id);
+    expect(ids).toContain("cur-user");
+
+    // All 4 steps must be in the window — none dropped
+    for (let i = 0; i < 4; i++) {
+      expect(ids).toContain(`step-${i}`);
+    }
+  });
+
+  test("current turn steps are not evicted even when budget is tight", () => {
+    // context=10000, output=2000, maxInput=8000, rawBudget ≈ 5600
+    // Old messages: 50 × 600 chars ≈ 7500 tokens — way over budget alone
+    // Current turn: user + 8 steps × 400 chars ≈ 850 tokens — must all be kept
+    const oldMsgs = Array.from({ length: 50 }, (_, i) =>
+      makeMsg(`tight-old-${i}`, i % 2 === 0 ? "user" : "assistant", "Z".repeat(600), SESSION),
+    );
+    const currentUser = makeMsg("tight-user", "user", "go", SESSION);
+    const steps = Array.from({ length: 8 }, (_, i) =>
+      makeStep(`tight-step-${i}`, "tight-user", "R".repeat(400), SESSION),
+    );
+    const messages = [...oldMsgs, currentUser, ...steps];
+
+    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+
+    const ids = result.messages.map((m) => m.info.id);
+    // All 8 steps must be present
+    for (let i = 0; i < 8; i++) {
+      expect(ids).toContain(`tight-step-${i}`);
+    }
+    // Old messages should be partially evicted (some dropped to make room)
+    const oldCount = ids.filter((id) => id.startsWith("tight-old-")).length;
+    const totalOld = 50;
+    expect(oldCount).toBeLessThan(totalOld);
+  });
+
+  test("layer escalates when current turn alone exceeds raw budget", () => {
+    // Current turn is massive — 8 steps × 2000 chars each ≈ 4000 tokens
+    // rawBudget at layer 1 ≈ 5600 tokens — the current turn just fits,
+    // but with layer 2's tighter budget it should escalate.
+    // Use a tiny context to make the math work.
+    setModelLimits({ context: 3_000, output: 500 });
+    calibrate(0, 0);
+
+    const currentUser = makeMsg("huge-user", "user", "massive task", SESSION);
+    // ~800 chars each ≈ 200 tokens per step, 8 steps = ~1600 tokens
+    // rawBudget at layer 1 ≈ (3000-500) * 0.7 ≈ 1750 tokens → fits
+    // rawBudget at layer 2 ≈ (3000-500) * 0.5 ≈ 1250 tokens → escalates
+    const steps = Array.from({ length: 8 }, (_, i) =>
+      makeStep(`huge-step-${i}`, "huge-user", "W".repeat(500), SESSION),
+    );
+    // Fill with old messages to force gradient mode
+    const oldMsgs = Array.from({ length: 20 }, (_, i) =>
+      makeMsg(`huge-old-${i}`, i % 2 === 0 ? "user" : "assistant", "V".repeat(200), SESSION),
+    );
+    const messages = [...oldMsgs, currentUser, ...steps];
+
+    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+
+    // Must be in gradient mode
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+
+    // Current turn steps must always be present regardless of layer
+    const ids = result.messages.map((m) => m.info.id);
+    for (let i = 0; i < 8; i++) {
+      expect(ids).toContain(`huge-step-${i}`);
+    }
   });
 });

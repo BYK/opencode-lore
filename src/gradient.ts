@@ -926,6 +926,23 @@ export function estimateMessages(messages: MessageWithParts[]): number {
   return messages.reduce((sum, m) => sum + estimateMessage(m), 0);
 }
 
+// Identify the current agentic turn: the last user message plus all subsequent
+// assistant messages that share its ID as parentID. These messages form an atomic
+// unit — the model must see all of them or it will lose track of its own prior
+// tool calls and re-issue them in an infinite loop.
+function currentTurnStart(messages: MessageWithParts[]): number {
+  // Find the last user message
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].info.role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx === -1) return 0; // no user message — treat all as current turn
+  return lastUserIdx;
+}
+
 function tryFit(input: {
   messages: MessageWithParts[];
   prefix: MessageWithParts[];
@@ -939,32 +956,49 @@ function tryFit(input: {
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
 
-  // Walk backwards through messages, accumulating tokens within raw budget
-  let rawTokens = 0;
-  let cutoff = input.messages.length;
-  const protectedTurns = input.protectedTurns ?? 0;
-  let turns = 0;
+  // Identify the current turn (last user message + all following assistant messages).
+  // These are always included — they must never be evicted. If they alone exceed the
+  // raw budget, escalate to the next layer (which strips tool outputs to reduce size).
+  const turnStart = currentTurnStart(input.messages);
+  const currentTurn = input.messages.slice(turnStart);
+  const currentTurnTokens = currentTurn.reduce((s, m) => s + estimateMessage(m), 0);
 
-  for (let i = input.messages.length - 1; i >= 0; i--) {
-    const msg = input.messages[i];
-    if (msg.info.role === "user") turns++;
+  if (currentTurnTokens > input.rawBudget) {
+    // Current turn alone exceeds budget — can't fit even with everything else dropped.
+    // Signal failure so the caller escalates to the next layer (tool-output stripping).
+    return null;
+  }
+
+  // Walk backwards through older messages (before the current turn),
+  // filling the remaining budget after reserving space for the current turn.
+  const olderMessages = input.messages.slice(0, turnStart);
+  const remainingBudget = input.rawBudget - currentTurnTokens;
+  let olderTokens = 0;
+  let cutoff = olderMessages.length; // default: include none of the older messages
+  const protectedTurns = input.protectedTurns ?? 0;
+
+  for (let i = olderMessages.length - 1; i >= 0; i--) {
+    const msg = olderMessages[i];
     const tokens = estimateMessage(msg);
-    if (rawTokens + tokens > input.rawBudget) {
+    if (olderTokens + tokens > remainingBudget) {
       cutoff = i + 1;
       break;
     }
-    rawTokens += tokens;
+    olderTokens += tokens;
     if (i === 0) cutoff = 0;
   }
 
-  const raw = input.messages.slice(cutoff);
-  // Must keep at least 1 raw message — otherwise this layer fails
-  if (!raw.length) return null;
+  const rawMessages = [...olderMessages.slice(cutoff), ...currentTurn];
+  const rawTokens = olderTokens + currentTurnTokens;
 
-  // Apply system-reminder stripping + optional tool output stripping
-  const processed = raw.map((msg, idx) => {
-    const fromEnd = raw.length - idx;
+  // Apply system-reminder stripping + optional tool output stripping.
+  // The current turn (end of rawMessages) is always "protected" — never stripped.
+  const currentTurnSet = new Set(currentTurn.map((m) => m.info.id));
+  const processed = rawMessages.map((msg, idx) => {
+    const fromEnd = rawMessages.length - idx;
+    const isCurrentTurn = currentTurnSet.has(msg.info.id);
     const isProtected =
+      isCurrentTurn ||
       input.strip === "none" ||
       (input.strip === "old-tools" && fromEnd <= protectedTurns * 2);
     const parts = isProtected
