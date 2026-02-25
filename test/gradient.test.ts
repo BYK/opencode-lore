@@ -11,6 +11,8 @@ import {
   resetPrefixCache,
   resetRawWindowCache,
   setForceMinLayer,
+  getLastLayer,
+  estimateMessages,
 } from "../src/gradient";
 import type { Message, Part } from "@opencode-ai/sdk";
 
@@ -409,7 +411,7 @@ describe("gradient — force escalation (reactive error recovery)", () => {
 describe("gradient — exact token tracking (proactive layer 0)", () => {
   const SESSION = "exact-tok-sess";
 
-  beforeAll(() => {
+  beforeEach(() => {
     setModelLimits({ context: 10_000, output: 2_000 });
     resetCalibration();
     resetPrefixCache();
@@ -612,5 +614,120 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
     for (let i = 0; i < 8; i++) {
       expect(ids).toContain(`huge-step-${i}`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Calibration oscillation fix (Options C + B)
+// ---------------------------------------------------------------------------
+
+describe("gradient — calibration oscillation fix", () => {
+  const SESSION = "osc-sess";
+
+  beforeEach(() => {
+    resetCalibration();
+    resetPrefixCache();
+    resetRawWindowCache();
+    // Context: 10K, output: 2K → usable 8K, rawBudget ~3200, maxInput 8000
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0, 0);
+  });
+
+  test("sticky layer: does not oscillate between layer 0 and layer 1 on consecutive steps", () => {
+    // Build a session that is too large for layer 0.
+    // 60 messages × 600 chars ≈ 60 × 150 tokens = 9000 tokens > maxInput (8000).
+    // maxInput = 10000 - 2000 = 8000. The full session exceeds maxInput,
+    // so gradient must activate.
+    const msgs = Array.from({ length: 60 }, (_, i) =>
+      makeMsg(`osc-${i}`, i % 2 === 0 ? "user" : "assistant", "A".repeat(600), SESSION),
+    );
+    // Add final user message to make it a proper conversation end
+    msgs.push(makeMsg("osc-user-final", "user", "next step", SESSION));
+
+    // First transform: should compress (layer >= 1)
+    const r1 = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+
+    // Simulate calibration: model saw the compressed window
+    const compressedCount = r1.messages.length;
+    const actualInput = estimateMessages(r1.messages); // approximate actual tokens
+    calibrate(actualInput, actualInput, SESSION, compressedCount);
+
+    // Add one more message (one agentic step)
+    const msgs2 = [...msgs, makeMsg("osc-step-1", "assistant", "working on it", SESSION)];
+
+    // Second transform: sticky layer guard must prevent layer 0
+    const r2 = transform({ messages: msgs2, projectPath: PROJECT, sessionID: SESSION });
+    expect(r2.layer).toBeGreaterThanOrEqual(1);
+    expect(getLastLayer()).toBeGreaterThanOrEqual(1);
+  });
+
+  test("sticky layer: allows layer 0 re-entry after compaction shrinks message count", () => {
+    // Same setup: force gradient mode (60 × 600 chars ≈ 9000 tokens > maxInput 8000)
+    const msgs = Array.from({ length: 60 }, (_, i) =>
+      makeMsg(`comp-${i}`, i % 2 === 0 ? "user" : "assistant", "B".repeat(600), SESSION),
+    );
+    msgs.push(makeMsg("comp-user-final", "user", "compact", SESSION));
+
+    const r1 = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+
+    // Calibrate from the compressed result
+    const compressedCount = r1.messages.length;
+    calibrate(estimateMessages(r1.messages), estimateMessages(r1.messages), SESSION, compressedCount);
+
+    // Simulate compaction: session now has only 3 messages (much smaller than lastKnownMessageCount)
+    const postCompaction = [
+      makeMsg("post-1", "user", "fresh start", SESSION),
+      makeMsg("post-2", "assistant", "ready", SESSION),
+      makeMsg("post-3", "user", "go", SESSION),
+    ];
+
+    // With fewer messages than lastKnownMessageCount, sticky guard is bypassed
+    const r2 = transform({ messages: postCompaction, projectPath: PROJECT, sessionID: SESSION });
+    // Should be layer 0 — 3 tiny messages easily fit
+    expect(r2.layer).toBe(0);
+  });
+
+  test("ID-based delta: accurately counts new messages after compression", () => {
+    // Build a large session (60 × 600 chars ≈ 9000 tokens > maxInput 8000)
+    const msgs = Array.from({ length: 60 }, (_, i) =>
+      makeMsg(`id-${i}`, i % 2 === 0 ? "user" : "assistant", "C".repeat(600), SESSION),
+    );
+    msgs.push(makeMsg("id-user-end", "user", "step", SESSION));
+
+    const r1 = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+
+    // Calibrate with the compressed window count
+    const compressedCount = r1.messages.length;
+    const actualInput = estimateMessages(r1.messages);
+    calibrate(actualInput, actualInput, SESSION, compressedCount);
+
+    // Add one truly new message
+    const newMsg = makeMsg("id-new-step", "assistant", "new work: " + "D".repeat(100), SESSION);
+    const msgs2 = [...msgs, newMsg];
+
+    // The delta should only include the one new message (id-new-step),
+    // not the ~50 evicted messages. Sticky guard keeps us at layer >= 1,
+    // so we don't oscillate to a passthrough that would send 300K tokens.
+    const r2 = transform({ messages: msgs2, projectPath: PROJECT, sessionID: SESSION });
+    expect(r2.layer).toBeGreaterThanOrEqual(1);
+
+    // The new message must be in the output
+    const ids2 = r2.messages.map((m) => m.info.id);
+    expect(ids2).toContain("id-new-step");
+  });
+
+  test("layer 0 still works for genuinely small sessions", () => {
+    // A fresh small session should always use layer 0 with no interference
+    const msgs = [
+      makeMsg("small-1", "user", "hello", SESSION),
+      makeMsg("small-2", "assistant", "hi", SESSION),
+      makeMsg("small-3", "user", "how are you", SESSION),
+    ];
+    const r = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    expect(r.layer).toBe(0);
+    expect(r.messages).toBe(msgs); // same reference — truly untouched
   });
 });

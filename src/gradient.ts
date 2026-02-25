@@ -63,6 +63,26 @@ export function getLastTransformedCount(): number {
   return lastTransformedCount;
 }
 
+/** Returns the layer used by the most recent transform() call. For testing. */
+export function getLastLayer(): SafetyLayer {
+  return lastLayer;
+}
+
+// The layer used by the most recent transform() call.
+// Used for the sticky-layer guard: once gradient mode activates (layer >= 1),
+// we don't allow fallback to layer 0 until the session genuinely shrinks
+// (e.g. after compaction). This prevents the calibration oscillation where a
+// compressed turn records 100K + 50-msg count, and the next turn's delta
+// estimation treats 250 evicted messages as "new", undercounts their tokens
+// via chars/4, and incorrectly concludes layer 0 passes.
+let lastLayer: SafetyLayer = 0;
+
+// The set of message IDs included in the most recent transform() output.
+// Used for accurate delta estimation: instead of counting messages by index
+// (which breaks after compression changes the window), we identify exactly
+// which messages are genuinely new since the last window.
+let lastWindowMessageIDs: Set<string> = new Set();
+
 // --- Force escalation ---
 // Set when the API returns "prompt is too long" — forces the transform to skip
 // layer 0 (and optionally layer 1) on the next call to ensure the context is
@@ -153,6 +173,8 @@ export function resetCalibration() {
   lastKnownMessageCount = 0;
   lastTransformedCount = 0;
   forceMinLayer = 0;
+  lastLayer = 0;
+  lastWindowMessageIDs = new Set();
 }
 
 type Distillation = {
@@ -724,7 +746,7 @@ function transformInner(input: {
   // When the API previously rejected with "prompt is too long", skip layers
   // below the forced minimum to ensure enough trimming on the next attempt.
   // One-shot: consumed here and reset to 0.
-  const effectiveMinLayer = forceMinLayer;
+  let effectiveMinLayer = forceMinLayer;
   forceMinLayer = 0;
 
   // --- Approach A: Cache-preserving passthrough ---
@@ -754,13 +776,29 @@ function transformInner(input: {
     return result.totalTokens * UNCALIBRATED_SAFETY <= maxInput;
   }
 
+  // --- Sticky layer guard (Option C) ---
+  // After a compressed turn (layer >= 1), don't allow layer 0 re-entry until
+  // the session genuinely shrinks (e.g. after compaction deletes messages).
+  // Prevents the calibration oscillation: a compressed turn stores
+  // lastKnownInput=100K for a 50-message window, but the next turn's
+  // input.messages has 300 raw messages. The delta estimation treats the 250
+  // evicted messages as "new" and undercounts them via chars/4, producing an
+  // expectedInput that fits in layer 0 — but the actual tokens are ~190K.
+  // Only applied when calibrated (same session) to avoid affecting other sessions.
+  if (calibrated && lastLayer >= 1 && input.messages.length >= lastKnownMessageCount) {
+    effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
+  }
+
   let expectedInput: number;
   if (calibrated) {
-    // Exact approach: prior API count + estimate of only the new messages.
-    const newMsgCount = Math.max(0, input.messages.length - lastKnownMessageCount);
-    const newMsgTokens = newMsgCount > 0
-      ? input.messages.slice(-newMsgCount).reduce((s, m) => s + estimateMessage(m), 0)
-      : 0;
+    // Exact approach: prior API count + estimate of only genuinely new messages.
+    // Use message ID tracking (Option B) to identify new messages accurately.
+    // After compression, the "last window" is a subset of the full message array —
+    // counting by index would treat evicted messages as new (off-by-250 error).
+    const newMessages = lastWindowMessageIDs.size > 0
+      ? input.messages.filter((m) => !lastWindowMessageIDs.has(m.info.id))
+      : input.messages.slice(-Math.max(0, input.messages.length - lastKnownMessageCount));
+    const newMsgTokens = newMessages.reduce((s, m) => s + estimateMessage(m), 0);
     const ltmDelta = ltmTokens - lastKnownLtm;
     expectedInput = lastKnownInput + newMsgTokens + ltmDelta;
   } else {
@@ -918,6 +956,8 @@ export function transform(input: {
 }): TransformResult {
   const result = transformInner(input);
   lastTransformedCount = result.messages.length;
+  lastLayer = result.layer;
+  lastWindowMessageIDs = new Set(result.messages.map((m) => m.info.id));
   return result;
 }
 
