@@ -135,19 +135,72 @@ export function forProject(
     .all(pid) as KnowledgeEntry[];
 }
 
+type Scored = { entry: KnowledgeEntry; score: number };
+
+/** Max entries per pool to include on first turn when no session context exists. */
+const NO_CONTEXT_FALLBACK_CAP = 10;
+
+/** Number of top-confidence project entries always included as a safety net,
+ *  even when they don't match any session context terms. This guards against
+ *  the coarse term-overlap scoring accidentally excluding important project
+ *  knowledge. */
+const PROJECT_SAFETY_NET = 5;
+
+/**
+ * Score entries by term overlap with session context.
+ * Returns score = (fraction of topTerms matched) * entry.confidence.
+ */
+function scoreEntries(
+  entries: KnowledgeEntry[],
+  topTerms: string[],
+): Scored[] {
+  return entries.map((entry) => {
+    const haystack =
+      (entry.title + " " + entry.content).replace(/[^\w\s]/g, " ").toLowerCase();
+    let hits = 0;
+    for (const term of topTerms) {
+      if (haystack.includes(term)) hits++;
+    }
+    const relevance = topTerms.length > 0 ? hits / topTerms.length : 0;
+    return { entry, score: relevance * entry.confidence };
+  });
+}
+
+/**
+ * Extract the top 30 meaningful terms (>3 chars) from text, sorted by frequency.
+ */
+function extractTopTerms(text: string): string[] {
+  const freq = text
+    .replace(/[^\w\s]/g, " ")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length > 3)
+    .reduce<Map<string, number>>((acc, w) => {
+      acc.set(w, (acc.get(w) ?? 0) + 1);
+      return acc;
+    }, new Map());
+
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 30)
+    .map(([w]) => w);
+}
+
 /**
  * Build a relevance-ranked, budget-capped list of knowledge entries for injection
  * into the system prompt of a live session.
  *
  * Strategy:
- * 1. Project-specific entries (project_id = current project, cross_project = 0)
- *    always get priority — they were curated specifically for this codebase.
- * 2. Cross-project entries are scored for relevance against recent session context
- *    (last distillation + recent raw messages). Only entries that match are included.
- * 3. All candidates are ranked by score * confidence, then greedily packed into
- *    the token budget (smallest-first within same score band to maximize count).
- * 4. If there's no session context yet (first turn), fall back to top entries by
- *    confidence only.
+ * 1. Both project-specific and cross-project entries are scored for relevance
+ *    against recent session context (last distillation + recent raw messages).
+ * 2. Project entries get a safety net: the top PROJECT_SAFETY_NET entries by
+ *    confidence are always included even if they have zero relevance score.
+ *    This ensures the most important project knowledge is never lost to
+ *    coarse term-overlap scoring.
+ * 3. All scored entries are merged into a single pool and greedily packed
+ *    into the token budget by score descending.
+ * 4. If there's no session context yet (first turn), fall back to top entries
+ *    by confidence only (capped at NO_CONTEXT_FALLBACK_CAP per pool).
  *
  * @param projectPath   Current project path
  * @param sessionID     Current session ID (for context extraction)
@@ -160,7 +213,7 @@ export function forSession(
 ): KnowledgeEntry[] {
   const pid = ensureProject(projectPath);
 
-  // --- 1. Load project-specific entries (always relevant) ---
+  // --- 1. Load project-specific entries ---
   const projectEntries = db()
     .query(
       `SELECT * FROM knowledge
@@ -181,7 +234,6 @@ export function forSession(
   if (!crossEntries.length && !projectEntries.length) return [];
 
   // --- 3. Build session context for relevance scoring ---
-  // Combine the most recent distillation text + last ~10 raw messages for this session
   let sessionContext = "";
   if (sessionID) {
     const distRow = db()
@@ -206,79 +258,53 @@ export function forSession(
     }
   }
 
-  // --- 4. Score cross-project entries by relevance ---
-  // Use FTS5 matching: extract terms from session context and score each entry
-  type Scored = { entry: KnowledgeEntry; score: number };
+  // --- 4. Score both pools by relevance ---
+  let scoredProject: Scored[];
   let scoredCross: Scored[];
 
   if (sessionContext.trim().length > 20) {
-    // Build a term set from session context (top 30 meaningful words)
-    const contextTerms = sessionContext
-      .replace(/[^\w\s]/g, " ")
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 3)
-      .reduce<Map<string, number>>((acc, w) => {
-        acc.set(w, (acc.get(w) ?? 0) + 1);
-        return acc;
-      }, new Map());
+    const topTerms = extractTopTerms(sessionContext);
 
-    // Sort by frequency, take top 30 terms
-    const topTerms = [...contextTerms.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 30)
-      .map(([w]) => w);
+    // Score project entries — include matched + safety net of top-N by confidence
+    const rawScored = scoreEntries(projectEntries, topTerms);
+    const matched = rawScored.filter((s) => s.score > 0);
+    const matchedIds = new Set(matched.map((s) => s.entry.id));
 
-    scoredCross = crossEntries.map((entry) => {
-      const haystack =
-        (entry.title + " " + entry.content).replace(/[^\w\s]/g, " ").toLowerCase();
-      let hits = 0;
-      for (const term of topTerms) {
-        // Count how many context terms appear in this entry (simple overlap)
-        if (haystack.includes(term)) hits++;
-      }
-      // Score = fraction of top terms matched, weighted by confidence
-      const relevance = topTerms.length > 0 ? hits / topTerms.length : 0;
-      return { entry, score: relevance * entry.confidence };
-    });
+    // Safety net: top PROJECT_SAFETY_NET entries by confidence that weren't already matched.
+    // Given a tiny score (0.001 * confidence) so they sort below genuinely matched entries.
+    const safetyNet = projectEntries
+      .filter((e) => !matchedIds.has(e.id))
+      .slice(0, PROJECT_SAFETY_NET)
+      .map((e) => ({ entry: e, score: 0.001 * e.confidence }));
 
-    // Only keep entries with at least one term match
-    scoredCross = scoredCross.filter((s) => s.score > 0);
+    scoredProject = [...matched, ...safetyNet];
+
+    // Score cross-project entries — only include entries with at least one term match
+    scoredCross = scoreEntries(crossEntries, topTerms).filter((s) => s.score > 0);
   } else {
-    // No session context yet — take top cross-project entries by confidence
-    scoredCross = crossEntries.slice(0, 10).map((entry) => ({
-      entry,
-      score: entry.confidence,
-    }));
+    // No session context — fall back to top entries by confidence, capped
+    scoredProject = projectEntries
+      .slice(0, NO_CONTEXT_FALLBACK_CAP)
+      .map((entry) => ({ entry, score: entry.confidence }));
+    scoredCross = crossEntries
+      .slice(0, NO_CONTEXT_FALLBACK_CAP)
+      .map((entry) => ({ entry, score: entry.confidence }));
   }
 
-  // Sort cross-project by score desc
-  scoredCross.sort((a, b) => b.score - a.score);
+  // --- 5. Merge and pack into token budget by score descending ---
+  const allScored = [...scoredProject, ...scoredCross];
+  allScored.sort((a, b) => b.score - a.score);
 
-  // --- 5. Pack into token budget ---
-  // Project entries get first pick (fully relevant); cross entries fill remaining budget.
-  // Use a greedy fit: iterate candidates and include if they fit.
-  const HEADER_OVERHEAD_TOKENS = 15; // "## Long-term Knowledge\n"
+  const HEADER_OVERHEAD_TOKENS = 15;
   let used = HEADER_OVERHEAD_TOKENS;
   const result: KnowledgeEntry[] = [];
 
-  function tryAdd(entry: KnowledgeEntry): boolean {
+  for (const { entry } of allScored) {
+    if (used >= maxTokens) break;
     const cost = estimateTokens(entry.title + entry.content) + 10;
-    if (used + cost > maxTokens) return false;
+    if (used + cost > maxTokens) continue;
     result.push(entry);
     used += cost;
-    return true;
-  }
-
-  // Project-specific first
-  for (const entry of projectEntries) {
-    tryAdd(entry);
-  }
-
-  // Then cross-project by relevance score
-  for (const { entry } of scoredCross) {
-    if (used >= maxTokens) break;
-    tryAdd(entry);
   }
 
   return result;
