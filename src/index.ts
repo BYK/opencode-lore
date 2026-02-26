@@ -224,7 +224,7 @@ export const LorePlugin: Plugin = async (ctx) => {
                 // not the total DB count. On layer 0 these are equal. On layers 1-4,
                 // the model only saw the compressed window — calibrate must track that
                 // count so the next turn's delta is computed correctly.
-                calibrate(actualInput, msgEstimate, msg.sessionID, getLastTransformedCount() || withParts.length);
+                calibrate(actualInput, msgEstimate, msg.sessionID, getLastTransformedCount(msg.sessionID) || withParts.length);
               }
             }
           }
@@ -270,7 +270,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           // The gradient at layers 2-4 will compress the context enough for the next turn.
           // Do NOT call session.summarize() here — it sends all messages to the model,
           // which would overflow again and create a stuck compaction loop.
-          setForceMinLayer(2);
+          setForceMinLayer(2, sessionID);
 
           if (sessionID) {
             // Force distillation to capture all undistilled messages into the temporal
@@ -383,6 +383,16 @@ export const LorePlugin: Plugin = async (ctx) => {
       if (!output.messages.length) return;
 
       const sessionID = output.messages[0]?.info.sessionID;
+
+      // Skip gradient transform for lore worker sessions (lore-distill, lore-curator).
+      // Worker sessions are small (typically 5-15 messages) and don't need context
+      // management. More importantly, allowing them through would overwrite the
+      // per-session state for the MAIN session if they happen to share a session ID —
+      // and before per-session state was introduced, module-level variables were
+      // corrupted this way, causing calibration oscillation and layer 0 passthrough
+      // on the main session's next step. Belt-and-suspenders: even with per-session
+      // state, worker sessions waste CPU on transform() for no benefit.
+      if (sessionID && await shouldSkip(sessionID)) return;
 
       const result = transform({
         messages: output.messages,

@@ -371,7 +371,7 @@ describe("gradient — force escalation (reactive error recovery)", () => {
       makeMsg("fe-1", "user", "hello", "force-sess"),
       makeMsg("fe-2", "assistant", "hi", "force-sess"),
     ];
-    setForceMinLayer(2);
+    setForceMinLayer(2, "force-sess");
     const result = transform({ messages, projectPath: PROJECT, sessionID: "force-sess" });
     // Despite tiny messages, force min layer should push to at least layer 2
     expect(result.layer).toBeGreaterThanOrEqual(2);
@@ -385,7 +385,7 @@ describe("gradient — force escalation (reactive error recovery)", () => {
       makeMsg("os-1", "user", "test", "oneshot-sess"),
       makeMsg("os-2", "assistant", "ok", "oneshot-sess"),
     ];
-    setForceMinLayer(1);
+    setForceMinLayer(1, "oneshot-sess");
     // First call consumes the flag
     const r1 = transform({ messages, projectPath: PROJECT, sessionID: "oneshot-sess" });
     expect(r1.layer).toBeGreaterThanOrEqual(1);
@@ -395,7 +395,7 @@ describe("gradient — force escalation (reactive error recovery)", () => {
   });
 
   test("resetCalibration clears forceMinLayer", () => {
-    setForceMinLayer(3);
+    setForceMinLayer(3, "rc-sess");
     resetCalibration();
     calibrate(0, 0); // re-establish zero overhead after reset
     const messages = [
@@ -790,7 +790,7 @@ describe("gradient — calibration oscillation fix", () => {
     // Second transform: sticky layer guard must prevent layer 0
     const r2 = transform({ messages: msgs2, projectPath: PROJECT, sessionID: SESSION });
     expect(r2.layer).toBeGreaterThanOrEqual(1);
-    expect(getLastLayer()).toBeGreaterThanOrEqual(1);
+    expect(getLastLayer(SESSION)).toBeGreaterThanOrEqual(1);
   });
 
   test("sticky layer: allows layer 0 re-entry after compaction shrinks message count", () => {
@@ -860,5 +860,51 @@ describe("gradient — calibration oscillation fix", () => {
     const r = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
     expect(r.layer).toBe(0);
     expect(r.messages).toBe(msgs); // same reference — truly untouched
+  });
+
+  test("worker session transform does NOT reset main session sticky layer guard", () => {
+    // Reproduces the root cause of calibration oscillation:
+    // Before per-session state, a worker session (lore-distill/curator) calling
+    // transform() would set module-level lastLayer=0, which reset the main session's
+    // sticky layer guard. The main session then passed through at layer 0 (175K),
+    // followed by compression at layer 1 (62K), oscillating indefinitely.
+    //
+    // With per-session state, worker transforms are isolated and cannot affect
+    // the main session's state.
+    const MAIN = "osc-sess";        // reuse the SESSION constant
+    const WORKER = "worker-distill-sess";
+
+    // Set up the main session in gradient mode: 60 large messages
+    const mainMsgs = Array.from({ length: 60 }, (_, i) =>
+      makeMsg(`main-${i}`, i % 2 === 0 ? "user" : "assistant", "A".repeat(600), MAIN),
+    );
+    mainMsgs.push(makeMsg("main-user-final", "user", "step 1", MAIN));
+
+    // First main transform: gradient activates (layer >= 1)
+    const r1 = transform({ messages: mainMsgs, projectPath: PROJECT, sessionID: MAIN });
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+
+    // Calibrate main session as compressed
+    const actualInput = estimateMessages(r1.messages);
+    calibrate(actualInput, actualInput, MAIN, r1.messages.length);
+
+    // WORKER SESSION: tiny messages → transform returns layer 0
+    const workerMsgs = [
+      makeMsg("w-1", "user", "distill this", WORKER),
+      makeMsg("w-2", "assistant", "done", WORKER),
+      makeMsg("w-3", "user", "ok", WORKER),
+    ];
+    const workerResult = transform({ messages: workerMsgs, projectPath: PROJECT, sessionID: WORKER });
+    expect(workerResult.layer).toBe(0); // worker is small → layer 0
+
+    // After worker transform, main session state must be unaffected.
+    // The sticky layer guard must still fire for the main session.
+    mainMsgs.push(makeMsg("main-step-2", "assistant", "doing work", MAIN));
+    const r2 = transform({ messages: mainMsgs, projectPath: PROJECT, sessionID: MAIN });
+
+    // Before the fix: worker's layer 0 reset module-level lastLayer=0,
+    // so r2 would be layer 0 passthrough (sending all 175K tokens).
+    // After the fix: per-session state — r2 must stay at layer >= 1.
+    expect(r2.layer).toBeGreaterThanOrEqual(1);
   });
 });

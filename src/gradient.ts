@@ -38,56 +38,68 @@ const FIRST_TURN_OVERHEAD = 15_000;
 
 // Calibrated overhead: actual tokens used minus our message estimate.
 // Null = not yet calibrated (first turn). Updated after every assistant response.
+// Shared across all sessions — this is model-level overhead (system prompt,
+// tool definitions, provider headers) that doesn't vary per session.
 let calibratedOverhead: number | null = null;
 
-// --- Exact token tracking ---
-// Stores the real input token count from the last successful API response.
-// Used for the layer 0 passthrough decision: instead of estimating the full
-// message array with chars/4, we take the exact count from the previous turn
-// and only estimate the small delta (new messages). 99%+ of the count is
-// exact from the API's own tokenizer, virtually eliminating overflow errors.
-let lastKnownInput = 0;
-let lastKnownLtm = 0;
-let lastKnownSessionID: string | null = null;
-let lastKnownMessageCount = 0;
+// ---------------------------------------------------------------------------
+// Per-session state
+//
+// All calibration, layer-tracking, and window-ID state is scoped per session
+// using an in-memory Map. This prevents worker sessions (lore-distill,
+// lore-curator) from corrupting the main session's sticky-layer guard and
+// delta-estimation state when their transform() calls return layer 0.
+//
+// DB persistence is unnecessary: UNCALIBRATED_SAFETY=1.5 safely handles
+// the first turn of a resumed session. The Map is bounded — there are never
+// more than a handful of active sessions at once.
+// ---------------------------------------------------------------------------
 
-// Number of messages in the most recent transform() output — i.e. how many
-// messages were actually sent to the model. On layer 0 this equals the full
-// session length. On layers 1-4 it equals the compressed window size.
-// Calibration must use this count (not the total DB message count) so that
-// the delta on the next turn reflects only messages added since the last
-// compressed window, not since the last DB snapshot.
-let lastTransformedCount = 0;
+type SessionState = {
+  /** Exact input token count from the last successful API response */
+  lastKnownInput: number;
+  /** LTM tokens that were in-flight when lastKnownInput was recorded */
+  lastKnownLtm: number;
+  /** Total messages sent to the model in the last turn (compressed count on layers 1-4) */
+  lastKnownMessageCount: number;
+  /** Number of messages in the most recent transform() output */
+  lastTransformedCount: number;
+  /** Layer used by the most recent transform() call — sticky-layer guard */
+  lastLayer: SafetyLayer;
+  /** Message IDs in the most recent transform() output — ID-based delta estimation */
+  lastWindowMessageIDs: Set<string>;
+  /** One-shot force escalation: skip layers below this on the next transform() */
+  forceMinLayer: SafetyLayer;
+  /** Distilled prefix cache (Approach C) */
+  prefixCache: PrefixCache | null;
+  /** Raw window pin cache (Approach B) */
+  rawWindowCache: RawWindowCache | null;
+};
 
-export function getLastTransformedCount(): number {
-  return lastTransformedCount;
+function makeSessionState(): SessionState {
+  return {
+    lastKnownInput: 0,
+    lastKnownLtm: 0,
+    lastKnownMessageCount: 0,
+    lastTransformedCount: 0,
+    lastLayer: 0,
+    lastWindowMessageIDs: new Set(),
+    forceMinLayer: 0,
+    prefixCache: null,
+    rawWindowCache: null,
+  };
 }
 
-/** Returns the layer used by the most recent transform() call. For testing. */
-export function getLastLayer(): SafetyLayer {
-  return lastLayer;
+const sessionStates = new Map<string, SessionState>();
+
+function getSessionState(sessionID: string): SessionState {
+  let state = sessionStates.get(sessionID);
+  if (!state) {
+    state = makeSessionState();
+    sessionStates.set(sessionID, state);
+  }
+  return state;
 }
-
-// The layer used by the most recent transform() call.
-// Used for the sticky-layer guard: once gradient mode activates (layer >= 1),
-// we don't allow fallback to layer 0 until the session genuinely shrinks
-// (e.g. after compaction). This prevents the calibration oscillation where a
-// compressed turn records 100K + 50-msg count, and the next turn's delta
-// estimation treats 250 evicted messages as "new", undercounts their tokens
-// via chars/4, and incorrectly concludes layer 0 passes.
-let lastLayer: SafetyLayer = 0;
-
-// The set of message IDs included in the most recent transform() output.
-// Used for accurate delta estimation: instead of counting messages by index
-// (which breaks after compression changes the window), we identify exactly
-// which messages are genuinely new since the last window.
-let lastWindowMessageIDs: Set<string> = new Set();
-
-// --- Force escalation ---
-// Set when the API returns "prompt is too long" — forces the transform to skip
-// layer 0 (and optionally layer 1) on the next call to ensure the context is
-// trimmed enough to fit. Cleared after one use (one-shot).
-let forceMinLayer: SafetyLayer = 0;
 
 // LTM tokens injected via system transform hook this turn.
 // Set by setLtmTokens() after the system hook runs; consumed by transform().
@@ -137,18 +149,20 @@ export function calibrate(
   sessionID?: string,
   messageCount?: number,
 ) {
-  // Store exact counts for the proactive layer 0 decision.
-  lastKnownInput = actualInput;
-  lastKnownLtm = ltmTokens;
-  if (sessionID !== undefined) lastKnownSessionID = sessionID;
-  if (messageCount !== undefined) lastKnownMessageCount = messageCount;
-
+  // Update global overhead calibration (shared across sessions — model-level).
   const overhead = Math.max(0, actualInput - messageEstimate);
-  // Smooth with EMA (alpha=0.3) once calibrated, or set directly on first call
   calibratedOverhead =
     calibratedOverhead === null
       ? overhead
       : Math.round(calibratedOverhead * 0.7 + overhead * 0.3);
+
+  // Store per-session exact counts for the proactive layer 0 decision.
+  if (sessionID !== undefined) {
+    const state = getSessionState(sessionID);
+    state.lastKnownInput = actualInput;
+    state.lastKnownLtm = ltmTokens;
+    if (messageCount !== undefined) state.lastKnownMessageCount = messageCount;
+  }
 }
 
 export function getOverhead(): number {
@@ -156,25 +170,45 @@ export function getOverhead(): number {
 }
 
 /**
- * Force the next transform() call to use at least the given layer.
+ * Returns the number of messages in the most recent transform() output for
+ * the given session. Used by calibrate() to track the compressed window size.
+ */
+export function getLastTransformedCount(sessionID: string): number {
+  return sessionStates.get(sessionID)?.lastTransformedCount ?? 0;
+}
+
+/** Returns the layer used by the most recent transform() call. For testing. */
+export function getLastLayer(sessionID?: string): SafetyLayer {
+  if (sessionID) return sessionStates.get(sessionID)?.lastLayer ?? 0;
+  // Fallback for tests: return from the first (and usually only) session state
+  const first = sessionStates.values().next().value;
+  return first?.lastLayer ?? 0;
+}
+
+/**
+ * Force the next transform() call for this session to use at least the given layer.
  * Called when the API returns "prompt is too long" so the next attempt
  * trims the context enough to fit within the model's context window.
  */
-export function setForceMinLayer(layer: SafetyLayer) {
-  forceMinLayer = layer;
+export function setForceMinLayer(layer: SafetyLayer, sessionID?: string) {
+  if (sessionID) {
+    getSessionState(sessionID).forceMinLayer = layer;
+  } else {
+    // Fallback for tests / callers without session ID: set on all active sessions
+    for (const state of sessionStates.values()) {
+      state.forceMinLayer = layer;
+    }
+  }
 }
 
 // For testing only — reset all calibration and force-escalation state
-export function resetCalibration() {
+export function resetCalibration(sessionID?: string) {
   calibratedOverhead = null;
-  lastKnownInput = 0;
-  lastKnownLtm = 0;
-  lastKnownSessionID = null;
-  lastKnownMessageCount = 0;
-  lastTransformedCount = 0;
-  forceMinLayer = 0;
-  lastLayer = 0;
-  lastWindowMessageIDs = new Set();
+  if (sessionID) {
+    sessionStates.delete(sessionID);
+  } else {
+    sessionStates.clear();
+  }
 }
 
 type Distillation = {
@@ -496,28 +530,29 @@ type PrefixCache = {
   prefixTokens: number;
 };
 
-let prefixCache: PrefixCache | null = null;
-
 /**
  * Return the distilled prefix messages, reusing cached content when possible.
+ * Uses per-session state from sessState.prefixCache (no module-level cache).
  *
  * Cache hit  — no new rows: returns the exact same prefixMessages object
  *              (byte-identical content, prompt cache preserved).
  * Cache miss — new rows appended: renders only the delta, appends to cached
  *              text, updates cache.
- * Full reset — session changed, or rows were rewritten by meta-distillation:
+ * Full reset — first call, or rows were rewritten by meta-distillation:
  *              renders everything from scratch.
  */
 function distilledPrefixCached(
   distillations: Distillation[],
   sessionID: string,
+  sessState: SessionState,
 ): { messages: MessageWithParts[]; tokens: number } {
   if (!distillations.length) {
-    prefixCache = null;
+    sessState.prefixCache = null;
     return { messages: [], tokens: 0 };
   }
 
   const lastRow = distillations[distillations.length - 1];
+  const prefixCache = sessState.prefixCache;
 
   // Cache is valid when: same session, row count only grew (no rewrites),
   // and the last previously-cached row still exists at the same position.
@@ -551,7 +586,7 @@ function distilledPrefixCached(
       const fullText = prefixCache!.cachedText + "\n\n" + deltaText;
       const messages = buildPrefixMessages(fullText);
       const tokens = messages.reduce((sum, m) => sum + estimateMessage(m), 0);
-      prefixCache = {
+      sessState.prefixCache = {
         sessionID,
         lastDistillationID: lastRow.id,
         rowCount: distillations.length,
@@ -563,7 +598,7 @@ function distilledPrefixCached(
     }
   }
 
-  // Full re-render: first call, session change, or meta-distillation rewrote rows
+  // Full re-render: first call or meta-distillation rewrote rows
   const now = new Date();
   const annotated = distillations.map((d) => ({
     ...d,
@@ -571,13 +606,13 @@ function distilledPrefixCached(
   }));
   const fullText = formatDistillations(annotated);
   if (!fullText) {
-    prefixCache = null;
+    sessState.prefixCache = null;
     return { messages: [], tokens: 0 };
   }
 
   const messages = buildPrefixMessages(fullText);
   const tokens = messages.reduce((sum, m) => sum + estimateMessage(m), 0);
-  prefixCache = {
+  sessState.prefixCache = {
     sessionID,
     lastDistillationID: lastRow.id,
     rowCount: distillations.length,
@@ -588,9 +623,14 @@ function distilledPrefixCached(
   return { messages, tokens };
 }
 
-// For testing only — reset prefix cache state
-export function resetPrefixCache() {
-  prefixCache = null;
+// For testing only — reset prefix cache state for a specific session (or all)
+export function resetPrefixCache(sessionID?: string) {
+  if (sessionID) {
+    const state = sessionStates.get(sessionID);
+    if (state) state.prefixCache = null;
+  } else {
+    for (const state of sessionStates.values()) state.prefixCache = null;
+  }
 }
 
 // --- Approach B: Lazy raw window eviction ---
@@ -616,14 +656,19 @@ type RawWindowCache = {
   firstMessageID: string;
 };
 
-let rawWindowCache: RawWindowCache | null = null;
-
-export function resetRawWindowCache() {
-  rawWindowCache = null;
+// For testing only — reset raw window cache state for a specific session (or all)
+export function resetRawWindowCache(sessionID?: string) {
+  if (sessionID) {
+    const state = sessionStates.get(sessionID);
+    if (state) state.rawWindowCache = null;
+  } else {
+    for (const state of sessionStates.values()) state.rawWindowCache = null;
+  }
 }
 
 /**
  * Layer-1 tryFit with lazy eviction.
+ * Uses per-session rawWindowCache from sessState (no module-level cache).
  *
  * Attempts to reuse the previous raw window cutoff before falling back to a
  * full backward scan. If the pinned window fits, returns it unchanged (same
@@ -638,11 +683,13 @@ function tryFitStable(input: {
   distilledBudget: number;
   rawBudget: number;
   sessionID: string;
+  sessState: SessionState;
 }): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget"> | null {
   // If the prefix already overflows its budget there's no point trying.
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
 
+  const rawWindowCache = input.sessState.rawWindowCache;
   const cacheValid =
     rawWindowCache !== null && rawWindowCache.sessionID === input.sessionID;
 
@@ -694,7 +741,7 @@ function tryFitStable(input: {
     // raw message in the new window. Pin to its ID for the next turn.
     const rawStart = result.messages[input.prefix.length];
     if (rawStart) {
-      rawWindowCache = {
+      input.sessState.rawWindowCache = {
         sessionID: input.sessionID,
         firstMessageID: rawStart.info.id,
       };
@@ -746,8 +793,10 @@ function transformInner(input: {
   // When the API previously rejected with "prompt is too long", skip layers
   // below the forced minimum to ensure enough trimming on the next attempt.
   // One-shot: consumed here and reset to 0.
-  let effectiveMinLayer = forceMinLayer;
-  forceMinLayer = 0;
+  const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
+  const sessState = sid ? getSessionState(sid) : makeSessionState();
+  let effectiveMinLayer = sessState.forceMinLayer;
+  sessState.forceMinLayer = 0;
 
   // --- Approach A: Cache-preserving passthrough ---
   // Use exact token count from the previous API response when available.
@@ -755,13 +804,12 @@ function transformInner(input: {
   // making the layer-0 decision 99%+ accurate from the API's own tokenizer.
   // maxInput = absolute ceiling the API enforces: input_tokens + max_tokens <= context
   const maxInput = contextLimit - outputReserved;
-  const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
 
   // True when we have real API token data from a previous turn in this session.
   // When false (first turn / session change), chars/4 estimates can undercount by
   // up to 1.8x — so tryFit output must be validated with a safety multiplier before
   // being used, to prevent sending an apparently-fitting window that actually overflows.
-  const calibrated = lastKnownInput > 0 && sid === lastKnownSessionID;
+  const calibrated = sessState.lastKnownInput > 0;
 
   // On uncalibrated turns, apply this multiplier to tryFit's estimated total to
   // approximate the real token count. 1.5 is conservative but not so aggressive
@@ -784,8 +832,9 @@ function transformInner(input: {
   // input.messages has 300 raw messages. The delta estimation treats the 250
   // evicted messages as "new" and undercounts them via chars/4, producing an
   // expectedInput that fits in layer 0 — but the actual tokens are ~190K.
-  // Only applied when calibrated (same session) to avoid affecting other sessions.
-  if (calibrated && lastLayer >= 1 && input.messages.length >= lastKnownMessageCount) {
+  // Only applied when calibrated (same session, per-session state) to avoid
+  // affecting other sessions including worker sessions.
+  if (calibrated && sessState.lastLayer >= 1 && input.messages.length >= sessState.lastKnownMessageCount) {
     effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
   }
 
@@ -795,12 +844,12 @@ function transformInner(input: {
     // Use message ID tracking (Option B) to identify new messages accurately.
     // After compression, the "last window" is a subset of the full message array —
     // counting by index would treat evicted messages as new (off-by-250 error).
-    const newMessages = lastWindowMessageIDs.size > 0
-      ? input.messages.filter((m) => !lastWindowMessageIDs.has(m.info.id))
-      : input.messages.slice(-Math.max(0, input.messages.length - lastKnownMessageCount));
+    const newMessages = sessState.lastWindowMessageIDs.size > 0
+      ? input.messages.filter((m) => !sessState.lastWindowMessageIDs.has(m.info.id))
+      : input.messages.slice(-Math.max(0, input.messages.length - sessState.lastKnownMessageCount));
     const newMsgTokens = newMessages.reduce((s, m) => s + estimateMessage(m), 0);
-    const ltmDelta = ltmTokens - lastKnownLtm;
-    expectedInput = lastKnownInput + newMsgTokens + ltmDelta;
+    const ltmDelta = ltmTokens - sessState.lastKnownLtm;
+    expectedInput = sessState.lastKnownInput + newMsgTokens + ltmDelta;
   } else {
     // First turn or session change: fall back to chars/4 + overhead.
     const messageTokens = input.messages.reduce((s, m) => s + estimateMessage(m), 0);
@@ -810,8 +859,8 @@ function transformInner(input: {
   if (effectiveMinLayer === 0 && expectedInput <= maxInput) {
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
-    const messageTokens = lastKnownInput > 0 && sid === lastKnownSessionID
-      ? expectedInput - (ltmTokens - lastKnownLtm)  // approximate raw portion
+    const messageTokens = calibrated
+      ? expectedInput - (ltmTokens - sessState.lastKnownLtm)  // approximate raw portion
       : expectedInput - overhead - ltmTokens;
     return {
       messages: input.messages,
@@ -834,7 +883,7 @@ function transformInner(input: {
   // the prompt cache. Layers 2-4 already cause full cache invalidation via
   // tool stripping / message restructuring, so they use the non-cached path.
   const cached = sid
-    ? distilledPrefixCached(distillations, sid)
+    ? distilledPrefixCached(distillations, sid, sessState)
     : (() => {
         const msgs = distilledPrefix(distillations);
         return { messages: msgs, tokens: msgs.reduce((sum, m) => sum + estimateMessage(m), 0) };
@@ -854,6 +903,7 @@ function transformInner(input: {
           distilledBudget,
           rawBudget,
           sessionID: sid,
+          sessState,
         })
       : tryFit({
           messages: input.messages,
@@ -868,7 +918,7 @@ function transformInner(input: {
 
   // Layer 1 didn't fit (or was force-skipped) — reset the raw window cache.
   // Layers 2-4 use full scans and already break the prompt cache.
-  rawWindowCache = null;
+  sessState.rawWindowCache = null;
 
   // Layer 2: Strip tool outputs from older messages, keep last 2 turns
   // Skipped when force-escalated to layer 3+.
@@ -955,9 +1005,13 @@ export function transform(input: {
   sessionID?: string;
 }): TransformResult {
   const result = transformInner(input);
-  lastTransformedCount = result.messages.length;
-  lastLayer = result.layer;
-  lastWindowMessageIDs = new Set(result.messages.map((m) => m.info.id));
+  const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
+  if (sid) {
+    const state = getSessionState(sid);
+    state.lastTransformedCount = result.messages.length;
+    state.lastLayer = result.layer;
+    state.lastWindowMessageIDs = new Set(result.messages.map((m) => m.info.id));
+  }
   return result;
 }
 
