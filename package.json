@@ -1,6 +1,6 @@
 {
   "name": "opencode-lore",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "type": "module",
   "license": "MIT",
   "description": "Three-tier memory architecture for OpenCode — distillation, not summarization",
