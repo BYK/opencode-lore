@@ -3,9 +3,9 @@
 
 ### Gotcha
 
-<!-- lore:019c9a17-b4cd-7324-92f7-e90f8a40a90e -->
+<!-- lore:019c9aa1-f7c7-799a-b323-9f9ecd11eae9 -->
 * **React useState async pitfall**: React useState setter is async — reading state immediately after setState returns stale value in dashboard components
-<!-- lore:019c9a17-b481-7436-bee2-0e096d6fb7bf -->
+<!-- lore:019c9aa1-f798-7404-8af1-06116f1636ba -->
 * **TypeScript strict mode caveat**: TypeScript strict null checks require explicit undefined handling
 <!-- lore:019c91cc-0596-7379-9344-7c969695ecc0 -->
 * **Trailing assistant messages after tryFit cause prefill API errors**: When the gradient transform (layers 1-4) produces a compressed message window, the last message may be a trailing assistant message. Anthropic's API requires the conversation to end with a user message. HOWEVER, an assistant message that has any \`tool\` parts (completed or pending) must NOT be dropped — OpenCode's SDK converts tool parts into \`tool\_result\` blocks sent as \`role: "user"\` messages at the API level, so these messages already end with a user-role message. Dropping them strips the entire current agentic turn and causes the model to restart from scratch in an infinite loop. Only pure-text assistant messages (zero tool parts) would actually cause a prefill error and should be dropped. Fix (v0.2.8): the drop predicate in src/index.ts changed from \`hasPendingTool\` (any non-completed tool) to \`hasToolParts\` (any tool at all) — stop dropping when a tool part is found, only drop pure-text trailing messages. Located in src/index.ts around lines 396-430. This was the actual root cause of the infinite tool-call loops at v0.2.5–v0.2.7 despite tryFit current-turn protection being correct.
@@ -34,14 +34,14 @@
 
 ### Preference
 
-<!-- lore:019c9a17-b491-7f6a-9c66-a5f7b8947fa7 -->
+<!-- lore:019c9aa1-f7a2-7c42-b067-a87eff21df63 -->
 * **General coding preference**: Prefer explicit error handling over silent failures
-<!-- lore:019c9a17-b40b-7a08-bc4a-dea6bce2669b -->
+<!-- lore:019c9aa1-f75c-7cf4-921e-cc1d5fdccbe7 -->
 * **Code style**: User prefers no backwards-compat shims, fix callers directly
 
 ### Pattern
 
-<!-- lore:019c9a17-b483-7a62-b59c-5ba11c932690 -->
+<!-- lore:019c9aa1-f79a-7f3c-94c6-1371d2fd7e62 -->
 * **Kubernetes deployment pattern**: Use helm charts for Kubernetes deployments with resource limits
 <!-- lore:019c8ae9-2e54-7276-966a-befe699db589 -->
 * **Use SDK internal client for HTTP requests in OpenCode plugins**: OpenCode plugins should use \`(ctx.client as any).\_client.patch()\` (or \`.get()\`, \`.post()\`, etc.) instead of raw \`fetch()\` with \`ctx.serverUrl\`. The \`\_client\` property is the HeyAPI \`Client\` instance backing the SDK — it has the correct base URL, custom fetch handler, and interceptors already configured by the OpenCode runtime. This avoids ConnectionRefused errors in TUI-only mode where the HTTP server isn't listening. The internal client supports path interpolation: pass \`url: '/session/{sessionID}/message/{messageID}/part/{partID}'\` with a \`path: { sessionID, messageID, partID }\` object, and \`defaultPathSerializer\` handles template variable substitution. Downside: \`\_client\` is a private/undocumented property, so it could change in SDK updates. Note: lore's only use of this pattern (the stats PATCH) was removed because mutating message parts for metadata was the wrong approach — prefer proper mechanisms (custom events, dedicated endpoints) for plugin-to-UI communication.
