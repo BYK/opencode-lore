@@ -18,24 +18,39 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      version: ${{ steps.craft.outputs.version }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: getsentry/craft@v2
-        id: craft
-        with:
-          version: ${{ inputs.version }}
-          force: ${{ inputs.force }}
+      - name: Install Craft
+        run: |
+          CRAFT_URL=$(curl -fsSL https://api.github.com/repos/getsentry/craft/releases/latest \
+            | jq -r '.assets[] | select(.name == "craft") | .browser_download_url')
+          sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
+          sudo chmod +x /usr/local/bin/craft
+      - name: Prepare
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Merge release PR
+        run: craft prepare ${{ inputs.version || 'auto' }} --no-input
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION=$(git branch --show-current | sed 's|^release/||')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+      - name: Push release branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${{ steps.craft.outputs.version }}"
-          PR=$(gh pr list --head "release/$VERSION" --json number --jq '.[0].number')
+          VERSION="${{ steps.version.outputs.version }}"
+          git push origin "release/$VERSION"
+          PR_URL=$(gh pr create \
+            --base main \
+            --head "release/$VERSION" \
+            --title "release: $VERSION" \
+            --body "Automated release PR for $VERSION")
+          PR=$(echo "$PR_URL" | grep -oE '[0-9]+$')
           gh pr merge "$PR" --squash --delete-branch --auto
           echo "Waiting for PR #$PR to merge..."
           for i in $(seq 1 60); do
@@ -66,8 +81,14 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - name: Install Craft
+        run: |
+          CRAFT_URL=$(curl -fsSL https://api.github.com/repos/getsentry/craft/releases/latest \
+            | jq -r '.assets[] | select(.name == "craft") | .browser_download_url')
+          sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
+          sudo chmod +x /usr/local/bin/craft
       - run: npm pack
       - name: Publish
-        run: npx @sentry/craft publish "${{ needs.prepare.outputs.version }}" --no-input
+        run: craft publish "${{ needs.prepare.outputs.version }}" --no-input
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
