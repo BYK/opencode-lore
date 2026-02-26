@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { DISTILLATION_SYSTEM, distillationUser } from "../src/prompt";
 
 const BASE_URL = "http://localhost:4096";
 const MODEL = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
@@ -83,23 +84,88 @@ const { values } = parseArgs({
     session: { type: "string" },
     all: { type: "boolean", default: false },
     "dry-run": { type: "boolean", default: false },
+    wipe: { type: "boolean", default: false },
   },
 });
 
+// When --wipe is set, we operate on all sessions that have temporal messages,
+// not just those with undistilled messages, since wipe resets distilled=0 first.
+function findAllSessions(): Array<{
+  session_id: string;
+  project_id: string;
+  total: number;
+  undistilled: number;
+  distillations: number;
+}> {
+  const d = new Database(DB_PATH, { readonly: true });
+  const rows = d
+    .query(
+      `SELECT session_id, project_id, COUNT(*) as total,
+              SUM(CASE WHEN distilled = 0 THEN 1 ELSE 0 END) as undistilled
+       FROM temporal_messages
+       GROUP BY session_id, project_id
+       ORDER BY total DESC`,
+    )
+    .all() as Array<{
+    session_id: string;
+    project_id: string;
+    total: number;
+    undistilled: number;
+  }>;
+
+  const result = rows.map((s) => {
+    const dists = (
+      d
+        .query(
+          "SELECT COUNT(*) as c FROM distillations WHERE project_id = ? AND session_id = ?",
+        )
+        .get(s.project_id, s.session_id) as { c: number }
+    ).c;
+    return { ...s, distillations: dists };
+  });
+  d.close();
+  return result;
+}
+
+const allSessions = values.wipe ? findAllSessions() : sessions;
+
 const targets = values.all
-  ? sessions
+  ? allSessions
   : values.session
-    ? sessions.filter((s) => s.session_id.includes(values.session!))
+    ? allSessions.filter((s) => s.session_id.includes(values.session!))
     : [];
 
 if (!targets.length) {
-  console.log("\nUsage: backfill.ts --all  OR  --session <id-prefix>");
+  console.log("\nUsage: backfill.ts --all  OR  --session <id-prefix>  [--wipe]");
   process.exit(1);
 }
 
 if (values["dry-run"]) {
-  console.log("\nDry run — would backfill", targets.length, "sessions");
+  const action = values.wipe ? "wipe + re-distill" : "backfill";
+  console.log(`\nDry run — would ${action}`, targets.length, "sessions");
   process.exit(0);
+}
+
+// --wipe: delete existing distillations and reset distilled=0 before backfilling.
+if (values.wipe) {
+  console.log(`\nWiping distillations for ${targets.length} session(s)...`);
+  const d = new Database(DB_PATH);
+  for (const session of targets) {
+    const { changes: delDist } = d
+      .query("DELETE FROM distillations WHERE project_id = ? AND session_id = ?")
+      .run(session.project_id, session.session_id);
+    const { changes: resetMsgs } = d
+      .query("UPDATE temporal_messages SET distilled = 0 WHERE project_id = ? AND session_id = ?")
+      .run(session.project_id, session.session_id);
+    console.log(
+      `  ${session.session_id.substring(0, 16)}: deleted ${delDist} distillation(s), reset ${resetMsgs} message(s)`,
+    );
+    // Refresh undistilled count after reset
+    session.undistilled = session.total;
+    session.distillations = 0;
+  }
+  d.close();
+  console.log("");
 }
 
 // Create an eval root to hide worker sessions
@@ -156,34 +222,7 @@ async function promptAndWait(
   return "[TIMEOUT]";
 }
 
-const DISTILL_SYSTEM = `You are a memory observer. Your observations will be the ONLY information an AI assistant has about past interactions. Produce a dense, dated event log — not a summary.
 
-CRITICAL: DISTINGUISH USER ASSERTIONS FROM QUESTIONS
-- 🔴 High: user assertions, stated facts, preferences, goals
-- 🟡 Medium: questions asked, context, assistant-generated content with full detail
-- 🟢 Low: minor conversational context
-
-ASSISTANT-GENERATED CONTENT — THIS IS CRITICAL:
-Record EVERY item in lists/recommendations with distinguishing details. Preserve file paths, line numbers, error messages, root causes, specific values.
-
-For technical/coding content:
-- Preserve file paths with line numbers
-- Preserve error messages and root causes
-- Preserve architecture decisions and rationale
-- Preserve specific values, thresholds, config details
-- Preserve approaches that failed and why
-
-EXACT NUMBERS — NEVER APPROXIMATE:
-When the conversation states a specific count, record that EXACT number — do not round, estimate, or substitute a count you see later.
-BAD: ~130 test failures
-GOOD: 131 test failures (1902 pass, 131 fail, 1 error across 100 files)
-
-BUG FIXES — ALWAYS RECORD:
-Every bug fix is important regardless of where it appears. Record the specific bug, root cause, fix applied (with file paths), and outcome.
-BAD: Fixed an FTS5 search bug
-GOOD: FTS5 was doing exact term matching instead of prefix matching in ltm.ts. Fix: added ftsQuery() that appends * to each term for prefix matching.
-
-Output ONLY an <observations> block with timestamped observations.`;
 
 for (const session of targets) {
   console.log(
@@ -238,13 +277,14 @@ for (const session of targets) {
       })
       .join("\n\n");
 
-    const prior = priorObs
-      ? `Previous observations (do NOT repeat):\n${priorObs}\n\n---\n\n`
-      : "This is the beginning of the session.\n\n";
-    const userMsg = `${prior}Session date: ${date}\n\nConversation to observe:\n\n${text}\n\nExtract new observations. Output ONLY an <observations> block.`;
+    const userMsg = distillationUser({
+      date,
+      messages: text,
+      priorObservations: priorObs,
+    });
 
     const sid = await createSession();
-    const response = await promptAndWait(sid, userMsg, DISTILL_SYSTEM);
+    const response = await promptAndWait(sid, userMsg, DISTILLATION_SYSTEM);
     const match = response.match(/<observations>([\s\S]*?)<\/observations>/i);
     const observations = match ? match[1].trim() : response.trim();
 

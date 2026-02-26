@@ -1,5 +1,6 @@
 import { parseArgs } from "util";
 import { mkdirSync } from "fs";
+import { DISTILLATION_SYSTEM, distillationUser } from "../src/prompt";
 
 // --- Config ---
 const BASE_URL = "http://localhost:4096";
@@ -125,81 +126,6 @@ function formatHistory(q: Question): string {
   return parts.join("\n");
 }
 
-// --- Lore observation prompts (Phase 1+2: observation-log format) ---
-const DISTILL_SYSTEM = `You are a memory observer. Your observations will be the ONLY information an AI assistant has about past interactions. Produce a dense, dated event log — not a summary.
-
-CRITICAL: DISTINGUISH USER ASSERTIONS FROM QUESTIONS
-
-When the user TELLS you something about themselves, mark it as an assertion (🔴):
-- "I have two kids" → 🔴 (14:30) User stated has two kids
-
-When the user ASKS about something, mark it as a question (🟡):
-- "Can you help me with X?" → 🟡 (15:00) User asked for help with X
-
-User assertions are AUTHORITATIVE — the user is the source of truth about their own life.
-
-TEMPORAL ANCHORING:
-Each observation gets a time tag (HH:MM). When content refers to a different time, add "(meaning DATE)" or "(estimated DATE)" at the END of the line.
-
-ONLY add date annotations when you can derive an actual date (avoid vague terms like "recently").
-
-STATE CHANGES — make supersession explicit:
-- "User will use X (replacing Y)"
-
-DETAILS TO ALWAYS PRESERVE:
-- Names, handles, numbers, counts, quantities, measurements
-- Prices, dates, times, durations
-- Locations and distinguishing attributes
-- User's specific role (presenter, volunteer — not just "attended")
-- Exact phrasing when unusual
-
-ASSISTANT-GENERATED CONTENT — THIS IS CRITICAL:
-
-When the assistant produces lists, recommendations, explanations, recipes, schedules, creative content, or any structured output — record EVERY ITEM with its distinguishing details. The user WILL ask about specific items later.
-
-BAD: 🟡 Assistant recommended 5 dessert spots in Orlando.
-GOOD: 🟡 Assistant recommended dessert spots: Sugar Factory (Icon Park, giant milkshakes), Wondermade (Sanford, gourmet marshmallows), Gideon's Bakehouse (Disney Springs, cookies), Farris & Foster's (unique flavors), Kilwins (handmade fudge)
-
-BAD: 🟡 Assistant listed work-from-home jobs for seniors.
-GOOD: 🟡 Assistant listed 10 WFH jobs for seniors: 1. Virtual assistant, 2. Online tutor, 3. Freelance writer, 4. Social media manager, 5. Customer service rep, 6. Bookkeeper, 7. Transcriptionist, 8. Web designer, 9. Data entry, 10. Consultant
-
-BAD: 🟡 Assistant explained refining processes.
-GOOD: 🟡 Assistant explained Lake Charles refinery processes: atmospheric distillation, fluid catalytic cracking (FCC), alkylation, hydrotreating
-
-Rules for assistant content:
-- Record EACH item in a list with at least one distinguishing attribute
-- For numbered lists, preserve the EXACT ordering (1st, 2nd, 3rd...)
-- For recipes: preserve specific quantities, ratios, temperatures, times
-- For recommendations: preserve names, locations, prices, key features
-- For creative content (songs, stories, poems): preserve titles, key phrases, character names, structural details
-- For technical explanations: preserve specific values, percentages, formulas, tool/library names
-- Ordered lists must keep their numbering — users ask "what was the 7th item?"
-- Use 🟡 priority but NEVER skip assistant-generated details to save space
-
-ENUMERATABLE ENTITIES — always flag for cross-session aggregation:
-When the user mentions attending events, buying things, meeting people:
-🔴 [event-attended] User attended Rachel+Mike's wedding (vineyard in Napa, Aug 12, 2023)
-🔴 [item-purchased] User bought Sony WH-1000XM5 headphones ($280)
-
-PRIORITY LEVELS:
-- 🔴 High: user assertions, stated facts, preferences, goals, enumeratable entities
-- 🟡 Medium: questions asked, context, assistant-generated content with full detail
-- 🟢 Low: minor conversational context, greetings, acknowledgments
-
-Output ONLY an <observations> block with dated, timestamped observations. No preamble.`;
-
-function distillUser(
-  session: Turn[],
-  date: string,
-  priorObservations?: string,
-): string {
-  const context = priorObservations
-    ? `Previous observations (do NOT repeat — yours will be appended):\n${priorObservations}\n\n---`
-    : "This is the beginning of the session.";
-  const text = session.map((t) => `[${t.role}]: ${t.content}`).join("\n\n");
-  return `${context}\n\nSession date: ${date}\n\nConversation to observe:\n\n${text}\n\nExtract new observations. Output ONLY an <observations> block.`;
-}
-
 type Distillation = { observations: string };
 
 function parseDistillation(text: string): Distillation | null {
@@ -276,10 +202,11 @@ async function processLore(
   for (let i = 0; i < q.haystack_sessions.length; i++) {
     const session = q.haystack_sessions[i];
     const date = q.haystack_dates?.[i] ?? "unknown date";
-    const prompt = distillUser(session, date, priorObservations);
+    const messages = session.map((t) => `[${t.role}]: ${t.content}`).join("\n\n");
+    const prompt = distillationUser({ date, messages, priorObservations });
 
     const sid = await createSession();
-    const response = await promptAndWait(sid, prompt, DISTILL_SYSTEM);
+    const response = await promptAndWait(sid, prompt, DISTILLATION_SYSTEM);
     const parsed = parseDistillation(response);
 
     if (parsed) {

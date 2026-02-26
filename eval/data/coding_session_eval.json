@@ -1,0 +1,182 @@
+[
+  {
+    "session_file": "eval/data/sessions/cli-sentry-issue.json",
+    "session_label": "cli-sentry-issue",
+    "question_type": "early-detail",
+    "question": "What was the Sentry issue short ID for the confusing ContextError, and how many occurrences did it have?",
+    "answer": "CLI-8C, with 33 occurrences and 5 users impacted.",
+    "message_index": 1,
+    "cumulative_tokens": 4393
+  },
+  {
+    "session_file": "eval/data/sessions/cli-sentry-issue.json",
+    "session_label": "cli-sentry-issue",
+    "question_type": "early-detail",
+    "question": "In the proposed 4-part plan, what specific files were listed for callsite migration in Part 2, and how many callsites were in each?",
+    "answer": "Three files: src/commands/issue/utils.ts (7 callsites at lines 143, 150, 162, 184, 211, 266, 289), src/lib/resolve-target.ts (1 callsite at line 796), and src/commands/event/view.ts (1 callsite at line 224).",
+    "message_index": 5,
+    "cumulative_tokens": 13500
+  },
+  {
+    "session_file": "eval/data/sessions/cli-sentry-issue.json",
+    "session_label": "cli-sentry-issue",
+    "question_type": "early-detail",
+    "question": "When presented with the 4-part plan, which parts did the user choose to implement and which did they skip?",
+    "answer": "The user chose to implement Parts 1+2+3 and skip Part 4 (the behavioral improvement for numeric ID resolution with DSN fallback).",
+    "message_index": 6,
+    "cumulative_tokens": 14605
+  },
+  {
+    "session_file": "eval/data/sessions/cli-sentry-issue.json",
+    "session_label": "cli-sentry-issue",
+    "question_type": "mid-detail",
+    "question": "After the first test run for Parts 1-3, how many test failures were found and in which test files?",
+    "answer": "7 failures in 4 test files: test/commands/log/view.test.ts, test/commands/issue/utils.test.ts, test/commands/trace/list.test.ts, and test/commands/trace/view.test.ts.",
+    "message_index": 101,
+    "cumulative_tokens": 44174
+  },
+  {
+    "session_file": "eval/data/sessions/cli-sentry-issue.json",
+    "session_label": "cli-sentry-issue",
+    "question_type": "mid-detail",
+    "question": "What was the commit message for the Parts 1-3 changes, and how many files were changed?",
+    "answer": "Commit message: 'fix(errors): add ResolutionError for not-found/ambiguous resolution failures'. 12 files changed, 286 insertions, 81 deletions.",
+    "message_index": 125,
+    "cumulative_tokens": 55922
+  },
+  {
+    "session_file": "eval/data/sessions/cli-sentry-issue.json",
+    "session_label": "cli-sentry-issue",
+    "question_type": "step4-recall",
+    "question": "When the user said 'Let's give a shot to that Step 4 now?', what was Step 4 about? What specific behavioral improvement did it propose?",
+    "answer": "Part 4 was 'Improve numeric ID resolution with DSN fallback'. When sentry issue view <numeric-id> returns a 404, instead of just throwing an error, the CLI should try to resolve the numeric value as a short ID suffix using DSN-detected project context from the current directory.",
+    "message_index": 132,
+    "cumulative_tokens": 56261
+  },
+  {
+    "session_file": "eval/data/sessions/cli-sentry-issue.json",
+    "session_label": "cli-sentry-issue",
+    "question_type": "late-detail",
+    "question": "What were the two PR numbers created during this session, and what happened to PR #293 by the time PR #294 was created?",
+    "answer": "PR #293 (Parts 1-3, ResolutionError) and PR #294 (Part 4, numeric issue ID resolution). By the time PR #294 was created, PR #293 had already been merged into main.",
+    "message_index": 258,
+    "cumulative_tokens": 94378
+  },
+  {
+    "session_file": "eval/data/sessions/cli-sentry-issue.json",
+    "session_label": "cli-sentry-issue",
+    "question_type": "late-detail",
+    "question": "What critical gap in parseSentryUrl was discovered during Part 4, and what URL format was it missing?",
+    "answer": "parseSentryUrl did not handle subdomain-style URLs like https://my-org.sentry.io/issues/99124558/. It only matched paths starting with /organizations/ or /settings/.",
+    "message_index": 285,
+    "cumulative_tokens": 104526
+  },
+  {
+    "session_file": "eval/data/sessions/cli-sentry-issue.json",
+    "session_label": "cli-sentry-issue",
+    "question_type": "late-detail",
+    "question": "What bug did the Sentry Seer bot identify in the getIssueInOrg function in PR #294?",
+    "answer": "getIssueInOrg passes issueId as a string to the retrieveAnIssue SDK method, which expects a number. Other API client functions use Number(issueId) to convert. The fix was to change issue_id: issueId to issue_id: Number(issueId).",
+    "message_index": 297,
+    "cumulative_tokens": 107044
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "early-detail",
+    "question": "What nightly version format was chosen for Sentry CLI? Give the example version string and explain why it was chosen over alternatives.",
+    "answer": "Unix timestamps in seconds: 0.12.0-dev.1740000000 (10 digits). Chosen over compact ISO (14 digits), UUIDv7 hex (12 chars), and millisecond timestamps (13 digits) because it is compact, sortable both numerically and lexicographically, and compatible with semver.",
+    "message_index": 7,
+    "cumulative_tokens": 10259
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "early-detail",
+    "question": "Where was the release channel setting persisted in the database, and why was no schema migration needed?",
+    "answer": "In the existing metadata key-value table with key 'release_channel', defaulting to 'stable'. No migration needed because the metadata table already existed. Implementation was in src/lib/db/release-channel.ts.",
+    "message_index": 17,
+    "cumulative_tokens": 42765
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "early-detail",
+    "question": "Was npm publishing planned for nightly builds? What distribution method was initially chosen?",
+    "answer": "No npm nightly publishing. The initial approach was a rolling GitHub prerelease tagged 'nightly', with binary assets replaced using gh release upload --clobber. GitHub-only distribution.",
+    "message_index": 20,
+    "cumulative_tokens": 45981
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "early-detail",
+    "question": "What was the initial commit for PR #292: the message, SHA, and how many files changed?",
+    "answer": "Message: 'feat(upgrade): add nightly release channel'. SHA: a7135dc. 10 files changed, 688 insertions, 75 deletions. PR #292.",
+    "message_index": 114,
+    "cumulative_tokens": 69114
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "mid-detail",
+    "question": "What caused the first CI failure on PR #292? Specifically, which job was skipped and what was the cascade effect?",
+    "answer": "The nightly-version job was skipped on PRs (if: github.ref == 'refs/heads/main'). Since build-binary had nightly-version in its needs, build-binary was also skipped, cascading to E2E Tests being skipped, causing CI Status to fail.",
+    "message_index": 219,
+    "cumulative_tokens": 91567
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "mid-detail",
+    "question": "What were the two bugs identified by Cursor BugBot on PR #292? Include their severity levels.",
+    "answer": "Bug 1 (High): Nightly version mismatch between build and publish jobs — each independently used Date.now(), producing different timestamps, causing perpetual upgrade loops. Bug 2 (Medium): In upgrade.ts:394, when a user on nightly requests a specific version, downloadTag was unconditionally set to NIGHTLY_TAG because the condition only checked channel, ignoring whether a specific versionArg was provided.",
+    "message_index": 292,
+    "cumulative_tokens": 115851
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "mid-detail",
+    "question": "What was the initial patch coverage percentage on PR #292, and what was the target?",
+    "answer": "Initial patch coverage was 49.20% (also reported as 47.66% in CI annotations). Target was 80%.",
+    "message_index": 380,
+    "cumulative_tokens": 136519
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "late-detail",
+    "question": "What was the final patch coverage achieved on PR #292, and which testing approach (Option A or B) succeeded?",
+    "answer": "Final patch coverage was 95.76%. Option B (Bun.spawn spy) succeeded. Option A (mock.module for node:child_process) was cancelled because mock.module bleeds across test files in Bun's shared module registry, causing 132 failures.",
+    "message_index": 643,
+    "cumulative_tokens": 265008
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "late-detail",
+    "question": "After PR #292 was merged, what specific HTTP error killed the rolling GitHub Release approach?",
+    "answer": "HTTP 422: Cannot upload assets to an immutable release. The getsentry org has immutable releases enabled, preventing asset modification on published releases.",
+    "message_index": 769,
+    "cumulative_tokens": 318131
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "late-detail",
+    "question": "What distribution method replaced the rolling GitHub Release after it failed, and what tool was used?",
+    "answer": "GitHub Container Registry (GHCR) with ORAS (OCI Registry As Storage) to push binaries as OCI artifacts to ghcr.io/getsentry/cli:nightly, which supports tag overwriting natively.",
+    "message_index": 802,
+    "cumulative_tokens": 323626
+  },
+  {
+    "session_file": "eval/data/sessions/cli-nightly.json",
+    "session_label": "cli-nightly",
+    "question_type": "late-detail",
+    "question": "Where was the GHCR/ORAS implementation plan saved, and why was it saved to a file?",
+    "answer": "Saved to .opencode/plans/ghcr-nightly-distribution.md. The user needed to work on the implementation in a different workspace.",
+    "message_index": 887,
+    "cumulative_tokens": 351094
+  }
+]

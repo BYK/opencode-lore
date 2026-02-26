@@ -234,6 +234,12 @@ export const LorePlugin: Plugin = async (ctx) => {
       }
 
       if (event.type === "session.error") {
+        // Skip eval/worker child sessions — only handle errors for real user sessions.
+        const errorSessionID = (event.properties as Record<string, unknown>).sessionID as
+          | string
+          | undefined;
+        if (errorSessionID && await shouldSkip(errorSessionID)) return;
+
         // Detect "prompt is too long" API errors and auto-recover:
         // 1. Force the gradient transform to escalate on the next call (skip layer 0/1)
         // 2. Force distillation to capture all temporal data before compaction
@@ -260,22 +266,19 @@ export const LorePlugin: Plugin = async (ctx) => {
         );
 
         if (isPromptTooLong) {
-          const sessionID = (event.properties as Record<string, unknown>).sessionID as
-            | string
-            | undefined;
           console.error(
-            `[lore] detected 'prompt too long' error — forcing distillation + layer escalation (session: ${sessionID?.substring(0, 16)})`,
+            `[lore] detected 'prompt too long' error — forcing distillation + layer escalation (session: ${errorSessionID?.substring(0, 16)})`,
           );
           // Force layer 2 on next transform — layers 0 and 1 were already too large.
           // The gradient at layers 2-4 will compress the context enough for the next turn.
           // Do NOT call session.summarize() here — it sends all messages to the model,
           // which would overflow again and create a stuck compaction loop.
-          setForceMinLayer(2, sessionID);
+          setForceMinLayer(2, errorSessionID);
 
-          if (sessionID) {
+          if (errorSessionID) {
             // Force distillation to capture all undistilled messages into the temporal
             // store so they're preserved even if the session is later compacted manually.
-            await backgroundDistill(sessionID, true);
+            await backgroundDistill(errorSessionID, true);
           }
         }
       }

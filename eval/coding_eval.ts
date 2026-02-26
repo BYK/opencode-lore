@@ -1,5 +1,6 @@
 import { parseArgs } from "util";
 import { Database } from "bun:sqlite";
+import { DISTILLATION_SYSTEM, distillationUser } from "../src/prompt";
 
 const BASE_URL = "http://localhost:4096";
 const MODEL = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
@@ -81,17 +82,21 @@ function getDistillations(
 
 
 // Purge temporal messages from eval sessions to prevent recall tool contamination.
-// Eval sessions are small (≤5 messages) and not in the test dataset.
+// Eval sessions are small (≤5 messages, <1000 tokens total) and not in the test dataset.
+// The token check guards against accidentally deleting small but meaningful real sessions.
 function purgeEvalMessages(testSessionIDs: string[]) {
   const d = new Database(DB_PATH);
   const testSet = new Set(testSessionIDs);
 
-  // Find small sessions (≤5 messages) that aren't test sessions
+  // Find small low-token sessions (≤5 messages AND <1000 total tokens) that aren't test sessions
   const sessions = d
     .query(
-      'SELECT session_id, count(*) as c FROM temporal_messages GROUP BY session_id HAVING c <= 5',
+      `SELECT session_id, count(*) as c, SUM(tokens) as total_tokens
+       FROM temporal_messages
+       GROUP BY session_id
+       HAVING c <= 5 AND total_tokens < 1000`,
     )
-    .all() as Array<{ session_id: string; c: number }>;
+    .all() as Array<{ session_id: string; c: number; total_tokens: number }>;
   const toDelete = sessions.filter((s) => !testSet.has(s.session_id));
   if (!toDelete.length) {
     d.close();
@@ -140,18 +145,93 @@ async function createSession(): Promise<string> {
   return res.id;
 }
 
+type TokenInfo = {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: { read: number; write: number };
+};
+
 type MessageInfo = {
-  info: { id: string; role: string; time: { created: number; updated: number } };
+  info: {
+    id: string;
+    role: string;
+    time: { created: number; updated: number };
+    cost?: number;
+    tokens?: TokenInfo;
+  };
   parts: Array<{ type: string; text?: string; tool?: string; state?: { status: string } }>;
 };
 
+type AggregatedTokens = {
+  input: number;       // input + cache.read + cache.write (total model context)
+  raw_input: number;   // input only (non-cached)
+  cache_read: number;
+  cache_write: number;
+  output: number;
+  reasoning: number;
+  cost: number;
+  cache_hit_rate: number; // cache.read / input (fraction served from cache)
+  api_calls: number;      // number of promptAndWait calls accumulated
+};
+
+function emptyTokens(): AggregatedTokens {
+  return {
+    input: 0, raw_input: 0, cache_read: 0, cache_write: 0,
+    output: 0, reasoning: 0, cost: 0, cache_hit_rate: 0, api_calls: 0,
+  };
+}
+
+function aggregateTokens(msgs: MessageInfo[]): AggregatedTokens {
+  let rawInput = 0, cacheRead = 0, cacheWrite = 0, output = 0, reasoning = 0, cost = 0;
+  for (const msg of msgs) {
+    if (msg.info.role !== "assistant" || !msg.info.tokens) continue;
+    const t = msg.info.tokens;
+    rawInput += t.input;
+    cacheRead += t.cache.read;
+    cacheWrite += t.cache.write;
+    output += t.output;
+    reasoning += t.reasoning;
+    cost += msg.info.cost ?? 0;
+  }
+  const totalInput = rawInput + cacheRead + cacheWrite;
+  return {
+    input: totalInput,
+    raw_input: rawInput,
+    cache_read: cacheRead,
+    cache_write: cacheWrite,
+    output,
+    reasoning,
+    cost,
+    cache_hit_rate: totalInput > 0 ? cacheRead / totalInput : 0,
+    api_calls: 1,
+  };
+}
+
+function addTokens(a: AggregatedTokens, b: AggregatedTokens): AggregatedTokens {
+  const totalInput = a.input + b.input;
+  const totalCacheRead = a.cache_read + b.cache_read;
+  return {
+    input: totalInput,
+    raw_input: a.raw_input + b.raw_input,
+    cache_read: totalCacheRead,
+    cache_write: a.cache_write + b.cache_write,
+    output: a.output + b.output,
+    reasoning: a.reasoning + b.reasoning,
+    cost: a.cost + b.cost,
+    cache_hit_rate: totalInput > 0 ? totalCacheRead / totalInput : 0,
+    api_calls: a.api_calls + b.api_calls,
+  };
+}
+
 // Wait for the model to finish responding. Handles multi-turn tool use by waiting until
 // the last assistant message has stabilized (no new messages and has a text part).
+// Returns the response text AND aggregated token usage across all assistant messages.
 async function promptAndWait(
   sessionID: string,
   text: string,
   options?: { system?: string; agent?: string },
-): Promise<string> {
+): Promise<{ text: string; tokens: AggregatedTokens }> {
   const body: Record<string, unknown> = {
     parts: [{ type: "text", text: options?.system ? `${options.system}\n\n${text}` : text }],
     model: MODEL,
@@ -166,6 +246,7 @@ async function promptAndWait(
   const deadline = Date.now() + MAX_WAIT;
   let stableCount = 0;
   let lastMsgCount = 0;
+  let lastMsgs: MessageInfo[] = [];
 
   while (Date.now() < deadline) {
     await Bun.sleep(POLL_INTERVAL);
@@ -188,14 +269,18 @@ async function promptAndWait(
         else stableCount = 0;
         // Wait for 2 stable polls to be sure tool results aren't still arriving
         if (stableCount >= 1) {
-          const text = last.parts.find((p) => p.type === "text" && p.text?.trim());
-          if (text?.text) return text.text.trim();
+          const textPart = last.parts.find((p) => p.type === "text" && p.text?.trim());
+          if (textPart?.text) {
+            lastMsgs = msgs;
+            return { text: textPart.text.trim(), tokens: aggregateTokens(lastMsgs) };
+          }
         }
       }
     }
     lastMsgCount = msgs.length;
+    lastMsgs = msgs;
   }
-  return "[TIMEOUT]";
+  return { text: "[TIMEOUT]", tokens: aggregateTokens(lastMsgs) };
 }
 
 // OpenCode's compaction prompt — same wording used in session/compaction.ts
@@ -245,7 +330,7 @@ async function compactSession(
     const prompt = `${prior}${segments[i]}\n\n${COMPACTION_PROMPT}`;
     const sid = await createSession();
     console.log(`    Compacting chunk ${i + 1}/${segments.length}...`);
-    summary = await promptAndWait(sid, prompt, { system: COMPACTION_SYSTEM });
+    summary = (await promptAndWait(sid, prompt, { system: COMPACTION_SYSTEM })).text;
   }
   return summary;
 }
@@ -258,35 +343,7 @@ function buildLore(distillations: Array<{ observations: string }>): string {
     .join("\n\n");
 }
 
-// --- Observer prompt for on-demand distillation ---
-const DISTILL_SYSTEM = `You are a memory observer. Your observations will be the ONLY information an AI assistant has about past interactions. Produce a dense, dated event log — not a summary.
 
-CRITICAL: DISTINGUISH USER ASSERTIONS FROM QUESTIONS
-- 🔴 High: user assertions, stated facts, preferences, goals
-- 🟡 Medium: questions asked, context, assistant-generated content with full detail
-- 🟢 Low: minor conversational context
-
-ASSISTANT-GENERATED CONTENT — THIS IS CRITICAL:
-Record EVERY item in lists/recommendations with distinguishing details. Preserve file paths, line numbers, error messages, root causes, specific values.
-
-For technical/coding content:
-- Preserve file paths with line numbers
-- Preserve error messages and root causes
-- Preserve architecture decisions and rationale
-- Preserve specific values, thresholds, config details
-- Preserve approaches that failed and why
-
-EXACT NUMBERS — NEVER APPROXIMATE:
-When the conversation states a specific count, record that EXACT number — do not round, estimate, or substitute a count you see later.
-BAD: ~130 test failures
-GOOD: 131 test failures (1902 pass, 131 fail, 1 error across 100 files)
-
-BUG FIXES — ALWAYS RECORD:
-Every bug fix is important regardless of where it appears. Record the specific bug, root cause, fix applied (with file paths), and outcome.
-BAD: Fixed an FTS5 search bug
-GOOD: FTS5 was doing exact term matching instead of prefix matching in ltm.ts. Fix: added ftsQuery() that appends * to each term for prefix matching.
-
-Output ONLY an <observations> block with timestamped observations.`;
 
 async function distillOnDemand(
   msgs: Array<{ role: string; content: string; created_at: number }>,
@@ -319,15 +376,16 @@ async function distillOnDemand(
 
   let allObservations = "";
   for (const segment of segments) {
-    const prior = allObservations
-      ? `Previous observations (do NOT repeat):\n${allObservations}\n\n---\n\n`
-      : "This is the beginning of the session.\n\n";
-    const userMsg = `${prior}Session date: ${date}\n\nConversation to observe:\n\n${segment}\n\nExtract new observations. Output ONLY an <observations> block.`;
+    const userMsg = distillationUser({
+      date,
+      messages: segment,
+      priorObservations: allObservations || undefined,
+    });
 
     const sid = await createSession();
-    const response = await promptAndWait(sid, userMsg, { system: DISTILL_SYSTEM });
-    const match = response.match(/<observations>([\s\S]*?)<\/observations>/i);
-    const obs = match ? match[1].trim() : response.trim();
+    const { text: responseText } = await promptAndWait(sid, userMsg, { system: DISTILLATION_SYSTEM });
+    const match = responseText.match(/<observations>([\s\S]*?)<\/observations>/i);
+    const obs = match ? match[1].trim() : responseText.trim();
     allObservations += (allObservations ? "\n" : "") + obs;
   }
   return allObservations;
@@ -357,6 +415,7 @@ async function processQuestion(
   answer: string;
   hypothesis: string;
   mode: string;
+  tokens: AggregatedTokens;
 }> {
   const sid = await createSession();
 
@@ -364,10 +423,10 @@ async function processQuestion(
     // Lore mode: distilled observations as context + recall tool available.
     // Use default agent (not lore-distill) so the recall tool is registered.
     const prompt = `Here are distilled observations from a past coding session:\n\n${loreContext}\n\nQuestion: ${q.question}\n\nAnswer concisely. If the observations don't have enough detail, use the recall tool to search for it.`;
-    const hypothesis = await promptAndWait(sid, prompt, {
+    const { text: hypothesis, tokens } = await promptAndWait(sid, prompt, {
       system: QA_SYSTEM_WITH_RECALL,
     });
-    return { question: q.question, answer: q.answer, hypothesis, mode };
+    return { question: q.question, answer: q.answer, hypothesis, mode, tokens };
   }
 
   // Default mode: static tail window of last ~80K tokens (simulating OpenCode's recency-biased context)
@@ -385,11 +444,11 @@ async function processQuestion(
   const dropped = msgs.length - (msgs.length - cutoff);
   const prefix = dropped > 0 ? `[Note: ${dropped} earlier messages were compacted/lost from context]\n\n` : "";
   const prompt = `Here is context from a past coding session:\n\n${prefix}${tailContext}\n\nQuestion: ${q.question}\n\nAnswer concisely:`;
-  const hypothesis = await promptAndWait(sid, prompt, {
+  const { text: hypothesis, tokens } = await promptAndWait(sid, prompt, {
     system: QA_SYSTEM,
     agent: "lore-distill",
   });
-  return { question: q.question, answer: q.answer, hypothesis, mode };
+  return { question: q.question, answer: q.answer, hypothesis, mode, tokens };
 }
 
 // --- Judge ---
@@ -402,7 +461,7 @@ async function judge(
 ): Promise<boolean> {
   const prompt = `Question: ${question}\nReference answer: ${reference}\nHypothesis: ${hypothesis}\n\nDoes the hypothesis correctly answer the question?`;
   const sid = await createSession();
-  const response = await promptAndWait(sid, prompt, {
+  const { text: response } = await promptAndWait(sid, prompt, {
     system: JUDGE_SYSTEM,
   });
   return response.toLowerCase().startsWith("yes");
@@ -519,6 +578,7 @@ await pool(
       hypothesis: result.hypothesis,
       mode: result.mode,
       label,
+      tokens: result.tokens,
     };
     writer.write(JSON.stringify(entry) + "\n");
     writer.flush();
@@ -526,8 +586,12 @@ await pool(
 
     const elapsed = (Date.now() - startTime) / 1000;
     const icon = label ? "✓" : "✗";
+    const t = result.tokens;
+    const cacheStr = t.input > 0
+      ? ` [${(t.cache_hit_rate * 100).toFixed(0)}% cache, ${(t.input / 1000).toFixed(1)}K in, $${t.cost.toFixed(4)}]`
+      : "";
     console.log(
-      `[${completed}/${work.length}] ${icon} ${mode.padEnd(7)} ${q.session_label.padEnd(12)} "${q.question.substring(0, 50)}..."`,
+      `[${completed}/${work.length}] ${icon} ${mode.padEnd(7)} ${q.session_label.padEnd(12)} "${q.question.substring(0, 50)}"${cacheStr}`,
     );
     return entry;
   },
@@ -565,6 +629,31 @@ if (modes.length > 1) {
       );
     }
   }
+}
+
+// --- Token usage summary ---
+console.log("\n=== Token Usage ===");
+for (const mode of modes) {
+  const modeResults = results.filter((r: any) => r.mode === mode && r.tokens);
+  if (!modeResults.length) continue;
+
+  const totals = modeResults.reduce(
+    (acc: AggregatedTokens, r: any) => addTokens(acc, r.tokens as AggregatedTokens),
+    emptyTokens(),
+  );
+  const n = modeResults.length;
+  const correct = modeResults.filter((r: any) => r.label).length;
+
+  console.log(`\n${mode}:`);
+  console.log(`  Avg input/question : ${(totals.input / n / 1000).toFixed(1)}K tokens`);
+  console.log(`  Avg output/question: ${(totals.output / n).toFixed(0)} tokens`);
+  console.log(`  Cache hit rate     : ${(totals.cache_hit_rate * 100).toFixed(1)}%`);
+  console.log(`    cache_read total : ${(totals.cache_read / 1000).toFixed(1)}K`);
+  console.log(`    cache_write total: ${(totals.cache_write / 1000).toFixed(1)}K`);
+  console.log(`    raw_input total  : ${(totals.raw_input / 1000).toFixed(1)}K`);
+  console.log(`  Total cost         : $${totals.cost.toFixed(4)}`);
+  console.log(`  Cost/correct answer: $${correct > 0 ? (totals.cost / correct).toFixed(4) : "N/A"}`);
+  console.log(`  Total API calls    : ${totals.api_calls}`);
 }
 
 const elapsed = (Date.now() - startTime) / 1000;

@@ -41,14 +41,43 @@ A **gradient context manager** decides how much of each tier to include in each 
 
 ### Coding session recall
 
-15 questions across 3 real coding sessions, each asking about a specific fact from the conversation. Compared against OpenCode's default behavior (last ~80K tokens of context).
+20 questions across 2 real coding sessions (113K and 353K tokens), targeting specific facts at varying depths. Default mode simulates OpenCode's actual behavior: compaction of early messages + 80K-token tail window. Lore mode uses on-the-fly distillation + the `recall` tool for searching raw message history.
 
-| Metric         | Default | Lore         |
-|----------------|---------|--------------|
-| Score          | 10/15   | **14/15**    |
-| Accuracy       | 66.7%   | **93.3%**    |
+**Accuracy:**
 
-Lore's advantage is largest on early/mid-session details that fall outside the recent-context window — facts like which PR was being tested, why an endpoint was changed, how many rows were updated, or what a specific bug's root cause was. The `recall` tool covers gaps where the distilled observations lack fine-grained detail.
+| Mode    | Score     | Accuracy   |
+|---------|-----------|------------|
+| Default | 10/20     | 50.0%      |
+| Lore    | **17/20** | **85.0%**  |
+
+**By question depth** (where in the session the answer lives):
+
+| Depth        | Default  | Lore        | Gap     |
+|--------------|----------|-------------|---------|
+| Early detail | 1/7      | **6/7**     | +71pp   |
+| Mid detail   | 3/5      | **5/5**     | +40pp   |
+| Late detail  | 6/7      | 6/7         | tied    |
+
+Early and mid details — specific numbers, file paths, design decisions, error messages — are what compaction loses and distillation preserves. Late details are in both modes' context windows, so they tie.
+
+**Cost:**
+
+| Metric             | Default    | Lore       | Factor       |
+|--------------------|------------|------------|--------------|
+| Avg input/question | 126K tok   | 50K tok    | 2.5x less    |
+| Total cost         | $8.14      | $1.87      | 4.4x cheaper |
+| Cost/correct       | $0.81      | **$0.11**  | 7.4x cheaper |
+
+Lore's distilled context is smaller and more cacheable than raw tail windows, making it both more accurate and cheaper per correct answer.
+
+**Distillation compression:**
+
+| Session            | Messages | Tokens | Distilled to     | Compression |
+|--------------------|----------|--------|------------------|-------------|
+| cli-sentry-issue   | 318      | 113K   | ~6K tokens       | 19x         |
+| cli-nightly        | 898      | 353K   | ~19K tokens      | 19x         |
+
+The eval is self-contained and reproducible: session transcripts are stored as JSON files with no database dependency. See [`eval/`](eval/) for the harness and data.
 
 ## How we got here
 
@@ -60,7 +89,9 @@ This plugin was built in a few intense sessions. Some highlights:
 
 **v2 — observation logs.** Switching to Mastra's observer/reflector architecture with plain-text timestamped observation logs was the breakthrough — LongMemEval jumped from 73.8% to 88.0%. The key insight: dated event logs preserve temporal relationships that structured JSON destroys.
 
-**Prompt refinements.** The final push from 80% to 93.3% on coding recall came from two observer prompt additions: "EXACT NUMBERS — NEVER APPROXIMATE" (the observer was rounding counts) and "BUG FIXES — ALWAYS RECORD" (early-session fixes were being compressed away during reflection).
+**Prompt refinements.** The push from 80% to 93.3% on the initial coding recall eval came from two observer prompt additions: "EXACT NUMBERS — NEVER APPROXIMATE" (the observer was rounding counts) and "BUG FIXES — ALWAYS RECORD" (early-session fixes were being compressed away during reflection).
+
+**v3 — gradient fixes, caching, and proper eval.** A month of fixes (per-session gradient state, current-turn protection, cache.write calibration, prefix caching, LTM relevance scoring) shipped alongside a new self-contained eval harness. The old coding eval used DB-resident sessions that degraded over time as temporal pruning deleted messages. The new eval extracts full session transcripts into portable JSON files, distills on the fly with the current production prompt, seeds the DB for recall tool access, and compares against OpenCode's actual compaction behavior. This moved the coding eval from 15 questions on degraded data to 20 questions on clean 113K-353K token sessions — and confirmed the +35pp accuracy gap and 7x cost efficiency advantage.
 
 ## Installation
 
