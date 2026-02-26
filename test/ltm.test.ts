@@ -157,11 +157,11 @@ describe("ltm — UUIDv7 IDs", () => {
   });
 
   test("multiple create() calls produce monotonically increasing IDs", () => {
-    const ids = Array.from({ length: 5 }, () =>
+    const ids = Array.from({ length: 5 }, (_, i) =>
       ltm.create({
         projectPath: PROJ,
         category: "pattern",
-        title: `Entry ${Date.now()}`,
+        title: `Monotonic entry ${i}`,
         content: "Content",
         scope: "project",
       }),

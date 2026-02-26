@@ -175,7 +175,7 @@ function buildSection(projectPath: string): string {
   // Section heading
   out.push("## Long-term Knowledge");
 
-  for (const [category, items] of grouped) {
+  for (const [category, items] of [...grouped.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     out.push("");
     out.push(`### ${category.charAt(0).toUpperCase() + category.slice(1)}`);
     out.push("");
