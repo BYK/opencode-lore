@@ -80,3 +80,7 @@
 <!-- lore:dd60622e-6cf3-48c7-9715-f44fb054e150 -->
 * **Use uuidv7 npm package for knowledge entry IDs**: User chose the \`uuidv7\` npm package (https://npmx.dev/package/uuidv7, by LiosK) over a self-contained ~15 line implementation. The package is RFC 9562 compliant, provides \`uuidv7()\` function that returns standard UUID string format, has a 42-bit counter for sub-millisecond monotonic ordering, and is clean/minimal. Usage: \`import { uuidv7 } from 'uuidv7'; const id = uuidv7();\` replaces \`crypto.randomUUID()\` in \`ltm.ts:31\`. Added as a runtime dependency in package.json.
 <!-- End lore-managed section -->
+
+## Conventions
+
+* This project uses [Conventional Commits](https://www.conventionalcommits.org/) for all commit messages. Releases and changelogs are auto-generated from these via [Craft](https://github.com/getsentry/craft).
