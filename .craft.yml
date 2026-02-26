@@ -1,0 +1,9 @@
+minVersion: '2.21.1'
+changelog:
+  policy: auto
+versioning:
+  policy: auto
+targets:
+  - name: npm
+    access: public
+  - name: github

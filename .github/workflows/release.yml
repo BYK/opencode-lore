@@ -1,0 +1,73 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release (or "auto")
+        required: false
+      force:
+        description: Force a release even when there are release-blockers
+        type: boolean
+        default: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    name: Prepare release
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      version: ${{ steps.craft.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: getsentry/craft@v2
+        id: craft
+        with:
+          version: ${{ inputs.version }}
+          force: ${{ inputs.force }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Merge release PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.craft.outputs.version }}"
+          PR=$(gh pr list --head "release/$VERSION" --json number --jq '.[0].number')
+          gh pr merge "$PR" --squash --delete-branch --auto
+          echo "Waiting for PR #$PR to merge..."
+          for i in $(seq 1 60); do
+            STATE=$(gh pr view "$PR" --json state --jq '.state')
+            if [ "$STATE" = "MERGED" ]; then
+              echo "PR #$PR merged"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Timed out waiting for release PR to merge"
+          exit 1
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    name: Publish release
+    environment: production
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm pack
+      - name: Publish
+        run: npx @sentry/craft publish "${{ needs.prepare.outputs.version }}" --no-input
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
