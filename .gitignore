@@ -5,8 +5,6 @@ dist/
 *.db-wal
 *.db-shm
 
-# Large eval benchmark data (download separately)
-eval/data/longmemeval_*.json
 
 # Local plans and agent config
 .plans/

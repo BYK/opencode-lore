@@ -24,21 +24,6 @@ A **gradient context manager** decides how much of each tier to include in each 
 
 > Scores below are on Claude Sonnet 4 (claude-sonnet-4-6). Results may vary with other models.
 
-### General memory recall
-
-500-question evaluation using the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benchmark (ICLR 2025), tested in oracle mode (full message history provided as conversation context).
-
-| Category                  | No plugin | Lore    |
-|---------------------------|-----------|---------|
-| Single-session (user)     | 71.9%     | 93.8%   |
-| Single-session (prefs)    | 46.7%     | 86.7%   |
-| Single-session (assistant)| 91.1%     | 96.4%   |
-| Multi-session             | 76.9%     | 85.1%   |
-| Knowledge updates         | 84.7%     | 93.1%   |
-| Temporal reasoning        | 64.6%     | 81.9%   |
-| Abstention                | 53.3%     | 86.7%   |
-| **Overall**               | **72.6%** | **88.0%** |
-
 ### Coding session recall
 
 20 questions across 2 real coding sessions (113K and 353K tokens), targeting specific facts at varying depths. Default mode simulates OpenCode's actual behavior: compaction of early messages + 80K-token tail window. Lore mode uses on-the-fly distillation + the `recall` tool for searching raw message history.
@@ -87,7 +72,7 @@ This plugin was built in a few intense sessions. Some highlights:
 
 **Markdown injection.** Property-based testing with fast-check revealed that user-generated content in facts (code fences, heading markers, thematic breaks) could break the markdown structure of the injected context, confusing the model.
 
-**v2 — observation logs.** Switching to Mastra's observer/reflector architecture with plain-text timestamped observation logs was the breakthrough — LongMemEval jumped from 73.8% to 88.0%. The key insight: dated event logs preserve temporal relationships that structured JSON destroys.
+**v2 — observation logs.** Switching to Mastra's observer/reflector architecture with plain-text timestamped observation logs was the breakthrough. The key insight: dated event logs preserve temporal relationships that structured JSON destroys.
 
 **Prompt refinements.** The push from 80% to 93.3% on the initial coding recall eval came from two observer prompt additions: "EXACT NUMBERS — NEVER APPROXIMATE" (the observer was rounding counts) and "BUG FIXES — ALWAYS RECORD" (early-session fixes were being compressed away during reflection).
 
@@ -157,7 +142,6 @@ The assistant gets a `recall` tool that searches across stored messages and know
 - [How we solved the agent memory problem](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) — Simen Svale at Sanity on the Nuum memory architecture: three-tier storage, distillation not summarization, recursive compression. The foundation this plugin is built on.
 - [Mastra Observational Memory](https://mastra.ai/research/observational-memory) — the observer/reflector architecture and the switch from structured JSON to timestamped observation logs that made v2 work.
 - [Mastra Memory source](https://github.com/mastra-ai/mastra/tree/main/packages/memory) — reference implementation.
-- [LongMemEval](https://arxiv.org/abs/2410.10813) — the evaluation benchmark (ICLR 2025) we used to measure progress.
 - [OpenCode](https://opencode.ai) — the coding agent this plugin extends.
 
 ## License
