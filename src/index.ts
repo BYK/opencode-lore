@@ -401,6 +401,18 @@ export const LorePlugin: Plugin = async (ctx) => {
       } else {
         setLtmTokens(0);
       }
+
+      // Remind the agent to include the agents file in commits.
+      // It is always modified after the lore export runs (post-session) so it
+      // appears as unstaged when the agent goes to commit — the agent must not
+      // skip it just because it looks auto-generated.
+      if (cfg.agentsFile.enabled) {
+        output.system.push(
+          `When making git commits, always check if ${cfg.agentsFile.path} has ` +
+          `unstaged changes and include it in the commit. This file contains ` +
+          `shared project knowledge managed by lore and must be version-controlled.`,
+        );
+      }
     },
 
     // Transform message history: distilled prefix + raw recent.
