@@ -1,4 +1,10 @@
 # Changelog
+## 0.3.4
+
+### Bug Fixes 🐛
+
+- (ci) Upgrade npm for OIDC trusted publishing (requires >=11.5.1) by @BYK in [42b2935b](https://github.com/BYK/opencode-lore/commit/42b2935b2da1d57b1c3988c6463e75983d55a9bf)
+
 ## 0.3.3
 
 ### Bug Fixes 🐛
