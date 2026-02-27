@@ -18,7 +18,7 @@ import { serialize, inline, h, ul, liph, strong, t, root, unescapeMarkdown } fro
 // ---------------------------------------------------------------------------
 
 export const LORE_SECTION_START =
-  "<!-- This section is auto-maintained by lore (https://github.com/BYK/opencode-lore) -->";
+  "<!-- This section is maintained by the coding agent via lore (https://github.com/BYK/opencode-lore) -->";
 export const LORE_SECTION_END = "<!-- End lore-managed section -->";
 
 /** Regex matching a valid UUID (v4 or v7) — 8-4-4-4-12 hex groups. */
