@@ -10,85 +10,16 @@ on:
         type: boolean
         default: false
 
-jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    name: Prepare release
-    permissions:
-      contents: write
-      pull-requests: write
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Install Craft
-        run: |
-          CRAFT_URL=$(curl -fsSL https://api.github.com/repos/getsentry/craft/releases/latest \
-            | jq -r '.assets[] | select(.name == "craft") | .browser_download_url')
-          sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
-          sudo chmod +x /usr/local/bin/craft
-      - name: Prepare
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: craft prepare ${{ inputs.version || 'auto' }} --no-input
-      - name: Resolve version
-        id: version
-        run: |
-          VERSION=$(git branch --show-current | sed 's|^release/||')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION"
-      - name: Push release branch
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          git push origin "release/$VERSION"
-          PR_URL=$(gh pr create \
-            --base main \
-            --head "release/$VERSION" \
-            --title "release: $VERSION" \
-            --body "Automated release PR for $VERSION")
-          PR=$(echo "$PR_URL" | grep -oE '[0-9]+$')
-          gh pr merge "$PR" --squash --delete-branch --auto
-          echo "Waiting for PR #$PR to merge..."
-          for i in $(seq 1 60); do
-            STATE=$(gh pr view "$PR" --json state --jq '.state')
-            if [ "$STATE" = "MERGED" ]; then
-              echo "PR #$PR merged"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::Timed out waiting for release PR to merge"
-          exit 1
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
 
-  publish:
-    needs: prepare
-    runs-on: ubuntu-latest
-    name: Publish release
-    environment: production
-    permissions:
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-      - name: Install Craft
-        run: |
-          CRAFT_URL=$(curl -fsSL https://api.github.com/repos/getsentry/craft/releases/latest \
-            | jq -r '.assets[] | select(.name == "craft") | .browser_download_url')
-          sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
-          sudo chmod +x /usr/local/bin/craft
-      - run: npm pack
-      - name: Publish
-        run: craft publish "${{ needs.prepare.outputs.version }}" --no-input
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  release:
+    uses: getsentry/craft/.github/workflows/release.yml@v2
+    with:
+      version: ${{ inputs.version || 'auto' }}
+      force: ${{ inputs.force && 'true' || 'false' }}
+      publish_repo: self
+    secrets: inherit
