@@ -56,7 +56,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   // Prune any corrupted/oversized knowledge entries left by the AGENTS.md
   // backslash-escaping bug or curator hallucinations. Sets confidence → 0
   // (below the 0.2 query threshold) so they stop polluting the context.
-  const pruned = ltm.pruneOversized(2000);
+  const pruned = ltm.pruneOversized(1200);
   if (pruned > 0) {
     console.error(`[lore] pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
   }
@@ -301,6 +301,29 @@ export const LorePlugin: Plugin = async (ctx) => {
           turnsSinceCuration = 0;
         }
 
+        // Consolidate entries if count exceeds cfg.curator.maxEntries.
+        // Runs after normal curation so newly created entries are counted.
+        // Only triggers when truly over the limit to avoid redundant LLM calls.
+        try {
+          const allEntries = ltm.forProject(projectPath);
+          if (allEntries.length > cfg.curator.maxEntries) {
+            console.error(
+              `[lore] entry count ${allEntries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
+            );
+            const { updated, deleted } = await curator.consolidate({
+              client: ctx.client,
+              projectPath,
+              sessionID,
+              model: cfg.model,
+            });
+            if (updated > 0 || deleted > 0) {
+              console.error(`[lore] consolidation: ${updated} updated, ${deleted} deleted`);
+            }
+          }
+        } catch (e) {
+          console.error("[lore] consolidation error:", e);
+        }
+
         // Prune temporal messages after distillation and curation have run.
         // Pass 1: TTL — remove distilled messages older than retention period.
         // Pass 2: Size cap — evict oldest distilled messages if over the limit.
@@ -371,7 +394,8 @@ export const LorePlugin: Plugin = async (ctx) => {
       if (formatted) {
         // Track how many tokens we actually consumed so the gradient manager
         // can deduct them from the usable budget for message injection.
-        const ltmTokenCount = Math.ceil(formatted.length / 4);
+        // Use /3 (not /4) — consistent with ltm.ts and prompt.ts estimators.
+        const ltmTokenCount = Math.ceil(formatted.length / 3);
         setLtmTokens(ltmTokenCount);
         output.system.push(formatted);
       } else {

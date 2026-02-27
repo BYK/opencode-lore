@@ -195,11 +195,23 @@ Do NOT extract:
 - Restatements of what the code obviously does (e.g. "the auth module handles authentication")
 
 BREVITY IS CRITICAL — each entry must be concise:
-- content MUST be under 500 words (roughly 2000 characters)
+- content MUST be under 150 words (~600 characters). Capture ONE specific actionable
+  insight in 2-3 sentences. Prefer terse technical language.
+- Each "gotcha": one specific trap + its fix in 1-2 sentences
+- Each "architecture": one design decision and its key constraint
 - Focus on the actionable insight, not the full story behind it
-- If a pattern requires more detail, split into multiple focused entries
+- If a pattern requires more detail, split into multiple focused entries (each under 150 words)
 - Omit code examples unless a single short snippet is essential
 - Never include full file contents, large diffs, or complete command outputs
+
+PREFER UPDATES OVER CREATES:
+- Before creating a new entry, always check if an existing entry covers the same system
+  or component. Update the existing entry rather than creating a new one.
+- When updating, REPLACE the full content with a concise rewrite — do not append to
+  the existing content or repeat what was already there.
+- If multiple existing entries cover the same system from different angles (e.g. different
+  bugs in the same module), consolidate them: update one with merged insights, delete the
+  rest. Fewer, denser entries are better than many scattered ones.
 
 crossProject flag:
 - Default is true — most useful knowledge is worth sharing across projects
@@ -211,14 +223,14 @@ Produce a JSON array of operations:
     "op": "create",
     "category": "decision" | "pattern" | "preference" | "architecture" | "gotcha",
     "title": "Short descriptive title",
-    "content": "Concise knowledge entry — under 500 words",
+    "content": "Concise knowledge entry — under 150 words",
     "scope": "project" | "global",
     "crossProject": true
   },
   {
     "op": "update",
     "id": "existing-entry-id",
-    "content": "Updated content — under 500 words",
+    "content": "Updated content — under 150 words",
     "confidence": 0.0-1.0
   },
   {
@@ -241,8 +253,9 @@ export function curatorUser(input: {
     content: string;
   }>;
 }): string {
-  const existing = input.existing.length
-    ? `Existing knowledge entries (you may update or delete these):\n${input.existing.map((e) => `- [${e.id}] (${e.category}) ${e.title}: ${e.content}`).join("\n")}`
+  const count = input.existing.length;
+  const existing = count
+    ? `Existing knowledge entries (${count} total — you may update or delete these):\n${input.existing.map((e) => `- [${e.id}] (${e.category}) ${e.title}: ${e.content}`).join("\n")}`
     : "No existing knowledge entries.";
   return `${existing}
 
@@ -252,7 +265,67 @@ Recent conversation to extract knowledge from:
 ${input.messages}
 
 ---
-IMPORTANT: If any new entries you would create are semantically duplicative of existing entries (same concept, different wording), prefer updating the existing entry rather than creating a new one. Only create new entries for genuinely distinct knowledge.`;
+IMPORTANT:
+1. Prefer updating existing entries over creating new ones. If a new insight refines or
+   extends an existing entry on the same topic, update that entry — don't create a new one.
+2. When updating, REPLACE the content with a complete rewrite — never append.
+3. If entries cover the same system from different angles, merge them: update one, delete the rest.
+4. Only create a new entry for genuinely distinct knowledge with no existing home.
+5. Keep all entries under 150 words. If an existing entry is too long, use an update op to trim it.`;
+}
+
+/**
+ * System prompt for the consolidation pass.
+ * Unlike the normal curator (which extracts from conversation), consolidation
+ * reviews the FULL entry corpus and aggressively merges/trims/deletes to reduce
+ * entry count while preserving the most actionable knowledge.
+ */
+export const CONSOLIDATION_SYSTEM = `You are a long-term memory curator performing a consolidation pass. The knowledge base has grown too large and needs to be trimmed.
+
+Your goal: reduce the entry count to the target maximum while preserving the most valuable knowledge.
+
+CONSOLIDATION RULES:
+1. MERGE related entries — if multiple entries describe the same system, module, or concept
+   from different angles (e.g. several bug fixes in the same component), merge them into
+   ONE concise entry. Use an "update" op for the surviving entry and "delete" ops for the rest.
+2. TRIM verbose entries — any entry over 150 words must be trimmed to its essential insight.
+   Use an "update" op with the rewritten content.
+3. DELETE low-value entries:
+   - Stale entries about bugs that have been fixed and no longer need gotcha warnings
+   - Entries whose knowledge is fully subsumed by another entry
+   - Entries about one-off incidents with no recurring applicability
+   - General advice available in any documentation
+4. PRESERVE:
+   - Entries describing non-obvious design decisions specific to this codebase
+   - Entries about recurring traps that a developer would hit again
+   - Entries that capture a hard-won gotcha with a concrete fix
+
+OUTPUT: A JSON array of "update" and "delete" ops only. No "create" ops — you are not
+extracting new knowledge, only consolidating existing knowledge.
+
+- "update": Replace content with a concise rewrite (under 150 words). Use to merge survivors or trim verbose entries.
+- "delete": Remove entries that are merged, stale, or low-value.
+
+Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
+
+export function consolidationUser(input: {
+  entries: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+  }>;
+  targetMax: number;
+}): string {
+  const count = input.entries.length;
+  const listed = input.entries
+    .map((e) => `- [${e.id}] (${e.category}) ${e.title}: ${e.content}`)
+    .join("\n");
+  return `Current knowledge entries (${count} total, target max: ${input.targetMax}):
+
+${listed}
+
+Produce update/delete ops to reduce entry count to at most ${input.targetMax}. Prioritize merging related entries and trimming verbose ones over outright deletion.`;
 }
 
 // Format distillations for injection into the message context.
@@ -287,9 +360,9 @@ export function formatDistillations(
 }
 
 // Rough token estimate used for budget-gating knowledge entries.
-// Consistent with gradient.ts: ~4 chars per token.
+// Uses ~3 chars/token (conservative for markdown-heavy technical text).
 function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / 3);
 }
 
 export function formatKnowledge(

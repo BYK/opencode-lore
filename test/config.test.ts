@@ -40,6 +40,25 @@ describe("LoreConfig — agentsFile schema", () => {
   });
 });
 
+describe("LoreConfig — curator schema", () => {
+  test("curator defaults: enabled=true, onIdle=true, afterTurns=10, maxEntries=25", () => {
+    const cfg = LoreConfig.parse({});
+    expect(cfg.curator.enabled).toBe(true);
+    expect(cfg.curator.onIdle).toBe(true);
+    expect(cfg.curator.afterTurns).toBe(10);
+    expect(cfg.curator.maxEntries).toBe(25);
+  });
+
+  test("curator.maxEntries can be customised", () => {
+    const cfg = LoreConfig.parse({ curator: { maxEntries: 30 } });
+    expect(cfg.curator.maxEntries).toBe(30);
+  });
+
+  test("curator.maxEntries minimum is 10", () => {
+    expect(() => LoreConfig.parse({ curator: { maxEntries: 5 } })).toThrow();
+  });
+});
+
 describe("load — reads config from .lore.json", () => {
   test("loads agentsFile.enabled=false from .lore.json", async () => {
     mkdirSync(TMP, { recursive: true });

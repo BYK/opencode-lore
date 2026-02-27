@@ -199,15 +199,15 @@ describe("formatKnowledge", () => {
     const entries = Array.from({ length: 20 }, (_, i) => ({
       category: "pattern",
       title: `Entry ${i}`,
-      content: "A".repeat(400), // ~100 tokens each
+      content: "A".repeat(400), // ~133 tokens each at chars/3
     }));
     // Budget of 500 tokens — should fit only a few
     const result = formatKnowledge(entries, 500);
     const items = countListItems(result);
     expect(items).toBeGreaterThan(0);
     expect(items).toBeLessThan(20);
-    // Total size should be roughly within budget
-    expect(Math.ceil(result.length / 4)).toBeLessThanOrEqual(600); // some slack for headers
+    // Total size should be roughly within budget (use /3 to match estimateTokens)
+    expect(Math.ceil(result.length / 3)).toBeLessThanOrEqual(600); // some slack for headers
   });
 
   test("token budget — returns empty string when no entries fit", () => {
