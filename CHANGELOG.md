@@ -1,4 +1,10 @@
 # Changelog
+## 0.3.8
+
+### Internal Changes 🔧
+
+- Use Craft npm target with OIDC, pack tarball on release branches by @BYK in [68e650a4](https://github.com/BYK/opencode-lore/commit/68e650a4f919d856e62c39d52e62135ad92fa643)
+
 ## 0.3.7
 
 - No documented changes.
