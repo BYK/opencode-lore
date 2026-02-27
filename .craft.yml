@@ -3,6 +3,11 @@ changelog:
   policy: auto
 versioning:
   policy: auto
+artifactProvider:
+  name: github
+  config:
+    artifacts:
+      CI: npm-package
 targets:
   - name: npm
     access: public
