@@ -17,9 +17,17 @@ permissions:
 
 jobs:
   release:
-    uses: getsentry/craft/.github/workflows/release.yml@v2
-    with:
-      version: ${{ inputs.version || 'auto' }}
-      force: ${{ inputs.force && 'true' || 'false' }}
-      publish_repo: self
-    secrets: inherit
+    runs-on: ubuntu-latest
+    name: Release a new version
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare release
+        uses: getsentry/craft@v2
+        with:
+          version: ${{ inputs.version || 'auto' }}
+          force: ${{ inputs.force && 'true' || 'false' }}
+          publish_repo: self
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
