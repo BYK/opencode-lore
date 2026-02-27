@@ -1,0 +1,72 @@
+name: Publish
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  id-token: write
+  issues: write
+
+jobs:
+  publish:
+    if: github.event.label.name == 'accepted' && github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    name: Publish release
+    environment: production
+    timeout-minutes: 15
+    steps:
+      - name: Parse publish request
+        id: inputs
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          # Title format: "publish: owner/repo@VERSION"
+          VERSION=$(echo "$ISSUE_TITLE" | grep -oP '@\K[^\s]+$')
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Could not parse version from issue title: $ISSUE_TITLE"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install Craft
+        run: |
+          CRAFT_URL=$(curl -fsSL https://api.github.com/repos/getsentry/craft/releases/latest \
+            | jq -r '.assets[] | select(.name == "craft") | .browser_download_url')
+          sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
+          sudo chmod +x /usr/local/bin/craft
+
+      - name: Publish GitHub release
+        run: craft publish "${{ steps.inputs.outputs.version }}" --no-input
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+
+      - name: Close issue on success
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue close "${{ github.event.issue.number }}" \
+            --comment "Published **${{ steps.inputs.outputs.version }}** successfully.
+          [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+
+      - name: Comment on failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "${{ github.event.issue.number }}" \
+            --body "Publish failed. [View workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          gh issue edit "${{ github.event.issue.number }}" --remove-label accepted
