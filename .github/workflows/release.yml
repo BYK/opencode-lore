@@ -47,7 +47,17 @@ jobs:
       - name: Resolve version
         id: version
         run: |
-          VERSION=$(git branch --show-current | sed 's|^release/||')
+          # Craft writes to GITHUB_OUTPUT via @actions/core
+          VERSION="${{ steps.craft.outputs.version }}"
+          # Fallback: read from the remote release branch
+          if [[ -z "$VERSION" ]]; then
+            git fetch origin 'refs/heads/release/*:refs/remotes/origin/release/*' 2>/dev/null
+            VERSION=$(git for-each-ref --sort=-creatordate --format='%(refname:short)' refs/remotes/origin/release/ | head -1 | sed 's|origin/release/||')
+          fi
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Could not determine release version"
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create publish issue
