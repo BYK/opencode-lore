@@ -1,4 +1,11 @@
 # Changelog
+## 0.3.9
+
+### Internal Changes 🔧
+
+- Use Craft github artifact provider and oidc: true for npm target by @BYK in [d0dc35aa](https://github.com/BYK/opencode-lore/commit/d0dc35aacbff2981f994e27932da3a3e9e2c6f3f)
+- Use Craft npm target with OIDC, pack tarball on release branches by @BYK in [68e650a4](https://github.com/BYK/opencode-lore/commit/68e650a4f919d856e62c39d52e62135ad92fa643)
+
 ## 0.3.7
 
 - No documented changes.
