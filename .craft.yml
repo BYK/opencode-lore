@@ -3,12 +3,6 @@ changelog:
   policy: auto
 versioning:
   policy: auto
-artifactProvider:
-  name: github
-  config:
-    artifacts:
-      CI: npm-package
+preReleaseCommand: npm version $CRAFT_NEW_VERSION --no-git-tag-version
 targets:
-  - name: npm
-    access: public
   - name: github
