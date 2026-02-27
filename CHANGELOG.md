@@ -1,4 +1,10 @@
 # Changelog
+## 0.3.5
+
+### Bug Fixes 🐛
+
+- (ci) Remove registry-url from setup-node to let npm use native OIDC by @BYK in [9802054b](https://github.com/BYK/opencode-lore/commit/9802054b92f1f69a67969f25d50bf8bc58389bee)
+
 ## 0.3.4
 
 ### Bug Fixes 🐛
