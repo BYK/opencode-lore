@@ -22,12 +22,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          token: ${{ secrets.GH_RELEASE_TOKEN }}
           fetch-depth: 0
+
+      - name: Set git user
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+      - name: Install Craft
+        run: |
+          CRAFT_URL=$(curl -fsSL https://api.github.com/repos/getsentry/craft/releases/latest \
+            | jq -r '.assets[] | select(.name == "craft") | .browser_download_url')
+          sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
+          sudo chmod +x /usr/local/bin/craft
+
       - name: Prepare release
-        uses: getsentry/craft@v2
-        with:
-          version: ${{ inputs.version || 'auto' }}
-          force: ${{ inputs.force && 'true' || 'false' }}
-          publish_repo: self
+        id: craft
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: craft prepare ${{ inputs.version || '' }} --no-input
+
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION=$(git branch --show-current | sed 's|^release/||')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create publish issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="release/$VERSION"
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "HEAD")
+          TARGETS=$(craft targets | jq -r '.[]|" - [ ] \(.)"')
+
+          title="publish: ${{ github.repository }}@${VERSION}"
+
+          # Check for existing issue
+          EXISTING=$(gh issue list --search "\"$title\"" --state open --json number --jq '.[0].number // empty')
+
+          body="Requested by: @${{ github.actor }}
+
+          Quick links:
+          - [View changes](https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${BRANCH})
+
+          Assign the **accepted** label to this issue to approve the release.
+
+          ### Targets
+
+          ${TARGETS}
+
+          Checked targets will be skipped."
+
+          if [[ -n "$EXISTING" ]]; then
+            gh issue edit "$EXISTING" --body "$body"
+            echo "::notice::Updated existing publish request: #$EXISTING"
+          else
+            ISSUE_URL=$(gh issue create --title "$title" --body "$body")
+            echo "::notice::Created publish request: $ISSUE_URL"
+          fi
