@@ -10,26 +10,27 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-
 jobs:
   release:
     runs-on: ubuntu-latest
     name: Release a new version
     environment: production
     steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_RELEASE_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
       - name: Set git user
         run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Install Craft
         run: |
@@ -41,7 +42,7 @@ jobs:
       - name: Prepare release
         id: craft
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: craft prepare ${{ inputs.version || '' }} --no-input
 
       - name: Resolve version
@@ -62,7 +63,7 @@ jobs:
 
       - name: Create publish issue
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           BRANCH="release/$VERSION"

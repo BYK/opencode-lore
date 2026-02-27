@@ -3,19 +3,24 @@ on:
   issues:
     types: [labeled]
 
-permissions:
-  contents: write
-  id-token: write
-  issues: write
-
 jobs:
   publish:
     if: github.event.label.name == 'accepted' && github.event.issue.state == 'open'
     runs-on: ubuntu-latest
     name: Publish release
     environment: production
+    permissions:
+      contents: write
+      id-token: write
+      issues: write
     timeout-minutes: 15
     steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - name: Parse publish request
         id: inputs
         env:
@@ -32,6 +37,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: release/${{ steps.inputs.outputs.version }}
+          token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
       - name: Set git user
@@ -54,7 +60,7 @@ jobs:
       - name: Publish GitHub release
         run: craft publish "${{ steps.inputs.outputs.version }}" --no-input --no-status-check
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Publish to npm
         run: npm publish --provenance --access public
@@ -62,7 +68,7 @@ jobs:
       - name: Close issue on success
         if: success()
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           gh issue close "${{ github.event.issue.number }}" \
             --comment "Published **${{ steps.inputs.outputs.version }}** successfully.
@@ -71,7 +77,7 @@ jobs:
       - name: Comment on failure
         if: failure()
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           gh issue comment "${{ github.event.issue.number }}" \
             --body "Publish failed. [View workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
