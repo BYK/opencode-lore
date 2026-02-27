@@ -10,14 +10,30 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-  issues: write
-
 jobs:
   release:
-    uses: getsentry/craft/.github/workflows/release.yml@v2
-    with:
-      version: ${{ inputs.version }}
-      force: ${{ inputs.force }}
-      publish_repo: self
+    runs-on: ubuntu-latest
+    name: Release a new version
+    environment: production
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - uses: getsentry/craft@v2
+        with:
+          version: ${{ inputs.version }}
+          force: ${{ inputs.force }}
+          publish_repo: self
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
