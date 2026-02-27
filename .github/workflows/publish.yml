@@ -31,7 +31,13 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          ref: release/${{ steps.inputs.outputs.version }}
           fetch-depth: 0
+
+      - name: Set git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - uses: actions/setup-node@v4
         with:
