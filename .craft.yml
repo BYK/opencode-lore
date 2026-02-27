@@ -4,8 +4,12 @@ changelog:
 versioning:
   policy: auto
 artifactProvider:
-  name: none
+  name: github
+  config:
+    artifacts:
+      CI: npm-tarball
 targets:
   - name: npm
     access: public
+    oidc: true
   - name: github
