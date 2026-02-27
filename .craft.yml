@@ -3,6 +3,6 @@ changelog:
   policy: auto
 versioning:
   policy: auto
-preReleaseCommand: npm version $CRAFT_NEW_VERSION --no-git-tag-version
+preReleaseCommand: bash -c 'npm version $CRAFT_NEW_VERSION --no-git-tag-version'
 targets:
   - name: github
