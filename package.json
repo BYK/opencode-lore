@@ -1,9 +1,9 @@
 {
   "name": "opencode-lore",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "type": "module",
   "license": "MIT",
-  "description": "Three-tier memory architecture for OpenCode \u2014 distillation, not summarization",
+  "description": "Three-tier memory architecture for OpenCode — distillation, not summarization",
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts"
