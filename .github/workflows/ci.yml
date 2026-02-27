@@ -23,3 +23,14 @@ jobs:
 
       - name: Test
         run: bun test
+
+      - name: Pack tarball
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: npm pack
+
+      - name: Upload tarball
+        if: startsWith(github.ref, 'refs/heads/release/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: '*.tgz'

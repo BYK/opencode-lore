@@ -64,13 +64,10 @@ jobs:
           sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
           sudo chmod +x /usr/local/bin/craft
 
-      - name: Publish GitHub release
+      - name: Publish
         run: craft publish "${{ steps.inputs.outputs.version }}" --no-input --no-status-check
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-
-      - name: Publish to npm
-        run: npm publish --provenance --access public
 
       - name: Close issue on success
         if: success()
