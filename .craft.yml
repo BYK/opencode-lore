@@ -4,5 +4,7 @@ changelog:
 versioning:
   policy: auto
 preReleaseCommand: bash -c 'npm version $CRAFT_NEW_VERSION --no-git-tag-version'
+artifactProvider:
+  name: none
 targets:
   - name: github
