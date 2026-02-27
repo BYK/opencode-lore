@@ -1,4 +1,8 @@
 # Changelog
+## 0.3.7
+
+- No documented changes.
+
 ## 0.3.6
 
 ### Bug Fixes 🐛
