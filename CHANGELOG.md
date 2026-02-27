@@ -1,4 +1,15 @@
 # Changelog
+## 0.4.0
+
+### New Features ✨
+
+- (ltm) Tighten entry budget, add consolidation pass by @BYK in [74728df1](https://github.com/BYK/opencode-lore/commit/74728df154a47529ceee418ddeaf7baf0e5aa38a)
+
+### Internal Changes 🔧
+
+- Use Craft composite action with app token for release by @BYK in [48b7a858](https://github.com/BYK/opencode-lore/commit/48b7a858679ebddc84f6a3b90f3c75dcb0326b39)
+- Use Craft reusable workflow for release by @BYK in [2ed8af27](https://github.com/BYK/opencode-lore/commit/2ed8af27ff89f16b76fecc5d5ac9886ec81956d2)
+
 ## 0.3.9
 
 ### Internal Changes 🔧
