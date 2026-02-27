@@ -1,4 +1,10 @@
 # Changelog
+## 0.3.6
+
+### Bug Fixes 🐛
+
+- (ci) Keep registry-url but strip \_authToken for OIDC auto-detection by @BYK in [15085e37](https://github.com/BYK/opencode-lore/commit/15085e37ed2980ca204b1be6050b051125fa6fcc)
+
 ## 0.3.5
 
 ### Bug Fixes 🐛
