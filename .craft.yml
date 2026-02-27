@@ -3,7 +3,7 @@ changelog:
   policy: auto
 versioning:
   policy: auto
-preReleaseCommand: bash -c 'npm version $CRAFT_NEW_VERSION --no-git-tag-version'
+preReleaseCommand: bash -c 'npm version $CRAFT_NEW_VERSION --no-git-tag-version && git add .'
 artifactProvider:
   name: none
 targets:

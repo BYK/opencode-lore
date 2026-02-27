@@ -52,9 +52,9 @@ jobs:
           sudo chmod +x /usr/local/bin/craft
 
       - name: Publish GitHub release
-        run: craft publish "${{ steps.inputs.outputs.version }}" --no-input
+        run: craft publish "${{ steps.inputs.outputs.version }}" --no-input --no-status-check
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
 
       - name: Publish to npm
         run: npm publish --provenance --access public
