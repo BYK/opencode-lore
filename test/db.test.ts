@@ -1,5 +1,5 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { db, close, ensureProject, projectId } from "../src/db";
+import { db, close, ensureProject, projectId, loadForceMinLayer, saveForceMinLayer } from "../src/db";
 
 afterAll(() => close());
 
@@ -15,13 +15,14 @@ describe("db", () => {
     expect(names).toContain("distillations");
     expect(names).toContain("knowledge");
     expect(names).toContain("schema_version");
+    expect(names).toContain("session_state");
   });
 
   test("schema version is set", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(3);
+    expect(row.version).toBe(4);
   });
 
   test("ensureProject creates and returns id", () => {
@@ -51,5 +52,21 @@ describe("db", () => {
   test("projectId returns undefined for unknown path", () => {
     const id = projectId("/nonexistent/path");
     expect(id).toBeUndefined();
+  });
+
+  test("saveForceMinLayer persists and loadForceMinLayer retrieves", () => {
+    saveForceMinLayer("test-session-persist", 2);
+    expect(loadForceMinLayer("test-session-persist")).toBe(2);
+  });
+
+  test("saveForceMinLayer(0) deletes the row", () => {
+    saveForceMinLayer("test-session-delete", 3);
+    expect(loadForceMinLayer("test-session-delete")).toBe(3);
+    saveForceMinLayer("test-session-delete", 0);
+    expect(loadForceMinLayer("test-session-delete")).toBe(0);
+  });
+
+  test("loadForceMinLayer returns 0 for unknown session", () => {
+    expect(loadForceMinLayer("nonexistent-session")).toBe(0);
   });
 });

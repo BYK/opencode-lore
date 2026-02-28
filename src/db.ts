@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { join } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const MIGRATIONS: string[] = [
   `
@@ -130,6 +130,17 @@ const MIGRATIONS: string[] = [
   -- VACUUM must run outside a transaction and cannot be in a multi-statement
   -- exec, so it is handled specially in the migrate() function.
   `,
+  `
+  -- Version 4: Persistent session state for error recovery.
+  -- Stores forceMinLayer so it survives OpenCode restarts. Without this,
+  -- a "prompt too long" error recovery (escalate to layer 2) is lost if
+  -- the process restarts before the next turn.
+  CREATE TABLE IF NOT EXISTS session_state (
+    session_id TEXT PRIMARY KEY,
+    force_min_layer INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 function dataDir() {
@@ -228,4 +239,36 @@ export function isFirstRun(): boolean {
     .query("SELECT COUNT(*) as count FROM projects")
     .get() as { count: number };
   return row.count === 0;
+}
+
+// ---------------------------------------------------------------------------
+// Persistent session state (error recovery)
+// ---------------------------------------------------------------------------
+
+/**
+ * Load persisted forceMinLayer for a session. Returns 0 if none stored.
+ */
+export function loadForceMinLayer(sessionID: string): number {
+  const row = db()
+    .query("SELECT force_min_layer FROM session_state WHERE session_id = ?")
+    .get(sessionID) as { force_min_layer: number } | null;
+  return row?.force_min_layer ?? 0;
+}
+
+/**
+ * Persist forceMinLayer for a session. Deletes the row when layer is 0
+ * (consumed) to avoid unbounded growth.
+ */
+export function saveForceMinLayer(sessionID: string, layer: number): void {
+  if (layer === 0) {
+    db()
+      .query("DELETE FROM session_state WHERE session_id = ?")
+      .run(sessionID);
+  } else {
+    db()
+      .query(
+        "INSERT OR REPLACE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(sessionID, layer, Date.now());
+  }
 }
