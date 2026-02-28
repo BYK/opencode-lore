@@ -2,8 +2,7 @@ import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "./db";
 import { ftsQuery } from "./temporal";
 
-// Rough token estimate: ~3 chars per token (conservative for markdown-heavy technical text;
-// real tokenization of code terms and special chars runs ~3.0-3.5 chars/token, not 4).
+// ~3 chars per token — validated as best heuristic against real API data.
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3);
 }

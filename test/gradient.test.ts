@@ -74,7 +74,7 @@ beforeAll(() => {
   ensureProject(PROJECT);
   // Set a small context for testing with zero overhead (no system prompt in tests)
   setModelLimits({ context: 10_000, output: 2_000 });
-  calibrate(0, 0); // zero overhead: no system prompt overhead in unit tests
+  calibrate(0); // zero overhead: no system prompt overhead in unit tests
 });
 
 afterAll(() => close());
@@ -126,7 +126,7 @@ describe("gradient", () => {
       return makeMsg(`nuclear-${i}`, role as "user" | "assistant", text);
     });
     setModelLimits({ context: 2_000, output: 500 }); // 1500 usable, rawBudget ~600
-    calibrate(0, 0); // keep overhead at zero for this test
+    calibrate(0); // keep overhead at zero for this test
     const result = transform({
       messages,
       projectPath: PROJECT,
@@ -136,7 +136,7 @@ describe("gradient", () => {
     expect(result.messages.length).toBeLessThanOrEqual(6); // layer 4: up to 3 prefix + 3 raw
     // Reset
     setModelLimits({ context: 10_000, output: 2_000 });
-    calibrate(0, 0);
+    calibrate(0);
   });
 
   test("returns valid token estimates", () => {
@@ -157,7 +157,7 @@ describe("gradient", () => {
     // Force context exhaustion: context=2000, output=500 → usable=1500
     // Each message ~550 tokens, 6 messages ~3300 tokens > 1500 usable
     setModelLimits({ context: 2_000, output: 500 });
-    calibrate(0, 0);
+    calibrate(0);
     const messages = Array.from({ length: 6 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
       return makeMsg(`exhaust-${i}`, role as "user" | "assistant", "X".repeat(2_000));
@@ -170,29 +170,36 @@ describe("gradient", () => {
     expect(result.layer).toBeGreaterThanOrEqual(1);
     // Reset
     setModelLimits({ context: 10_000, output: 2_000 });
-    calibrate(0, 0);
+    calibrate(0);
   });
 });
 
 describe("gradient — lazy raw window eviction (Approach B)", () => {
   // context=5000, output=1000 → usable=4000, rawBudget=floor(4000*0.4)=1600
-  // Each ~300-char message ≈ 95 tokens (75 chars/4 + 20 overhead).
-  // 10 messages ≈ 950 tokens — fits in 1600 raw budget, so gradient mode
-  // is reached only when we push things over with large messages.
+  // Each ~1000-char message ≈ 354 tokens (1000 chars/3 + 20 overhead).
+  // 16 messages ≈ 5664 > 4000 → gradient fires.
   const SESSION = "lazy-evict-sess";
 
   beforeAll(() => {
     setModelLimits({ context: 5_000, output: 1_000 });
-    calibrate(0, 0);
+    calibrate(0);
+    resetPrefixCache();
+    resetRawWindowCache();
+  });
+
+  afterAll(() => {
+    // Restore default limits so subsequent test suites aren't affected
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
     resetPrefixCache();
     resetRawWindowCache();
   });
 
   test("raw window is stable when the new turn fits", () => {
     // Build a conversation that exhausts the context so gradient mode fires.
-    // usable=4000; each message ≈ 270 tokens (1000 chars / 4 + 20 overhead).
-    // 16 messages ≈ 4320 > 4000 → gradient fires.
-    // rawBudget=floor(4000*0.4)=1600 → fits ~5 messages (5 × 270 = 1350 ≤ 1600).
+    // usable=4000; each message ≈ 354 tokens (1000 chars/3 + 20 overhead).
+    // 16 messages ≈ 5664 > 4000 → gradient fires.
+    // rawBudget=1600 → fits ~4 messages (4 × 354 = 1416 ≤ 1600).
     const base = Array.from({ length: 16 }, (_, i) =>
       makeMsg(`le-${i}`, i % 2 === 0 ? "user" : "assistant", "A".repeat(1_000), SESSION),
     );
@@ -226,11 +233,10 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
     resetRawWindowCache();
 
     // context=3000, output=500 → usable=2500, rawBudget=floor(2500*0.4)=1000
-    // Each 400-char message ≈ 120 tokens (400/4 + 20 overhead).
-    // 22 messages ≈ 2640 > 2500 → gradient fires.
-    // rawBudget=1000 → fits ~8 messages (8 × 120 = 960 ≤ 1000).
+    // Each 400-char message ≈ 154 tokens (400 chars/3 + 20 overhead).
+    // 22 messages ≈ 3388 > 2500 → gradient fires.
     setModelLimits({ context: 3_000, output: 500 });
-    calibrate(0, 0);
+    calibrate(0);
 
     const SESS2 = "lazy-evict-tight";
     const base = Array.from({ length: 22 }, (_, i) =>
@@ -242,11 +248,12 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
     expect(r1.layer).toBe(1);
     const firstId1 = r1.messages.find((m) => m.info.sessionID === SESS2)?.info.id;
 
-    // Second call: append a huge message that definitely pushes the pinned window
-    // past rawBudget, forcing eviction of the oldest message.
+    // Second call: append a large message that pushes the pinned window past
+    // rawBudget (1000), forcing eviction. C(2000) = 687 tokens — fits within
+    // rawBudget alone, but combined with pinned base messages forces re-scan.
     const withHuge = [
       ...base,
-      makeMsg(`tight-huge`, "user", "C".repeat(3_500), SESS2),
+      makeMsg(`tight-huge`, "user", "C".repeat(2_000), SESS2),
     ];
     const r2 = transform({ messages: withHuge, projectPath: PROJECT, sessionID: SESS2 });
     expect(r2.layer).toBe(1);
@@ -257,16 +264,16 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
 
     // Reset back
     setModelLimits({ context: 5_000, output: 1_000 });
-    calibrate(0, 0);
+    calibrate(0);
   });
 
   test("raw window cache resets on session change", () => {
     resetRawWindowCache();
 
-    // context=3000, output=500 → usable=2500, rawBudget=1000
-    // 22 × 400-char messages ≈ 2640 > 2500 → gradient fires
+    // context=3000, output=500 → usable=2500
+    // 22 × 400-char messages ≈ 3388 > 2500 → gradient fires
     setModelLimits({ context: 3_000, output: 500 });
-    calibrate(0, 0);
+    calibrate(0);
 
     const SESS_A = "lazy-sess-a";
     const SESS_B = "lazy-sess-b";
@@ -292,7 +299,7 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
 
     // Reset
     setModelLimits({ context: 5_000, output: 1_000 });
-    calibrate(0, 0);
+    calibrate(0);
     resetRawWindowCache();
   });
 });
@@ -300,7 +307,7 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
 describe("gradient — LTM budget coordination", () => {
   beforeAll(() => {
     setModelLimits({ context: 10_000, output: 2_000 });
-    calibrate(0, 0); // zero overhead for these tests
+    calibrate(0); // zero overhead for these tests
   });
 
   test("getLtmBudget returns fraction of usable context", () => {
@@ -360,7 +367,7 @@ describe("gradient — LTM budget coordination", () => {
 describe("gradient — force escalation (reactive error recovery)", () => {
   beforeAll(() => {
     setModelLimits({ context: 10_000, output: 2_000 });
-    calibrate(0, 0);
+    calibrate(0);
     resetPrefixCache();
     resetRawWindowCache();
   });
@@ -397,7 +404,7 @@ describe("gradient — force escalation (reactive error recovery)", () => {
   test("resetCalibration clears forceMinLayer", () => {
     setForceMinLayer(3, "rc-sess");
     resetCalibration();
-    calibrate(0, 0); // re-establish zero overhead after reset
+    calibrate(0); // re-establish zero overhead after reset
     const messages = [
       makeMsg("rc-1", "user", "hello", "rc-sess"),
       makeMsg("rc-2", "assistant", "world", "rc-sess"),
@@ -425,9 +432,9 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
     ];
     // Simulate a prior API response: 3000 tokens in, 2 messages
     // (overhead 0 so actual = message estimate)
-    calibrate(3_000, 3_000, SESSION, 2);
+    calibrate(3_000, SESSION, 2);
 
-    // Now add one new message (~130 tokens: 500/4 + 20)
+    // Now add one new message
     const withNew = [...messages, makeMsg("et-3", "user", "C".repeat(500), SESSION)];
     // expectedInput = 3000 + ~130 = ~3130 << maxInput (8000) → layer 0
     const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
@@ -435,14 +442,16 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
     expect(result.messages).toBe(withNew); // same reference
   });
 
-  test("falls back to chars/4 estimate when session changes", () => {
-    // calibrate was for SESSION, but we transform a different session
-    calibrate(3_000, 3_000, SESSION, 2);
+  test("falls back to chars/3 estimate when session changes", () => {
+    // calibrate was for SESSION, but we transform a different session.
+    // First zero the overhead (beforeEach resets to null → FIRST_TURN_OVERHEAD=15K).
+    calibrate(0);
+    calibrate(3_000, SESSION, 2);
     const messages = [
       makeMsg("diff-1", "user", "A".repeat(200), "other-sess"),
       makeMsg("diff-2", "assistant", "B".repeat(200), "other-sess"),
     ];
-    // Fallback: messageTokens + overhead(0) + ltm(0) = ~110 << 8000 → still layer 0
+    // Fallback: messageTokens + overhead(0) + ltm(0) = ~174 << 8000 → still layer 0
     const result = transform({ messages, projectPath: PROJECT, sessionID: "other-sess" });
     expect(result.layer).toBe(0);
   });
@@ -450,7 +459,7 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
   test("exact tracking prevents overflow: near-limit session stays layer 0", () => {
     // maxInput = 10000 - 2000 = 8000
     // Set lastKnownInput close to limit but within budget
-    calibrate(7_800, 7_800, SESSION, 10);
+    calibrate(7_800, SESSION, 10);
     // New message: very short (~25 tokens)
     const messages = Array.from({ length: 10 }, (_, i) =>
       makeMsg(`near-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
@@ -463,7 +472,7 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
 
   test("exact tracking escalates when new messages push over limit", () => {
     // lastKnownInput = 7900, maxInput = 8000, new message ~600 tokens
-    calibrate(7_900, 7_900, SESSION, 10);
+    calibrate(7_900, SESSION, 10);
     const messages = Array.from({ length: 10 }, (_, i) =>
       makeMsg(`over-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(100), SESSION),
     );
@@ -524,7 +533,7 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
     resetRawWindowCache();
     // Small context to make overflow happen with fewer messages
     setModelLimits({ context: 5_000, output: 1_000 });
-    calibrate(0, 0); // zero overhead
+    calibrate(0); // zero overhead
     ensureProject(PROJECT);
   });
 
@@ -583,23 +592,21 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
     expect(oldCount).toBeLessThan(totalOld);
   });
 
-  test("layer escalates when current turn alone exceeds raw budget", () => {
-    // Current turn is massive — 8 steps × 2000 chars each ≈ 4000 tokens
-    // rawBudget at layer 1 ≈ 5600 tokens — the current turn just fits,
-    // but with layer 2's tighter budget it should escalate.
-    // Use a tiny context to make the math work.
+  test("current turn steps survive compression — never evicted", () => {
+    // Verify that even when gradient fires and evicts old messages, all steps
+    // in the current agentic turn are preserved as an atomic unit.
+    // context=3000, output=500 → usable=2500, rawBudget=floor(2500*0.4)=1000
     setModelLimits({ context: 3_000, output: 500 });
-    calibrate(0, 0);
+    calibrate(0);
 
     const currentUser = makeMsg("huge-user", "user", "massive task", SESSION);
-    // ~800 chars each ≈ 200 tokens per step, 8 steps = ~1600 tokens
-    // rawBudget at layer 1 ≈ (3000-500) * 0.7 ≈ 1750 tokens → fits
-    // rawBudget at layer 2 ≈ (3000-500) * 0.5 ≈ 1250 tokens → escalates
+    // 8 steps × ~87 tokens (200 chars/3 + 20) = 696, + user 24 = 720 ≤ rawBudget(1000)
     const steps = Array.from({ length: 8 }, (_, i) =>
-      makeStep(`huge-step-${i}`, "huge-user", "W".repeat(500), SESSION),
+      makeStep(`huge-step-${i}`, "huge-user", "W".repeat(200), SESSION),
     );
-    // Fill with old messages to force gradient mode
-    const oldMsgs = Array.from({ length: 20 }, (_, i) =>
+    // 22 old messages to force gradient mode: 22 × 87 = 1914
+    // Total = 1914 + 720 = 2634 > maxInput(2500) → gradient fires
+    const oldMsgs = Array.from({ length: 22 }, (_, i) =>
       makeMsg(`huge-old-${i}`, i % 2 === 0 ? "user" : "assistant", "V".repeat(200), SESSION),
     );
     const messages = [...oldMsgs, currentUser, ...steps];
@@ -697,7 +704,7 @@ describe("gradient — tool-bearing steps survive compression (index.ts trailing
     resetPrefixCache();
     resetRawWindowCache();
     setModelLimits({ context: 5_000, output: 1_000 });
-    calibrate(0, 0);
+    calibrate(0);
     ensureProject(PROJECT);
   });
 
@@ -761,7 +768,7 @@ describe("gradient — calibration oscillation fix", () => {
     resetRawWindowCache();
     // Context: 10K, output: 2K → usable 8K, rawBudget ~3200, maxInput 8000
     setModelLimits({ context: 10_000, output: 2_000 });
-    calibrate(0, 0);
+    calibrate(0);
   });
 
   test("sticky layer: does not oscillate between layer 0 and layer 1 on consecutive steps", () => {
@@ -779,10 +786,11 @@ describe("gradient — calibration oscillation fix", () => {
     const r1 = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
     expect(r1.layer).toBeGreaterThanOrEqual(1);
 
-    // Simulate calibration: model saw the compressed window
+    // Simulate calibration: model saw the compressed window.
+    // transform() already stored lastTransformEstimate, so calibrate() uses it.
     const compressedCount = r1.messages.length;
     const actualInput = estimateMessages(r1.messages); // approximate actual tokens
-    calibrate(actualInput, actualInput, SESSION, compressedCount);
+    calibrate(actualInput, SESSION, compressedCount);
 
     // Add one more message (one agentic step)
     const msgs2 = [...msgs, makeMsg("osc-step-1", "assistant", "working on it", SESSION)];
@@ -805,7 +813,7 @@ describe("gradient — calibration oscillation fix", () => {
 
     // Calibrate from the compressed result
     const compressedCount = r1.messages.length;
-    calibrate(estimateMessages(r1.messages), estimateMessages(r1.messages), SESSION, compressedCount);
+    calibrate(estimateMessages(r1.messages), SESSION, compressedCount);
 
     // Simulate compaction: session now has only 3 messages (much smaller than lastKnownMessageCount)
     const postCompaction = [
@@ -830,10 +838,11 @@ describe("gradient — calibration oscillation fix", () => {
     const r1 = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
     expect(r1.layer).toBeGreaterThanOrEqual(1);
 
-    // Calibrate with the compressed window count
+    // Calibrate with the compressed window count.
+    // transform() already stored lastTransformEstimate.
     const compressedCount = r1.messages.length;
     const actualInput = estimateMessages(r1.messages);
-    calibrate(actualInput, actualInput, SESSION, compressedCount);
+    calibrate(actualInput, SESSION, compressedCount);
 
     // Add one truly new message
     const newMsg = makeMsg("id-new-step", "assistant", "new work: " + "D".repeat(100), SESSION);
@@ -886,7 +895,7 @@ describe("gradient — calibration oscillation fix", () => {
 
     // Calibrate main session as compressed
     const actualInput = estimateMessages(r1.messages);
-    calibrate(actualInput, actualInput, MAIN, r1.messages.length);
+    calibrate(actualInput, MAIN, r1.messages.length);
 
     // WORKER SESSION: tiny messages → transform returns layer 0
     const workerMsgs = [

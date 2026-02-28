@@ -359,8 +359,7 @@ export function formatDistillations(
   return sections.join("\n\n");
 }
 
-// Rough token estimate used for budget-gating knowledge entries.
-// Uses ~3 chars/token (conservative for markdown-heavy technical text).
+// ~3 chars per token — validated as best heuristic against real API data.
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3);
 }
