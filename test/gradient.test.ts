@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
-import { db, close, ensureProject } from "../src/db";
+import { db, close, ensureProject, loadForceMinLayer } from "../src/db";
 import {
   transform,
   setModelLimits,
@@ -412,6 +412,64 @@ describe("gradient — force escalation (reactive error recovery)", () => {
     // After reset+recalibrate, flag is gone — tiny messages → layer 0
     const result = transform({ messages, projectPath: PROJECT, sessionID: "rc-sess" });
     expect(result.layer).toBe(0);
+  });
+});
+
+describe("gradient — forceMinLayer persistence (restart survival)", () => {
+  beforeAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    resetPrefixCache();
+    resetRawWindowCache();
+  });
+
+  test("persisted forceMinLayer is loaded by getSessionState on cold start", () => {
+    const SID = "persist-cold-sess";
+    const messages = [
+      makeMsg("pc-1", "user", "hello", SID),
+      makeMsg("pc-2", "assistant", "hi", SID),
+    ];
+
+    // Ensure no in-memory state exists for this session
+    resetCalibration(SID);
+    calibrate(0);
+
+    // Manually write forceMinLayer to DB (simulating a prior process's setForceMinLayer)
+    db().query(
+      "INSERT OR REPLACE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, ?, ?)",
+    ).run(SID, 2, Date.now());
+
+    // transform() should pick up forceMinLayer=2 from DB
+    const result = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(result.layer).toBeGreaterThanOrEqual(2);
+
+    // One-shot: consumed — DB should be cleared
+    expect(loadForceMinLayer(SID)).toBe(0);
+
+    // Next call should be layer 0 (tiny messages, no escalation)
+    const result2 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(result2.layer).toBe(0);
+  });
+
+  test("setForceMinLayer writes to DB and transform consumes it", () => {
+    const SID = "persist-consume-sess";
+    const messages = [
+      makeMsg("pco-1", "user", "hello", SID),
+      makeMsg("pco-2", "assistant", "hi", SID),
+    ];
+
+    resetCalibration(SID);
+    calibrate(0);
+
+    setForceMinLayer(3, SID);
+    expect(loadForceMinLayer(SID)).toBe(3);
+
+    // Transform consumes the escalation
+    const result = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(result.layer).toBeGreaterThanOrEqual(3);
+
+    // DB row should be deleted after consumption
+    expect(loadForceMinLayer(SID)).toBe(0);
   });
 });
 

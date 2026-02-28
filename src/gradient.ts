@@ -1,5 +1,5 @@
 import type { Message, Part } from "@opencode-ai/sdk";
-import { db, ensureProject } from "./db";
+import { db, ensureProject, loadForceMinLayer, saveForceMinLayer } from "./db";
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
 import { normalize } from "./markdown";
@@ -53,9 +53,12 @@ let calibratedOverhead: number | null = null;
 // lore-curator) from corrupting the main session's sticky-layer guard and
 // delta-estimation state when their transform() calls return layer 0.
 //
-// DB persistence is unnecessary: UNCALIBRATED_SAFETY=1.5 safely handles
-// the first turn of a resumed session. The Map is bounded — there are never
-// more than a handful of active sessions at once.
+// forceMinLayer is the one field that MUST survive process restarts: when the
+// API returns "prompt is too long", the error handler sets forceMinLayer=2.
+// If OpenCode restarts before the next turn, the escalation is lost and the
+// overflow repeats. forceMinLayer is persisted to SQLite (session_state table)
+// and loaded on first access. All other state rebuilds from the first API
+// response via UNCALIBRATED_SAFETY.
 // ---------------------------------------------------------------------------
 
 type SessionState = {
@@ -102,6 +105,11 @@ function getSessionState(sessionID: string): SessionState {
   let state = sessionStates.get(sessionID);
   if (!state) {
     state = makeSessionState();
+    // Restore persisted forceMinLayer from DB — survives process restarts.
+    // Critical for "prompt too long" recovery: the error handler sets
+    // forceMinLayer=2, but if OpenCode restarts before the next turn,
+    // the in-memory escalation would be lost without this.
+    state.forceMinLayer = loadForceMinLayer(sessionID) as SafetyLayer;
     sessionStates.set(sessionID, state);
   }
   return state;
@@ -213,10 +221,12 @@ export function getLastLayer(sessionID?: string): SafetyLayer {
 export function setForceMinLayer(layer: SafetyLayer, sessionID?: string) {
   if (sessionID) {
     getSessionState(sessionID).forceMinLayer = layer;
+    saveForceMinLayer(sessionID, layer);
   } else {
     // Fallback for tests / callers without session ID: set on all active sessions
-    for (const state of sessionStates.values()) {
+    for (const [sid, state] of sessionStates.entries()) {
       state.forceMinLayer = layer;
+      saveForceMinLayer(sid, layer);
     }
   }
 }
@@ -225,8 +235,12 @@ export function setForceMinLayer(layer: SafetyLayer, sessionID?: string) {
 export function resetCalibration(sessionID?: string) {
   calibratedOverhead = null;
   if (sessionID) {
+    saveForceMinLayer(sessionID, 0); // clear persisted state
     sessionStates.delete(sessionID);
   } else {
+    for (const sid of sessionStates.keys()) {
+      saveForceMinLayer(sid, 0);
+    }
     sessionStates.clear();
   }
 }
@@ -812,11 +826,12 @@ function transformInner(input: {
   // --- Force escalation (reactive error recovery) ---
   // When the API previously rejected with "prompt is too long", skip layers
   // below the forced minimum to ensure enough trimming on the next attempt.
-  // One-shot: consumed here and reset to 0.
+  // One-shot: consumed here and reset to 0 (both in-memory and on disk).
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   const sessState = sid ? getSessionState(sid) : makeSessionState();
   let effectiveMinLayer = sessState.forceMinLayer;
   sessState.forceMinLayer = 0;
+  if (sid && effectiveMinLayer > 0) saveForceMinLayer(sid, 0);
 
   // --- Approach A: Cache-preserving passthrough ---
   // Use exact token count from the previous API response when available.

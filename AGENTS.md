@@ -25,6 +25,10 @@
 
 ### Gotcha
 
+<!-- lore:019ca60f-0390-74ce-9381-b4296d94a553 -->
+* **React useState async pitfall**: React useState setter is async — reading state immediately after setState returns stale value in dashboard components
+<!-- lore:019ca60f-036f-7341-bbb7-dda2ea63294f -->
+* **TypeScript strict mode caveat**: TypeScript strict null checks require explicit undefined handling
 <!-- lore:019c91d6-04af-7334-8374-e8bbf14cb43d -->
 * **Calibration used DB message count instead of transformed window count — caused layer 0 false passthrough**: Multiple gradient calibration bugs caused context overflow: (1) Calibration used DB message count instead of transformed window count — after compression (e.g. 50 msgs), delta saw ~1 new message → layer 0 passthrough → all raw messages sent → overflow. Fix: use getLastTransformedCount(). (2) actualInput formula omitted cache.write — on cold-cache turns actualInput became ~3 instead of 150K → layer 0 → overflow. Fix: include cache.write in both the formula and calibration guard. (3) Trailing pure-text assistant messages after tryFit cause Anthropic prefill errors. But messages with ANY tool parts must NOT be dropped (SDK converts to tool\_result user-role). Drop predicate: \`hasToolParts\`, not \`hasPendingTool\`. (4) Stats PATCH on message parts was removed — it was write-only dead code causing system-reminder persistence bug. Don't mutate parts you don't own.
 <!-- lore:019c91c0-cdf3-71c9-be52-7f6441fb643e -->
@@ -36,11 +40,17 @@
 
 ### Pattern
 
+<!-- lore:019ca60f-0371-7021-9a40-bf59215147e1 -->
+* **Kubernetes deployment pattern**: Use helm charts for Kubernetes deployments with resource limits
 <!-- lore:019c8ae9-2e54-7276-966a-befe699db589 -->
 * **Use SDK internal client for HTTP requests in OpenCode plugins**: OpenCode plugins should use \`(ctx.client as any).\_client.patch()\` instead of raw fetch() with ctx.serverUrl. The \_client is the HeyAPI Client with correct base URL and interceptors, avoiding ConnectionRefused in TUI-only mode. Supports path interpolation. Caveat: \_client is private/undocumented. Note: lore's use of this pattern was removed — prefer dedicated endpoints over part mutation.
 
 ### Preference
 
+<!-- lore:019ca60f-0376-72e0-805c-e1927dacdbed -->
+* **General coding preference**: Prefer explicit error handling over silent failures
+<!-- lore:019ca60f-0335-786c-83bd-a5cfcccbf223 -->
+* **Code style**: User prefers no backwards-compat shims, fix callers directly
 <!-- lore:019ca19d-fc02-7657-b2e9-7764658c01a5 -->
 * **Code style**: User prefers no backwards-compat shims — fix callers directly. Prefer explicit error handling over silent failures. Derive thresholds from existing constants rather than hardcoding magic numbers (e.g., use \`raw.length <= COL\_COUNT\` instead of \`n < 10\_000\`). In CI, define shared env vars at workflow level, not per-job.
 

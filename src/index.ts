@@ -15,9 +15,50 @@ import {
   setForceMinLayer,
   getLastTransformedCount,
 } from "./gradient";
-import { formatKnowledge } from "./prompt";
+import { formatKnowledge, formatDistillations } from "./prompt";
 import { createRecallTool } from "./reflect";
 import { shouldImport, importFromFile, exportToFile } from "./agents-file";
+
+/**
+ * Detect whether an error from session.error is a context overflow ("prompt too long").
+ * Matches both APIError wrapper shape (error.data.message) and direct shape (error.message).
+ */
+export function isContextOverflow(rawError: unknown): boolean {
+  const error = rawError as
+    | { name?: string; message?: string; data?: { message?: string } }
+    | undefined;
+  const errorMessage = error?.data?.message ?? error?.message ?? "";
+  return (
+    typeof errorMessage === "string" &&
+    (errorMessage.includes("prompt is too long") ||
+      errorMessage.includes("context length exceeded") ||
+      errorMessage.includes("maximum context length") ||
+      errorMessage.includes("ContextWindowExceededError") ||
+      errorMessage.includes("too many tokens"))
+  );
+}
+
+/**
+ * Build the synthetic recovery message injected after a context overflow.
+ * Contains the distilled session history so the model can continue.
+ */
+export function buildRecoveryMessage(
+  summaries: Array<{ observations: string; generation: number }>,
+): string {
+  const historyText = summaries.length > 0
+    ? formatDistillations(summaries)
+    : "";
+
+  return [
+    "<system-reminder>",
+    "The previous turn failed with a context overflow error (prompt too long).",
+    "Lore has automatically compressed the conversation history.",
+    "Review the session history below and continue where you left off.",
+    "",
+    historyText || "(No distilled history available — check recent messages for context.)",
+    "</system-reminder>",
+  ].join("\n");
+}
 
 export const LorePlugin: Plugin = async (ctx) => {
   const projectPath = ctx.worktree || ctx.directory;
@@ -226,45 +267,50 @@ export const LorePlugin: Plugin = async (ctx) => {
           | undefined;
         if (errorSessionID && await shouldSkip(errorSessionID)) return;
 
-        // Detect "prompt is too long" API errors and auto-recover:
-        // 1. Force the gradient transform to escalate on the next call (skip layer 0/1)
-        // 2. Force distillation to capture all temporal data before compaction
-        // 3. Trigger compaction so the session recovers without user intervention
+        // Detect "prompt is too long" API errors and auto-recover.
         const rawError = (event.properties as Record<string, unknown>).error;
-        // Diagnostic: log the full error shape so we can verify our detection matches
         console.error("[lore] session.error received:", JSON.stringify(rawError, null, 2));
 
-        const error = rawError as
-          | { name?: string; message?: string; data?: { message?: string } }
-          | undefined;
-        // Match both shapes: error.data.message (APIError wrapper) and error.message (direct)
-        const errorMessage = error?.data?.message ?? error?.message ?? "";
-        const isPromptTooLong =
-          typeof errorMessage === "string" &&
-          (errorMessage.includes("prompt is too long") ||
-            errorMessage.includes("context length exceeded") ||
-            errorMessage.includes("maximum context length") ||
-            errorMessage.includes("ContextWindowExceededError") ||
-            errorMessage.includes("too many tokens"));
-
-        console.error(
-          `[lore] session.error isPromptTooLong=${isPromptTooLong} (name=${error?.name}, message=${errorMessage.substring(0, 120)})`,
-        );
-
-        if (isPromptTooLong) {
+        if (isContextOverflow(rawError) && errorSessionID) {
           console.error(
-            `[lore] detected 'prompt too long' error — forcing distillation + layer escalation (session: ${errorSessionID?.substring(0, 16)})`,
+            `[lore] detected context overflow — auto-recovering (session: ${errorSessionID.substring(0, 16)})`,
           );
-          // Force layer 2 on next transform — layers 0 and 1 were already too large.
-          // The gradient at layers 2-4 will compress the context enough for the next turn.
-          // Do NOT call session.summarize() here — it sends all messages to the model,
-          // which would overflow again and create a stuck compaction loop.
+
+          // 1. Force layer 2 on next transform (persisted to DB — survives restarts).
           setForceMinLayer(2, errorSessionID);
 
-          if (errorSessionID) {
-            // Force distillation to capture all undistilled messages into the temporal
-            // store so they're preserved even if the session is later compacted manually.
-            await backgroundDistill(errorSessionID, true);
+          // 2. Distill all undistilled messages so nothing is lost.
+          await backgroundDistill(errorSessionID, true);
+
+          // 3. Auto-recover: inject a synthetic message that goes through the normal
+          //    chat path. The gradient transform fires with forceMinLayer=2, compressing
+          //    the context to fit. The model receives the distilled summaries and
+          //    continues where it left off — no user intervention needed.
+          try {
+            const summaries = distillation.loadForSession(projectPath, errorSessionID);
+            const recoveryText = buildRecoveryMessage(
+              summaries.map(s => ({ observations: s.observations, generation: s.generation })),
+            );
+
+            console.error(
+              `[lore] sending auto-recovery message to session ${errorSessionID.substring(0, 16)}`,
+            );
+            await ctx.client.session.prompt({
+              path: { id: errorSessionID },
+              body: {
+                parts: [{ type: "text", text: recoveryText, synthetic: true }],
+              },
+            });
+            console.error(
+              `[lore] auto-recovery message sent successfully`,
+            );
+          } catch (recoveryError) {
+            // Recovery is best-effort — don't let it crash the event handler.
+            // The persisted forceMinLayer will still help on the user's next message.
+            console.error(
+              `[lore] auto-recovery failed (forceMinLayer still persisted):`,
+              recoveryError,
+            );
           }
         }
       }
