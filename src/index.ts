@@ -10,7 +10,6 @@ import {
   setModelLimits,
   needsUrgentDistillation,
   calibrate,
-  estimateMessages,
   setLtmTokens,
   getLtmBudget,
   setForceMinLayer,
@@ -204,28 +203,15 @@ export const LorePlugin: Plugin = async (ctx) => {
                 backgroundDistill(msg.sessionID);
               }
 
-              // Calibrate overhead estimate using real token counts.
-              // Also store the exact input count + message count for the proactive
-              // layer-0 decision (avoids full chars/4 re-estimation each turn).
-              // actualInput = all tokens the model processed as input, regardless of
-              // whether they were new (input), read from cache (cache.read), or newly
-              // written to cache (cache.write). All three contribute to the context window.
-              const allMsgs = await ctx.client.session.messages({
-                path: { id: msg.sessionID },
-              });
-              if (allMsgs.data) {
-                const withParts = allMsgs.data
-                  .filter((m) => m.info.id !== msg.id)
-                  .map((m) => ({ info: m.info, parts: m.parts }));
-                const msgEstimate = estimateMessages(withParts);
-                const actualInput =
-                  msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write;
-                // Use the compressed message count (from the last transform output),
-                // not the total DB count. On layer 0 these are equal. On layers 1-4,
-                // the model only saw the compressed window — calibrate must track that
-                // count so the next turn's delta is computed correctly.
-                calibrate(actualInput, msgEstimate, msg.sessionID, getLastTransformedCount(msg.sessionID) || withParts.length);
-              }
+              // Calibrate overhead using real token counts from the API response.
+              // actualInput = all tokens the model processed (input + cache.read + cache.write).
+              // The message estimate comes from the transform's own output (stored in
+              // session state as lastTransformEstimate), NOT from re-estimating all session
+              // messages. On compressed sessions, all-message estimate >> actualInput, which
+              // previously clamped overhead to 0 and broke budget calculations.
+              const actualInput =
+                msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write;
+              calibrate(actualInput, msg.sessionID, getLastTransformedCount(msg.sessionID));
             }
           }
         } catch {
@@ -394,7 +380,6 @@ export const LorePlugin: Plugin = async (ctx) => {
       if (formatted) {
         // Track how many tokens we actually consumed so the gradient manager
         // can deduct them from the usable budget for message injection.
-        // Use /3 (not /4) — consistent with ltm.ts and prompt.ts estimators.
         const ltmTokenCount = Math.ceil(formatted.length / 3);
         setLtmTokens(ltmTokenCount);
         output.system.push(formatted);

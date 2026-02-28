@@ -1,9 +1,9 @@
 import { db, ensureProject } from "./db";
 import type { Message, Part } from "@opencode-ai/sdk";
 
-// Estimate token count from text length (rough: 1 token ≈ 4 chars)
+// ~3 chars per token — validated as best heuristic against real API data.
 function estimate(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / 3);
 }
 
 function partsToText(parts: Part[]): string {

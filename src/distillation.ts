@@ -153,7 +153,7 @@ function storeDistillation(input: {
   const pid = ensureProject(input.projectPath);
   const id = crypto.randomUUID();
   const sourceJson = JSON.stringify(input.sourceIDs);
-  const tokens = Math.ceil(input.observations.length / 4);
+  const tokens = Math.ceil(input.observations.length / 3);
   db()
     .query(
       `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at)
