@@ -73,6 +73,14 @@ function loreSectionWithEntries(
 // Setup / teardown
 // ---------------------------------------------------------------------------
 
+// Fixed UUIDs used in importFromFile tests that must be cleaned up to prevent
+// cross-test-file collisions (ltm.test.ts uses the same IDs for its own fixtures).
+const TEST_UUIDS = [
+  "019505a1-7c00-7000-8000-aabbccddeeff",
+  "019505a2-7c00-7000-8000-bbbbbbbbbbbb",
+  "019505a1-7c00-7000-8000-aaaaaaaaaaaa",
+];
+
 beforeEach(() => {
   mkdirSync(TMP_DIR, { recursive: true });
   // Clean DB knowledge for this project (including any cross-project entries it created)
@@ -86,12 +94,24 @@ beforeEach(() => {
       "DELETE FROM knowledge WHERE project_id IN (SELECT id FROM projects WHERE path LIKE '/test/%')",
     )
     .run();
+  // Remove fixed-UUID entries that may have leaked from importFromFile tests;
+  // ltm.test.ts uses the same UUIDs and will UNIQUE-constraint-fail if they exist.
+  for (const id of TEST_UUIDS) {
+    db().query("DELETE FROM knowledge WHERE id = ?").run(id);
+  }
   // Reset the agents file
   if (existsSync(AGENTS_FILE)) rmSync(AGENTS_FILE);
 });
 
 afterAll(() => {
   rmSync(TMP_DIR, { recursive: true, force: true });
+  // Final cleanup of all fixed-UUID test entries so ltm.test.ts doesn't hit
+  // UNIQUE constraint failures when it tries to insert the same IDs.
+  const pid = ensureProject(PROJECT);
+  db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+  for (const id of TEST_UUIDS) {
+    db().query("DELETE FROM knowledge WHERE id = ?").run(id);
+  }
   close();
 });
 
