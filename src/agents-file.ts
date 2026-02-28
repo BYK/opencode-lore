@@ -21,6 +21,17 @@ export const LORE_SECTION_START =
   "<!-- This section is maintained by the coding agent via lore (https://github.com/BYK/opencode-lore) -->";
 export const LORE_SECTION_END = "<!-- End lore-managed section -->";
 
+/**
+ * All known start-marker variants, ordered newest-first.
+ * When we renamed the marker in the past, old files kept the old text.
+ * splitFile() matches any of these so it can strip all lore sections
+ * regardless of which marker version was used to write them.
+ */
+const ALL_START_MARKERS = [
+  LORE_SECTION_START,
+  "<!-- This section is auto-maintained by lore (https://github.com/BYK/opencode-lore) -->",
+] as const;
+
 /** Regex matching a valid UUID (v4 or v7) — 8-4-4-4-12 hex groups. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -45,26 +56,70 @@ export type ParsedFileEntry = {
 
 /**
  * Split file content into three parts: before, lore section body, after.
- * Returns null for section body when markers are absent.
+ * Returns null for section body when no lore markers are found.
+ *
+ * Handles multiple lore sections (from duplication bugs) and all known
+ * start-marker variants (old + new text) by:
+ * - Collecting every lore section span in the file
+ * - Returning `before` = content before the first section
+ * - Returning `after`  = content after the last section (all intermediate
+ *   sections are discarded)
+ * - Returning `section` = body of the first section found (for import
+ *   and shouldImport to read the canonical content)
+ *
+ * This is self-healing: a file with N duplicate sections will be collapsed
+ * to exactly one on the next exportToFile() call.
  */
 function splitFile(fileContent: string): {
   before: string;
   section: string | null;
   after: string;
 } {
-  const startIdx = fileContent.indexOf(LORE_SECTION_START);
-  const endIdx = fileContent.indexOf(LORE_SECTION_END);
+  // Collect every lore section span in the file, matching all known
+  // start-marker variants (current + historical renamed markers).
+  // Each span records: where the section body begins/ends and where the
+  // full span (including end-marker) ends.
+  type Span = { markerStart: number; bodyStart: number; bodyEnd: number; spanEnd: number };
+  const spans: Span[] = [];
 
-  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
+  let searchFrom = 0;
+  while (searchFrom < fileContent.length) {
+    // Find the earliest occurrence of any known start marker
+    let markerStart = -1;
+    let markerLen = 0;
+    for (const marker of ALL_START_MARKERS) {
+      const idx = fileContent.indexOf(marker, searchFrom);
+      if (idx !== -1 && (markerStart === -1 || idx < markerStart)) {
+        markerStart = idx;
+        markerLen = marker.length;
+      }
+    }
+    if (markerStart === -1) break; // no more start markers
+
+    const bodyStart = markerStart + markerLen;
+    const endIdx = fileContent.indexOf(LORE_SECTION_END, bodyStart);
+    if (endIdx === -1) {
+      // Unclosed section — consume to EOF
+      spans.push({ markerStart, bodyStart, bodyEnd: fileContent.length, spanEnd: fileContent.length });
+      break;
+    }
+
+    spans.push({ markerStart, bodyStart, bodyEnd: endIdx, spanEnd: endIdx + LORE_SECTION_END.length });
+    searchFrom = endIdx + LORE_SECTION_END.length;
+  }
+
+  if (spans.length === 0) {
     return { before: fileContent, section: null, after: "" };
   }
 
-  const before = fileContent.slice(0, startIdx);
-  const section = fileContent.slice(
-    startIdx + LORE_SECTION_START.length,
-    endIdx,
-  );
-  const after = fileContent.slice(endIdx + LORE_SECTION_END.length);
+  // before = everything before the first lore section (start marker not included)
+  // section = body of the first section (used by shouldImport and importFromFile)
+  // after = everything after the LAST lore section's end marker
+  // Any intermediate duplicate sections are discarded.
+  const before = fileContent.slice(0, spans[0].markerStart);
+  const section = fileContent.slice(spans[0].bodyStart, spans[0].bodyEnd);
+  const after = fileContent.slice(spans[spans.length - 1].spanEnd);
+
   return { before, section, after };
 }
 

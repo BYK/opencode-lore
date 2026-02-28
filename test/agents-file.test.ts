@@ -4,7 +4,6 @@ import {
   expect,
   beforeEach,
   afterAll,
-  mock,
 } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
@@ -672,6 +671,163 @@ describe("round-trip stability", () => {
     expect(final).toContain("Middleware");
     expect(final).toContain(LORE_SECTION_START);
     expect(final).toContain(LORE_SECTION_END);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-section deduplication (self-healing)
+// ---------------------------------------------------------------------------
+
+const OLD_LORE_SECTION_START =
+  "<!-- This section is auto-maintained by lore (https://github.com/BYK/opencode-lore) -->";
+
+describe("exportToFile — self-healing duplicate sections", () => {
+  test("collapses multiple new-marker sections into one on export", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+
+    // Simulate a file that somehow got two lore sections (the duplication bug).
+    // Non-lore content before the first and after the last section is preserved;
+    // anything sandwiched between dup sections is consumed (unavoidable).
+    const dupSection = `${LORE_SECTION_START}\n\n## Long-term Knowledge\n\n### Decision\n\n<!-- lore:${id} -->\n* **Auth strategy**: OAuth2 with PKCE\n\n${LORE_SECTION_END}\n`;
+    const content = `# My Project\n\n${dupSection}\n${dupSection}\n\n## Conventions\n\nSome text.\n`;
+    writeFile(content);
+
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const result = readFile();
+    const startCount = (result.match(new RegExp(escapeRegex(LORE_SECTION_START), "g")) ?? []).length;
+    const endCount = (result.match(new RegExp(escapeRegex(LORE_SECTION_END), "g")) ?? []).length;
+    expect(startCount).toBe(1);
+    expect(endCount).toBe(1);
+    // Non-lore content is preserved
+    expect(result).toContain("# My Project");
+    expect(result).toContain("## Conventions");
+    expect(result).toContain("Some text.");
+  });
+
+  test("collapses old-marker section into one new-marker section on export", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+
+    // File with old marker text (before the rename)
+    const oldSection = `${OLD_LORE_SECTION_START}\n\n## Long-term Knowledge\n\n${LORE_SECTION_END}\n`;
+    writeFile(`# My Project\n\n${oldSection}\n## Extra\n\nStuff.\n`);
+
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const result = readFile();
+    // Old marker must be gone, new marker must appear exactly once
+    expect(result).not.toContain(OLD_LORE_SECTION_START);
+    const startCount = (result.match(new RegExp(escapeRegex(LORE_SECTION_START), "g")) ?? []).length;
+    expect(startCount).toBe(1);
+    expect(result).toContain(LORE_SECTION_END);
+    // Non-lore content preserved
+    expect(result).toContain("# My Project");
+    expect(result).toContain("## Extra");
+    expect(result).toContain("Stuff.");
+    // Entry present
+    expect(result).toContain("Auth strategy");
+  });
+
+  test("collapses mixed old+new marker sections (the real-world bug) into one", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Watch this",
+      content: "Something tricky",
+      scope: "project",
+    });
+
+    // Replicate the actual AGENTS.md state: old marker section first,
+    // then several new marker sections appended after.
+    const oldSection = `${OLD_LORE_SECTION_START}\n\n## Long-term Knowledge\n\n${LORE_SECTION_END}\n`;
+    const newSection = `${LORE_SECTION_START}\n\n## Long-term Knowledge\n\n${LORE_SECTION_END}\n`;
+    const badFile = [
+      "# Project",
+      "",
+      "## Conventions",
+      "",
+      oldSection,
+      "",
+      "## More",
+      "",
+      newSection,
+      "",
+      newSection,
+    ].join("\n");
+    writeFile(badFile);
+
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const result = readFile();
+    const allStartCount =
+      (result.match(new RegExp(escapeRegex(LORE_SECTION_START), "g")) ?? []).length +
+      (result.match(new RegExp(escapeRegex(OLD_LORE_SECTION_START), "g")) ?? []).length;
+    const endCount = (result.match(new RegExp(escapeRegex(LORE_SECTION_END), "g")) ?? []).length;
+    expect(allStartCount).toBe(1);
+    expect(endCount).toBe(1);
+    expect(result).toContain(LORE_SECTION_START);
+    expect(result).not.toContain(OLD_LORE_SECTION_START);
+    expect(result).toContain("Watch this");
+  });
+
+  test("non-lore content between duplicate sections is also removed", () => {
+    // If there's random text between two lore sections (shouldn't happen but
+    // good to verify what 'after last section' means).
+    ltm.create({
+      projectPath: PROJECT,
+      category: "pattern",
+      title: "Test",
+      content: "Content",
+      scope: "project",
+    });
+
+    const sec1 = `${LORE_SECTION_START}\n## Long-term Knowledge\n\n${LORE_SECTION_END}`;
+    const sec2 = `${LORE_SECTION_START}\n## Long-term Knowledge\n\n${LORE_SECTION_END}`;
+    writeFile(`# Before\n\n${sec1}\n\n## BETWEEN SECTIONS - should be removed\n\n${sec2}\n\n## After\n`);
+
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const result = readFile();
+    expect(result).toContain("# Before");
+    expect(result).toContain("## After");
+    expect(result).not.toContain("BETWEEN SECTIONS");
+    const startCount = (result.match(new RegExp(escapeRegex(LORE_SECTION_START), "g")) ?? []).length;
+    expect(startCount).toBe(1);
+  });
+});
+
+describe("shouldImport — old marker variant", () => {
+  test("returns true when file has only old-marker lore section (content differs from DB)", () => {
+    // File with old marker and some content that differs from empty DB
+    const oldSection = `${OLD_LORE_SECTION_START}\n\n## Long-term Knowledge\n\n### Decision\n\n<!-- lore:019505a1-7c00-7000-8000-aabbccddeeff -->\n* **Auth strategy**: OAuth2 with PKCE\n\n${LORE_SECTION_END}\n`;
+    writeFile(oldSection);
+
+    // DB is empty, so the file's section differs from what we'd produce
+    expect(shouldImport({ projectPath: PROJECT, filePath: AGENTS_FILE })).toBe(true);
+  });
+
+  test("importFromFile reads entries from an old-marker section", () => {
+    const remoteId = "019505a1-7c00-7000-8000-aabbccddeeff";
+    const oldSection = `${OLD_LORE_SECTION_START}\n\n## Long-term Knowledge\n\n### Decision\n\n<!-- lore:${remoteId} -->\n* **Auth strategy**: OAuth2 with PKCE\n\n${LORE_SECTION_END}\n`;
+    writeFile(oldSection);
+
+    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const entry = ltm.get(remoteId);
+    expect(entry).not.toBeNull();
+    expect(entry!.title).toBe("Auth strategy");
   });
 });
 
