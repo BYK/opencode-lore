@@ -1,4 +1,11 @@
 # Changelog
+## 0.4.1
+
+### Bug Fixes 🐛
+
+- (agents-file) Always commit agents file, soften auto-maintained wording by @BYK in [e5918a65](https://github.com/BYK/opencode-lore/commit/e5918a65da36ec31c7f307786a1561c8e1c296ab)
+- (gradient) Use chars/3 estimation and fix calibration to use compressed window estimate by @BYK in [e2287a20](https://github.com/BYK/opencode-lore/commit/e2287a2073ff51691cecf615d4c65b02faac612b)
+
 ## 0.4.0
 
 ### New Features ✨
