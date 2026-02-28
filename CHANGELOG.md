@@ -1,4 +1,10 @@
 # Changelog
+## 0.4.4
+
+### Bug Fixes 🐛
+
+- (gradient) Persist forceMinLayer and auto-recover from context overflow by @BYK in [#21](https://github.com/BYK/opencode-lore/pull/21)
+
 ## 0.4.3
 
 ### Bug Fixes 🐛
