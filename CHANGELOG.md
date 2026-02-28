@@ -1,4 +1,10 @@
 # Changelog
+## 0.4.3
+
+### Bug Fixes 🐛
+
+- (gradient) Apply safety multiplier to uncalibrated layer-0 check by @BYK in [452c013a](https://github.com/BYK/opencode-lore/commit/452c013a492c097003142ad0ec34ce09889d0ced)
+
 ## 0.4.2
 
 ### Bug Fixes 🐛
