@@ -876,7 +876,12 @@ function transformInner(input: {
     expectedInput = messageTokens + overhead + ltmTokens;
   }
 
-  if (effectiveMinLayer === 0 && expectedInput <= maxInput) {
+  // When uncalibrated, apply safety multiplier to the layer-0 decision too.
+  // chars/3 undercounts by ~1.63x on real sessions — without this, a session
+  // estimated at 146K passes layer 0 but actually costs 214K → overflow.
+  const layer0Input = calibrated ? expectedInput : expectedInput * UNCALIBRATED_SAFETY;
+
+  if (effectiveMinLayer === 0 && layer0Input <= maxInput) {
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
     const messageTokens = calibrated
