@@ -1,4 +1,14 @@
 # Changelog
+## 0.4.2
+
+### Bug Fixes 🐛
+
+- (agents-file) Self-heal duplicate lore sections and support old marker variants by @BYK in [aa83eb00](https://github.com/BYK/opencode-lore/commit/aa83eb003a682dff8a4e7415abbb5a07e2f9f189)
+
+### Internal Changes 🔧
+
+- (agents-file) Clean up fixed-UUID entries in afterAll to prevent ltm test collisions by @BYK in [f5c43486](https://github.com/BYK/opencode-lore/commit/f5c4348634b05a25458a1f1b9b135c2e7f5a383b)
+
 ## 0.4.1
 
 ### Bug Fixes 🐛
