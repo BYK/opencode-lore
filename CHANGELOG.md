@@ -1,4 +1,8 @@
 # Changelog
+## 0.5.1
+
+- Suppress informational log messages in TUI mode by @BYK in [#26](https://github.com/BYK/opencode-lore/pull/26)
+
 ## 0.5.0
 
 ### New Features ✨
