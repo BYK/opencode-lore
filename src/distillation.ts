@@ -2,6 +2,7 @@ import type { createOpencodeClient } from "@opencode-ai/sdk";
 import { db, ensureProject } from "./db";
 import { config } from "./config";
 import * as temporal from "./temporal";
+import * as log from "./log";
 import {
   DISTILLATION_SYSTEM,
   distillationUser,
@@ -273,8 +274,8 @@ export async function run(input: {
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
   if (orphans > 0) {
-    console.error(
-      `[lore] Reset ${orphans} orphaned messages for re-observation`,
+    log.info(
+      `Reset ${orphans} orphaned messages for re-observation`,
     );
   }
 

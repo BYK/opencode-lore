@@ -28,15 +28,17 @@
 <!-- lore:019c91ad-4d47-7afc-90e0-239a9eda57a4 -->
 * **Stuck compaction loops leave orphaned user+assistant message pairs in DB**: When OpenCode compaction overflows, it creates paired user+assistant messages per retry (assistant has error.name:'ContextOverflowError', mode:'compaction'). These accumulate and worsen the session. Recovery: find last good assistant message (has tokens, no error), delete all messages after it from both \`message\` and \`part\` tables. Use json\_extract(data, '$.error.name') to identify compaction debris.
 <!-- lore:019c8f4f-67ca-7212-a8c4-8a75b230ceea -->
-* **Lore test suite uses live DB — no test isolation for db.test.ts**: The lore test suite (test/db.test.ts, test/ltm.test.ts) uses the live DB at ~/.local/share/opencode-lore/lore.db — no LORE\_DB\_PATH override. Test fixtures create entries with 019c9026-\* UUIDs that persist and leak into AGENTS.md exports. Known leaked entries: 'Kubernetes deployment pattern', 'TypeScript strict mode caveat', 'React useState async pitfall', 'Fine entry'. These require periodic manual cleanup from the DB. Fix needed: set LORE\_DB\_PATH to a temp file in tests.
+* **Lore test suite uses live DB — no test isolation for db.test.ts**: Lore test suite (test/db.test.ts, test/ltm.test.ts) uses the live DB at ~/.local/share/opencode-lore/lore.db — no LORE\_DB\_PATH override. Test fixtures create entries with 019c9026-\* UUIDs that persist and leak into AGENTS.md exports. Known leaked entries: 'Kubernetes deployment pattern', 'TypeScript strict mode caveat', 'React useState async pitfall', 'Fine entry'. Require periodic manual cleanup. Fix needed: LORE\_DB\_PATH temp file in tests.
 
-### Preference
+### Pattern
 
-<!-- lore:019ca19d-fc02-7657-b2e9-7764658c01a5 -->
-* **Code style**: User prefers no backwards-compat shims — fix callers directly. Prefer explicit error handling over silent failures. Derive thresholds from existing constants rather than hardcoding magic numbers (e.g., use \`raw.length <= COL\_COUNT\` instead of \`n < 10\_000\`). In CI, define shared env vars at workflow level, not per-job.
+<!-- lore:019cb050-ef48-7cbe-8e58-802f17c34591 -->
+* **Lore logging: LORE\_DEBUG gating for info/warn, always-on for errors**: src/log.ts provides three levels: log.info() and log.warn() are suppressed unless LORE\_DEBUG=1 or LORE\_DEBUG=true; log.error() always emits. All write to stderr with \[lore] prefix. This exists because OpenCode TUI renders all stderr as red error text — routine status messages (distillation counts, pruning stats, consolidation) were alarming users. Rule: use log.info() for successful operations and status, log.warn() for non-actionable oddities (e.g. dropping trailing messages), log.error() only in catch blocks for real failures. Never use console.error directly in plugin source files.
 
 ### Preference
 
 <!-- lore:019ca190-0001-7000-8000-000000000001 -->
 * **Always dry-run before bulk DB deletes**: Never execute bulk DELETE/destructive operations without first running the equivalent SELECT to verify row count and inspect affected rows. A hardcoded timestamp off by one year caused deletion of all 1638 messages + 5927 parts instead of 5 debris rows. Pattern: (1) SELECT with same WHERE, (2) verify count, (3) then DELETE. Applies to any destructive op — DB mutations, git reset, file deletion.
+<!-- lore:019ca19d-fc02-7657-b2e9-7764658c01a5 -->
+* **Code style**: User prefers no backwards-compat shims — fix callers directly. Prefer explicit error handling over silent failures. Derive thresholds from existing constants rather than hardcoding magic numbers (e.g., use \`raw.length <= COL\_COUNT\` instead of \`n < 10\_000\`). In CI, define shared env vars at workflow level, not per-job.
 <!-- End lore-managed section -->

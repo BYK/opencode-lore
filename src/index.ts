@@ -18,6 +18,7 @@ import {
 import { formatKnowledge, formatDistillations } from "./prompt";
 import { createRecallTool } from "./reflect";
 import { shouldImport, importFromFile, exportToFile } from "./agents-file";
+import * as log from "./log";
 
 /**
  * Detect whether an error from session.error is a context overflow ("prompt too long").
@@ -85,9 +86,9 @@ export const LorePlugin: Plugin = async (ctx) => {
       if (shouldImport({ projectPath, filePath })) {
         try {
           importFromFile({ projectPath, filePath });
-          console.error("[lore] imported knowledge from", cfg.agentsFile.path);
+          log.info("imported knowledge from", cfg.agentsFile.path);
         } catch (e) {
-          console.error("[lore] agents-file import error:", e);
+          log.error("agents-file import error:", e);
         }
       }
     }
@@ -99,7 +100,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   if (config().knowledge.enabled) {
     const pruned = ltm.pruneOversized(1200);
     if (pruned > 0) {
-      console.error(`[lore] pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
+      log.info(`pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
     }
   }
 
@@ -168,7 +169,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         });
       }
     } catch (e) {
-      console.error("[lore] distillation error:", e);
+      log.error("distillation error:", e);
     } finally {
       distilling = false;
     }
@@ -185,7 +186,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         model: cfg.model,
       });
     } catch (e) {
-      console.error("[lore] curator error:", e);
+      log.error("curator error:", e);
     }
   }
 
@@ -240,8 +241,8 @@ export const LorePlugin: Plugin = async (ctx) => {
             ) {
               const pending = temporal.undistilledCount(projectPath, msg.sessionID);
               if (pending >= config().distillation.maxSegment) {
-                console.error(
-                  `[lore] incremental distillation: ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
+                log.info(
+                  `incremental distillation: ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
                 );
                 backgroundDistill(msg.sessionID);
               }
@@ -271,11 +272,11 @@ export const LorePlugin: Plugin = async (ctx) => {
 
         // Detect "prompt is too long" API errors and auto-recover.
         const rawError = (event.properties as Record<string, unknown>).error;
-        console.error("[lore] session.error received:", JSON.stringify(rawError, null, 2));
+        log.info("session.error received:", JSON.stringify(rawError, null, 2));
 
         if (isContextOverflow(rawError) && errorSessionID) {
-          console.error(
-            `[lore] detected context overflow — auto-recovering (session: ${errorSessionID.substring(0, 16)})`,
+          log.info(
+            `detected context overflow — auto-recovering (session: ${errorSessionID.substring(0, 16)})`,
           );
 
           // 1. Force layer 2 on next transform (persisted to DB — survives restarts).
@@ -294,8 +295,8 @@ export const LorePlugin: Plugin = async (ctx) => {
               summaries.map(s => ({ observations: s.observations, generation: s.generation })),
             );
 
-            console.error(
-              `[lore] sending auto-recovery message to session ${errorSessionID.substring(0, 16)}`,
+            log.info(
+              `sending auto-recovery message to session ${errorSessionID.substring(0, 16)}`,
             );
             await ctx.client.session.prompt({
               path: { id: errorSessionID },
@@ -303,14 +304,14 @@ export const LorePlugin: Plugin = async (ctx) => {
                 parts: [{ type: "text", text: recoveryText, synthetic: true }],
               },
             });
-            console.error(
-              `[lore] auto-recovery message sent successfully`,
+            log.info(
+              `auto-recovery message sent successfully`,
             );
           } catch (recoveryError) {
             // Recovery is best-effort — don't let it crash the event handler.
             // The persisted forceMinLayer will still help on the user's next message.
-            console.error(
-              `[lore] auto-recovery failed (forceMinLayer still persisted):`,
+            log.error(
+              `auto-recovery failed (forceMinLayer still persisted):`,
               recoveryError,
             );
           }
@@ -343,8 +344,8 @@ export const LorePlugin: Plugin = async (ctx) => {
         if (cfg.knowledge.enabled) try {
           const allEntries = ltm.forProject(projectPath);
           if (allEntries.length > cfg.curator.maxEntries) {
-            console.error(
-              `[lore] entry count ${allEntries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
+            log.info(
+              `entry count ${allEntries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
             );
             const { updated, deleted } = await curator.consolidate({
               client: ctx.client,
@@ -353,11 +354,11 @@ export const LorePlugin: Plugin = async (ctx) => {
               model: cfg.model,
             });
             if (updated > 0 || deleted > 0) {
-              console.error(`[lore] consolidation: ${updated} updated, ${deleted} deleted`);
+              log.info(`consolidation: ${updated} updated, ${deleted} deleted`);
             }
           }
         } catch (e) {
-          console.error("[lore] consolidation error:", e);
+          log.error("consolidation error:", e);
         }
 
         // Prune temporal messages after distillation and curation have run.
@@ -371,12 +372,12 @@ export const LorePlugin: Plugin = async (ctx) => {
             maxStorageMB: cfg.pruning.maxStorage,
           });
           if (ttlDeleted > 0 || capDeleted > 0) {
-            console.error(
-              `[lore] pruned temporal messages: ${ttlDeleted} by TTL, ${capDeleted} by size cap`,
+            log.info(
+              `pruned temporal messages: ${ttlDeleted} by TTL, ${capDeleted} by size cap`,
             );
           }
         } catch (e) {
-          console.error("[lore] pruning error:", e);
+          log.error("pruning error:", e);
         }
 
         // Export curated knowledge to AGENTS.md after distillation + curation.
@@ -387,7 +388,7 @@ export const LorePlugin: Plugin = async (ctx) => {
             exportToFile({ projectPath, filePath });
           }
         } catch (e) {
-          console.error("[lore] agents-file export error:", e);
+          log.error("agents-file export error:", e);
         }
       }
     },
@@ -508,8 +509,8 @@ export const LorePlugin: Plugin = async (ctx) => {
             break;
           }
           const dropped = result.messages.pop()!;
-          console.error(
-            "[lore] WARN: dropping trailing pure-text",
+          log.warn(
+            "dropping trailing pure-text",
             dropped.info.role,
             "message to prevent prefill error. id:",
             dropped.info.id,
