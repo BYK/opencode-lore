@@ -1,4 +1,10 @@
 # Changelog
+## 0.5.0
+
+### New Features ✨
+
+- Add knowledge.enabled option to disable LTM system by @BYK in [#23](https://github.com/BYK/opencode-lore/pull/23)
+
 ## 0.4.4
 
 ### Bug Fixes 🐛
