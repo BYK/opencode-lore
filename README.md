@@ -110,6 +110,78 @@ To use a local clone instead of the published package:
 }
 ```
 
+## Configuration
+
+Create a `.lore.json` file in your project root to customize behavior. All fields are optional — defaults are shown below:
+
+```jsonc
+{
+  // Disable long-term knowledge entirely. Temporal storage, distillation,
+  // gradient context management, and the recall tool (for conversation search)
+  // remain active. Only the curator, knowledge injection, and AGENTS.md sync
+  // are turned off.
+  "knowledge": { "enabled": true },
+
+  // Tune the curator that extracts knowledge from conversations.
+  "curator": {
+    "enabled": true,        // set false to stop extracting knowledge entries
+    "onIdle": true,         // run curation when a session goes idle
+    "afterTurns": 10,       // run curation after N user turns
+    "maxEntries": 25        // consolidate when entries exceed this count
+  },
+
+  // AGENTS.md export/import — the universal agents file format.
+  "agentsFile": {
+    "enabled": true,        // set false to disable AGENTS.md sync
+    "path": "AGENTS.md"     // change to e.g. "CLAUDE.md" or ".cursor/rules/lore.md"
+  },
+
+  // Context budget fractions (of usable context window).
+  "budget": {
+    "distilled": 0.25,      // distilled history prefix
+    "raw": 0.4,             // recent raw messages
+    "output": 0.25,         // reserved for model output
+    "ltm": 0.10             // long-term knowledge in system prompt (2-30%)
+  },
+
+  // Distillation thresholds.
+  "distillation": {
+    "minMessages": 8,       // min undistilled messages before distilling
+    "maxSegment": 50        // max messages per distillation chunk
+  },
+
+  // Temporal message pruning.
+  "pruning": {
+    "retention": 120,       // days to keep distilled messages
+    "maxStorage": 1024      // max storage in MB before emergency pruning
+  },
+
+  // Include cross-project knowledge entries. Default: true.
+  "crossProject": true
+}
+```
+
+### Disabling long-term knowledge
+
+If you prefer to manage context manually and only want conversation search capabilities, set:
+
+```json
+{
+  "knowledge": { "enabled": false }
+}
+```
+
+This disables:
+- **Knowledge extraction** — the curator won't extract patterns, decisions, or gotchas from conversations
+- **Knowledge injection** — no knowledge entries are added to the system prompt
+- **AGENTS.md sync** — no import/export of the agents file
+
+This keeps active:
+- **Temporal storage** — all messages are still stored and searchable
+- **Distillation** — conversations are still distilled for context management
+- **Gradient context manager** — context window is still managed automatically
+- **The `recall` tool** — the agent can still search conversation history and distillations (knowledge search is skipped)
+
 ## What to expect
 
 Once Lore is active, you should notice several changes:
