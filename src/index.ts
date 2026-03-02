@@ -80,7 +80,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   // (hand-written entries, edits from other machines, or merge conflicts).
   {
     const cfg = config();
-    if (cfg.agentsFile.enabled) {
+    if (cfg.knowledge.enabled && cfg.agentsFile.enabled) {
       const filePath = `${projectPath}/${cfg.agentsFile.path}`;
       if (shouldImport({ projectPath, filePath })) {
         try {
@@ -96,9 +96,11 @@ export const LorePlugin: Plugin = async (ctx) => {
   // Prune any corrupted/oversized knowledge entries left by the AGENTS.md
   // backslash-escaping bug or curator hallucinations. Sets confidence → 0
   // (below the 0.2 query threshold) so they stop polluting the context.
-  const pruned = ltm.pruneOversized(1200);
-  if (pruned > 0) {
-    console.error(`[lore] pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
+  if (config().knowledge.enabled) {
+    const pruned = ltm.pruneOversized(1200);
+    if (pruned > 0) {
+      console.error(`[lore] pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
+    }
   }
 
   // Track user turns for periodic curation
@@ -323,11 +325,13 @@ export const LorePlugin: Plugin = async (ctx) => {
         // Run background distillation for any remaining undistilled messages
         await backgroundDistill(sessionID);
 
-        // Run curator periodically
+        // Run curator periodically (only when knowledge system is enabled)
         const cfg = config();
         if (
-          cfg.curator.onIdle ||
-          turnsSinceCuration >= cfg.curator.afterTurns
+          cfg.knowledge.enabled && (
+            cfg.curator.onIdle ||
+            turnsSinceCuration >= cfg.curator.afterTurns
+          )
         ) {
           await backgroundCurate(sessionID);
           turnsSinceCuration = 0;
@@ -336,7 +340,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         // Consolidate entries if count exceeds cfg.curator.maxEntries.
         // Runs after normal curation so newly created entries are counted.
         // Only triggers when truly over the limit to avoid redundant LLM calls.
-        try {
+        if (cfg.knowledge.enabled) try {
           const allEntries = ltm.forProject(projectPath);
           if (allEntries.length > cfg.curator.maxEntries) {
             console.error(
@@ -378,7 +382,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         // Export curated knowledge to AGENTS.md after distillation + curation.
         try {
           const agentsCfg = cfg.agentsFile;
-          if (agentsCfg.enabled) {
+          if (cfg.knowledge.enabled && agentsCfg.enabled) {
             const filePath = `${projectPath}/${agentsCfg.path}`;
             exportToFile({ projectPath, filePath });
           }
@@ -407,28 +411,34 @@ export const LorePlugin: Plugin = async (ctx) => {
       }
 
       const cfg = config();
-      const ltmBudget = getLtmBudget(cfg.budget.ltm);
-      const entries = ltm.forSession(projectPath, input.sessionID, ltmBudget);
-      if (!entries.length) {
-        setLtmTokens(0);
-        return;
-      }
 
-      const formatted = formatKnowledge(
-        entries.map((e) => ({
-          category: e.category,
-          title: e.title,
-          content: e.content,
-        })),
-        ltmBudget,
-      );
+      // Knowledge injection — only when the knowledge system is enabled.
+      // When disabled, LTM budget is zero and no knowledge is injected.
+      if (cfg.knowledge.enabled) {
+        const ltmBudget = getLtmBudget(cfg.budget.ltm);
+        const entries = ltm.forSession(projectPath, input.sessionID, ltmBudget);
+        if (!entries.length) {
+          setLtmTokens(0);
+        } else {
+          const formatted = formatKnowledge(
+            entries.map((e) => ({
+              category: e.category,
+              title: e.title,
+              content: e.content,
+            })),
+            ltmBudget,
+          );
 
-      if (formatted) {
-        // Track how many tokens we actually consumed so the gradient manager
-        // can deduct them from the usable budget for message injection.
-        const ltmTokenCount = Math.ceil(formatted.length / 3);
-        setLtmTokens(ltmTokenCount);
-        output.system.push(formatted);
+          if (formatted) {
+            // Track how many tokens we actually consumed so the gradient manager
+            // can deduct them from the usable budget for message injection.
+            const ltmTokenCount = Math.ceil(formatted.length / 3);
+            setLtmTokens(ltmTokenCount);
+            output.system.push(formatted);
+          } else {
+            setLtmTokens(0);
+          }
+        }
       } else {
         setLtmTokens(0);
       }
@@ -437,7 +447,7 @@ export const LorePlugin: Plugin = async (ctx) => {
       // It is always modified after the lore export runs (post-session) so it
       // appears as unstaged when the agent goes to commit — the agent must not
       // skip it just because it looks auto-generated.
-      if (cfg.agentsFile.enabled) {
+      if (cfg.knowledge.enabled && cfg.agentsFile.enabled) {
         output.system.push(
           `When making git commits, always check if ${cfg.agentsFile.path} has ` +
           `unstaged changes and include it in the commit. This file contains ` +
@@ -532,7 +542,9 @@ export const LorePlugin: Plugin = async (ctx) => {
         ? distillation.loadForSession(projectPath, input.sessionID)
         : [];
 
-      const entries = ltm.forProject(projectPath, config().crossProject);
+      const entries = config().knowledge.enabled
+        ? ltm.forProject(projectPath, config().crossProject)
+        : [];
       const knowledge = entries.length
         ? formatKnowledge(
             entries.map((e) => ({
@@ -577,7 +589,7 @@ End with "I'm ready to continue." so the agent knows to pick up where it left of
 
     // Register the recall tool
     tool: {
-      recall: createRecallTool(projectPath),
+      recall: createRecallTool(projectPath, config().knowledge.enabled),
     },
   };
 };

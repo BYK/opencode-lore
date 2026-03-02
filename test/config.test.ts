@@ -40,6 +40,23 @@ describe("LoreConfig — agentsFile schema", () => {
   });
 });
 
+describe("LoreConfig — knowledge schema", () => {
+  test("knowledge defaults: enabled=true", () => {
+    const cfg = LoreConfig.parse({});
+    expect(cfg.knowledge.enabled).toBe(true);
+  });
+
+  test("knowledge.enabled can be set to false", () => {
+    const cfg = LoreConfig.parse({ knowledge: { enabled: false } });
+    expect(cfg.knowledge.enabled).toBe(false);
+  });
+
+  test("knowledge section is optional — omitting it uses defaults", () => {
+    const cfg = LoreConfig.parse({ curator: { enabled: false } });
+    expect(cfg.knowledge.enabled).toBe(true);
+  });
+});
+
 describe("LoreConfig — curator schema", () => {
   test("curator defaults: enabled=true, onIdle=true, afterTurns=10, maxEntries=25", () => {
     const cfg = LoreConfig.parse({});
@@ -80,6 +97,17 @@ describe("load — reads config from .lore.json", () => {
     );
     const cfg = await load(TMP);
     expect(cfg.agentsFile.path).toBe("CLAUDE.md");
+  });
+
+  test("loads knowledge.enabled=false from .lore.json", async () => {
+    mkdirSync(TMP, { recursive: true });
+    writeFileSync(
+      join(TMP, ".lore.json"),
+      JSON.stringify({ knowledge: { enabled: false } }),
+      "utf8",
+    );
+    const cfg = await load(TMP);
+    expect(cfg.knowledge.enabled).toBe(false);
   });
 
   test("falls back to defaults when no config file exists", async () => {

@@ -23,6 +23,16 @@ export const LoreConfig = z.object({
       metaThreshold: z.number().min(3).default(10),
     })
     .default({}),
+  knowledge: z
+    .object({
+      /** Set to false to disable long-term knowledge storage and system-prompt injection.
+       *  Conversation recall (temporal search, distillation search) and context management
+       *  (gradient transform, distillation) remain fully active. Disabling this turns off
+       *  the curator, knowledge DB writes, AGENTS.md sync, and LTM injection into the
+       *  system prompt. Default: true. */
+      enabled: z.boolean().default(true),
+    })
+    .default({}),
   curator: z
     .object({
       enabled: z.boolean().default(true),
