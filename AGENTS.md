@@ -21,6 +21,10 @@
 
 ### Gotcha
 
+<!-- lore:019cb117-9f72-77b2-aa3f-1528a1d23210 -->
+* **React useState async pitfall**: React useState setter is async — reading state immediately after setState returns stale value in dashboard components
+<!-- lore:019cb117-9f27-75c7-aa08-1eb7f3ff5568 -->
+* **TypeScript strict mode caveat**: TypeScript strict null checks require explicit undefined handling
 <!-- lore:019c91d6-04af-7334-8374-e8bbf14cb43d -->
 * **Calibration used DB message count instead of transformed window count — caused layer 0 false passthrough**: Lore gradient calibration bugs that caused context overflow: (1) Used DB message count instead of transformed window count — after compression, delta saw ~1 new msg → layer 0 passthrough → overflow. Fix: getLastTransformedCount(). (2) actualInput omitted cache.write — cold-cache turns showed ~3 tokens instead of 150K → layer 0. Fix: include cache.write. (3) Trailing pure-text assistant messages cause Anthropic prefill errors, but messages with tool parts must NOT be dropped (SDK converts to tool\_result user-role). Drop predicate: \`hasToolParts\`. (4) Don't mutate message parts you don't own — removed stats PATCH that caused system-reminder persistence bug.
 <!-- lore:019c91c0-cdf3-71c9-be52-7f6441fb643e -->
@@ -32,11 +36,17 @@
 
 ### Pattern
 
+<!-- lore:019cb117-9f29-7c64-84c3-99ca7f3e8f49 -->
+* **Kubernetes deployment pattern**: Use helm charts for Kubernetes deployments with resource limits
 <!-- lore:019cb050-ef48-7cbe-8e58-802f17c34591 -->
 * **Lore logging: LORE\_DEBUG gating for info/warn, always-on for errors**: src/log.ts provides three levels: log.info() and log.warn() are suppressed unless LORE\_DEBUG=1 or LORE\_DEBUG=true; log.error() always emits. All write to stderr with \[lore] prefix. This exists because OpenCode TUI renders all stderr as red error text — routine status messages (distillation counts, pruning stats, consolidation) were alarming users. Rule: use log.info() for successful operations and status, log.warn() for non-actionable oddities (e.g. dropping trailing messages), log.error() only in catch blocks for real failures. Never use console.error directly in plugin source files.
 
 ### Preference
 
+<!-- lore:019cb117-9f36-7788-a4d7-417169bcfa69 -->
+* **General coding preference**: Prefer explicit error handling over silent failures
+<!-- lore:019cb117-9ecb-7005-abf6-9a1c1ddbee65 -->
+* **Code style**: User prefers no backwards-compat shims, fix callers directly
 <!-- lore:019ca190-0001-7000-8000-000000000001 -->
 * **Always dry-run before bulk DB deletes**: Never execute bulk DELETE/destructive operations without first running the equivalent SELECT to verify row count and inspect affected rows. A hardcoded timestamp off by one year caused deletion of all 1638 messages + 5927 parts instead of 5 debris rows. Pattern: (1) SELECT with same WHERE, (2) verify count, (3) then DELETE. Applies to any destructive op — DB mutations, git reset, file deletion.
 <!-- lore:019ca19d-fc02-7657-b2e9-7764658c01a5 -->
