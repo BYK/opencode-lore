@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
-import { db, close, ensureProject, loadForceMinLayer } from "../src/db";
+import { db, ensureProject, loadForceMinLayer } from "../src/db";
 import {
   transform,
   setModelLimits,
@@ -77,7 +77,6 @@ beforeAll(() => {
   calibrate(0); // zero overhead: no system prompt overhead in unit tests
 });
 
-afterAll(() => close());
 
 describe("gradient", () => {
   test("passes through small message sets unchanged (Layer 0)", () => {

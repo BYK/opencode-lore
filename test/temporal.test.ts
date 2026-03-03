@@ -1,5 +1,5 @@
-import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
-import { db, close, ensureProject } from "../src/db";
+import { describe, test, expect, beforeEach } from "bun:test";
+import { db, ensureProject } from "../src/db";
 import * as temporal from "../src/temporal";
 import { ftsQuery } from "../src/temporal";
 import type { Message, Part } from "@opencode-ai/sdk";
@@ -53,13 +53,6 @@ function makeParts(messageID: string, text: string): Part[] {
     },
   ];
 }
-
-beforeAll(() => {
-  // Clean up any leftover test data from previous runs
-  const pid = ensureProject(PROJECT);
-  db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
-});
-afterAll(() => close());
 
 describe("temporal", () => {
   test("store and retrieve messages", () => {
@@ -184,8 +177,8 @@ describe("temporal", () => {
         .run(id, pid, sessionID, content, Math.ceil(contentSize / 4), distilled, createdAt);
     }
 
-    // Clean the prune project before every test so accumulated rows from
-    // prior test runs (live DB, no isolation) don't interfere with counts.
+    // Clean the prune project before every test so data from
+    // earlier tests in this file don't interfere with counts.
     beforeEach(() => {
       const pid = ensureProject(PRUNE_PROJECT);
       db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);

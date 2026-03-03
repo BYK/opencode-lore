@@ -1,7 +1,6 @@
-import { describe, test, expect, afterAll } from "bun:test";
-import { db, close, ensureProject, projectId, loadForceMinLayer, saveForceMinLayer } from "../src/db";
+import { describe, test, expect } from "bun:test";
+import { db, ensureProject, projectId, loadForceMinLayer, saveForceMinLayer } from "../src/db";
 
-afterAll(() => close());
 
 describe("db", () => {
   test("initializes and creates tables", () => {

@@ -7,7 +7,7 @@ import {
 } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
-import { db, close, ensureProject } from "../src/db";
+import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import {
   LORE_SECTION_START,
@@ -73,8 +73,8 @@ function loreSectionWithEntries(
 // Setup / teardown
 // ---------------------------------------------------------------------------
 
-// Fixed UUIDs used in importFromFile tests that must be cleaned up to prevent
-// cross-test-file collisions (ltm.test.ts uses the same IDs for its own fixtures).
+// Fixed UUIDs shared between agents-file and ltm tests — cleaned in
+// beforeEach to prevent UNIQUE constraint collisions.
 const TEST_UUIDS = [
   "019505a1-7c00-7000-8000-aabbccddeeff",
   "019505a2-7c00-7000-8000-bbbbbbbbbbbb",
@@ -87,15 +87,15 @@ beforeEach(() => {
   const pid = ensureProject(PROJECT);
   db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
   db().query("DELETE FROM knowledge WHERE project_id IS NULL").run();
-  // Also remove any cross-project entries that originated from test projects
-  // (prevents test pollution leaking into forProject(PROJECT, includeCross=true) queries)
+  // Also remove cross-project entries from test projects
+  // (prevents cross-file pollution within the test run)
   db()
     .query(
       "DELETE FROM knowledge WHERE project_id IN (SELECT id FROM projects WHERE path LIKE '/test/%')",
     )
     .run();
-  // Remove fixed-UUID entries that may have leaked from importFromFile tests;
-  // ltm.test.ts uses the same UUIDs and will UNIQUE-constraint-fail if they exist.
+  // Remove fixed-UUID entries that may exist from prior test files;
+  // ltm.test.ts uses the same UUIDs and would UNIQUE-constraint-fail.
   for (const id of TEST_UUIDS) {
     db().query("DELETE FROM knowledge WHERE id = ?").run(id);
   }
@@ -105,14 +105,10 @@ beforeEach(() => {
 
 afterAll(() => {
   rmSync(TMP_DIR, { recursive: true, force: true });
-  // Final cleanup of all fixed-UUID test entries so ltm.test.ts doesn't hit
-  // UNIQUE constraint failures when it tries to insert the same IDs.
-  const pid = ensureProject(PROJECT);
-  db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+  // Clean shared UUIDs so ltm.test.ts does not hit UNIQUE constraint
   for (const id of TEST_UUIDS) {
     db().query("DELETE FROM knowledge WHERE id = ?").run(id);
   }
-  close();
 });
 
 // ---------------------------------------------------------------------------

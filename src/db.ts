@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { join } from "path";
+import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
 const SCHEMA_VERSION = 4;
@@ -153,9 +153,16 @@ let instance: Database | undefined;
 
 export function db(): Database {
   if (instance) return instance;
-  const dir = dataDir();
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, "lore.db");
+  const envPath = process.env.LORE_DB_PATH;
+  let path: string;
+  if (envPath) {
+    mkdirSync(dirname(envPath), { recursive: true });
+    path = envPath;
+  } else {
+    const dir = dataDir();
+    mkdirSync(dir, { recursive: true });
+    path = join(dir, "lore.db");
+  }
   instance = new Database(path, { create: true });
   instance.exec("PRAGMA journal_mode = WAL");
   instance.exec("PRAGMA foreign_keys = ON");

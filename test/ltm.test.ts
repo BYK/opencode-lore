@@ -1,5 +1,5 @@
-import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
-import { db, close, ensureProject } from "../src/db";
+import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
+import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 
 // UUID v7 pattern: starts with version nibble 7, variant bits 10xxxxxx
@@ -8,13 +8,6 @@ const UUID_RE    = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 const PROJECT = "/test/ltm/project";
 
-beforeAll(() => {
-  // Clean up any leftover test data from previous runs
-  const pid = ensureProject(PROJECT);
-  db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
-  db().query("DELETE FROM knowledge WHERE project_id IS NULL").run();
-});
-afterAll(() => close());
 
 describe("ltm", () => {
   test("create and retrieve knowledge entry", () => {
