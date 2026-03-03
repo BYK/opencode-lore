@@ -15,14 +15,14 @@ export const LoreConfig = z.object({
       /** Max fraction of usable context reserved for LTM system-prompt injection. Default: 0.10 (10%). */
       ltm: z.number().min(0.02).max(0.3).default(0.10),
     })
-    .default({}),
+    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.10 }),
   distillation: z
     .object({
       minMessages: z.number().min(3).default(8),
       maxSegment: z.number().min(5).default(50),
       metaThreshold: z.number().min(3).default(10),
     })
-    .default({}),
+    .default({ minMessages: 8, maxSegment: 50, metaThreshold: 10 }),
   knowledge: z
     .object({
       /** Set to false to disable long-term knowledge storage and system-prompt injection.
@@ -32,7 +32,7 @@ export const LoreConfig = z.object({
        *  system prompt. Default: true. */
       enabled: z.boolean().default(true),
     })
-    .default({}),
+    .default({ enabled: true }),
   curator: z
     .object({
       enabled: z.boolean().default(true),
@@ -41,7 +41,7 @@ export const LoreConfig = z.object({
       /** Max knowledge entries per project before consolidation triggers. Default: 25. */
       maxEntries: z.number().min(10).default(25),
     })
-    .default({}),
+    .default({ enabled: true, onIdle: true, afterTurns: 10, maxEntries: 25 }),
   pruning: z
     .object({
       /** Days to keep distilled temporal messages before pruning. Default: 120. */
@@ -49,7 +49,7 @@ export const LoreConfig = z.object({
       /** Max total temporal_messages storage in MB before emergency pruning. Default: 1024 (1 GB). */
       maxStorage: z.number().min(50).default(1024),
     })
-    .default({}),
+    .default({ retention: 120, maxStorage: 1024 }),
   crossProject: z.boolean().default(true),
   agentsFile: z
     .object({
@@ -58,7 +58,7 @@ export const LoreConfig = z.object({
       /** Path to the agents file, relative to the project root. */
       path: z.string().default("AGENTS.md"),
     })
-    .default({}),
+    .default({ enabled: true, path: "AGENTS.md" }),
 });
 
 export type LoreConfig = z.infer<typeof LoreConfig>;
