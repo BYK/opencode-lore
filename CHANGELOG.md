@@ -1,4 +1,17 @@
 # Changelog
+## 0.5.3
+
+### Bug Fixes 🐛
+
+- Prevent excessive background LLM requests causing rate limiting and sluggishness by @BYK in [#33](https://github.com/BYK/opencode-lore/pull/33)
+- Upgrade zod from v3 to v4 by @BYK in [#32](https://github.com/BYK/opencode-lore/pull/32)
+- Drop trailing pure-text assistant messages at layer 0 too by @BYK in [#31](https://github.com/BYK/opencode-lore/pull/31)
+- Isolate test suite from live lore DB via LORE_DB_PATH preload by @BYK in [b96cb956](https://github.com/BYK/opencode-lore/commit/b96cb95629cdd8257290e1d36932cc67fbce0a2b)
+
+### Internal Changes 🔧
+
+- Remove leaked test fixture entries from AGENTS.md by @BYK in [54dbae18](https://github.com/BYK/opencode-lore/commit/54dbae1832959aff8f513c23338585ed4b18dec7)
+
 ## 0.5.2
 
 ### Bug Fixes 🐛
