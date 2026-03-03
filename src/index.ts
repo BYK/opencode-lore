@@ -481,41 +481,49 @@ export const LorePlugin: Plugin = async (ctx) => {
         sessionID,
       });
 
+      // The API requires the conversation to end with a user message.
+      // Drop trailing pure-text assistant messages (no tool parts), which would
+      // cause an Anthropic "does not support assistant message prefill" error.
+      // This must run at ALL layers, including layer 0 (passthrough) — the error
+      // can occur even when messages fit within the context budget.
+      //
+      // Crucially, assistant messages that contain tool parts (completed OR pending)
+      // must NOT be dropped:
+      // - Completed tool parts: OpenCode's SDK converts these into tool_result blocks
+      //   sent as user-role messages at the API level. The conversation already ends
+      //   with a user message — dropping would strip the entire current agentic turn
+      //   and cause an infinite tool-call loop (the model restarts from scratch).
+      // - Pending tool parts: the tool call hasn't returned yet; dropping would make
+      //   the model re-issue the same tool call on the next turn.
+      //
+      // Note: at layer 0, result.messages === output.messages (same reference), so
+      // mutating result.messages here also trims output.messages in place — which is
+      // safe for prompt caching since we only ever remove trailing messages, never
+      // reorder or insert.
+      while (
+        result.messages.length > 0 &&
+        result.messages.at(-1)!.info.role !== "user"
+      ) {
+        const last = result.messages.at(-1)!;
+        const hasToolParts = last.parts.some((p) => p.type === "tool");
+        if (hasToolParts) {
+          // Tool parts → tool_result (user-role) at the API level → no prefill error.
+          // Stop dropping; the conversation ends correctly as-is.
+          break;
+        }
+        const dropped = result.messages.pop()!;
+        log.warn(
+          "dropping trailing pure-text",
+          dropped.info.role,
+          "message to prevent prefill error. id:",
+          dropped.info.id,
+        );
+      }
+
       // Only restructure messages when the gradient transform is active (layers 1-4).
       // Layer 0 means all messages fit within the context budget — leave them alone
       // so the append-only sequence stays intact for prompt caching.
       if (result.layer > 0) {
-        // The API requires the conversation to end with a user message.
-        // Drop trailing pure-text assistant messages (no tool parts), which would
-        // cause an Anthropic "does not support assistant message prefill" error.
-        //
-        // Crucially, assistant messages that contain tool parts (completed OR pending)
-        // must NOT be dropped:
-        // - Completed tool parts: OpenCode's SDK converts these into tool_result blocks
-        //   sent as user-role messages at the API level. The conversation already ends
-        //   with a user message — dropping would strip the entire current agentic turn
-        //   and cause an infinite tool-call loop (the model restarts from scratch).
-        // - Pending tool parts: the tool call hasn't returned yet; dropping would make
-        //   the model re-issue the same tool call on the next turn.
-        while (
-          result.messages.length > 0 &&
-          result.messages.at(-1)!.info.role !== "user"
-        ) {
-          const last = result.messages.at(-1)!;
-          const hasToolParts = last.parts.some((p) => p.type === "tool");
-          if (hasToolParts) {
-            // Tool parts → tool_result (user-role) at the API level → no prefill error.
-            // Stop dropping; the conversation ends correctly as-is.
-            break;
-          }
-          const dropped = result.messages.pop()!;
-          log.warn(
-            "dropping trailing pure-text",
-            dropped.info.role,
-            "message to prevent prefill error. id:",
-            dropped.info.id,
-          );
-        }
         output.messages.splice(0, output.messages.length, ...result.messages);
       }
 

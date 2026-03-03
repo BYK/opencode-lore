@@ -753,6 +753,88 @@ function makeStepWithTool(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Layer 0 trailing-drop: pure-text trailing assistant messages must be dropped
+// even when gradient is not active (layer 0 passthrough). This is the fix for
+// the "does not support assistant message prefill" error that recurred on small
+// sessions. The hook in index.ts now runs the drop loop unconditionally, before
+// the layer > 0 guard. At layer 0, result.messages === output.messages (same
+// reference), so mutating it in place trims output.messages too.
+// ---------------------------------------------------------------------------
+
+describe("gradient — layer 0 trailing assistant message drop (index.ts prefill fix)", () => {
+  const SESSION = "layer0-drop-sess";
+
+  beforeEach(() => {
+    resetCalibration();
+    resetPrefixCache();
+    resetRawWindowCache();
+    setModelLimits({ context: 200_000, output: 32_000 });
+    calibrate(0);
+    ensureProject(PROJECT);
+  });
+
+  test("transform returns layer 0 for a small session ending with trailing assistant message", () => {
+    // Tiny session — well within context budget, must be layer 0.
+    const msgs = [
+      makeMsg("l0-u1", "user", "hello", SESSION),
+      makeMsg("l0-a1", "assistant", "hi there", SESSION),
+      makeMsg("l0-u2", "user", "thanks", SESSION),
+      makeMsg("l0-a2", "assistant", "no problem", SESSION), // trailing pure-text — prefill error
+    ];
+
+    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+
+    // Must be layer 0 — tiny messages easily fit
+    expect(result.layer).toBe(0);
+
+    // result.messages is the same reference as the input array at layer 0.
+    // The hook's drop loop mutates this in place. Simulate what the hook does:
+    while (result.messages.length > 0) {
+      const last = result.messages[result.messages.length - 1]!;
+      if (last.info.role === "user") break;
+      const hasToolParts = last.parts.some((p) => p.type === "tool");
+      if (hasToolParts) break;
+      result.messages.pop();
+    }
+
+    // After drop: last message must be user-role
+    const afterLast = result.messages[result.messages.length - 1]!;
+    expect(afterLast.info.role).toBe("user");
+    expect(afterLast.info.id).toBe("l0-u2");
+    // And since result.messages === msgs at layer 0, msgs is also trimmed
+    expect(msgs[msgs.length - 1]!.info.id).toBe("l0-u2");
+  });
+
+  test("tool-bearing trailing assistant message at layer 0 is preserved (no infinite tool loop)", () => {
+    // Same tiny session, but last message has a tool part.
+    // Must NOT be dropped — tool parts produce user-role tool_result at the API level.
+    const msgs = [
+      makeMsg("l0t-u1", "user", "run the build", SESSION),
+      makeStepWithTool("l0t-a1", "l0t-u1", "bash", "ok", SESSION), // trailing tool-bearing
+    ];
+
+    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+
+    // Must be layer 0 — tiny messages
+    expect(result.layer).toBe(0);
+
+    // Simulate the hook's drop loop — must stop immediately at tool-bearing message
+    const beforeLen = result.messages.length;
+    while (result.messages.length > 0) {
+      const last = result.messages[result.messages.length - 1]!;
+      if (last.info.role === "user") break;
+      const hasToolParts = last.parts.some((p) => p.type === "tool");
+      if (hasToolParts) break;
+      result.messages.pop();
+    }
+
+    // Nothing dropped — length unchanged
+    expect(result.messages.length).toBe(beforeLen);
+    expect(result.messages[result.messages.length - 1]!.info.id).toBe("l0t-a1");
+  });
+});
+
 describe("gradient — tool-bearing steps survive compression (index.ts trailing-drop fix)", () => {
   const SESSION = "tool-drop-sess";
 
