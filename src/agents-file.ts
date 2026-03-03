@@ -225,6 +225,12 @@ function buildSection(projectPath: string): string {
   // with its own <!-- lore:UUID --> marker. This avoids the title-based Map
   // deduplication bug where multiple entries with the same title all got the
   // same UUID marker from the last Map.set() winner.
+  //
+  // Merge-friendliness: entries within each category are sorted alphabetically
+  // by title (case-insensitive) so the ordering is deterministic across all
+  // machines regardless of DB timestamps.  Blank lines between entries give
+  // git unique context lines to anchor changes -- two branches adding entries
+  // with different titles insert at different positions and auto-merge.
   const out: string[] = [""];
 
   // Section heading
@@ -234,13 +240,20 @@ function buildSection(projectPath: string): string {
     out.push("");
     out.push(`### ${category.charAt(0).toUpperCase() + category.slice(1)}`);
     out.push("");
-    for (const entry of items) {
-      out.push(`<!-- lore:${entry.id} -->`);
+
+    // Sort entries alphabetically by title for deterministic, merge-friendly output.
+    const sorted = [...items].sort((a, b) =>
+      a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
+    );
+
+    for (let i = 0; i < sorted.length; i++) {
+      if (i > 0) out.push(""); // blank line between entries for git context
+      out.push(`<!-- lore:${sorted[i].id} -->`);
       // Render the bullet using remark serializer for proper markdown escaping.
       // serialize(root(ul([liph(...)]))) produces "* **Title**: content\n".
       // Trim the trailing newline since we join with \n ourselves.
       const bullet = serialize(
-        root(ul([liph(strong(inline(entry.title)), t(": " + inline(entry.content)))]))
+        root(ul([liph(strong(inline(sorted[i].title)), t(": " + inline(sorted[i].content)))]))
       ).trimEnd();
       out.push(bullet);
     }

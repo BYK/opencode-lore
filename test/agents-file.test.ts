@@ -346,6 +346,71 @@ describe("exportToFile", () => {
     expect(gotchaPos).toBeGreaterThan(-1);
     expect(decisionPos).toBeLessThan(gotchaPos);
   });
+
+  test("sorts entries alphabetically by title within a category", () => {
+    // Create entries in reverse-alpha and reverse-creation order to ensure
+    // the export sorts by title, not by DB insertion order or updated_at.
+    ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Zebra gotcha",
+      content: "Z content",
+      scope: "project",
+    });
+    ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Alpha gotcha",
+      content: "A content",
+      scope: "project",
+    });
+    ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Middle gotcha",
+      content: "M content",
+      scope: "project",
+    });
+
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const content = readFile();
+    const alphaPos = content.indexOf("Alpha gotcha");
+    const middlePos = content.indexOf("Middle gotcha");
+    const zebraPos = content.indexOf("Zebra gotcha");
+    expect(alphaPos).toBeGreaterThan(-1);
+    expect(middlePos).toBeGreaterThan(-1);
+    expect(zebraPos).toBeGreaterThan(-1);
+    expect(alphaPos).toBeLessThan(middlePos);
+    expect(middlePos).toBeLessThan(zebraPos);
+  });
+
+  test("separates entries with blank lines for merge-friendliness", () => {
+    const id1 = ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Alpha decision",
+      content: "First",
+      scope: "project",
+    });
+    const id2 = ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Beta decision",
+      content: "Second",
+      scope: "project",
+    });
+
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const content = readFile();
+    // Between the first bullet and the second marker there should be a blank line
+    const pattern = new RegExp("\\* \\*\\*Alpha decision\\*\\*.*\n\n<!-- lore:");
+    expect(content).toMatch(pattern);
+    // First entry after heading should NOT have a leading blank line
+    const headingPattern = new RegExp("### Decision\n\n<!-- lore:");
+    expect(content).toMatch(headingPattern);
+  });
 });
 
 // ---------------------------------------------------------------------------
