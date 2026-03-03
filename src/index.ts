@@ -110,6 +110,11 @@ export const LorePlugin: Plugin = async (ctx) => {
   // Track active sessions for distillation
   const activeSessions = new Set<string>();
 
+  // Sessions currently in auto-recovery — prevents infinite loop when
+  // the recovery prompt itself triggers another "prompt too long" error.
+  // Without this guard: overflow → recovery prompt → overflow → recovery → ...
+  const recoveringSessions = new Set<string>();
+
   // Sessions to skip for temporal storage and distillation. Includes worker sessions
   // (distillation, curator) and child sessions (eval, any other children).
   // Checked once per session ID and cached to avoid repeated API calls.
@@ -120,11 +125,13 @@ export const LorePlugin: Plugin = async (ctx) => {
     if (skipSessions.has(sessionID)) return true;
     if (activeSessions.has(sessionID)) return false; // already known good
     // First encounter — check if this is a child session.
-    // session.get() uses exact storage key lookup and only works with full IDs
-    // (e.g. "ses_384e7de8dffeBDc4Z3dK9kfx1k"). Message events deliver short IDs
-    // (e.g. "ses_384e7de8dffe") which cause session.get() to fail with NotFound.
-    // Fall back to the session list to find a session whose full ID starts with
-    // the short ID, then check its parentID.
+    // Only make ONE API call and cache the result either way. The previous
+    // implementation fell back to session.list() when session.get() failed
+    // (common with short IDs from message events), fetching ALL sessions on
+    // every unknown message event. That's too expensive — accept the tradeoff:
+    // if a child session has a short ID that fails session.get(), we won't skip
+    // it. Worker sessions are already caught by isWorkerSession above, and a few
+    // extra temporal messages from eval are harmless.
     try {
       const session = await ctx.client.session.get({ path: { id: sessionID } });
       if (session.data?.parentID) {
@@ -132,18 +139,10 @@ export const LorePlugin: Plugin = async (ctx) => {
         return true;
       }
     } catch {
-      // session.get failed (likely short ID) — search list for matching full ID
-      try {
-        const list = await ctx.client.session.list();
-        const match = list.data?.find((s) => s.id.startsWith(sessionID));
-        if (match?.parentID) {
-          skipSessions.add(sessionID);
-          return true;
-        }
-      } catch {
-        // If we can't fetch session info, don't skip
-      }
+      // session.get failed (likely short ID or not found) — assume not a child.
     }
+    // Cache as known-good so we never re-check this session.
+    activeSessions.add(sessionID);
     return false;
   }
 
@@ -275,6 +274,18 @@ export const LorePlugin: Plugin = async (ctx) => {
         log.info("session.error received:", JSON.stringify(rawError, null, 2));
 
         if (isContextOverflow(rawError) && errorSessionID) {
+          // Prevent infinite loop: if we're already recovering this session,
+          // the recovery prompt itself overflowed — don't try again.
+          // Without this guard: overflow → distill + prompt → overflow → distill + prompt → ...
+          // Each cycle fires 2+ LLM calls, repeating until rate-limited.
+          if (recoveringSessions.has(errorSessionID)) {
+            log.warn(
+              `recovery for ${errorSessionID.substring(0, 16)} also overflowed — giving up (forceMinLayer still persisted)`,
+            );
+            recoveringSessions.delete(errorSessionID);
+            return;
+          }
+
           log.info(
             `detected context overflow — auto-recovering (session: ${errorSessionID.substring(0, 16)})`,
           );
@@ -289,6 +300,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           //    chat path. The gradient transform fires with forceMinLayer=2, compressing
           //    the context to fit. The model receives the distilled summaries and
           //    continues where it left off — no user intervention needed.
+          recoveringSessions.add(errorSessionID);
           try {
             const summaries = distillation.loadForSession(projectPath, errorSessionID);
             const recoveryText = buildRecoveryMessage(
@@ -314,6 +326,8 @@ export const LorePlugin: Plugin = async (ctx) => {
               `auto-recovery failed (forceMinLayer still persisted):`,
               recoveryError,
             );
+          } finally {
+            recoveringSessions.delete(errorSessionID);
           }
         }
       }
@@ -326,13 +340,16 @@ export const LorePlugin: Plugin = async (ctx) => {
         // Run background distillation for any remaining undistilled messages
         await backgroundDistill(sessionID);
 
-        // Run curator periodically (only when knowledge system is enabled)
+        // Run curator periodically (only when knowledge system is enabled).
+        // onIdle gates whether idle events trigger curation at all; afterTurns
+        // is the minimum turn count before curation fires. The previous `||`
+        // caused onIdle=true (default) to short-circuit, running the curator
+        // on EVERY session.idle — an LLM worker call after every agent turn.
         const cfg = config();
         if (
-          cfg.knowledge.enabled && (
-            cfg.curator.onIdle ||
-            turnsSinceCuration >= cfg.curator.afterTurns
-          )
+          cfg.knowledge.enabled &&
+          cfg.curator.onIdle &&
+          turnsSinceCuration >= cfg.curator.afterTurns
         ) {
           await backgroundCurate(sessionID);
           turnsSinceCuration = 0;
