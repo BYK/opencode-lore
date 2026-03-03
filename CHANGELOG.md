@@ -1,4 +1,14 @@
 # Changelog
+## 0.5.2
+
+### Bug Fixes 🐛
+
+- Make AGENTS.md export merge-friendly with sorted entries and blank line separators by @BYK in [#28](https://github.com/BYK/opencode-lore/pull/28)
+
+### Other
+
+- release: 0.5.2 by @BYK in [#29](https://github.com/BYK/opencode-lore/pull/29)
+
 ## 0.5.1
 
 - Suppress informational log messages in TUI mode by @BYK in [#26](https://github.com/BYK/opencode-lore/pull/26)
