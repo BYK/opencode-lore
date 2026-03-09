@@ -130,6 +130,81 @@ describe("ltm", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// crossProject default and dedup guard
+// ---------------------------------------------------------------------------
+
+describe("ltm — crossProject defaults and dedup", () => {
+  const PROJ = "/test/ltm/crossproject";
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJ);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    // Clean up cross-project entries created by these tests
+    db()
+      .query(
+        "DELETE FROM knowledge WHERE cross_project = 1 AND title LIKE 'Cross-project dedup%'",
+      )
+      .run();
+  });
+
+  test("create() defaults crossProject to false", () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "pattern",
+      title: "Default cross-project test",
+      content: "Should default to project-scoped",
+      scope: "project",
+    });
+    const entry = ltm.get(id);
+    expect(entry).not.toBeNull();
+    expect(entry!.cross_project).toBe(0);
+  });
+
+  test("create() with explicit crossProject: true sets cross_project = 1", () => {
+    const id = ltm.create({
+      category: "preference",
+      title: "Explicit cross-project test",
+      content: "Explicitly shared globally",
+      scope: "global",
+      crossProject: true,
+    });
+    const entry = ltm.get(id);
+    expect(entry).not.toBeNull();
+    expect(entry!.cross_project).toBe(1);
+  });
+
+  test("dedup guard catches title match against cross-project entry", () => {
+    // Create a cross-project entry
+    const crossId = ltm.create({
+      category: "gotcha",
+      title: "Cross-project dedup test entry",
+      content: "Original cross-project content",
+      scope: "global",
+      crossProject: true,
+    });
+
+    // Attempt to create a project-scoped entry with the same title — should
+    // update the cross-project entry instead of creating a duplicate.
+    const returnedId = ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "Cross-project dedup test entry",
+      content: "Updated content from project scope",
+      scope: "project",
+    });
+
+    expect(returnedId).toBe(crossId);
+    const entry = ltm.get(crossId);
+    expect(entry!.content).toBe("Updated content from project scope");
+
+    // No duplicate should exist
+    const all = ltm.forProject(PROJ, true);
+    const matching = all.filter((e) => e.title === "Cross-project dedup test entry");
+    expect(matching).toHaveLength(1);
+  });
+});
+
 describe("ltm — UUIDv7 IDs", () => {
   const PROJ = "/test/ltm/uuidv7";
 

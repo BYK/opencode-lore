@@ -378,6 +378,7 @@ export function importFromFile(input: {
           title: entry.title,
           content: entry.content,
           scope: "project",
+          crossProject: false,
           id: entry.id,
         });
       }
@@ -395,6 +396,7 @@ export function importFromFile(input: {
           title: entry.title,
           content: entry.content,
           scope: "project",
+          crossProject: false,
         });
       }
     }

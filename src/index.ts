@@ -359,7 +359,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         // Runs after normal curation so newly created entries are counted.
         // Only triggers when truly over the limit to avoid redundant LLM calls.
         if (cfg.knowledge.enabled) try {
-          const allEntries = ltm.forProject(projectPath);
+          const allEntries = ltm.forProject(projectPath, false);
           if (allEntries.length > cfg.curator.maxEntries) {
             log.info(
               `entry count ${allEntries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,

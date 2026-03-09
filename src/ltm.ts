@@ -40,9 +40,12 @@ export function create(input: {
   // Dedup guard: if an entry with the same project_id + title already exists,
   // update its content instead of inserting a duplicate. This prevents the
   // curator from creating multiple entries for the same concept across sessions.
+  // Also checks cross-project entries to prevent the curator from creating
+  // project-scoped duplicates of globally-shared knowledge.
   // Note: when an explicit id is provided (cross-machine import), skip dedup —
   // the caller (importFromFile) already handles duplicate detection by UUID.
   if (!input.id) {
+    // First check same project_id
     const existing = (
       pid !== null
         ? db()
@@ -61,6 +64,19 @@ export function create(input: {
       update(existing.id, { content: input.content });
       return existing.id;
     }
+
+    // Also check cross-project entries — prevents creating project-scoped
+    // duplicates of entries that already exist as cross-project knowledge.
+    const crossExisting = db()
+      .query(
+        "SELECT id FROM knowledge WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+      )
+      .get(input.title) as { id: string } | null;
+
+    if (crossExisting) {
+      update(crossExisting.id, { content: input.content });
+      return crossExisting.id;
+    }
   }
 
   const id = input.id ?? uuidv7();
@@ -77,7 +93,7 @@ export function create(input: {
       input.title,
       input.content,
       input.session ?? null,
-      (input.crossProject ?? true) ? 1 : 0,
+      (input.crossProject ?? false) ? 1 : 0,
       now,
       now,
     );
@@ -128,7 +144,7 @@ export function forProject(
   return db()
     .query(
       `SELECT * FROM knowledge
-       WHERE (project_id = ? OR project_id IS NULL)
+       WHERE project_id = ?
        AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
     )
