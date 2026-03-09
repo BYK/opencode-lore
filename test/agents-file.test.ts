@@ -756,6 +756,92 @@ describe("round-trip stability", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Cross-project isolation
+// ---------------------------------------------------------------------------
+
+const OTHER_PROJECT = "/test/agents-file/other-project";
+
+describe("cross-project isolation", () => {
+  test("importFromFile creates entries with cross_project = 0", () => {
+    const remoteId = "019505a1-7c00-7000-8000-aabbccddeeff";
+    const section = loreSectionWithEntries([
+      { id: remoteId, category: "decision", title: "Auth strategy", content: "OAuth2 with PKCE" },
+    ]);
+    writeFile(section);
+
+    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const entry = ltm.get(remoteId);
+    expect(entry).not.toBeNull();
+    expect(entry!.cross_project).toBe(0);
+  });
+
+  test("hand-written entries imported from AGENTS.md are project-scoped", () => {
+    writeFile(`${LORE_SECTION_START}\n\n## Long-term Knowledge\n\n### Pattern\n\n* **Hand-written pattern**: Using middleware\n\n${LORE_SECTION_END}\n`);
+
+    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const entries = ltm.forProject(PROJECT, false);
+    const match = entries.find((e) => e.title === "Hand-written pattern");
+    expect(match).toBeDefined();
+    expect(match!.cross_project).toBe(0);
+  });
+
+  test("cross-project entries from another project do not appear in exportToFile", () => {
+    // Create a cross-project entry scoped to a different project
+    ltm.create({
+      category: "gotcha",
+      title: "Unrelated gotcha from other project",
+      content: "This should not leak into PROJECT's AGENTS.md",
+      scope: "global",
+      crossProject: true,
+    });
+
+    // Create a project-specific entry for PROJECT
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Project-specific decision",
+      content: "This belongs to this project",
+      scope: "project",
+      crossProject: false,
+    });
+
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    const content = readFile();
+    expect(content).toContain("Project-specific decision");
+    expect(content).not.toContain("Unrelated gotcha from other project");
+  });
+
+  test("cross-project entries from another project do not inflate forProject(path, false) count", () => {
+    // Create cross-project entries in "other" project
+    ltm.create({
+      category: "pattern",
+      title: "Other project pattern",
+      content: "Cross-project from elsewhere",
+      scope: "global",
+      crossProject: true,
+    });
+
+    // Create one entry for PROJECT
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Only project entry",
+      content: "Project-scoped",
+      scope: "project",
+      crossProject: false,
+    });
+
+    const projectOnly = ltm.forProject(PROJECT, false);
+    const projectOnlyTitles = projectOnly.map((e) => e.title);
+    expect(projectOnlyTitles).toContain("Only project entry");
+    expect(projectOnlyTitles).not.toContain("Other project pattern");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Multi-section deduplication (self-healing)
 // ---------------------------------------------------------------------------
 

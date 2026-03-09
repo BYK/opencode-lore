@@ -50,7 +50,7 @@ export const LoreConfig = z.object({
       maxStorage: z.number().min(50).default(1024),
     })
     .default({ retention: 120, maxStorage: 1024 }),
-  crossProject: z.boolean().default(true),
+  crossProject: z.boolean().default(false),
   agentsFile: z
     .object({
       /** Set to false to disable all AGENTS.md export/import behaviour. */

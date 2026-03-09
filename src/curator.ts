@@ -82,7 +82,7 @@ export async function run(input: {
   if (recent.length < 3) return { created: 0, updated: 0, deleted: 0 };
 
   const text = recent.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
-  const existing = ltm.forProject(input.projectPath, cfg.crossProject);
+  const existing = ltm.forProject(input.projectPath, false);
   const existingForPrompt = existing.map((e) => ({
     id: e.id,
     category: e.category,
@@ -189,7 +189,7 @@ export async function consolidate(input: {
   const cfg = config();
   if (!cfg.curator.enabled) return { updated: 0, deleted: 0 };
 
-  const entries = ltm.forProject(input.projectPath, cfg.crossProject);
+  const entries = ltm.forProject(input.projectPath, false);
   if (entries.length <= cfg.curator.maxEntries) return { updated: 0, deleted: 0 };
 
   const entriesForPrompt = entries.map((e) => ({
