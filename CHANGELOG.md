@@ -1,4 +1,14 @@
 # Changelog
+## 0.6.0
+
+### New Features ✨
+
+- Research-informed compaction improvements by @BYK in [#35](https://github.com/BYK/opencode-lore/pull/35)
+
+### Bug Fixes 🐛
+
+- Prevent cross-project knowledge entries from leaking into AGENTS.md by @BYK in [#36](https://github.com/BYK/opencode-lore/pull/36)
+
 ## 0.5.3
 
 ### Bug Fixes 🐛
