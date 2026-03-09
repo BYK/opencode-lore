@@ -175,22 +175,25 @@ function storeDistillation(input: {
   return id;
 }
 
+// Count non-archived gen-0 distillations — these are the ones awaiting
+// meta-distillation. Archived gen-0 entries have already been consolidated.
 function gen0Count(projectPath: string, sessionID: string): number {
   const pid = ensureProject(projectPath);
   return (
     db()
       .query(
-        "SELECT COUNT(*) as count FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0",
+        "SELECT COUNT(*) as count FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0 AND archived = 0",
       )
       .get(pid, sessionID) as { count: number }
   ).count;
 }
 
+// Load non-archived gen-0 distillations for meta-distillation input.
 function loadGen0(projectPath: string, sessionID: string): Distillation[] {
   const pid = ensureProject(projectPath);
   const rows = db()
     .query(
-      "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0 ORDER BY created_at ASC",
+      "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0 AND archived = 0 ORDER BY created_at ASC",
     )
     .all(pid, sessionID) as Array<{
     id: string;
@@ -208,11 +211,20 @@ function loadGen0(projectPath: string, sessionID: string): Distillation[] {
   }));
 }
 
-function removeDistillations(ids: string[]) {
+// Archive distillations instead of deleting them. Archived entries are excluded
+// from the in-context prefix (loadDistillations filters them out) but remain
+// searchable via the recall tool (searchDistillations includes them). This
+// preserves a detailed "zoom-in" layer beneath the compressed gen-1 summary.
+// Inspired by Cartridges (Eyuboglu et al., 2025): independently compressed
+// representations remain composable and queryable after consolidation.
+// Reference: https://arxiv.org/abs/2501.17390
+function archiveDistillations(ids: string[]) {
   if (!ids.length) return;
   const placeholders = ids.map(() => "?").join(",");
   db()
-    .query(`DELETE FROM distillations WHERE id IN (${placeholders})`)
+    .query(
+      `UPDATE distillations SET archived = 1 WHERE id IN (${placeholders})`,
+    )
     .run(...ids);
 }
 
@@ -446,8 +458,9 @@ async function metaDistill(input: {
     generation: maxGen + 1,
   });
 
-  // Remove the gen-0 distillations that were merged
-  removeDistillations(existing.map((d) => d.id));
+  // Archive the gen-0 distillations that were merged into gen-1+.
+  // They remain searchable via recall but excluded from the in-context prefix.
+  archiveDistillations(existing.map((d) => d.id));
 
   return result;
 }

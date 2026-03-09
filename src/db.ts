@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const MIGRATIONS: string[] = [
   `
@@ -140,6 +140,18 @@ const MIGRATIONS: string[] = [
     force_min_layer INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL
   );
+  `,
+  `
+  -- Version 5: Multi-resolution composable distillations.
+  -- Instead of deleting gen-0 distillations during meta-distillation,
+  -- mark them as archived. Archived entries are excluded from the in-context
+  -- prefix but remain searchable via the recall tool, providing a detailed
+  -- "zoom-in" layer beneath the compressed gen-1 summary.
+  -- Inspired by Cartridges (Eyuboglu et al., 2025) composability: independently
+  -- compressed representations can be concatenated and queried without retraining.
+  -- Reference: https://arxiv.org/abs/2501.17390
+  ALTER TABLE distillations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+  CREATE INDEX IF NOT EXISTS idx_distillation_archived ON distillations(archived);
   `,
 ];
 
