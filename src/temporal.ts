@@ -317,5 +317,14 @@ export function prune(input: {
     }
   }
 
+  // Pass 3: Prune archived distillations older than the retention window.
+  // Archived gen-0 distillations are kept for recall search but don't need
+  // to live forever — they follow the same retention policy as temporal messages.
+  database
+    .query(
+      "DELETE FROM distillations WHERE project_id = ? AND archived = 1 AND created_at < ?",
+    )
+    .run(pid, cutoff);
+
   return { ttlDeleted, capDeleted };
 }

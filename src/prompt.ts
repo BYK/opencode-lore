@@ -140,13 +140,38 @@ ${input.messages}
 Extract new observations. Output ONLY an <observations> block.`;
 }
 
-export const RECURSIVE_SYSTEM = `You are a memory reflector. You are given a set of observations from multiple conversation segments. Your job is to reorganize, streamline, and compress them into a single refined observation log that will become the agent's entire memory going forward.
+// Meta-distillation prompt using a context-distillation objective: instead of
+// reorganizing observations into another event log (which Eyuboglu et al. 2025
+// showed is a memorization objective that fails to generalize), produce a
+// structured working context optimized for diverse downstream queries.
+// This mirrors the Self-Study approach from "Cartridges" (Eyuboglu et al.,
+// 2025) where diverse seed prompt types ensure the compressed representation
+// supports varied information needs, not just chronological recall.
+// Reference: https://arxiv.org/abs/2501.17390
+export const RECURSIVE_SYSTEM = `You are a memory reflector. You are given a set of observations from multiple conversation segments. Your job is to consolidate them into a structured working context that will become the agent's entire memory going forward.
 
 IMPORTANT: Your reflections ARE the entirety of the assistant's memory. Any information you omit is permanently forgotten. Do not leave out anything important.
 
-REFLECTION RULES:
+STRUCTURE your output into these sections — each section supports a different type of downstream query:
+
+### Current State
+What is in progress right now? Active branches, open files, current task, blockers.
+This section answers: "What was I working on?"
+
+### Key Decisions
+What was decided and why? Include the alternatives considered and rationale.
+This section answers: "Why did we choose approach X?" and "What alternatives were rejected?"
+
+### Technical Changes
+Bugs found, root causes, fixes applied, files modified, tests added/fixed.
+Preserve exact file paths, line numbers, error messages, and commit references.
+This section answers: "What bugs were fixed?" and "What files were changed?"
+
+### Session Timeline
+Condensed chronological events with timestamps. Older events compressed more aggressively; recent events retain detail. This section answers: "When did X happen?" and "What was the sequence of events?"
+
+CONSOLIDATION RULES:
 - Preserve ALL dates and timestamps — temporal context is critical
-- Condense older observations more aggressively; retain more detail for recent ones
 - Combine related items (e.g., "agent called view tool 5 times on file x" → single line)
 - Merge duplicate facts, keeping the most specific version
 - Drop observations superseded by later info (if value changed, keep only final value)
@@ -158,8 +183,6 @@ REFLECTION RULES:
 EXACT NUMBERS: When two segments report different numbers for what seems like the same thing, keep the number from the earlier/original observation — it's likely the correct one from the actual event. Later references may be from memory or approximation.
 
 EARLY-SESSION CONTENT: Bug fixes, code changes, and decisions from the start of a session are just as important as later work. Never drop them just because the segment is short or old. If the first segment contains a specific bug fix with file paths and root cause, it MUST survive into the reflection.
-
-Keep the same format: dated sections with priority-tagged observations.
 
 Output ONLY an <observations> block with the consolidated observations.`;
 

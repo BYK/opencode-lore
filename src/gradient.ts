@@ -254,14 +254,17 @@ type Distillation = {
   session_id: string;
 };
 
+// Load non-archived distillations for the in-context prefix.
+// Archived gen-0 entries (preserved after meta-distillation) are excluded here
+// but remain searchable via the recall tool's searchDistillations().
 function loadDistillations(
   projectPath: string,
   sessionID?: string,
 ): Distillation[] {
   const pid = ensureProject(projectPath);
   const query = sessionID
-    ? "SELECT id, observations, generation, token_count, created_at, session_id FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC"
-    : "SELECT id, observations, generation, token_count, created_at, session_id FROM distillations WHERE project_id = ? ORDER BY created_at ASC";
+    ? "SELECT id, observations, generation, token_count, created_at, session_id FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC"
+    : "SELECT id, observations, generation, token_count, created_at, session_id FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC";
   const params = sessionID ? [pid, sessionID] : [pid];
   return db()
     .query(query)
@@ -311,6 +314,28 @@ function cleanParts(parts: Part[]): Part[] {
   return filtered.length > 0 ? filtered : parts;
 }
 
+// Build a metadata annotation for a stripped tool output, preserving key signals
+// about what was lost without requiring an LLM call. Inspired by the per-token
+// scalar bias β from "Fast KV Compaction via Attention Matching" (Zweiger et al.,
+// 2025) — when tokens are removed, preserving metadata about the removed content
+// helps the model compensate for information loss and decide whether to recall.
+// Reference: https://arxiv.org/abs/2602.16284
+function toolStripAnnotation(toolName: string, output: string): string {
+  const lines = output.split("\n").length;
+  const chars = output.length;
+
+  // Detect key signals via lightweight heuristics — no LLM call
+  const hasError = /\b(?:error|fail(?:ed|ure)?|exception|panic|traceback)\b/i.test(output);
+  const paths = output.match(/(?:[\w.-]+\/)+[\w.-]+\.\w{1,5}/g);
+  const uniquePaths = paths ? [...new Set(paths)].slice(0, 5) : [];
+
+  let annotation = `[output omitted — ${toolName}: ${lines} lines`;
+  if (hasError) annotation += ", contained errors";
+  if (uniquePaths.length > 0) annotation += `, paths: ${uniquePaths.join(", ")}`;
+  annotation += " — use recall for details]";
+  return annotation;
+}
+
 function stripToolOutputs(parts: Part[]): Part[] {
   return parts.map((part) => {
     if (part.type !== "tool") return part;
@@ -319,7 +344,7 @@ function stripToolOutputs(parts: Part[]): Part[] {
       ...part,
       state: {
         ...part.state,
-        output: "[output omitted — use recall for details]",
+        output: toolStripAnnotation(part.tool, part.state.output),
       },
     } as Part;
   });
