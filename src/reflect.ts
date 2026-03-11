@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin/tool";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
+import * as log from "./log";
 import { db, ensureProject } from "./db";
 import { serialize, inline, h, p, ul, lip, liph, t, root } from "./markdown";
 
@@ -114,34 +115,46 @@ export function createRecallTool(projectPath: string, knowledgeEnabled = true): 
       const scope = args.scope ?? "all";
       const sid = context.sessionID;
 
-      const temporalResults =
-        scope === "knowledge"
-          ? []
-          : temporal.search({
-              projectPath,
-              query: args.query,
-              sessionID: scope === "session" ? sid : undefined,
-              limit: 10,
-            });
+      let temporalResults: temporal.TemporalMessage[] = [];
+      if (scope !== "knowledge") {
+        try {
+          temporalResults = temporal.search({
+            projectPath,
+            query: args.query,
+            sessionID: scope === "session" ? sid : undefined,
+            limit: 10,
+          });
+        } catch (err) {
+          log.error("recall: temporal search failed:", err);
+        }
+      }
 
-      const distillationResults =
-        scope === "knowledge"
-          ? []
-          : searchDistillations({
-              projectPath,
-              query: args.query,
-              sessionID: scope === "session" ? sid : undefined,
-              limit: 5,
-            });
+      let distillationResults: Distillation[] = [];
+      if (scope !== "knowledge") {
+        try {
+          distillationResults = searchDistillations({
+            projectPath,
+            query: args.query,
+            sessionID: scope === "session" ? sid : undefined,
+            limit: 5,
+          });
+        } catch (err) {
+          log.error("recall: distillation search failed:", err);
+        }
+      }
 
-      const knowledgeResults =
-        !knowledgeEnabled || scope === "session"
-          ? []
-          : ltm.search({
-              query: args.query,
-              projectPath,
-              limit: 10,
-            });
+      let knowledgeResults: ltm.KnowledgeEntry[] = [];
+      if (knowledgeEnabled && scope !== "session") {
+        try {
+          knowledgeResults = ltm.search({
+            query: args.query,
+            projectPath,
+            limit: 10,
+          });
+        } catch (err) {
+          log.error("recall: knowledge search failed:", err);
+        }
+      }
 
       return formatResults({
         temporalResults,

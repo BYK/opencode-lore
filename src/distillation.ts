@@ -388,6 +388,11 @@ async function distillSegment(input: {
     path: { id: workerID },
     query: { limit: 2 },
   });
+  // Rotate worker session so the next call starts fresh — prevents
+  // accumulating multiple assistant messages with reasoning/thinking parts,
+  // which providers reject ("Multiple reasoning_opaque values").
+  workerSessions.delete(input.sessionID);
+
   const last = msgs.data?.at(-1);
   if (!last || last.info.role !== "assistant") return null;
 
@@ -438,6 +443,9 @@ async function metaDistill(input: {
     path: { id: workerID },
     query: { limit: 2 },
   });
+  // Rotate worker session — see distillSegment() comment.
+  workerSessions.delete(input.sessionID);
+
   const last = msgs.data?.at(-1);
   if (!last || last.info.role !== "assistant") return null;
 
