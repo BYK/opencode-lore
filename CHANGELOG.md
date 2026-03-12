@@ -1,4 +1,10 @@
 # Changelog
+## 0.6.1
+
+### Bug Fixes 🐛
+
+- Rotate worker sessions after each LLM call and add recall error handling by @BYK in [#38](https://github.com/BYK/opencode-lore/pull/38)
+
 ## 0.6.0
 
 ### New Features ✨
