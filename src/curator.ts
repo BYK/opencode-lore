@@ -113,6 +113,11 @@ export async function run(input: {
     path: { id: workerID },
     query: { limit: 2 },
   });
+  // Rotate worker session so the next call starts fresh — prevents
+  // accumulating multiple assistant messages with reasoning/thinking parts,
+  // which providers reject ("Multiple reasoning_opaque values").
+  workerSessions.delete(input.sessionID);
+
   const last = msgs.data?.at(-1);
   if (!last || last.info.role !== "assistant")
     return { created: 0, updated: 0, deleted: 0 };
@@ -222,6 +227,9 @@ export async function consolidate(input: {
     path: { id: workerID },
     query: { limit: 2 },
   });
+  // Rotate worker session — see run() comment.
+  workerSessions.delete(input.sessionID);
+
   const last = msgs.data?.at(-1);
   if (!last || last.info.role !== "assistant") return { updated: 0, deleted: 0 };
 
