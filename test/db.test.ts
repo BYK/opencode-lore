@@ -21,7 +21,24 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(5);
+    expect(row.version).toBe(6);
+  });
+
+  test("compound indexes exist for common query patterns", () => {
+    const indexes = db()
+      .query("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    const names = indexes.map((i) => i.name);
+    // Compound indexes added in version 6
+    expect(names).toContain("idx_temporal_project_session");
+    expect(names).toContain("idx_temporal_project_session_distilled");
+    expect(names).toContain("idx_temporal_project_distilled_created");
+    expect(names).toContain("idx_distillation_project_session");
+    expect(names).toContain("idx_distillation_project_session_gen_archived");
+    // Redundant single-column indexes should be dropped
+    expect(names).not.toContain("idx_temporal_project");
+    expect(names).not.toContain("idx_temporal_distilled");
+    expect(names).not.toContain("idx_distillation_project");
   });
 
   test("ensureProject creates and returns id", () => {
