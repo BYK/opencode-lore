@@ -37,9 +37,6 @@
 <!-- lore:019cb615-0b10-7bbc-a7db-50111118c200 -->
 * **Lore auto-recovery can infinite-loop without re-entrancy guard**: Three v0.5.2 bugs causing excessive background LLM requests: (1) Auto-recovery loop — session.error handler injected recovery prompt → could overflow again → loop. Fix: recoveringSessions Set as re-entrancy guard. (2) Curator ran every idle — \`onIdle || afterTurns\` short-circuited (onIdle=true). Fix: \`||\` → \`&&\`. Lesson: boolean flag gating numeric threshold needs AND not OR. (3) shouldSkip() fell back to session.list() on unknown sessions. Fix: remove list fallback, cache in activeSessions.
 
-<!-- lore:019cb3e6-da66-7534-a573-30d2ecadfd53 -->
-* **Returning bare promises loses async function from error stack traces**: When an \`async\` function returns another promise without \`await\`, the calling function disappears from error stack traces if the inner promise rejects. A function that drops \`async\` and does \`return someAsyncCall()\` loses its frame entirely. Fix: keep the function \`async\` and use \`return await someAsyncCall()\`. This matters for debugging — the intermediate function name in the stack trace helps locate which code path triggered the failure. ESLint rule \`no-return-await\` is outdated; modern engines optimize \`return await\` in async functions.
-
 <!-- lore:019c8f4f-67ca-7212-a8c4-8a75b230ceea -->
 * **Test DB isolation via LORE\_DB\_PATH and Bun test preload**: Lore test suite uses isolated temp DB via test/setup.ts preload (bunfig.toml). Preload sets LORE\_DB\_PATH to mkdtempSync path before any imports of src/db.ts; afterAll cleans up. src/db.ts checks LORE\_DB\_PATH first. agents-file.test.ts needs beforeEach cleanup for intra-file isolation and TEST\_UUIDS cleanup in afterAll (shared with ltm.test.ts). Individual test files don't need close() calls — preload handles DB lifecycle.
 
