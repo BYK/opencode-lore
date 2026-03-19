@@ -35,6 +35,37 @@ describe("isContextOverflow", () => {
     ).toBe(true);
   });
 
+  test("detects ContextOverflowError by name (compaction overflow)", () => {
+    expect(
+      isContextOverflow({
+        name: "ContextOverflowError",
+        data: { message: "Conversation history too large to compact - exceeds model context limit" },
+      }),
+    ).toBe(true);
+  });
+
+  test("detects ContextOverflowError by name with any message", () => {
+    expect(
+      isContextOverflow({
+        name: "ContextOverflowError",
+        data: { message: "some unknown provider error" },
+      }),
+    ).toBe(true);
+  });
+
+  test("detects ContextOverflowError by name alone (no data/message)", () => {
+    expect(isContextOverflow({ name: "ContextOverflowError" })).toBe(true);
+  });
+
+  test("returns false for UnknownError with 429 (not a context overflow)", () => {
+    expect(
+      isContextOverflow({
+        name: "UnknownError",
+        data: { message: "Token refresh failed: 429" },
+      }),
+    ).toBe(false);
+  });
+
   test("returns false for unrelated errors", () => {
     expect(isContextOverflow({ message: "rate limit exceeded" })).toBe(false);
   });
