@@ -1,4 +1,4 @@
-import type { Plugin } from "@opencode-ai/plugin";
+import type { Plugin, Hooks } from "@opencode-ai/plugin";
 import { load, config } from "./config";
 import { ensureProject, isFirstRun } from "./db";
 import * as temporal from "./temporal";
@@ -22,12 +22,18 @@ import * as log from "./log";
 
 /**
  * Detect whether an error from session.error is a context overflow ("prompt too long").
- * Matches both APIError wrapper shape (error.data.message) and direct shape (error.message).
+ * Matches by error name (ContextOverflowError — covers both API-level and OpenCode
+ * compaction overflow) and by message text patterns for provider-specific strings.
  */
 export function isContextOverflow(rawError: unknown): boolean {
   const error = rawError as
     | { name?: string; message?: string; data?: { message?: string } }
     | undefined;
+
+  // Match by error name — covers both API context overflow and OpenCode's
+  // compaction overflow ("Conversation history too large to compact").
+  if (error?.name === "ContextOverflowError") return true;
+
   const errorMessage = error?.data?.message ?? error?.message ?? "";
   return (
     typeof errorMessage === "string" &&
@@ -63,9 +69,10 @@ export function buildRecoveryMessage(
 
 export const LorePlugin: Plugin = async (ctx) => {
   const projectPath = ctx.worktree || ctx.directory;
-  await load(ctx.directory);
-  let firstRun = isFirstRun();
-  ensureProject(projectPath);
+  try {
+    await load(ctx.directory);
+    let firstRun = isFirstRun();
+    ensureProject(projectPath);
 
   if (firstRun) {
     ctx.client.tui.showToast({
@@ -189,7 +196,7 @@ export const LorePlugin: Plugin = async (ctx) => {
     }
   }
 
-  return {
+  const hooks: Hooks = {
     // Disable built-in compaction and register hidden worker agents
     config: async (input) => {
       const cfg = input as Record<string, unknown>;
@@ -618,6 +625,20 @@ End with "I'm ready to continue." so the agent knows to pick up where it left of
       recall: createRecallTool(projectPath, config().knowledge.enabled),
     },
   };
+
+  // Always-on startup confirmation — not gated by LORE_DEBUG — so silent
+  // plugin loading failures are immediately visible. If this line never
+  // appears for a project, the init failed (see catch block below).
+  process.stderr.write(`[lore] active: ${projectPath}\n`);
+
+  return hooks;
+  } catch (e) {
+    // Log the full error before re-throwing so OpenCode's plugin loader
+    // (which catches and swallows the error) doesn't hide the root cause.
+    const detail = e instanceof Error ? e.stack || e.message : String(e);
+    process.stderr.write(`[lore] init failed: ${detail}\n`);
+    throw e;
+  }
 };
 
 export default LorePlugin;
