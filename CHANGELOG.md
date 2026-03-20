@@ -1,4 +1,11 @@
 # Changelog
+## 0.6.2
+
+### Bug Fixes 🐛
+
+- Prevent EROFS crash when launched outside a git repo by @BYK in [#43](https://github.com/BYK/opencode-lore/pull/43)
+- Cache LTM per session to preserve prompt cache hit rate by @BYK in [#42](https://github.com/BYK/opencode-lore/pull/42)
+
 ## 0.6.1
 
 ### Bug Fixes 🐛
