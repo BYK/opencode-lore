@@ -94,6 +94,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         try {
           importFromFile({ projectPath, filePath });
           log.info("imported knowledge from", cfg.agentsFile.path);
+          invalidateLtmCache();
         } catch (e) {
           log.error("agents-file import error:", e);
         }
@@ -108,11 +109,23 @@ export const LorePlugin: Plugin = async (ctx) => {
     const pruned = ltm.pruneOversized(1200);
     if (pruned > 0) {
       log.info(`pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
+      invalidateLtmCache();
     }
   }
 
   // Track user turns for periodic curation
   let turnsSinceCuration = 0;
+
+  // Per-session LTM cache — reuse exact formatted bytes across turns to
+  // preserve the system prompt prefix for Anthropic's prompt caching.
+  // Without this, forSession() re-scores entries every turn (session context
+  // changes → different terms → different entries → system prompt bytes change
+  // at position 0 → total cache invalidation). Cleared when knowledge
+  // mutations occur (curation, consolidation, pruning, import).
+  const ltmSessionCache = new Map<string, { formatted: string; tokenCount: number }>();
+  function invalidateLtmCache() {
+    ltmSessionCache.clear();
+  }
 
   // Track active sessions for distillation
   const activeSessions = new Set<string>();
@@ -191,6 +204,9 @@ export const LorePlugin: Plugin = async (ctx) => {
         sessionID,
         model: cfg.model,
       });
+      // Curation may have created/updated/deleted knowledge entries.
+      // Invalidate the LTM cache so the next turn picks up the changes.
+      invalidateLtmCache();
     } catch (e) {
       log.error("curator error:", e);
     }
@@ -379,6 +395,7 @@ export const LorePlugin: Plugin = async (ctx) => {
             });
             if (updated > 0 || deleted > 0) {
               log.info(`consolidation: ${updated} updated, ${deleted} deleted`);
+              invalidateLtmCache();
             }
           }
         } catch (e) {
@@ -439,30 +456,42 @@ export const LorePlugin: Plugin = async (ctx) => {
 
       // Knowledge injection — only when the knowledge system is enabled.
       // When disabled, LTM budget is zero and no knowledge is injected.
+      //
+      // Uses per-session caching to preserve system prompt byte-stability
+      // for Anthropic's prompt caching. Without this, forSession() re-scores
+      // entries against evolving session context every turn, producing
+      // different formatted text → system prompt changes at byte 0 → total
+      // cache invalidation on every single turn.
       if (cfg.knowledge.enabled) {
-        const ltmBudget = getLtmBudget(cfg.budget.ltm);
-        const entries = ltm.forSession(projectPath, input.sessionID, ltmBudget);
-        if (!entries.length) {
-          setLtmTokens(0);
-        } else {
-          const formatted = formatKnowledge(
-            entries.map((e) => ({
-              category: e.category,
-              title: e.title,
-              content: e.content,
-            })),
-            ltmBudget,
-          );
+        const sessionID = input.sessionID;
+        let cached = sessionID ? ltmSessionCache.get(sessionID) : undefined;
 
-          if (formatted) {
-            // Track how many tokens we actually consumed so the gradient manager
-            // can deduct them from the usable budget for message injection.
-            const ltmTokenCount = Math.ceil(formatted.length / 3);
-            setLtmTokens(ltmTokenCount);
-            output.system.push(formatted);
-          } else {
-            setLtmTokens(0);
+        if (!cached) {
+          const ltmBudget = getLtmBudget(cfg.budget.ltm);
+          const entries = ltm.forSession(projectPath, sessionID, ltmBudget);
+          if (entries.length) {
+            const formatted = formatKnowledge(
+              entries.map((e) => ({
+                category: e.category,
+                title: e.title,
+                content: e.content,
+              })),
+              ltmBudget,
+            );
+
+            if (formatted) {
+              const tokenCount = Math.ceil(formatted.length / 3);
+              cached = { formatted, tokenCount };
+              if (sessionID) ltmSessionCache.set(sessionID, cached);
+            }
           }
+        }
+
+        if (cached) {
+          setLtmTokens(cached.tokenCount);
+          output.system.push(cached.formatted);
+        } else {
+          setLtmTokens(0);
         }
       } else {
         setLtmTokens(0);
