@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 const MIGRATIONS: string[] = [
   `
@@ -152,6 +152,32 @@ const MIGRATIONS: string[] = [
   -- Reference: https://arxiv.org/abs/2501.17390
   ALTER TABLE distillations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
   CREATE INDEX IF NOT EXISTS idx_distillation_archived ON distillations(archived);
+  `,
+  `
+  -- Version 6: Compound indexes for common multi-column query patterns.
+  -- Almost every query filters on (project_id, session_id) but only single-column
+  -- indexes existed, forcing SQLite to pick one and scan for the rest.
+
+  -- temporal_messages: covers bySession, search-LIKE fallback, count, undistilledCount
+  CREATE INDEX IF NOT EXISTS idx_temporal_project_session ON temporal_messages(project_id, session_id);
+  -- temporal_messages: covers undistilled() and undistilledCount() with distilled filter
+  CREATE INDEX IF NOT EXISTS idx_temporal_project_session_distilled ON temporal_messages(project_id, session_id, distilled);
+  -- temporal_messages: covers pruning TTL pass and size-cap pass (distilled=1 ordered by created_at)
+  CREATE INDEX IF NOT EXISTS idx_temporal_project_distilled_created ON temporal_messages(project_id, distilled, created_at);
+
+  -- distillations: covers loadForSession, latestObservations, searchDistillations, resetOrphans
+  CREATE INDEX IF NOT EXISTS idx_distillation_project_session ON distillations(project_id, session_id);
+  -- distillations: covers gen0Count, loadGen0, gradient prefix loading (archived filter)
+  CREATE INDEX IF NOT EXISTS idx_distillation_project_session_gen_archived ON distillations(project_id, session_id, generation, archived);
+
+  -- Drop redundant single-column indexes that are now left-prefixes of compound indexes.
+  -- idx_temporal_project is a prefix of idx_temporal_project_session.
+  -- idx_distillation_project is a prefix of idx_distillation_project_session.
+  -- idx_temporal_distilled is a prefix of no compound index but is low-selectivity (0/1)
+  -- and all queries that use it also filter on project_id — covered by the new compounds.
+  DROP INDEX IF EXISTS idx_temporal_project;
+  DROP INDEX IF EXISTS idx_temporal_distilled;
+  DROP INDEX IF EXISTS idx_distillation_project;
   `,
 ];
 

@@ -1,4 +1,4 @@
-import type { Plugin } from "@opencode-ai/plugin";
+import type { Plugin, Hooks } from "@opencode-ai/plugin";
 import { load, config } from "./config";
 import { ensureProject, isFirstRun } from "./db";
 import * as temporal from "./temporal";
@@ -22,12 +22,18 @@ import * as log from "./log";
 
 /**
  * Detect whether an error from session.error is a context overflow ("prompt too long").
- * Matches both APIError wrapper shape (error.data.message) and direct shape (error.message).
+ * Matches by error name (ContextOverflowError — covers both API-level and OpenCode
+ * compaction overflow) and by message text patterns for provider-specific strings.
  */
 export function isContextOverflow(rawError: unknown): boolean {
   const error = rawError as
     | { name?: string; message?: string; data?: { message?: string } }
     | undefined;
+
+  // Match by error name — covers both API context overflow and OpenCode's
+  // compaction overflow ("Conversation history too large to compact").
+  if (error?.name === "ContextOverflowError") return true;
+
   const errorMessage = error?.data?.message ?? error?.message ?? "";
   return (
     typeof errorMessage === "string" &&
@@ -63,9 +69,10 @@ export function buildRecoveryMessage(
 
 export const LorePlugin: Plugin = async (ctx) => {
   const projectPath = ctx.worktree || ctx.directory;
-  await load(ctx.directory);
-  let firstRun = isFirstRun();
-  ensureProject(projectPath);
+  try {
+    await load(ctx.directory);
+    let firstRun = isFirstRun();
+    ensureProject(projectPath);
 
   if (firstRun) {
     ctx.client.tui.showToast({
@@ -87,6 +94,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         try {
           importFromFile({ projectPath, filePath });
           log.info("imported knowledge from", cfg.agentsFile.path);
+          invalidateLtmCache();
         } catch (e) {
           log.error("agents-file import error:", e);
         }
@@ -101,11 +109,23 @@ export const LorePlugin: Plugin = async (ctx) => {
     const pruned = ltm.pruneOversized(1200);
     if (pruned > 0) {
       log.info(`pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
+      invalidateLtmCache();
     }
   }
 
   // Track user turns for periodic curation
   let turnsSinceCuration = 0;
+
+  // Per-session LTM cache — reuse exact formatted bytes across turns to
+  // preserve the system prompt prefix for Anthropic's prompt caching.
+  // Without this, forSession() re-scores entries every turn (session context
+  // changes → different terms → different entries → system prompt bytes change
+  // at position 0 → total cache invalidation). Cleared when knowledge
+  // mutations occur (curation, consolidation, pruning, import).
+  const ltmSessionCache = new Map<string, { formatted: string; tokenCount: number }>();
+  function invalidateLtmCache() {
+    ltmSessionCache.clear();
+  }
 
   // Track active sessions for distillation
   const activeSessions = new Set<string>();
@@ -184,12 +204,15 @@ export const LorePlugin: Plugin = async (ctx) => {
         sessionID,
         model: cfg.model,
       });
+      // Curation may have created/updated/deleted knowledge entries.
+      // Invalidate the LTM cache so the next turn picks up the changes.
+      invalidateLtmCache();
     } catch (e) {
       log.error("curator error:", e);
     }
   }
 
-  return {
+  const hooks: Hooks = {
     // Disable built-in compaction and register hidden worker agents
     config: async (input) => {
       const cfg = input as Record<string, unknown>;
@@ -372,6 +395,7 @@ export const LorePlugin: Plugin = async (ctx) => {
             });
             if (updated > 0 || deleted > 0) {
               log.info(`consolidation: ${updated} updated, ${deleted} deleted`);
+              invalidateLtmCache();
             }
           }
         } catch (e) {
@@ -432,30 +456,42 @@ export const LorePlugin: Plugin = async (ctx) => {
 
       // Knowledge injection — only when the knowledge system is enabled.
       // When disabled, LTM budget is zero and no knowledge is injected.
+      //
+      // Uses per-session caching to preserve system prompt byte-stability
+      // for Anthropic's prompt caching. Without this, forSession() re-scores
+      // entries against evolving session context every turn, producing
+      // different formatted text → system prompt changes at byte 0 → total
+      // cache invalidation on every single turn.
       if (cfg.knowledge.enabled) {
-        const ltmBudget = getLtmBudget(cfg.budget.ltm);
-        const entries = ltm.forSession(projectPath, input.sessionID, ltmBudget);
-        if (!entries.length) {
-          setLtmTokens(0);
-        } else {
-          const formatted = formatKnowledge(
-            entries.map((e) => ({
-              category: e.category,
-              title: e.title,
-              content: e.content,
-            })),
-            ltmBudget,
-          );
+        const sessionID = input.sessionID;
+        let cached = sessionID ? ltmSessionCache.get(sessionID) : undefined;
 
-          if (formatted) {
-            // Track how many tokens we actually consumed so the gradient manager
-            // can deduct them from the usable budget for message injection.
-            const ltmTokenCount = Math.ceil(formatted.length / 3);
-            setLtmTokens(ltmTokenCount);
-            output.system.push(formatted);
-          } else {
-            setLtmTokens(0);
+        if (!cached) {
+          const ltmBudget = getLtmBudget(cfg.budget.ltm);
+          const entries = ltm.forSession(projectPath, sessionID, ltmBudget);
+          if (entries.length) {
+            const formatted = formatKnowledge(
+              entries.map((e) => ({
+                category: e.category,
+                title: e.title,
+                content: e.content,
+              })),
+              ltmBudget,
+            );
+
+            if (formatted) {
+              const tokenCount = Math.ceil(formatted.length / 3);
+              cached = { formatted, tokenCount };
+              if (sessionID) ltmSessionCache.set(sessionID, cached);
+            }
           }
+        }
+
+        if (cached) {
+          setLtmTokens(cached.tokenCount);
+          output.system.push(cached.formatted);
+        } else {
+          setLtmTokens(0);
         }
       } else {
         setLtmTokens(0);
@@ -618,6 +654,20 @@ End with "I'm ready to continue." so the agent knows to pick up where it left of
       recall: createRecallTool(projectPath, config().knowledge.enabled),
     },
   };
+
+  // Always-on startup confirmation — not gated by LORE_DEBUG — so silent
+  // plugin loading failures are immediately visible. If this line never
+  // appears for a project, the init failed (see catch block below).
+  process.stderr.write(`[lore] active: ${projectPath}\n`);
+
+  return hooks;
+  } catch (e) {
+    // Log the full error before re-throwing so OpenCode's plugin loader
+    // (which catches and swallows the error) doesn't hide the root cause.
+    const detail = e instanceof Error ? e.stack || e.message : String(e);
+    process.stderr.write(`[lore] init failed: ${detail}\n`);
+    throw e;
+  }
 };
 
 export default LorePlugin;

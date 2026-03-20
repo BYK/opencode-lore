@@ -25,26 +25,14 @@
 
 ### Gotcha
 
-<!-- lore:019cc484-f0e1-7016-a851-177fb9ad2cc4 -->
-* **AGENTS.md must be excluded from markdown linters**: AGENTS.md is auto-managed by lore and uses \`\*\` list markers and long lines that violate typical remark-lint rules (unordered-list-marker-style, maximum-line-length). When a project uses remark with \`--frail\` (warnings become errors), AGENTS.md will fail CI. Fix: add \`AGENTS.md\` to \`.remarkignore\`. This applies to any lore-managed project with markdown linting.
-
 <!-- lore:019c91d6-04af-7334-8374-e8bbf14cb43d -->
 * **Calibration used DB message count instead of transformed window count — caused layer 0 false passthrough**: Lore gradient/context bugs: (1) Used DB message count instead of transformed window count — delta ≈ 1 → layer 0 passthrough → overflow. Fix: getLastTransformedCount(). (2) actualInput omitted cache.write — cold-cache ~3 tokens → layer 0. Fix: include cache.write. (3) Trailing pure-text assistant messages cause Anthropic prefill errors. Drop loop must run at ALL layers (layer 0 shares ref with output). Never drop messages with tool parts (hasToolParts) — causes infinite loops. (4) Unregistered projects get zero context management → stuck compaction loops. Recovery: delete messages after last good assistant message.
-
-<!-- lore:019cc40e-e56e-71e9-bc5d-545f97df732b -->
-* **Consola prompt cancel returns truthy Symbol, not false**: When a user cancels a \`consola\` / \`@clack/prompts\` confirmation prompt (Ctrl+C), the return value is \`Symbol(clack:cancel)\`, not \`false\`. Since Symbols are truthy in JavaScript, checking \`!confirmed\` will be \`false\` and the code falls through as if the user confirmed. Fix: use \`confirmed !== true\` (strict equality) instead of \`!confirmed\` to correctly handle cancel, false, and any other non-true values.
 
 <!-- lore:019cb615-0b10-7bbc-a7db-50111118c200 -->
 * **Lore auto-recovery can infinite-loop without re-entrancy guard**: Three v0.5.2 bugs causing excessive background LLM requests: (1) Auto-recovery loop — session.error handler injected recovery prompt → could overflow again → loop. Fix: recoveringSessions Set as re-entrancy guard. (2) Curator ran every idle — \`onIdle || afterTurns\` short-circuited (onIdle=true). Fix: \`||\` → \`&&\`. Lesson: boolean flag gating numeric threshold needs AND not OR. (3) shouldSkip() fell back to session.list() on unknown sessions. Fix: remove list fallback, cache in activeSessions.
 
-<!-- lore:019cb3e6-da66-7534-a573-30d2ecadfd53 -->
-* **Returning bare promises loses async function from error stack traces**: When an \`async\` function returns another promise without \`await\`, the calling function disappears from error stack traces if the inner promise rejects. A function that drops \`async\` and does \`return someAsyncCall()\` loses its frame entirely. Fix: keep the function \`async\` and use \`return await someAsyncCall()\`. This matters for debugging — the intermediate function name in the stack trace helps locate which code path triggered the failure. ESLint rule \`no-return-await\` is outdated; modern engines optimize \`return await\` in async functions.
-
 <!-- lore:019c8f4f-67ca-7212-a8c4-8a75b230ceea -->
 * **Test DB isolation via LORE\_DB\_PATH and Bun test preload**: Lore test suite uses isolated temp DB via test/setup.ts preload (bunfig.toml). Preload sets LORE\_DB\_PATH to mkdtempSync path before any imports of src/db.ts; afterAll cleans up. src/db.ts checks LORE\_DB\_PATH first. agents-file.test.ts needs beforeEach cleanup for intra-file isolation and TEST\_UUIDS cleanup in afterAll (shared with ltm.test.ts). Individual test files don't need close() calls — preload handles DB lifecycle.
-
-<!-- lore:019cc303-e397-75b9-9762-6f6ad108f50a -->
-* **Zod z.coerce.number() converts null to 0 silently**: Zod gotchas in this codebase: (1) \`z.coerce.number()\` passes input through \`Number()\`, so \`null\` silently becomes \`0\`. Be aware if \`null\` vs \`0\` distinction matters. (2) Zod v4 \`.default({})\` short-circuits — it returns the default value without parsing through inner schema defaults. So \`.object({ enabled: z.boolean().default(true) }).default({})\` returns \`{}\`, not \`{ enabled: true }\`. Fix: provide fully-populated default objects. This affected nested config sections in src/config.ts during the v3→v4 upgrade.
 
 ### Pattern
 
