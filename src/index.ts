@@ -1,4 +1,5 @@
 import type { Plugin, Hooks } from "@opencode-ai/plugin";
+import { join } from "path";
 import { load, config } from "./config";
 import { ensureProject, isFirstRun } from "./db";
 import * as temporal from "./temporal";
@@ -67,6 +68,14 @@ export function buildRecoveryMessage(
   ].join("\n");
 }
 
+/**
+ * Check whether a project path is valid for file operations (e.g. AGENTS.md export/import).
+ * Returns false for root ("/"), empty, or falsy paths to prevent writing to the filesystem root.
+ */
+export function isValidProjectPath(p: string): boolean {
+  return !!p && p !== "/";
+}
+
 export const LorePlugin: Plugin = async (ctx) => {
   const projectPath = ctx.worktree || ctx.directory;
   try {
@@ -88,8 +97,8 @@ export const LorePlugin: Plugin = async (ctx) => {
   // (hand-written entries, edits from other machines, or merge conflicts).
   {
     const cfg = config();
-    if (cfg.knowledge.enabled && cfg.agentsFile.enabled) {
-      const filePath = `${projectPath}/${cfg.agentsFile.path}`;
+    if (isValidProjectPath(projectPath) && cfg.knowledge.enabled && cfg.agentsFile.enabled) {
+      const filePath = join(projectPath, cfg.agentsFile.path);
       if (shouldImport({ projectPath, filePath })) {
         try {
           importFromFile({ projectPath, filePath });
@@ -424,8 +433,8 @@ export const LorePlugin: Plugin = async (ctx) => {
         // Export curated knowledge to AGENTS.md after distillation + curation.
         try {
           const agentsCfg = cfg.agentsFile;
-          if (cfg.knowledge.enabled && agentsCfg.enabled) {
-            const filePath = `${projectPath}/${agentsCfg.path}`;
+          if (isValidProjectPath(projectPath) && cfg.knowledge.enabled && agentsCfg.enabled) {
+            const filePath = join(projectPath, agentsCfg.path);
             exportToFile({ projectPath, filePath });
           }
         } catch (e) {

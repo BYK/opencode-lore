@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from "bun:test";
-import { isContextOverflow, buildRecoveryMessage, LorePlugin } from "../src/index";
+import { isContextOverflow, buildRecoveryMessage, LorePlugin, isValidProjectPath } from "../src/index";
 import * as ltm from "../src/ltm";
 import type { Plugin } from "@opencode-ai/plugin";
 
@@ -620,5 +620,47 @@ describe("LTM session cache", () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+// ── isValidProjectPath tests ─────────────────────────────────────────
+
+describe("isValidProjectPath", () => {
+  test("returns false for root path '/'", () => {
+    expect(isValidProjectPath("/")).toBe(false);
+  });
+
+  test("returns false for empty string", () => {
+    expect(isValidProjectPath("")).toBe(false);
+  });
+
+  test("returns true for a normal project path", () => {
+    expect(isValidProjectPath("/home/user/project")).toBe(true);
+  });
+
+  test("returns true for a relative path", () => {
+    expect(isValidProjectPath("./my-project")).toBe(true);
+  });
+});
+
+// ── Plugin with invalid project path ─────────────────────────────────
+
+describe("LorePlugin — invalid project path", () => {
+  test("initializes without crashing when projectPath is '/'", async () => {
+    const { client } = createMockClient();
+
+    // Simulate launching outside a git repo: no worktree, directory is "/"
+    const hooks = await LorePlugin({
+      client,
+      project: { id: "test", path: "/" } as any,
+      directory: "/",
+      worktree: "",
+      serverUrl: new URL("http://localhost:0"),
+      $: {} as any,
+    });
+
+    // Plugin should return hooks without crashing
+    expect(hooks).toBeTruthy();
+    expect(hooks.event).toBeDefined();
   });
 });
