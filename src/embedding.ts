@@ -21,9 +21,12 @@ function getApiKey(): string | undefined {
   return process.env.VOYAGE_API_KEY;
 }
 
-/** Returns true if embedding is configured and the API key is present. */
+/** Returns true if embedding is available.
+ *  Active when VOYAGE_API_KEY is set, unless explicitly disabled via
+ *  `search.embeddings.enabled: false` in .lore.json. */
 export function isAvailable(): boolean {
-  return config().search.embeddings.enabled && !!getApiKey();
+  if (config().search.embeddings.enabled === false) return false;
+  return !!getApiKey();
 }
 
 // ---------------------------------------------------------------------------
