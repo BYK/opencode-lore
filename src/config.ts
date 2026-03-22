@@ -66,11 +66,27 @@ export const LoreConfig = z.object({
        *  When enabled, the configured model generates 2–3 alternative query phrasings
        *  before search, improving recall for ambiguous queries. */
       queryExpansion: z.boolean().default(false),
+      /** Vector embedding search via Voyage AI. Requires VOYAGE_API_KEY env var. */
+      embeddings: z
+        .object({
+          /** Enable vector embedding search. Requires VOYAGE_API_KEY env var. Default: false. */
+          enabled: z.boolean().default(false),
+          /** Voyage AI model ID. Default: voyage-code-3. */
+          model: z.string().default("voyage-code-3"),
+          /** Embedding dimensions. Default: 1024. */
+          dimensions: z.number().min(256).max(2048).default(1024),
+        })
+        .default({
+          enabled: false,
+          model: "voyage-code-3",
+          dimensions: 1024,
+        }),
     })
     .default({
       ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
       recallLimit: 10,
       queryExpansion: false,
+      embeddings: { enabled: false, model: "voyage-code-3", dimensions: 1024 },
     }),
   crossProject: z.boolean().default(false),
   agentsFile: z
