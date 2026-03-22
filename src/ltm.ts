@@ -1,6 +1,6 @@
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "./db";
-import { ftsQuery, ftsQueryOr, EMPTY_QUERY } from "./search";
+import { ftsQuery, ftsQueryOr, EMPTY_QUERY, extractTopTerms } from "./search";
 
 // ~3 chars per token — validated as best heuristic against real API data.
 function estimateTokens(text: string): number {
@@ -153,6 +153,9 @@ export function forProject(
 
 type Scored = { entry: KnowledgeEntry; score: number };
 
+/** BM25 column weights for knowledge_fts: title, content, category. */
+const FTS_WEIGHTS = { title: 6.0, content: 2.0, category: 3.0 };
+
 /** Max entries per pool to include on first turn when no session context exists. */
 const NO_CONTEXT_FALLBACK_CAP = 10;
 
@@ -163,43 +166,53 @@ const NO_CONTEXT_FALLBACK_CAP = 10;
 const PROJECT_SAFETY_NET = 5;
 
 /**
- * Score entries by term overlap with session context.
- * Returns score = (fraction of topTerms matched) * entry.confidence.
+ * Score entries by FTS5 BM25 relevance to session context.
+ *
+ * Uses OR semantics (not AND-then-OR) because we're scoring ALL candidates
+ * for relevance ranking, not searching for exact matches. An entry that
+ * matches 1 of 40 terms should still get a (low) score, not be excluded.
+ * BM25 naturally weights entries matching more terms higher.
+ *
+ * Returns a Map of entry ID → normalized score (0–1).
  */
-function scoreEntries(
-  entries: KnowledgeEntry[],
-  topTerms: string[],
-): Scored[] {
-  return entries.map((entry) => {
-    const haystack =
-      (entry.title + " " + entry.content).replace(/[^\w\s]/g, " ").toLowerCase();
-    let hits = 0;
-    for (const term of topTerms) {
-      if (haystack.includes(term)) hits++;
+function scoreEntriesFTS(sessionContext: string): Map<string, number> {
+  const terms = extractTopTerms(sessionContext);
+  if (!terms.length) return new Map();
+
+  const q = terms.map((t) => `${t}*`).join(" OR ");
+  const { title, content, category } = FTS_WEIGHTS;
+
+  try {
+    const results = db()
+      .query(
+        `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
+         FROM knowledge k
+         JOIN knowledge_fts f ON k.rowid = f.rowid
+         WHERE knowledge_fts MATCH ?
+         AND k.confidence > 0.2`,
+      )
+      .all(title, content, category, q) as Array<{
+      id: string;
+      rank: number;
+    }>;
+
+    if (!results.length) return new Map();
+
+    // Normalize: BM25 rank is negative (more negative = better).
+    // Convert to 0–1 where 1 = best match.
+    const ranks = results.map((r) => r.rank);
+    const minRank = Math.min(...ranks);
+    const maxRank = Math.max(...ranks);
+    const scoreMap = new Map<string, number>();
+    for (const r of results) {
+      const norm =
+        minRank === maxRank ? 1 : (maxRank - r.rank) / (maxRank - minRank);
+      scoreMap.set(r.id, norm);
     }
-    const relevance = topTerms.length > 0 ? hits / topTerms.length : 0;
-    return { entry, score: relevance * entry.confidence };
-  });
-}
-
-/**
- * Extract the top 30 meaningful terms (>3 chars) from text, sorted by frequency.
- */
-function extractTopTerms(text: string): string[] {
-  const freq = text
-    .replace(/[^\w\s]/g, " ")
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((w) => w.length > 3)
-    .reduce<Map<string, number>>((acc, w) => {
-      acc.set(w, (acc.get(w) ?? 0) + 1);
-      return acc;
-    }, new Map());
-
-  return [...freq.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 30)
-    .map(([w]) => w);
+    return scoreMap;
+  } catch {
+    return new Map();
+  }
 }
 
 /**
@@ -279,10 +292,14 @@ export function forSession(
   let scoredCross: Scored[];
 
   if (sessionContext.trim().length > 20) {
-    const topTerms = extractTopTerms(sessionContext);
+    // Use FTS5 BM25 to score all knowledge entries against session context
+    const ftsScores = scoreEntriesFTS(sessionContext);
 
-    // Score project entries — include matched + safety net of top-N by confidence
-    const rawScored = scoreEntries(projectEntries, topTerms);
+    // Score project entries: FTS relevance × confidence, with safety net
+    const rawScored: Scored[] = projectEntries.map((entry) => ({
+      entry,
+      score: (ftsScores.get(entry.id) ?? 0) * entry.confidence,
+    }));
     const matched = rawScored.filter((s) => s.score > 0);
     const matchedIds = new Set(matched.map((s) => s.entry.id));
 
@@ -295,8 +312,13 @@ export function forSession(
 
     scoredProject = [...matched, ...safetyNet];
 
-    // Score cross-project entries — only include entries with at least one term match
-    scoredCross = scoreEntries(crossEntries, topTerms).filter((s) => s.score > 0);
+    // Score cross-project entries — only include entries with FTS match
+    scoredCross = crossEntries
+      .filter((e) => ftsScores.has(e.id))
+      .map((e) => ({
+        entry: e,
+        score: (ftsScores.get(e.id) ?? 0) * e.confidence,
+      }));
   } else {
     // No session context — fall back to top entries by confidence, capped
     scoredProject = projectEntries
@@ -363,9 +385,6 @@ function searchLike(input: {
     )
     .all(...likeParams, input.limit) as KnowledgeEntry[];
 }
-
-/** BM25 column weights for knowledge_fts: title, content, category. */
-const FTS_WEIGHTS = { title: 6.0, content: 2.0, category: 3.0 };
 
 export function search(input: {
   query: string;
