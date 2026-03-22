@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 const MIGRATIONS: string[] = [
   `
@@ -207,6 +207,18 @@ const MIGRATIONS: string[] = [
     VALUES('delete', old.rowid, old.observations);
     INSERT INTO distillation_fts(rowid, observations) VALUES (new.rowid, new.observations);
   END;
+  `,
+  `
+  -- Version 8: Embedding BLOB column for vector search (Voyage AI).
+  -- No backfill — entries get embedded lazily on next create/update
+  -- or via explicit backfill when embeddings are first enabled.
+  ALTER TABLE knowledge ADD COLUMN embedding BLOB;
+
+  -- Key-value metadata table for plugin state (e.g. embedding config fingerprint).
+  CREATE TABLE IF NOT EXISTS kv_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
   `,
 ];
 

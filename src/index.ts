@@ -19,6 +19,7 @@ import {
 import { formatKnowledge, formatDistillations } from "./prompt";
 import { createRecallTool } from "./reflect";
 import { shouldImport, importFromFile, exportToFile } from "./agents-file";
+import * as embedding from "./embedding";
 import * as log from "./log";
 
 /**
@@ -677,6 +678,15 @@ End with "I'm ready to continue." so the agent knows to pick up where it left of
   // plugin loading failures are immediately visible. If this line never
   // appears for a project, the init failed (see catch block below).
   process.stderr.write(`[lore] active: ${projectPath}\n`);
+
+  // Background: backfill embeddings for entries that don't have one yet.
+  // Fires once when embeddings are first enabled — subsequent entries
+  // get embedded on create/update via ltm.ts hooks.
+  if (config().search.embeddings.enabled && embedding.isAvailable()) {
+    embedding.backfillEmbeddings().catch((err) => {
+      log.info("embedding backfill failed:", err);
+    });
+  }
 
   return hooks;
   } catch (e) {

@@ -2,6 +2,7 @@ import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "./db";
 import { config } from "./config";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, extractTopTerms } from "./search";
+import * as embedding from "./embedding";
 
 // ~3 chars per token — validated as best heuristic against real API data.
 function estimateTokens(text: string): number {
@@ -98,6 +99,12 @@ export function create(input: {
       now,
       now,
     );
+
+  // Fire-and-forget: embed for vector search (errors logged, never thrown)
+  if (embedding.isAvailable()) {
+    embedding.embedKnowledgeEntry(id, input.title, input.content);
+  }
+
   return id;
 }
 
@@ -121,6 +128,14 @@ export function update(
   db()
     .query(`UPDATE knowledge SET ${sets.join(", ")} WHERE id = ?`)
     .run(...(params as [string, ...string[]]));
+
+  // Re-embed when content changes (fire-and-forget)
+  if (embedding.isAvailable() && input.content !== undefined) {
+    const entry = get(id);
+    if (entry) {
+      embedding.embedKnowledgeEntry(id, entry.title, input.content);
+    }
+  }
 }
 
 export function remove(id: string) {
