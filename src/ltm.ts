@@ -417,6 +417,56 @@ export function search(input: {
   }
 }
 
+export type ScoredKnowledgeEntry = KnowledgeEntry & { rank: number };
+
+/**
+ * Search with BM25 scores included. Returns results with raw FTS5 rank values
+ * for use in cross-source score fusion (RRF).
+ */
+export function searchScored(input: {
+  query: string;
+  projectPath?: string;
+  limit?: number;
+}): ScoredKnowledgeEntry[] {
+  const limit = input.limit ?? 20;
+  const q = ftsQuery(input.query);
+  if (q === EMPTY_QUERY) return [];
+
+  const pid = input.projectPath ? ensureProject(input.projectPath) : null;
+  const { title, content, category } = FTS_WEIGHTS;
+
+  const ftsSQL = pid
+    ? `SELECT k.*, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
+       JOIN knowledge_fts f ON k.rowid = f.rowid
+       WHERE knowledge_fts MATCH ?
+       AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
+       AND k.confidence > 0.2
+       ORDER BY rank LIMIT ?`
+    : `SELECT k.*, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
+       JOIN knowledge_fts f ON k.rowid = f.rowid
+       WHERE knowledge_fts MATCH ?
+       AND k.confidence > 0.2
+       ORDER BY rank LIMIT ?`;
+
+  const ftsParams = pid
+    ? [title, content, category, q, pid, limit]
+    : [title, content, category, q, limit];
+
+  try {
+    const results = db().query(ftsSQL).all(...ftsParams) as ScoredKnowledgeEntry[];
+    if (results.length) return results;
+
+    const qOr = ftsQueryOr(input.query);
+    if (qOr === EMPTY_QUERY) return [];
+    const ftsParamsOr = pid
+      ? [title, content, category, qOr, pid, limit]
+      : [title, content, category, qOr, limit];
+    return db().query(ftsSQL).all(...ftsParamsOr) as ScoredKnowledgeEntry[];
+  } catch {
+    return [];
+  }
+}
+
 export function get(id: string): KnowledgeEntry | null {
   return db()
     .query("SELECT * FROM knowledge WHERE id = ?")
