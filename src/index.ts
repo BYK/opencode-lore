@@ -682,7 +682,7 @@ End with "I'm ready to continue." so the agent knows to pick up where it left of
   // Background: backfill embeddings for entries that don't have one yet.
   // Fires once when embeddings are first enabled — subsequent entries
   // get embedded on create/update via ltm.ts hooks.
-  if (config().search.embeddings.enabled && embedding.isAvailable()) {
+  if (embedding.isAvailable()) {
     embedding.backfillEmbeddings().catch((err) => {
       log.info("embedding backfill failed:", err);
     });

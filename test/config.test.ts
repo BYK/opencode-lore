@@ -84,7 +84,7 @@ describe("LoreConfig — search schema", () => {
     expect(cfg.search.ftsWeights.category).toBe(3.0);
     expect(cfg.search.recallLimit).toBe(10);
     expect(cfg.search.queryExpansion).toBe(false);
-    expect(cfg.search.embeddings.enabled).toBe(false);
+    expect(cfg.search.embeddings.enabled).toBe(true);
     expect(cfg.search.embeddings.model).toBe("voyage-code-3");
     expect(cfg.search.embeddings.dimensions).toBe(1024);
   });
@@ -125,14 +125,14 @@ describe("LoreConfig — search schema", () => {
     expect(cfg.search.ftsWeights.title).toBe(6.0);
     expect(cfg.search.recallLimit).toBe(20);
     expect(cfg.search.queryExpansion).toBe(false);
-    expect(cfg.search.embeddings.enabled).toBe(false);
+    expect(cfg.search.embeddings.enabled).toBe(true);
   });
 
-  test("search.embeddings can be enabled", () => {
+  test("search.embeddings can be disabled", () => {
     const cfg = LoreConfig.parse({
-      search: { embeddings: { enabled: true } },
+      search: { embeddings: { enabled: false } },
     });
-    expect(cfg.search.embeddings.enabled).toBe(true);
+    expect(cfg.search.embeddings.enabled).toBe(false);
     expect(cfg.search.embeddings.model).toBe("voyage-code-3");
     expect(cfg.search.embeddings.dimensions).toBe(1024);
   });
