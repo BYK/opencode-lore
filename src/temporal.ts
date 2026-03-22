@@ -1,4 +1,5 @@
 import { db, ensureProject } from "./db";
+import { ftsQuery, ftsQueryOr, EMPTY_QUERY } from "./search";
 import type { Message, Part } from "@opencode-ai/sdk";
 
 // ~3 chars per token — validated as best heuristic against real API data.
@@ -126,19 +127,6 @@ export function markDistilled(ids: string[]) {
     .run(...ids);
 }
 
-// Sanitize a natural-language query for FTS5 MATCH.
-// FTS5 treats punctuation as operators: - = NOT, . = column filter, " = phrase, etc.
-// Strip everything except word chars and whitespace, split into tokens, append * for
-// prefix matching. Exported so ltm.ts can reuse it instead of maintaining a duplicate.
-export function ftsQuery(raw: string): string {
-  const words = raw
-    .replace(/[^\w\s]/g, " ")
-    .split(/\s+/)
-    .filter(Boolean);
-  if (!words.length) return '""'; // empty match-nothing sentinel
-  return words.map((w) => `${w}*`).join(" ");
-}
-
 // LIKE-based fallback for when FTS5 fails unexpectedly.
 function searchLike(input: {
   pid: string;
@@ -173,6 +161,8 @@ export function search(input: {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 20;
   const q = ftsQuery(input.query);
+  if (q === EMPTY_QUERY) return [];
+
   const ftsSQL = input.sessionID
     ? `SELECT m.* FROM temporal_messages m
        JOIN temporal_fts f ON m.rowid = f.rowid
@@ -186,9 +176,20 @@ export function search(input: {
     ? [q, pid, input.sessionID, limit]
     : [q, pid, limit];
   try {
-    return db()
+    const results = db()
       .query(ftsSQL)
       .all(...params) as TemporalMessage[];
+    if (results.length) return results;
+
+    // AND returned nothing — try OR fallback for broader recall
+    const qOr = ftsQueryOr(input.query);
+    if (qOr === EMPTY_QUERY) return [];
+    const paramsOr = input.sessionID
+      ? [qOr, pid, input.sessionID, limit]
+      : [qOr, pid, limit];
+    return db()
+      .query(ftsSQL)
+      .all(...paramsOr) as TemporalMessage[];
   } catch {
     // FTS5 still choked (edge case) — fall back to LIKE search
     return searchLike({

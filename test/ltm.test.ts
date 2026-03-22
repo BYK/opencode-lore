@@ -127,6 +127,65 @@ describe("ltm", () => {
       });
       expect(results.length).toBeGreaterThan(0);
     });
+
+    test("search returns empty for all-stopword queries", () => {
+      const results = ltm.search({
+        query: "what is this",
+        projectPath: PROJECT,
+      });
+      expect(results.length).toBe(0);
+    });
+
+    test("AND→OR fallback: finds entries when only some terms match", () => {
+      // Create an entry that matches "gradient" but not "xyznonexistent"
+      ltm.create({
+        projectPath: PROJECT,
+        category: "architecture",
+        title: "Gradient context system",
+        content: "The gradient manages context window compression across layers",
+        scope: "project",
+      });
+
+      // AND query "gradient xyznonexistent" should fail, then OR fallback finds "gradient"
+      const results = ltm.search({
+        query: "gradient xyznonexistent",
+        projectPath: PROJECT,
+      });
+      expect(results.length).toBeGreaterThan(0);
+      expect(results[0].title).toContain("Gradient");
+    });
+  });
+
+  describe("search: BM25 ranking", () => {
+    const RANK_PROJECT = "/test/ltm/ranking";
+
+    test("title matches rank higher than content-only matches", () => {
+      // Entry with "database" in title — should rank higher
+      ltm.create({
+        projectPath: RANK_PROJECT,
+        category: "architecture",
+        title: "Database migration strategy",
+        content: "Use incremental schema changes for all migrations",
+        scope: "project",
+      });
+
+      // Entry with "database" only in content — should rank lower
+      ltm.create({
+        projectPath: RANK_PROJECT,
+        category: "pattern",
+        title: "Storage layer design",
+        content: "The database uses SQLite with WAL mode for concurrent reads",
+        scope: "project",
+      });
+
+      const results = ltm.search({
+        query: "database",
+        projectPath: RANK_PROJECT,
+      });
+      expect(results.length).toBeGreaterThanOrEqual(2);
+      // First result should be the one with "database" in the title (higher BM25 weight)
+      expect(results[0].title).toContain("Database");
+    });
   });
 });
 

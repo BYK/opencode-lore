@@ -21,7 +21,25 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(6);
+    expect(row.version).toBe(7);
+  });
+
+  test("distillation_fts virtual table exists", () => {
+    const tables = db()
+      .query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    const names = tables.map((t) => t.name);
+    expect(names).toContain("distillation_fts");
+  });
+
+  test("distillation_fts triggers exist for sync", () => {
+    const triggers = db()
+      .query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'distillation_fts_%' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    const names = triggers.map((t) => t.name);
+    expect(names).toContain("distillation_fts_insert");
+    expect(names).toContain("distillation_fts_delete");
+    expect(names).toContain("distillation_fts_update");
   });
 
   test("compound indexes exist for common query patterns", () => {

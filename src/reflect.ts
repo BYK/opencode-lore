@@ -3,6 +3,7 @@ import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import { db, ensureProject } from "./db";
+import { ftsQuery, ftsQueryOr, EMPTY_QUERY } from "./search";
 import { serialize, inline, h, p, ul, lip, liph, t, root } from "./markdown";
 
 type Distillation = {
@@ -13,6 +14,33 @@ type Distillation = {
   session_id: string;
 };
 
+// LIKE-based fallback for when FTS5 fails unexpectedly on distillations.
+function searchDistillationsLike(input: {
+  pid: string;
+  query: string;
+  sessionID?: string;
+  limit: number;
+}): Distillation[] {
+  const terms = input.query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 1);
+  if (!terms.length) return [];
+  const conditions = terms
+    .map(() => "LOWER(observations) LIKE ?")
+    .join(" AND ");
+  const likeParams = terms.map((t) => `%${t}%`);
+  const sql = input.sessionID
+    ? `SELECT id, observations, generation, created_at, session_id FROM distillations WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
+    : `SELECT id, observations, generation, created_at, session_id FROM distillations WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
+  const allParams = input.sessionID
+    ? [input.pid, input.sessionID, ...likeParams, input.limit]
+    : [input.pid, ...likeParams, input.limit];
+  return db()
+    .query(sql)
+    .all(...allParams) as Distillation[];
+}
+
 function searchDistillations(input: {
   projectPath: string;
   query: string;
@@ -21,31 +49,46 @@ function searchDistillations(input: {
 }): Distillation[] {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 10;
-  // Search distillation narratives and facts with LIKE since we don't have FTS on them
-  const terms = input.query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((t) => t.length > 2);
-  if (!terms.length) return [];
+  const q = ftsQuery(input.query);
+  if (q === EMPTY_QUERY) return [];
 
-  const conditions = terms
-    .map(() => "LOWER(observations) LIKE ?")
-    .join(" AND ");
-  const params: string[] = [];
-  for (const term of terms) {
-    params.push(`%${term}%`);
+  const ftsSQL = input.sessionID
+    ? `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id
+       FROM distillations d
+       JOIN distillation_fts f ON d.rowid = f.rowid
+       WHERE distillation_fts MATCH ?
+       AND d.project_id = ? AND d.session_id = ?
+       ORDER BY rank LIMIT ?`
+    : `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id
+       FROM distillations d
+       JOIN distillation_fts f ON d.rowid = f.rowid
+       WHERE distillation_fts MATCH ?
+       AND d.project_id = ?
+       ORDER BY rank LIMIT ?`;
+  const params = input.sessionID
+    ? [q, pid, input.sessionID, limit]
+    : [q, pid, limit];
+
+  try {
+    const results = db().query(ftsSQL).all(...params) as Distillation[];
+    if (results.length) return results;
+
+    // AND returned nothing — try OR fallback
+    const qOr = ftsQueryOr(input.query);
+    if (qOr === EMPTY_QUERY) return [];
+    const paramsOr = input.sessionID
+      ? [qOr, pid, input.sessionID, limit]
+      : [qOr, pid, limit];
+    return db().query(ftsSQL).all(...paramsOr) as Distillation[];
+  } catch {
+    // FTS5 failed — fall back to LIKE search
+    return searchDistillationsLike({
+      pid,
+      query: input.query,
+      sessionID: input.sessionID,
+      limit,
+    });
   }
-
-  const query = input.sessionID
-    ? `SELECT id, observations, generation, created_at, session_id FROM distillations WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
-    : `SELECT id, observations, generation, created_at, session_id FROM distillations WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
-  const allParams = input.sessionID
-    ? [pid, input.sessionID, ...params, limit]
-    : [pid, ...params, limit];
-
-  return db()
-    .query(query)
-    .all(...allParams) as Distillation[];
 }
 
 function formatResults(input: {
@@ -114,6 +157,11 @@ export function createRecallTool(projectPath: string, knowledgeEnabled = true): 
     async execute(args, context) {
       const scope = args.scope ?? "all";
       const sid = context.sessionID;
+
+      // If the query is all stopwords / single chars, short-circuit with guidance
+      if (ftsQuery(args.query) === EMPTY_QUERY) {
+        return "Query too vague — try using specific keywords, file names, or technical terms.";
+      }
 
       let temporalResults: temporal.TemporalMessage[] = [];
       if (scope !== "knowledge") {

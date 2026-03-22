@@ -12,6 +12,9 @@
 <!-- lore:019c8f4f-67c8-7cf4-b93b-c5ec46ed94b6 -->
 * **Lore DB uses incremental auto\_vacuum to prevent free-page bloat**: Lore's SQLite DB uses incremental auto\_vacuum (schema version 3 migration) to prevent free-page bloat from deletions. The migration sets PRAGMA auto\_vacuum = INCREMENTAL then VACUUM outside a transaction. temporal\_messages is the primary storage consumer (~51MB); knowledge table is tiny.
 
+<!-- lore:019d15de-e2d6-7ff2-ab86-b78ca39688a7 -->
+* **Lore search pipeline: FTS5 with AND-then-OR fallback and RRF fusion**: Lore's search overhaul (planned/in-progress) replaces three independent search systems with a unified pipeline in \`src/search.ts\`. Key design: \`ftsQuery()\` builds AND queries (primary), \`ftsQueryOr()\` builds OR queries (fallback only when AND returns zero results). Blanket OR was rejected empirically — it adds noise even with stopword filtering. Conservative stopword list excludes domain terms like 'handle', 'state', 'type'. FTS5 rank is negative (more negative = better); \`ORDER BY rank\` sorts best first. \`bm25()\` with column weights (title=6, content=2, category=3) verified working in Bun's SQLite. Recall tool uses Reciprocal Rank Fusion (k=60) across knowledge, temporal, and distillation sources. \`forSession()\` scoring uses OR (not AND-then-OR) because it's ranking all candidates, not searching for exact matches — BM25 naturally weights multi-term matches higher.
+
 <!-- lore:019c8f8c-47c3-71a2-b5fd-248a2cfeba78 -->
 * **Lore temporal pruning runs after distillation and curation on session.idle**: In src/index.ts, session.idle awaits backgroundDistill and backgroundCurate sequentially before running temporal.prune(). Ordering is critical: pruning must not delete unprocessed messages. Pruning defaults: 120-day retention, 1GB max storage (in .lore.json under pruning.retention and pruning.maxStorage). These generous defaults were chosen because the system was new — earlier proposals of 7d/200MB were based on insufficient data.
 
@@ -23,6 +26,9 @@
 <!-- lore:019c904b-7924-7187-8471-8ad2423b8946 -->
 * **Curator prompt scoped to code-relevant knowledge only**: CURATOR\_SYSTEM in src/prompt.ts now explicitly excludes: general ecosystem knowledge available online, business strategy and marketing positioning, product pricing models, third-party tool details not needed for development, and personal contact information. This was added after the curator extracted entries about OpenWork integration strategy (including an email address), Lore Cloud pricing tiers, and AGENTS.md ecosystem facts — none of which help an agent write code. The curatorUser() function also appends guidance to prefer updating existing entries over creating new ones for the same concept, reducing duplicate creation.
 
+<!-- lore:019d15de-e2e4-777f-8e00-fe21198117ad -->
+* **Lore plugin cannot use native Node addons — pure bun:sqlite only**: Lore is a Bun plugin library (\`main: 'src/index.ts'\`, Plugin type) running inside OpenCode's compiled Bun binary. It has no build step and cannot use native Node addons (no better-sqlite3, no node-llama-cpp, no sqlite-vec). Dependencies must be pure JS/TS or Bun built-ins. This rules out QMD as a library dependency (requires better-sqlite3 + node-llama-cpp + sqlite-vec). QMD's search patterns (BM25 + vector + RRF + reranking) are adapted for pure FTS5 instead. Vector/embedding search would need to use OpenCode's existing chat providers rather than local GGUF models.
+
 ### Gotcha
 
 <!-- lore:019c91d6-04af-7334-8374-e8bbf14cb43d -->
@@ -30,6 +36,9 @@
 
 <!-- lore:019cb615-0b10-7bbc-a7db-50111118c200 -->
 * **Lore auto-recovery can infinite-loop without re-entrancy guard**: Three v0.5.2 bugs causing excessive background LLM requests: (1) Auto-recovery loop — session.error handler injected recovery prompt → could overflow again → loop. Fix: recoveringSessions Set as re-entrancy guard. (2) Curator ran every idle — \`onIdle || afterTurns\` short-circuited (onIdle=true). Fix: \`||\` → \`&&\`. Lesson: boolean flag gating numeric threshold needs AND not OR. (3) shouldSkip() fell back to session.list() on unknown sessions. Fix: remove list fallback, cache in activeSessions.
+
+<!-- lore:019d15de-e2e1-7ea0-a0bb-ab59227422e8 -->
+* **Lore knowledge FTS search was sorted by updated\_at, not BM25 relevance**: In \`ltm.search()\`, knowledge FTS results were ordered by \`k.updated\_at DESC\` instead of FTS5 BM25 rank — most recently edited won over most relevant. Fix: replace the \`WHERE k.rowid IN (SELECT rowid FROM knowledge\_fts ...)\` subquery pattern with a JOIN that exposes \`rank\`, then \`ORDER BY bm25(knowledge\_fts, 6.0, 2.0, 3.0)\`. Also: distillations had no FTS table at all (LIKE-only search), fixed by adding \`distillation\_fts\` in schema migration v7 with backfill and sync triggers.
 
 <!-- lore:019c8f4f-67ca-7212-a8c4-8a75b230ceea -->
 * **Test DB isolation via LORE\_DB\_PATH and Bun test preload**: Lore test suite uses isolated temp DB via test/setup.ts preload (bunfig.toml). Preload sets LORE\_DB\_PATH to mkdtempSync path before any imports of src/db.ts; afterAll cleans up. src/db.ts checks LORE\_DB\_PATH first. agents-file.test.ts needs beforeEach cleanup for intra-file isolation and TEST\_UUIDS cleanup in afterAll (shared with ltm.test.ts). Individual test files don't need close() calls — preload handles DB lifecycle.

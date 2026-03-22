@@ -1,6 +1,6 @@
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "./db";
-import { ftsQuery } from "./temporal";
+import { ftsQuery, ftsQueryOr, EMPTY_QUERY } from "./search";
 
 // ~3 chars per token — validated as best heuristic against real API data.
 function estimateTokens(text: string): number {
@@ -364,6 +364,9 @@ function searchLike(input: {
     .all(...likeParams, input.limit) as KnowledgeEntry[];
 }
 
+/** BM25 column weights for knowledge_fts: title, content, category. */
+const FTS_WEIGHTS = { title: 6.0, content: 2.0, category: 3.0 };
+
 export function search(input: {
   query: string;
   projectPath?: string;
@@ -371,37 +374,46 @@ export function search(input: {
 }): KnowledgeEntry[] {
   const limit = input.limit ?? 20;
   const q = ftsQuery(input.query);
-  if (input.projectPath) {
-    const pid = ensureProject(input.projectPath);
-    try {
-      return db()
-        .query(
-          `SELECT k.* FROM knowledge k
-           WHERE k.rowid IN (SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?)
-           AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
-           AND k.confidence > 0.2
-           ORDER BY k.updated_at DESC LIMIT ?`,
-        )
-        .all(q, pid, limit) as KnowledgeEntry[];
-    } catch {
-      return searchLike({
-        query: input.query,
-        projectPath: input.projectPath,
-        limit,
-      });
-    }
-  }
+  if (q === EMPTY_QUERY) return [];
+
+  const pid = input.projectPath ? ensureProject(input.projectPath) : null;
+
+  const ftsSQL = pid
+    ? `SELECT k.* FROM knowledge k
+       JOIN knowledge_fts f ON k.rowid = f.rowid
+       WHERE knowledge_fts MATCH ?
+       AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
+       AND k.confidence > 0.2
+       ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`
+    : `SELECT k.* FROM knowledge k
+       JOIN knowledge_fts f ON k.rowid = f.rowid
+       WHERE knowledge_fts MATCH ?
+       AND k.confidence > 0.2
+       ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`;
+
+  const { title, content, category } = FTS_WEIGHTS;
+  const ftsParams = pid
+    ? [q, pid, title, content, category, limit]
+    : [q, title, content, category, limit];
+
   try {
-    return db()
-      .query(
-        `SELECT k.* FROM knowledge k
-         WHERE k.rowid IN (SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?)
-         AND k.confidence > 0.2
-         ORDER BY k.updated_at DESC LIMIT ?`,
-      )
-      .all(q, limit) as KnowledgeEntry[];
+    const results = db().query(ftsSQL).all(...ftsParams) as KnowledgeEntry[];
+    if (results.length) return results;
+
+    // AND returned nothing — try OR fallback for broader recall
+    const qOr = ftsQueryOr(input.query);
+    if (qOr === EMPTY_QUERY) return [];
+
+    const ftsParamsOr = pid
+      ? [qOr, pid, title, content, category, limit]
+      : [qOr, title, content, category, limit];
+    return db().query(ftsSQL).all(...ftsParamsOr) as KnowledgeEntry[];
   } catch {
-    return searchLike({ query: input.query, limit });
+    return searchLike({
+      query: input.query,
+      projectPath: input.projectPath,
+      limit,
+    });
   }
 }
 

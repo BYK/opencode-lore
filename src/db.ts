@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 const MIGRATIONS: string[] = [
   `
@@ -178,6 +178,35 @@ const MIGRATIONS: string[] = [
   DROP INDEX IF EXISTS idx_temporal_project;
   DROP INDEX IF EXISTS idx_temporal_distilled;
   DROP INDEX IF EXISTS idx_distillation_project;
+  `,
+  `
+  -- Version 7: FTS5 for distillations — enables ranked search instead of LIKE.
+  CREATE VIRTUAL TABLE IF NOT EXISTS distillation_fts USING fts5(
+    observations,
+    content=distillations,
+    content_rowid=rowid,
+    tokenize='porter unicode61'
+  );
+
+  -- Backfill existing data (skip empty observations from schema v1→v2 migration)
+  INSERT INTO distillation_fts(rowid, observations)
+  SELECT rowid, observations FROM distillations WHERE observations != '';
+
+  -- Sync triggers
+  CREATE TRIGGER IF NOT EXISTS distillation_fts_insert AFTER INSERT ON distillations BEGIN
+    INSERT INTO distillation_fts(rowid, observations) VALUES (new.rowid, new.observations);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS distillation_fts_delete AFTER DELETE ON distillations BEGIN
+    INSERT INTO distillation_fts(distillation_fts, rowid, observations)
+    VALUES('delete', old.rowid, old.observations);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS distillation_fts_update AFTER UPDATE ON distillations BEGIN
+    INSERT INTO distillation_fts(distillation_fts, rowid, observations)
+    VALUES('delete', old.rowid, old.observations);
+    INSERT INTO distillation_fts(rowid, observations) VALUES (new.rowid, new.observations);
+  END;
   `,
 ];
 

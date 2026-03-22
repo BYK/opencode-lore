@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { db, ensureProject } from "../src/db";
 import * as temporal from "../src/temporal";
-import { ftsQuery } from "../src/temporal";
+import { ftsQuery } from "../src/search";
 import type { Message, Part } from "@opencode-ai/sdk";
 
 const PROJECT = "/test/temporal/project";
@@ -292,8 +292,9 @@ describe("temporal", () => {
       expect(ftsQuery("sanity.io")).toBe("sanity* io*");
     });
 
-    test("other punctuation stripped", () => {
-      expect(ftsQuery("what's the fix?")).toBe("what* s* the* fix*");
+    test("other punctuation stripped, stopwords and single chars removed", () => {
+      // "what" is stopword, "s" is single char, "the" is stopword — only "fix" survives
+      expect(ftsQuery("what's the fix?")).toBe("fix*");
     });
 
     test("empty string returns sentinel", () => {
