@@ -3,6 +3,7 @@ import type { createOpencodeClient } from "@opencode-ai/sdk";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
+import * as embedding from "./embedding";
 import { db, ensureProject } from "./db";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, reciprocalRankFusion, expandQuery } from "./search";
 import { serialize, inline, h, p, ul, lip, liph, t, root } from "./markdown";
@@ -308,6 +309,33 @@ export function createRecallTool(
             key: (r) => `t:${r.item.id}`,
           },
         );
+      }
+
+      // Vector search: embed query and find similar knowledge entries
+      if (embedding.isAvailable() && knowledgeEnabled && scope !== "session") {
+        try {
+          const [queryVec] = await embedding.embed([args.query], "query");
+          const vectorHits = embedding.vectorSearch(queryVec, limit);
+          const vectorTagged: TaggedResult[] = [];
+          for (const hit of vectorHits) {
+            const entry = ltm.get(hit.id);
+            if (entry) {
+              vectorTagged.push({
+                source: "knowledge",
+                item: { ...entry, rank: -hit.similarity },
+              });
+            }
+          }
+          if (vectorTagged.length) {
+            // Same `k:` key prefix as BM25 knowledge — RRF merges, not duplicates
+            allRrfLists.push({
+              items: vectorTagged,
+              key: (r) => `k:${r.item.id}`,
+            });
+          }
+        } catch (err) {
+          log.info("recall: vector search failed:", err);
+        }
       }
 
       // Fuse results using Reciprocal Rank Fusion across all query variants
