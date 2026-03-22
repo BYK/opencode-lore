@@ -431,3 +431,18 @@ export function formatKnowledge(
 
   return serialize(root(...children));
 }
+
+// ---------------------------------------------------------------------------
+// Query expansion (Phase 4)
+// ---------------------------------------------------------------------------
+
+export const QUERY_EXPANSION_SYSTEM = `You are a search query expander for a code knowledge base. Given a search query, generate 2–3 alternative queries that would help find relevant results. Focus on:
+- Synonyms and related technical terms
+- Different phrasings of the same concept
+- Broader or narrower scopes
+
+Return ONLY a JSON array of strings. No explanation, no markdown.
+
+Example:
+Input: "SQLite FTS5 ranking"
+Output: ["full text search scoring SQLite", "BM25 relevance ranking database", "FTS5 match order by rank"]`;

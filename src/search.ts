@@ -266,3 +266,113 @@ export function reciprocalRankFusion<T>(
 
   return [...scores.values()].sort((a, b) => b.score - a.score);
 }
+
+// ---------------------------------------------------------------------------
+// LLM query expansion (Phase 4)
+// ---------------------------------------------------------------------------
+
+import type { createOpencodeClient } from "@opencode-ai/sdk";
+import { workerSessionIDs } from "./distillation";
+import { QUERY_EXPANSION_SYSTEM } from "./prompt";
+import * as log from "./log";
+
+type Client = ReturnType<typeof createOpencodeClient>;
+
+// Worker sessions for query expansion — keyed by parent session ID
+const expansionWorkerSessions = new Map<string, string>();
+
+async function ensureExpansionWorkerSession(
+  client: Client,
+  parentID: string,
+): Promise<string> {
+  const existing = expansionWorkerSessions.get(parentID);
+  if (existing) return existing;
+  const session = await client.session.create({
+    body: { parentID, title: "lore query expansion" },
+  });
+  const id = session.data!.id;
+  expansionWorkerSessions.set(parentID, id);
+  workerSessionIDs.add(id);
+  return id;
+}
+
+/**
+ * Expand a user query into multiple search variants using the configured LLM.
+ * Returns `[original, ...expanded]`. The original is always first.
+ *
+ * Uses a 3-second timeout — if the LLM is slow, returns only the original query.
+ * Errors are caught silently (logged) and the original query is returned.
+ *
+ * @param client    OpenCode client for LLM calls
+ * @param query     The original user query
+ * @param sessionID Parent session ID (for worker session creation)
+ * @param model     Optional model override
+ */
+export async function expandQuery(
+  client: Client,
+  query: string,
+  sessionID: string,
+  model?: { providerID: string; modelID: string },
+): Promise<string[]> {
+  const TIMEOUT_MS = 3000;
+
+  try {
+    const workerID = await ensureExpansionWorkerSession(client, sessionID);
+    const parts = [
+      {
+        type: "text" as const,
+        text: `${QUERY_EXPANSION_SYSTEM}\n\nInput: "${query}"`,
+      },
+    ];
+
+    // Race the LLM call against a timeout
+    const result = await Promise.race([
+      client.session.prompt({
+        path: { id: workerID },
+        body: {
+          parts,
+          agent: "lore-query-expand",
+          ...(model ? { model } : {}),
+        },
+      }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), TIMEOUT_MS)),
+    ]);
+
+    // Rotate worker session so the next call starts fresh
+    expansionWorkerSessions.delete(sessionID);
+
+    if (!result) {
+      log.info("query expansion timed out, using original query");
+      return [query];
+    }
+
+    // Read the response
+    const msgs = await client.session.messages({
+      path: { id: workerID },
+      query: { limit: 2 },
+    });
+    const last = msgs.data?.at(-1);
+    if (!last || last.info.role !== "assistant") return [query];
+
+    const responsePart = last.parts.find((p) => p.type === "text");
+    if (!responsePart || responsePart.type !== "text") return [query];
+
+    // Parse JSON array from response
+    const cleaned = responsePart.text
+      .trim()
+      .replace(/^```json?\s*/i, "")
+      .replace(/\s*```$/i, "");
+    const parsed = JSON.parse(cleaned);
+    if (!Array.isArray(parsed)) return [query];
+
+    const expanded = parsed.filter(
+      (q): q is string => typeof q === "string" && q.trim().length > 0,
+    );
+    if (!expanded.length) return [query];
+
+    return [query, ...expanded.slice(0, 3)]; // cap at 3 expansions
+  } catch (err) {
+    log.info("query expansion failed, using original query:", err);
+    return [query];
+  }
+}
