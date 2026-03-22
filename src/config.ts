@@ -50,6 +50,28 @@ export const LoreConfig = z.object({
       maxStorage: z.number().min(50).default(1024),
     })
     .default({ retention: 120, maxStorage: 1024 }),
+  search: z
+    .object({
+      /** BM25 column weights for knowledge FTS5 [title, content, category]. */
+      ftsWeights: z
+        .object({
+          title: z.number().min(0).default(6.0),
+          content: z.number().min(0).default(2.0),
+          category: z.number().min(0).default(3.0),
+        })
+        .default({ title: 6.0, content: 2.0, category: 3.0 }),
+      /** Max results per source in recall tool before fusion. Default: 10. */
+      recallLimit: z.number().min(1).max(50).default(10),
+      /** Enable LLM-based query expansion for the recall tool. Default: false.
+       *  When enabled, the configured model generates 2–3 alternative query phrasings
+       *  before search, improving recall for ambiguous queries. */
+      queryExpansion: z.boolean().default(false),
+    })
+    .default({
+      ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
+      recallLimit: 10,
+      queryExpansion: false,
+    }),
   crossProject: z.boolean().default(false),
   agentsFile: z
     .object({

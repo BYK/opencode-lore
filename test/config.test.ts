@@ -76,6 +76,55 @@ describe("LoreConfig — curator schema", () => {
   });
 });
 
+describe("LoreConfig — search schema", () => {
+  test("search defaults: ftsWeights, recallLimit, queryExpansion", () => {
+    const cfg = LoreConfig.parse({});
+    expect(cfg.search.ftsWeights.title).toBe(6.0);
+    expect(cfg.search.ftsWeights.content).toBe(2.0);
+    expect(cfg.search.ftsWeights.category).toBe(3.0);
+    expect(cfg.search.recallLimit).toBe(10);
+    expect(cfg.search.queryExpansion).toBe(false);
+  });
+
+  test("search.ftsWeights can be customised", () => {
+    const cfg = LoreConfig.parse({
+      search: { ftsWeights: { title: 10.0, content: 1.0, category: 0.5 } },
+    });
+    expect(cfg.search.ftsWeights.title).toBe(10.0);
+    expect(cfg.search.ftsWeights.content).toBe(1.0);
+    expect(cfg.search.ftsWeights.category).toBe(0.5);
+  });
+
+  test("search.recallLimit can be customised", () => {
+    const cfg = LoreConfig.parse({ search: { recallLimit: 25 } });
+    expect(cfg.search.recallLimit).toBe(25);
+  });
+
+  test("search.recallLimit rejects values over 50", () => {
+    expect(() => LoreConfig.parse({ search: { recallLimit: 100 } })).toThrow();
+  });
+
+  test("search.queryExpansion can be enabled", () => {
+    const cfg = LoreConfig.parse({ search: { queryExpansion: true } });
+    expect(cfg.search.queryExpansion).toBe(true);
+  });
+
+  test("search section is optional — omitting it uses defaults", () => {
+    const cfg = LoreConfig.parse({ curator: { enabled: false } });
+    expect(cfg.search.ftsWeights.title).toBe(6.0);
+    expect(cfg.search.recallLimit).toBe(10);
+    expect(cfg.search.queryExpansion).toBe(false);
+  });
+
+  test("partial search config merges with defaults", () => {
+    const cfg = LoreConfig.parse({ search: { recallLimit: 20 } });
+    // ftsWeights should still have defaults
+    expect(cfg.search.ftsWeights.title).toBe(6.0);
+    expect(cfg.search.recallLimit).toBe(20);
+    expect(cfg.search.queryExpansion).toBe(false);
+  });
+});
+
 describe("load — reads config from .lore.json", () => {
   test("loads agentsFile.enabled=false from .lore.json", async () => {
     mkdirSync(TMP, { recursive: true });

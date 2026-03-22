@@ -1,5 +1,6 @@
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "./db";
+import { config } from "./config";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, extractTopTerms } from "./search";
 
 // ~3 chars per token — validated as best heuristic against real API data.
@@ -153,8 +154,11 @@ export function forProject(
 
 type Scored = { entry: KnowledgeEntry; score: number };
 
-/** BM25 column weights for knowledge_fts: title, content, category. */
-const FTS_WEIGHTS = { title: 6.0, content: 2.0, category: 3.0 };
+/** BM25 column weights for knowledge_fts: title, content, category.
+ *  Reads from config().search.ftsWeights, falling back to defaults. */
+function ftsWeights() {
+  return config().search.ftsWeights;
+}
 
 /** Max entries per pool to include on first turn when no session context exists. */
 const NO_CONTEXT_FALLBACK_CAP = 10;
@@ -180,7 +184,7 @@ function scoreEntriesFTS(sessionContext: string): Map<string, number> {
   if (!terms.length) return new Map();
 
   const q = terms.map((t) => `${t}*`).join(" OR ");
-  const { title, content, category } = FTS_WEIGHTS;
+  const { title, content, category } = ftsWeights();
 
   try {
     const results = db()
@@ -410,7 +414,7 @@ export function search(input: {
        AND k.confidence > 0.2
        ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`;
 
-  const { title, content, category } = FTS_WEIGHTS;
+  const { title, content, category } = ftsWeights();
   const ftsParams = pid
     ? [q, pid, title, content, category, limit]
     : [q, title, content, category, limit];
@@ -452,7 +456,7 @@ export function searchScored(input: {
   if (q === EMPTY_QUERY) return [];
 
   const pid = input.projectPath ? ensureProject(input.projectPath) : null;
-  const { title, content, category } = FTS_WEIGHTS;
+  const { title, content, category } = ftsWeights();
 
   const ftsSQL = pid
     ? `SELECT k.*, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k

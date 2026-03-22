@@ -236,6 +236,10 @@ export const LorePlugin: Plugin = async (ctx) => {
           hidden: true,
           description: "Lore knowledge curator worker",
         },
+        "lore-query-expand": {
+          hidden: true,
+          description: "Lore query expansion worker",
+        },
       };
     },
 
@@ -660,7 +664,12 @@ End with "I'm ready to continue." so the agent knows to pick up where it left of
 
     // Register the recall tool
     tool: {
-      recall: createRecallTool(projectPath, config().knowledge.enabled),
+      recall: createRecallTool(
+        projectPath,
+        config().knowledge.enabled,
+        ctx.client,
+        config().search,
+      ),
     },
   };
 
