@@ -6,6 +6,7 @@ import {
   EMPTY_QUERY,
   normalizeRank,
   reciprocalRankFusion,
+  extractTopTerms,
 } from "../src/search";
 
 describe("search", () => {
@@ -256,6 +257,68 @@ describe("search", () => {
 
       // With k=10, rank 0 → 1/(10+0) = 0.1
       expect(fused[0].score).toBeCloseTo(0.1, 4);
+    });
+  });
+
+  describe("extractTopTerms", () => {
+    test("extracts terms sorted by frequency", () => {
+      const terms = extractTopTerms("database database database config config");
+      expect(terms[0]).toBe("database");
+      expect(terms[1]).toBe("config");
+    });
+
+    test("filters stopwords", () => {
+      const terms = extractTopTerms("the database with the indexes from the table");
+      expect(terms).toContain("database");
+      expect(terms).toContain("indexes");
+      expect(terms).toContain("table");
+      expect(terms).not.toContain("the");
+      expect(terms).not.toContain("with");
+      expect(terms).not.toContain("from");
+    });
+
+    test("filters single chars", () => {
+      const terms = extractTopTerms("I found a bug in x module");
+      expect(terms).toContain("found");
+      expect(terms).toContain("bug");
+      expect(terms).toContain("module");
+      expect(terms).not.toContain("I");
+      expect(terms).not.toContain("a");
+      expect(terms).not.toContain("x");
+    });
+
+    test("preserves 2-char tokens like DB, CI, IO", () => {
+      const terms = extractTopTerms("check DB and CI pipeline for IO errors");
+      expect(terms).toContain("db"); // lowercased
+      expect(terms).toContain("ci");
+      expect(terms).toContain("io");
+    });
+
+    test("respects limit parameter", () => {
+      const text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+      const terms = extractTopTerms(text, 3);
+      expect(terms.length).toBe(3);
+    });
+
+    test("default limit is 40", () => {
+      // Generate 50 unique words
+      const words = Array.from({ length: 50 }, (_, i) => `word${i}`);
+      const text = words.join(" ");
+      const terms = extractTopTerms(text);
+      expect(terms.length).toBe(40);
+    });
+
+    test("returns empty for all-stopword text", () => {
+      const terms = extractTopTerms("the with from is at by in");
+      expect(terms.length).toBe(0);
+    });
+
+    test("strips punctuation before processing", () => {
+      const terms = extractTopTerms("what's happening? database-migration!");
+      expect(terms).toContain("happening");
+      expect(terms).toContain("database");
+      expect(terms).toContain("migration");
+      expect(terms).not.toContain("what"); // stopword
     });
   });
 });

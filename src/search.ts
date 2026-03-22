@@ -174,6 +174,38 @@ export function ftsQueryOr(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Term extraction (Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the top meaningful terms from text, sorted by frequency.
+ *
+ * Same filtering as ftsQuery: drops single chars + stopwords.
+ * No general length threshold — preserves short meaningful tokens like "DB", "CI".
+ *
+ * Used by forSession() to build session context queries for FTS5 scoring.
+ *
+ * @param text   Raw text to extract terms from
+ * @param limit  Max number of terms to return (default 40)
+ */
+export function extractTopTerms(text: string, limit = 40): string[] {
+  const freq = text
+    .replace(/[^\w\s]/g, " ")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !STOPWORDS.has(w))
+    .reduce<Map<string, number>>((acc, w) => {
+      acc.set(w, (acc.get(w) ?? 0) + 1);
+      return acc;
+    }, new Map());
+
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([w]) => w);
+}
+
+// ---------------------------------------------------------------------------
 // Score normalization & fusion (Phase 2)
 // ---------------------------------------------------------------------------
 
