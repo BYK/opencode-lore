@@ -201,6 +201,51 @@ export function search(input: {
   }
 }
 
+export type ScoredTemporalMessage = TemporalMessage & { rank: number };
+
+/**
+ * Search with BM25 scores included. Returns results with raw FTS5 rank values
+ * for use in cross-source score fusion (RRF).
+ */
+export function searchScored(input: {
+  projectPath: string;
+  query: string;
+  sessionID?: string;
+  limit?: number;
+}): ScoredTemporalMessage[] {
+  const pid = ensureProject(input.projectPath);
+  const limit = input.limit ?? 20;
+  const q = ftsQuery(input.query);
+  if (q === EMPTY_QUERY) return [];
+
+  const ftsSQL = input.sessionID
+    ? `SELECT m.*, rank FROM temporal_messages m
+       JOIN temporal_fts f ON m.rowid = f.rowid
+       WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ?
+       ORDER BY rank LIMIT ?`
+    : `SELECT m.*, rank FROM temporal_messages m
+       JOIN temporal_fts f ON m.rowid = f.rowid
+       WHERE f.content MATCH ? AND m.project_id = ?
+       ORDER BY rank LIMIT ?`;
+  const params = input.sessionID
+    ? [q, pid, input.sessionID, limit]
+    : [q, pid, limit];
+
+  try {
+    const results = db().query(ftsSQL).all(...params) as ScoredTemporalMessage[];
+    if (results.length) return results;
+
+    const qOr = ftsQueryOr(input.query);
+    if (qOr === EMPTY_QUERY) return [];
+    const paramsOr = input.sessionID
+      ? [qOr, pid, input.sessionID, limit]
+      : [qOr, pid, limit];
+    return db().query(ftsSQL).all(...paramsOr) as ScoredTemporalMessage[];
+  } catch {
+    return [];
+  }
+}
+
 export function count(projectPath: string, sessionID?: string): number {
   const pid = ensureProject(projectPath);
   const query = sessionID

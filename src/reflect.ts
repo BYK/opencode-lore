@@ -3,7 +3,7 @@ import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import { db, ensureProject } from "./db";
-import { ftsQuery, ftsQueryOr, EMPTY_QUERY } from "./search";
+import { ftsQuery, ftsQueryOr, EMPTY_QUERY, reciprocalRankFusion } from "./search";
 import { serialize, inline, h, p, ul, lip, liph, t, root } from "./markdown";
 
 type Distillation = {
@@ -41,25 +41,27 @@ function searchDistillationsLike(input: {
     .all(...allParams) as Distillation[];
 }
 
-function searchDistillations(input: {
+type ScoredDistillation = Distillation & { rank: number };
+
+function searchDistillationsScored(input: {
   projectPath: string;
   query: string;
   sessionID?: string;
   limit?: number;
-}): Distillation[] {
+}): ScoredDistillation[] {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 10;
   const q = ftsQuery(input.query);
   if (q === EMPTY_QUERY) return [];
 
   const ftsSQL = input.sessionID
-    ? `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id
+    ? `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, rank
        FROM distillations d
        JOIN distillation_fts f ON d.rowid = f.rowid
        WHERE distillation_fts MATCH ?
        AND d.project_id = ? AND d.session_id = ?
        ORDER BY rank LIMIT ?`
-    : `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id
+    : `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, rank
        FROM distillations d
        JOIN distillation_fts f ON d.rowid = f.rowid
        WHERE distillation_fts MATCH ?
@@ -70,7 +72,7 @@ function searchDistillations(input: {
     : [q, pid, limit];
 
   try {
-    const results = db().query(ftsSQL).all(...params) as Distillation[];
+    const results = db().query(ftsSQL).all(...params) as ScoredDistillation[];
     if (results.length) return results;
 
     // AND returned nothing — try OR fallback
@@ -79,15 +81,15 @@ function searchDistillations(input: {
     const paramsOr = input.sessionID
       ? [qOr, pid, input.sessionID, limit]
       : [qOr, pid, limit];
-    return db().query(ftsSQL).all(...paramsOr) as Distillation[];
+    return db().query(ftsSQL).all(...paramsOr) as ScoredDistillation[];
   } catch {
-    // FTS5 failed — fall back to LIKE search
+    // FTS5 failed — fall back to LIKE search with synthetic rank
     return searchDistillationsLike({
       pid,
       query: input.query,
       sessionID: input.sessionID,
       limit,
-    });
+    }).map((d, i) => ({ ...d, rank: -(10 - i) }));
   }
 }
 
@@ -137,6 +139,53 @@ function formatResults(input: {
   return serialize(root(...children));
 }
 
+type TaggedResult =
+  | { source: "knowledge"; item: ltm.ScoredKnowledgeEntry }
+  | { source: "distillation"; item: ScoredDistillation }
+  | { source: "temporal"; item: temporal.ScoredTemporalMessage };
+
+function formatFusedResults(
+  results: Array<{ item: TaggedResult; score: number }>,
+  maxResults: number,
+): string {
+  if (!results.length) return "No results found for this query.";
+
+  const items = results.slice(0, maxResults).map(({ item: tagged }) => {
+    switch (tagged.source) {
+      case "knowledge": {
+        const k = tagged.item;
+        return liph(
+          t(
+            `**[knowledge/${k.category}]** ${inline(k.title)}: ${inline(k.content)}`,
+          ),
+        );
+      }
+      case "distillation": {
+        const d = tagged.item;
+        const preview =
+          d.observations.length > 500
+            ? d.observations.slice(0, 500) + "..."
+            : d.observations;
+        return lip(
+          `**[distilled]** ${inline(preview)}`,
+        );
+      }
+      case "temporal": {
+        const m = tagged.item;
+        const preview =
+          m.content.length > 500
+            ? m.content.slice(0, 500) + "..."
+            : m.content;
+        return lip(
+          `**[temporal/${m.role}]** (session: ${m.session_id.slice(0, 8)}...) ${inline(preview)}`,
+        );
+      }
+    }
+  });
+
+  return serialize(root(h(2, "Recall Results"), ul(items)));
+}
+
 export function createRecallTool(projectPath: string, knowledgeEnabled = true): ReturnType<typeof tool> {
   return tool({
     description:
@@ -163,52 +212,80 @@ export function createRecallTool(projectPath: string, knowledgeEnabled = true): 
         return "Query too vague — try using specific keywords, file names, or technical terms.";
       }
 
-      let temporalResults: temporal.TemporalMessage[] = [];
-      if (scope !== "knowledge") {
-        try {
-          temporalResults = temporal.search({
-            projectPath,
-            query: args.query,
-            sessionID: scope === "session" ? sid : undefined,
-            limit: 10,
-          });
-        } catch (err) {
-          log.error("recall: temporal search failed:", err);
-        }
-      }
-
-      let distillationResults: Distillation[] = [];
-      if (scope !== "knowledge") {
-        try {
-          distillationResults = searchDistillations({
-            projectPath,
-            query: args.query,
-            sessionID: scope === "session" ? sid : undefined,
-            limit: 5,
-          });
-        } catch (err) {
-          log.error("recall: distillation search failed:", err);
-        }
-      }
-
-      let knowledgeResults: ltm.KnowledgeEntry[] = [];
+      // Run scored searches across all sources
+      const knowledgeResults: ltm.ScoredKnowledgeEntry[] = [];
       if (knowledgeEnabled && scope !== "session") {
         try {
-          knowledgeResults = ltm.search({
-            query: args.query,
-            projectPath,
-            limit: 10,
-          });
+          knowledgeResults.push(
+            ...ltm.searchScored({
+              query: args.query,
+              projectPath,
+              limit: 10,
+            }),
+          );
         } catch (err) {
           log.error("recall: knowledge search failed:", err);
         }
       }
 
-      return formatResults({
-        temporalResults,
-        distillationResults,
-        knowledgeResults,
-      });
+      const distillationResults: ScoredDistillation[] = [];
+      if (scope !== "knowledge") {
+        try {
+          distillationResults.push(
+            ...searchDistillationsScored({
+              projectPath,
+              query: args.query,
+              sessionID: scope === "session" ? sid : undefined,
+              limit: 10,
+            }),
+          );
+        } catch (err) {
+          log.error("recall: distillation search failed:", err);
+        }
+      }
+
+      const temporalResults: temporal.ScoredTemporalMessage[] = [];
+      if (scope !== "knowledge") {
+        try {
+          temporalResults.push(
+            ...temporal.searchScored({
+              projectPath,
+              query: args.query,
+              sessionID: scope === "session" ? sid : undefined,
+              limit: 10,
+            }),
+          );
+        } catch (err) {
+          log.error("recall: temporal search failed:", err);
+        }
+      }
+
+      // Fuse results using Reciprocal Rank Fusion
+      const fused = reciprocalRankFusion<TaggedResult>([
+        {
+          items: knowledgeResults.map((item) => ({
+            source: "knowledge" as const,
+            item,
+          })),
+          key: (r) => `k:${r.item.id}`,
+        },
+        {
+          items: distillationResults.map((item) => ({
+            source: "distillation" as const,
+            item,
+          })),
+          key: (r) => `d:${r.item.id}`,
+        },
+        {
+          items: temporalResults.map((item) => ({
+            source: "temporal" as const,
+            item,
+          })),
+          key: (r) => `t:${r.item.id}`,
+        },
+      ]);
+
+      return formatFusedResults(fused, 20);
     },
   });
 }
