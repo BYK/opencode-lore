@@ -23,6 +23,15 @@ export type KnowledgeEntry = {
   metadata: string | null;
 };
 
+/** Columns to select for KnowledgeEntry — excludes the embedding BLOB
+ *  (4KB per entry) which is only needed by vectorSearch() in embedding.ts. */
+const KNOWLEDGE_COLS =
+  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata";
+
+/** Same columns with table alias prefix for use in JOIN queries. */
+const KNOWLEDGE_COLS_K =
+  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata";
+
 export function create(input: {
   projectPath?: string;
   category: string;
@@ -150,7 +159,7 @@ export function forProject(
   if (includeCross) {
     return db()
       .query(
-        `SELECT * FROM knowledge
+        `SELECT ${KNOWLEDGE_COLS} FROM knowledge
          WHERE (project_id = ? OR (project_id IS NULL) OR (cross_project = 1))
          AND confidence > 0.2
          ORDER BY confidence DESC, updated_at DESC`,
@@ -159,7 +168,7 @@ export function forProject(
   }
   return db()
     .query(
-      `SELECT * FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
        WHERE project_id = ?
        AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
@@ -264,7 +273,7 @@ export function forSession(
   // --- 1. Load project-specific entries ---
   const projectEntries = db()
     .query(
-      `SELECT * FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
        WHERE project_id = ? AND cross_project = 0 AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
     )
@@ -273,7 +282,7 @@ export function forSession(
   // --- 2. Load cross-project candidates ---
   const crossEntries = db()
     .query(
-      `SELECT * FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
        WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
     )
@@ -370,7 +379,7 @@ export function forSession(
 export function all(): KnowledgeEntry[] {
   return db()
     .query(
-      "SELECT * FROM knowledge WHERE confidence > 0.2 ORDER BY confidence DESC, updated_at DESC",
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE confidence > 0.2 ORDER BY confidence DESC, updated_at DESC`,
     )
     .all() as KnowledgeEntry[];
 }
@@ -394,13 +403,13 @@ function searchLike(input: {
     const pid = ensureProject(input.projectPath);
     return db()
       .query(
-        `SELECT * FROM knowledge WHERE (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+        `SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
       )
       .all(pid, ...likeParams, input.limit) as KnowledgeEntry[];
   }
   return db()
     .query(
-      `SELECT * FROM knowledge WHERE confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
     )
     .all(...likeParams, input.limit) as KnowledgeEntry[];
 }
@@ -417,13 +426,13 @@ export function search(input: {
   const pid = input.projectPath ? ensureProject(input.projectPath) : null;
 
   const ftsSQL = pid
-    ? `SELECT k.* FROM knowledge k
+    ? `SELECT ${KNOWLEDGE_COLS_K} FROM knowledge k
        JOIN knowledge_fts f ON k.rowid = f.rowid
        WHERE knowledge_fts MATCH ?
        AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
        AND k.confidence > 0.2
        ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`
-    : `SELECT k.* FROM knowledge k
+    : `SELECT ${KNOWLEDGE_COLS_K} FROM knowledge k
        JOIN knowledge_fts f ON k.rowid = f.rowid
        WHERE knowledge_fts MATCH ?
        AND k.confidence > 0.2
@@ -474,13 +483,13 @@ export function searchScored(input: {
   const { title, content, category } = ftsWeights();
 
   const ftsSQL = pid
-    ? `SELECT k.*, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
+    ? `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
        JOIN knowledge_fts f ON k.rowid = f.rowid
        WHERE knowledge_fts MATCH ?
        AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
        AND k.confidence > 0.2
        ORDER BY rank LIMIT ?`
-    : `SELECT k.*, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
+    : `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
        JOIN knowledge_fts f ON k.rowid = f.rowid
        WHERE knowledge_fts MATCH ?
        AND k.confidence > 0.2
@@ -507,7 +516,7 @@ export function searchScored(input: {
 
 export function get(id: string): KnowledgeEntry | null {
   return db()
-    .query("SELECT * FROM knowledge WHERE id = ?")
+    .query(`SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE id = ?`)
     .get(id) as KnowledgeEntry | null;
 }
 

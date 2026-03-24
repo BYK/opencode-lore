@@ -15,6 +15,7 @@ import {
   getLtmBudget,
   setForceMinLayer,
   getLastTransformedCount,
+  getLastTransformEstimate,
 } from "./gradient";
 import { formatKnowledge, formatDistillations } from "./prompt";
 import { createRecallTool } from "./reflect";
@@ -136,6 +137,10 @@ export const LorePlugin: Plugin = async (ctx) => {
   function invalidateLtmCache() {
     ltmSessionCache.clear();
   }
+
+  // Sessions where LTM injection failed and the fallback note was pushed.
+  // Used to decide whether recovering LTM is worth the prompt cache bust.
+  const ltmDegradedSessions = new Set<string>();
 
   // Track active sessions for distillation
   const activeSessions = new Set<string>();
@@ -478,34 +483,67 @@ export const LorePlugin: Plugin = async (ctx) => {
       // cache invalidation on every single turn.
       if (cfg.knowledge.enabled) {
         const sessionID = input.sessionID;
-        let cached = sessionID ? ltmSessionCache.get(sessionID) : undefined;
+        try {
+          let cached = sessionID ? ltmSessionCache.get(sessionID) : undefined;
 
-        if (!cached) {
-          const ltmBudget = getLtmBudget(cfg.budget.ltm);
-          const entries = ltm.forSession(projectPath, sessionID, ltmBudget);
-          if (entries.length) {
-            const formatted = formatKnowledge(
-              entries.map((e) => ({
-                category: e.category,
-                title: e.title,
-                content: e.content,
-              })),
-              ltmBudget,
-            );
+          if (!cached) {
+            const ltmBudget = getLtmBudget(cfg.budget.ltm);
+            const entries = ltm.forSession(projectPath, sessionID, ltmBudget);
+            if (entries.length) {
+              const formatted = formatKnowledge(
+                entries.map((e) => ({
+                  category: e.category,
+                  title: e.title,
+                  content: e.content,
+                })),
+                ltmBudget,
+              );
 
-            if (formatted) {
-              const tokenCount = Math.ceil(formatted.length / 3);
-              cached = { formatted, tokenCount };
-              if (sessionID) ltmSessionCache.set(sessionID, cached);
+              if (formatted) {
+                const tokenCount = Math.ceil(formatted.length / 3);
+
+                // If this session was previously degraded (fallback note instead of LTM),
+                // switching to real LTM changes the system prompt prefix → busts the
+                // provider's read-token cache for the entire conversation after this point.
+                // Only recover if the cache invalidation cost is small relative to LTM benefit.
+                if (sessionID && ltmDegradedSessions.has(sessionID)) {
+                  const conversationTokens = getLastTransformEstimate(sessionID);
+                  if (conversationTokens > tokenCount) {
+                    // Conversation is larger than LTM — cache bust costs more than
+                    // LTM is worth. Keep the fallback note for this session.
+                    setLtmTokens(0);
+                    output.system.push(
+                      "[Lore plugin] Long-term memory is temporarily unavailable. " +
+                        "Use the recall tool to search for project knowledge, " +
+                        "past decisions, and prior session context when needed.",
+                    );
+                    return;
+                  }
+                  // Conversation is small — LTM benefit outweighs cache cost. Recover.
+                  ltmDegradedSessions.delete(sessionID);
+                }
+
+                cached = { formatted, tokenCount };
+                if (sessionID) ltmSessionCache.set(sessionID, cached);
+              }
             }
           }
-        }
 
-        if (cached) {
-          setLtmTokens(cached.tokenCount);
-          output.system.push(cached.formatted);
-        } else {
+          if (cached) {
+            setLtmTokens(cached.tokenCount);
+            output.system.push(cached.formatted);
+          } else {
+            setLtmTokens(0);
+          }
+        } catch (e) {
+          log.error("system transform: knowledge injection failed:", e);
           setLtmTokens(0);
+          if (sessionID) ltmDegradedSessions.add(sessionID);
+          output.system.push(
+            "[Lore plugin] Long-term memory is temporarily unavailable. " +
+              "Use the recall tool to search for project knowledge, " +
+              "past decisions, and prior session context when needed.",
+          );
         }
       } else {
         setLtmTokens(0);
@@ -532,70 +570,75 @@ export const LorePlugin: Plugin = async (ctx) => {
 
       const sessionID = output.messages[0]?.info.sessionID;
 
-      // Skip gradient transform for lore worker sessions (lore-distill, lore-curator).
-      // Worker sessions are small (typically 5-15 messages) and don't need context
-      // management. More importantly, allowing them through would overwrite the
-      // per-session state for the MAIN session if they happen to share a session ID —
-      // and before per-session state was introduced, module-level variables were
-      // corrupted this way, causing calibration oscillation and layer 0 passthrough
-      // on the main session's next step. Belt-and-suspenders: even with per-session
-      // state, worker sessions waste CPU on transform() for no benefit.
-      if (sessionID && await shouldSkip(sessionID)) return;
+      try {
+        // Skip gradient transform for lore worker sessions (lore-distill, lore-curator).
+        // Worker sessions are small (typically 5-15 messages) and don't need context
+        // management. More importantly, allowing them through would overwrite the
+        // per-session state for the MAIN session if they happen to share a session ID —
+        // and before per-session state was introduced, module-level variables were
+        // corrupted this way, causing calibration oscillation and layer 0 passthrough
+        // on the main session's next step. Belt-and-suspenders: even with per-session
+        // state, worker sessions waste CPU on transform() for no benefit.
+        if (sessionID && await shouldSkip(sessionID)) return;
 
-      const result = transform({
-        messages: output.messages,
-        projectPath,
-        sessionID,
-      });
+        const result = transform({
+          messages: output.messages,
+          projectPath,
+          sessionID,
+        });
 
-      // The API requires the conversation to end with a user message.
-      // Drop trailing pure-text assistant messages (no tool parts), which would
-      // cause an Anthropic "does not support assistant message prefill" error.
-      // This must run at ALL layers, including layer 0 (passthrough) — the error
-      // can occur even when messages fit within the context budget.
-      //
-      // Crucially, assistant messages that contain tool parts (completed OR pending)
-      // must NOT be dropped:
-      // - Completed tool parts: OpenCode's SDK converts these into tool_result blocks
-      //   sent as user-role messages at the API level. The conversation already ends
-      //   with a user message — dropping would strip the entire current agentic turn
-      //   and cause an infinite tool-call loop (the model restarts from scratch).
-      // - Pending tool parts: the tool call hasn't returned yet; dropping would make
-      //   the model re-issue the same tool call on the next turn.
-      //
-      // Note: at layer 0, result.messages === output.messages (same reference), so
-      // mutating result.messages here also trims output.messages in place — which is
-      // safe for prompt caching since we only ever remove trailing messages, never
-      // reorder or insert.
-      while (
-        result.messages.length > 0 &&
-        result.messages.at(-1)!.info.role !== "user"
-      ) {
-        const last = result.messages.at(-1)!;
-        const hasToolParts = last.parts.some((p) => p.type === "tool");
-        if (hasToolParts) {
-          // Tool parts → tool_result (user-role) at the API level → no prefill error.
-          // Stop dropping; the conversation ends correctly as-is.
-          break;
+        // The API requires the conversation to end with a user message.
+        // Drop trailing pure-text assistant messages (no tool parts), which would
+        // cause an Anthropic "does not support assistant message prefill" error.
+        // This must run at ALL layers, including layer 0 (passthrough) — the error
+        // can occur even when messages fit within the context budget.
+        //
+        // Crucially, assistant messages that contain tool parts (completed OR pending)
+        // must NOT be dropped:
+        // - Completed tool parts: OpenCode's SDK converts these into tool_result blocks
+        //   sent as user-role messages at the API level. The conversation already ends
+        //   with a user message — dropping would strip the entire current agentic turn
+        //   and cause an infinite tool-call loop (the model restarts from scratch).
+        // - Pending tool parts: the tool call hasn't returned yet; dropping would make
+        //   the model re-issue the same tool call on the next turn.
+        //
+        // Note: at layer 0, result.messages === output.messages (same reference), so
+        // mutating result.messages here also trims output.messages in place — which is
+        // safe for prompt caching since we only ever remove trailing messages, never
+        // reorder or insert.
+        while (
+          result.messages.length > 0 &&
+          result.messages.at(-1)!.info.role !== "user"
+        ) {
+          const last = result.messages.at(-1)!;
+          const hasToolParts = last.parts.some((p) => p.type === "tool");
+          if (hasToolParts) {
+            // Tool parts → tool_result (user-role) at the API level → no prefill error.
+            // Stop dropping; the conversation ends correctly as-is.
+            break;
+          }
+          const dropped = result.messages.pop()!;
+          log.warn(
+            "dropping trailing pure-text",
+            dropped.info.role,
+            "message to prevent prefill error. id:",
+            dropped.info.id,
+          );
         }
-        const dropped = result.messages.pop()!;
-        log.warn(
-          "dropping trailing pure-text",
-          dropped.info.role,
-          "message to prevent prefill error. id:",
-          dropped.info.id,
-        );
-      }
 
-      // Only restructure messages when the gradient transform is active (layers 1-4).
-      // Layer 0 means all messages fit within the context budget — leave them alone
-      // so the append-only sequence stays intact for prompt caching.
-      if (result.layer > 0) {
-        output.messages.splice(0, output.messages.length, ...result.messages);
-      }
+        // Only restructure messages when the gradient transform is active (layers 1-4).
+        // Layer 0 means all messages fit within the context budget — leave them alone
+        // so the append-only sequence stays intact for prompt caching.
+        if (result.layer > 0) {
+          output.messages.splice(0, output.messages.length, ...result.messages);
+        }
 
-      if (result.layer >= 2 && sessionID) {
-        backgroundDistill(sessionID);
+        if (result.layer >= 2 && sessionID) {
+          backgroundDistill(sessionID);
+        }
+      } catch (e) {
+        log.error("messages transform: gradient transform failed:", e);
+        // output.messages untouched — session continues without context management
       }
     },
 

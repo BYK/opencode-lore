@@ -1,7 +1,10 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { isContextOverflow, buildRecoveryMessage, LorePlugin, isValidProjectPath } from "../src/index";
 import * as ltm from "../src/ltm";
+import { db } from "../src/db";
+import { getLtmTokens, setModelLimits, calibrate, setLtmTokens } from "../src/gradient";
 import type { Plugin } from "@opencode-ai/plugin";
+import type { Message, Part } from "@opencode-ai/sdk";
 
 // ── Pure function tests ──────────────────────────────────────────────
 
@@ -662,5 +665,363 @@ describe("LorePlugin — invalid project path", () => {
     // Plugin should return hooks without crashing
     expect(hooks).toBeTruthy();
     expect(hooks.event).toBeDefined();
+  });
+});
+
+// ── Transform hook error handling ─────────────────────────────────────
+//
+// Validates that both transform hooks catch DB errors and degrade gracefully
+// instead of propagating exceptions that surface as 500 errors.
+
+/**
+ * Helper: call the messages transform hook and return the output.
+ */
+async function callMessagesTransform(
+  hooks: Awaited<ReturnType<typeof LorePlugin>>,
+  messages: Array<{ info: Message; parts: Part[] }>,
+): Promise<Array<{ info: Message; parts: Part[] }>> {
+  const msgTransform = (hooks as Record<string, unknown>)[
+    "experimental.chat.messages.transform"
+  ] as (
+    input: unknown,
+    output: { messages: Array<{ info: Message; parts: Part[] }> },
+  ) => Promise<void>;
+  const output = { messages: [...messages] };
+  await msgTransform({}, output);
+  return output.messages;
+}
+
+function makeTestMsg(
+  id: string,
+  role: "user" | "assistant",
+  text: string,
+  sessionID = "ses_transform_err",
+): { info: Message; parts: Part[] } {
+  const info: Message =
+    role === "user"
+      ? {
+          id,
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "build",
+          model: {
+            providerID: "anthropic",
+            modelID: "claude-sonnet-4-20250514",
+          },
+        }
+      : {
+          id,
+          sessionID,
+          role: "assistant",
+          time: { created: Date.now() },
+          parentID: `parent-${id}`,
+          modelID: "claude-sonnet-4-20250514",
+          providerID: "anthropic",
+          mode: "build",
+          path: { cwd: "/test", root: "/test" },
+          cost: 0,
+          tokens: {
+            input: 100,
+            output: 50,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+        };
+  return {
+    info,
+    parts: [
+      {
+        id: `part-${id}`,
+        sessionID,
+        messageID: id,
+        type: "text",
+        text,
+        time: { start: Date.now(), end: Date.now() },
+      },
+    ],
+  };
+}
+
+/**
+ * Helper: drop and recreate the knowledge + FTS tables with full schema
+ * (matching db.ts initial schema + all migrations).
+ * Used by error-handling tests that need to corrupt then restore the DB.
+ */
+function restoreKnowledgeTables() {
+  db().exec(`
+    CREATE TABLE IF NOT EXISTS knowledge (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      category TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      source_session TEXT,
+      cross_project INTEGER DEFAULT 0,
+      confidence REAL DEFAULT 1.0,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      metadata TEXT,
+      embedding BLOB
+    )
+  `);
+  db().exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+      title, content, category,
+      content=knowledge, content_rowid=rowid,
+      tokenize='porter unicode61'
+    )
+  `);
+  // Recreate FTS sync triggers
+  db().exec(`
+    CREATE TRIGGER IF NOT EXISTS knowledge_fts_insert AFTER INSERT ON knowledge BEGIN
+      INSERT INTO knowledge_fts(rowid, title, content, category)
+      VALUES (new.rowid, new.title, new.content, new.category);
+    END
+  `);
+  db().exec(`
+    CREATE TRIGGER IF NOT EXISTS knowledge_fts_delete AFTER DELETE ON knowledge BEGIN
+      INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, category)
+      VALUES('delete', old.rowid, old.title, old.content, old.category);
+    END
+  `);
+  db().exec(`
+    CREATE TRIGGER IF NOT EXISTS knowledge_fts_update AFTER UPDATE ON knowledge BEGIN
+      INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, category)
+      VALUES('delete', old.rowid, old.title, old.content, old.category);
+      INSERT INTO knowledge_fts(rowid, title, content, category)
+      VALUES (new.rowid, new.title, new.content, new.category);
+    END
+  `);
+}
+
+function restoreDistillationTables() {
+  db().exec(`
+    CREATE TABLE IF NOT EXISTS distillations (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      session_id TEXT NOT NULL,
+      narrative TEXT NOT NULL,
+      facts TEXT NOT NULL,
+      source_ids TEXT NOT NULL,
+      generation INTEGER DEFAULT 0,
+      token_count INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      observations TEXT NOT NULL DEFAULT '',
+      archived INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  // Post-migration indexes: compound indexes from v6, single-column idx_distillation_project dropped
+  db().exec(`CREATE INDEX IF NOT EXISTS idx_distillation_session ON distillations(session_id)`);
+  db().exec(`CREATE INDEX IF NOT EXISTS idx_distillation_archived ON distillations(archived)`);
+  db().exec(`CREATE INDEX IF NOT EXISTS idx_distillation_project_session ON distillations(project_id, session_id)`);
+  db().exec(`CREATE INDEX IF NOT EXISTS idx_distillation_project_session_gen_archived ON distillations(project_id, session_id, generation, archived)`);
+  db().exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS distillation_fts USING fts5(
+      observations, content='distillations', content_rowid='rowid'
+    )
+  `);
+  db().exec(`
+    CREATE TRIGGER IF NOT EXISTS distillation_fts_insert AFTER INSERT ON distillations BEGIN
+      INSERT INTO distillation_fts(rowid, observations) VALUES (new.rowid, new.observations);
+    END
+  `);
+  db().exec(`
+    CREATE TRIGGER IF NOT EXISTS distillation_fts_delete AFTER DELETE ON distillations BEGIN
+      INSERT INTO distillation_fts(distillation_fts, rowid, observations)
+      VALUES('delete', old.rowid, old.observations);
+    END
+  `);
+  db().exec(`
+    CREATE TRIGGER IF NOT EXISTS distillation_fts_update AFTER UPDATE ON distillations BEGIN
+      INSERT INTO distillation_fts(distillation_fts, rowid, observations)
+      VALUES('delete', old.rowid, old.observations);
+      INSERT INTO distillation_fts(rowid, observations) VALUES (new.rowid, new.observations);
+    END
+  `);
+}
+
+describe("transform hook error handling", () => {
+  test("system.transform catches DB error and pushes fallback note", async () => {
+    const { hooks, tmpDir, cleanup } = await initPlugin();
+    try {
+      // Seed a knowledge entry so forSession() would normally return data
+      ltm.create({
+        projectPath: tmpDir,
+        category: "pattern",
+        title: "Error handling test entry",
+        content: "This entry exists to trigger forSession code path",
+        scope: "project",
+      });
+
+      // Corrupt the knowledge table — forSession() queries it directly.
+      // Drop both FTS and base table to ensure a hard error.
+      db().exec("DROP TABLE IF EXISTS knowledge_fts");
+      db().exec("DROP TABLE IF EXISTS knowledge");
+
+      const sessionID = "ses_sys_db_error";
+      const result = await callSystemTransform(hooks!, sessionID);
+
+      // Should contain the fallback note (not crash)
+      const fallback = result.find((s) =>
+        s.includes("Long-term memory is temporarily unavailable"),
+      );
+      expect(fallback).toBeTruthy();
+      expect(fallback).toContain("recall tool");
+
+      // LTM tokens should be reset to 0
+      expect(getLtmTokens()).toBe(0);
+    } finally {
+      restoreKnowledgeTables();
+      cleanup();
+    }
+  });
+
+  test("messages.transform catches DB error and leaves messages unchanged", async () => {
+    const { hooks, cleanup } = await initPlugin();
+    try {
+      const sessionID = "ses_msg_db_error";
+      const messages = [
+        makeTestMsg("u1", "user", "Hello world", sessionID),
+        makeTestMsg("a1", "assistant", "Hi there!", sessionID),
+        makeTestMsg("u2", "user", "What next?", sessionID),
+      ];
+
+      // Corrupt the distillations table — transform() calls loadDistillations()
+      // which queries this table.
+      db().exec("DROP TABLE IF EXISTS distillation_fts");
+      db().exec("DROP TABLE IF EXISTS distillations");
+
+      // Should not throw — messages pass through unchanged
+      const result = await callMessagesTransform(hooks!, messages);
+
+      // Messages should be unchanged (layer 0 passthrough equivalent)
+      expect(result.length).toBe(messages.length);
+      expect(result[0].info.id).toBe("u1");
+      expect(result[2].info.id).toBe("u2");
+    } finally {
+      restoreDistillationTables();
+      cleanup();
+    }
+  });
+
+  test("LTM recovery skipped on long session to preserve prompt cache", async () => {
+    const { hooks, tmpDir, cleanup } = await initPlugin();
+    try {
+      // Seed knowledge entry
+      ltm.create({
+        projectPath: tmpDir,
+        category: "architecture",
+        title: "Cache trade-off test",
+        content: "Entry for testing LTM recovery trade-off",
+        scope: "project",
+      });
+
+      const sessionID = "ses_cache_tradeoff_long";
+
+      // First call: corrupt DB to trigger degraded mode
+      db().exec("DROP TABLE IF EXISTS knowledge_fts");
+      db().exec("DROP TABLE IF EXISTS knowledge");
+      const degraded = await callSystemTransform(hooks!, sessionID);
+      expect(
+        degraded.find((s) => s.includes("temporarily unavailable")),
+      ).toBeTruthy();
+
+      // Restore the knowledge table
+      restoreKnowledgeTables();
+
+      // Re-seed knowledge
+      ltm.create({
+        projectPath: tmpDir,
+        category: "architecture",
+        title: "Cache trade-off test restored",
+        content: "Entry for testing LTM recovery trade-off after restore",
+        scope: "project",
+      });
+
+      // Simulate a long conversation by doing a real transform + calibration
+      // so lastTransformEstimate is set high.
+      setModelLimits({ context: 200_000, output: 32_000 });
+
+      // Create a substantial message array to drive up lastTransformEstimate
+      const messages: Array<{ info: Message; parts: Part[] }> = [];
+      for (let i = 0; i < 100; i++) {
+        messages.push(
+          makeTestMsg(`u${i}`, "user", "x".repeat(500), sessionID),
+          makeTestMsg(`a${i}`, "assistant", "y".repeat(500), sessionID),
+        );
+      }
+
+      // Run messages transform to populate lastTransformEstimate for this session
+      await callMessagesTransform(hooks!, messages);
+
+      // Now call system transform again — DB is restored, forSession() would
+      // succeed, but the session is degraded + conversation is large.
+      // Should keep the fallback note to preserve prompt cache.
+      const recovered = await callSystemTransform(hooks!, sessionID);
+      const stillDegraded = recovered.find((s) =>
+        s.includes("temporarily unavailable"),
+      );
+      expect(stillDegraded).toBeTruthy();
+    } finally {
+      restoreKnowledgeTables();
+      cleanup();
+    }
+  });
+
+  test("LTM recovery proceeds on short session", async () => {
+    const { hooks, tmpDir, cleanup } = await initPlugin();
+    try {
+      // Seed knowledge entry
+      ltm.create({
+        projectPath: tmpDir,
+        category: "architecture",
+        title: "Short session recovery test",
+        content: "Entry for testing LTM recovery on a short session",
+        scope: "project",
+      });
+
+      const sessionID = "ses_cache_tradeoff_short";
+
+      // First call: corrupt DB to trigger degraded mode
+      db().exec("DROP TABLE IF EXISTS knowledge_fts");
+      db().exec("DROP TABLE IF EXISTS knowledge");
+      const degraded = await callSystemTransform(hooks!, sessionID);
+      expect(
+        degraded.find((s) => s.includes("temporarily unavailable")),
+      ).toBeTruthy();
+
+      // Restore the knowledge table
+      restoreKnowledgeTables();
+
+      // Re-seed knowledge
+      ltm.create({
+        projectPath: tmpDir,
+        category: "architecture",
+        title: "Short session recovery entry",
+        content: "Entry visible after DB recovery on short session",
+        scope: "project",
+      });
+
+      // Don't run any messages transform — lastTransformEstimate stays at 0
+      // (short/new session). LTM benefit outweighs zero cache cost.
+      const recovered = await callSystemTransform(hooks!, sessionID);
+
+      // Should recover real LTM (not the fallback note)
+      const ltmBlock = recovered.find((s) =>
+        s.includes("Long-term Knowledge"),
+      );
+      expect(ltmBlock).toBeTruthy();
+      expect(ltmBlock).toContain("Short session recovery entry");
+
+      // The fallback note should NOT be present
+      const fallback = recovered.find((s) =>
+        s.includes("temporarily unavailable"),
+      );
+      expect(fallback).toBeUndefined();
+    } finally {
+      restoreKnowledgeTables();
+      cleanup();
+    }
   });
 });
