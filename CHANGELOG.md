@@ -1,4 +1,19 @@
 # Changelog
+## 0.7.0
+
+### New Features ✨
+
+- Add Voyage AI embedding search by @BYK in [#50](https://github.com/BYK/opencode-lore/pull/50)
+- Add search config surface and LLM query expansion by @BYK in [#49](https://github.com/BYK/opencode-lore/pull/49)
+- Replace forSession() scoring with FTS5 BM25 by @BYK in [#48](https://github.com/BYK/opencode-lore/pull/48)
+- Add RRF score fusion and rewrite recall tool by @BYK in [#47](https://github.com/BYK/opencode-lore/pull/47)
+- Improve FTS5 search foundations by @BYK in [#46](https://github.com/BYK/opencode-lore/pull/46)
+
+### Bug Fixes 🐛
+
+- Catch unhandled exceptions in transform hooks and avoid loading embedding BLOBs by @BYK in [#52](https://github.com/BYK/opencode-lore/pull/52)
+- Auto-enable embeddings when VOYAGE_API_KEY is set by @BYK in [#51](https://github.com/BYK/opencode-lore/pull/51)
+
 ## 0.6.2
 
 ### Bug Fixes 🐛
