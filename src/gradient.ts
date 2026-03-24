@@ -205,6 +205,11 @@ export function getLastTransformedCount(sessionID: string): number {
   return sessionStates.get(sessionID)?.lastTransformedCount ?? 0;
 }
 
+/** Returns the token estimate from the most recent transform() output. */
+export function getLastTransformEstimate(sessionID: string): number {
+  return sessionStates.get(sessionID)?.lastTransformEstimate ?? 0;
+}
+
 /** Returns the layer used by the most recent transform() call. For testing. */
 export function getLastLayer(sessionID?: string): SafetyLayer {
   if (sessionID) return sessionStates.get(sessionID)?.lastLayer ?? 0;
