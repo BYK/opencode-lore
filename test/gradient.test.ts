@@ -754,6 +754,283 @@ function makeStepWithTool(
 }
 
 // ---------------------------------------------------------------------------
+// sanitizeToolParts: pending/running tool parts → error state
+// Prevents orphaned tool_use blocks (no matching tool_result) from reaching the
+// Anthropic API. When a session errors mid-tool-execution, the tool part stays in
+// pending/running state. sanitizeToolParts() converts these to error state so the
+// SDK generates both tool_use + tool_result(is_error=true).
+// ---------------------------------------------------------------------------
+
+function makeStepWithPendingTool(
+  id: string,
+  parentUserID: string,
+  toolName: string,
+  sessionID = "grad-sess",
+): { info: Message; parts: Part[] } {
+  const info: Message = {
+    id,
+    sessionID,
+    role: "assistant",
+    time: { created: Date.now() },
+    parentID: parentUserID,
+    modelID: "claude-sonnet-4-20250514",
+    providerID: "anthropic",
+    mode: "build",
+    path: { cwd: "/test", root: "/test" },
+    cost: 0,
+    tokens: {
+      input: 100,
+      output: 50,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    },
+  };
+  return {
+    info,
+    parts: [
+      {
+        id: `step-start-${id}`,
+        sessionID,
+        messageID: id,
+        type: "step-start",
+      } as Part,
+      {
+        id: `tool-${id}`,
+        sessionID,
+        messageID: id,
+        type: "tool",
+        callID: `call-${id}`,
+        tool: toolName,
+        state: {
+          status: "pending",
+          input: { command: "ls" },
+          raw: '{"command": "ls"}',
+        },
+      } as unknown as Part,
+    ],
+  };
+}
+
+function makeStepWithRunningTool(
+  id: string,
+  parentUserID: string,
+  toolName: string,
+  sessionID = "grad-sess",
+): { info: Message; parts: Part[] } {
+  const info: Message = {
+    id,
+    sessionID,
+    role: "assistant",
+    time: { created: Date.now() },
+    parentID: parentUserID,
+    modelID: "claude-sonnet-4-20250514",
+    providerID: "anthropic",
+    mode: "build",
+    path: { cwd: "/test", root: "/test" },
+    cost: 0,
+    tokens: {
+      input: 100,
+      output: 50,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    },
+  };
+  const startTime = Date.now() - 5000;
+  return {
+    info,
+    parts: [
+      {
+        id: `step-start-${id}`,
+        sessionID,
+        messageID: id,
+        type: "step-start",
+      } as Part,
+      {
+        id: `tool-${id}`,
+        sessionID,
+        messageID: id,
+        type: "tool",
+        callID: `call-${id}`,
+        tool: toolName,
+        state: {
+          status: "running",
+          input: { command: "build" },
+          title: toolName,
+          metadata: { cwd: "/test" },
+          time: { start: startTime },
+        },
+      } as unknown as Part,
+    ],
+  };
+}
+
+describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
+  const SESSION = "sanitize-sess";
+
+  beforeEach(() => {
+    resetCalibration();
+    resetPrefixCache();
+    resetRawWindowCache();
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    ensureProject(PROJECT);
+  });
+
+  test("no-op when all tool parts are completed — returns same array reference", () => {
+    const msgs = [
+      makeMsg("san-u1", "user", "build it", SESSION),
+      makeStepWithTool("san-a1", "san-u1", "bash", "done", SESSION),
+    ];
+
+    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+
+    // Layer 0 for small session — messages should be the same reference
+    expect(result.layer).toBe(0);
+    // The tool part should still be completed
+    const toolPart = result.messages[1]!.parts.find((p) => p.type === "tool")!;
+    expect((toolPart as any).state.status).toBe("completed");
+  });
+
+  test("pending tool part is converted to error state", () => {
+    const msgs = [
+      makeMsg("san-u2", "user", "run something", SESSION),
+      makeStepWithPendingTool("san-a2", "san-u2", "bash", SESSION),
+    ];
+
+    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+
+    const toolPart = result.messages[1]!.parts.find((p) => p.type === "tool")! as any;
+    expect(toolPart.state.status).toBe("error");
+    expect(toolPart.state.error).toBe("[tool execution interrupted — session recovered]");
+    expect(toolPart.state.input).toEqual({ command: "ls" });
+    // Pending has no time field — both start and end should be fabricated
+    expect(typeof toolPart.state.time.start).toBe("number");
+    expect(typeof toolPart.state.time.end).toBe("number");
+  });
+
+  test("running tool part is converted to error state, preserving time.start", () => {
+    const msgs = [
+      makeMsg("san-u3", "user", "build the project", SESSION),
+      makeStepWithRunningTool("san-a3", "san-u3", "bash", SESSION),
+    ];
+
+    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+
+    const toolPart = result.messages[1]!.parts.find((p) => p.type === "tool")! as any;
+    expect(toolPart.state.status).toBe("error");
+    expect(toolPart.state.error).toBe("[tool execution interrupted — session recovered]");
+    expect(toolPart.state.input).toEqual({ command: "build" });
+    // Running has time.start — should be preserved
+    expect(toolPart.state.time.start).toBeLessThan(Date.now());
+    expect(toolPart.state.time.end).toBeGreaterThanOrEqual(toolPart.state.time.start);
+    // Metadata from running state should be carried over
+    expect(toolPart.state.metadata).toEqual({ cwd: "/test" });
+  });
+
+  test("mixed parts: text + completed tool + pending tool — only pending converted", () => {
+    const msgs = [
+      makeMsg("san-u4", "user", "do stuff", SESSION),
+      {
+        ...makeStepWithTool("san-a4", "san-u4", "bash", "first output", SESSION),
+        parts: [
+          // text part
+          {
+            id: "text-san-a4",
+            sessionID: SESSION,
+            messageID: "san-a4",
+            type: "text",
+            text: "Let me run two commands",
+            time: { start: Date.now(), end: Date.now() },
+          } as Part,
+          // completed tool part
+          {
+            id: "tool-completed-san-a4",
+            sessionID: SESSION,
+            messageID: "san-a4",
+            type: "tool",
+            callID: "call-completed",
+            tool: "bash",
+            state: {
+              status: "completed",
+              title: "bash",
+              input: { command: "ls" },
+              output: "file1.ts file2.ts",
+              metadata: {},
+              time: { start: Date.now(), end: Date.now() },
+            },
+          } as unknown as Part,
+          // pending tool part
+          {
+            id: "tool-pending-san-a4",
+            sessionID: SESSION,
+            messageID: "san-a4",
+            type: "tool",
+            callID: "call-pending",
+            tool: "bash",
+            state: {
+              status: "pending",
+              input: { command: "cat file1.ts" },
+              raw: '{"command": "cat file1.ts"}',
+            },
+          } as unknown as Part,
+        ],
+      },
+    ];
+
+    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+
+    const parts = result.messages[1]!.parts;
+    // Text part unchanged
+    const textPart = parts.find((p) => p.type === "text")!;
+    expect((textPart as any).text).toBe("Let me run two commands");
+    // Completed tool part unchanged
+    const completedTool = parts.find(
+      (p) => p.type === "tool" && (p as any).callID === "call-completed",
+    )! as any;
+    expect(completedTool.state.status).toBe("completed");
+    expect(completedTool.state.output).toBe("file1.ts file2.ts");
+    // Pending tool part → error
+    const pendingTool = parts.find(
+      (p) => p.type === "tool" && (p as any).callID === "call-pending",
+    )! as any;
+    expect(pendingTool.state.status).toBe("error");
+    expect(pendingTool.state.error).toBe("[tool execution interrupted — session recovered]");
+  });
+
+  test("user messages are untouched", () => {
+    const userMsg = makeMsg("san-u5", "user", "hello", SESSION);
+    const msgs = [userMsg, makeStepWithPendingTool("san-a5", "san-u5", "bash", SESSION)];
+
+    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+
+    // User message should be the same object reference (not cloned)
+    expect(result.messages[0]!.info.id).toBe("san-u5");
+    expect(result.messages[0]!.parts[0]!.type).toBe("text");
+  });
+
+  test("multiple messages: only affected messages are cloned", () => {
+    const msgs = [
+      makeMsg("san-u6", "user", "first task", SESSION),
+      makeStepWithTool("san-a6", "san-u6", "bash", "done", SESSION), // completed — untouched
+      makeMsg("san-u7", "user", "second task", SESSION),
+      makeStepWithPendingTool("san-a7", "san-u7", "edit", SESSION), // pending — converted
+    ];
+
+    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+
+    // Completed tool message untouched
+    const completedMsg = result.messages.find((m) => m.info.id === "san-a6")!;
+    const completedTool = completedMsg.parts.find((p) => p.type === "tool")! as any;
+    expect(completedTool.state.status).toBe("completed");
+
+    // Pending tool message converted
+    const pendingMsg = result.messages.find((m) => m.info.id === "san-a7")!;
+    const pendingTool = pendingMsg.parts.find((p) => p.type === "tool")! as any;
+    expect(pendingTool.state.status).toBe("error");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Layer 0 trailing-drop: pure-text trailing assistant messages must be dropped
 // even when gradient is not active (layer 0 passthrough). This is the fix for
 // the "does not support assistant message prefill" error that recurred on small

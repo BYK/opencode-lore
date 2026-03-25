@@ -341,6 +341,53 @@ function toolStripAnnotation(toolName: string, output: string): string {
   return annotation;
 }
 
+// Ensure every tool part in the window has a terminal state (completed or error).
+// Pending/running tool parts produce tool_use blocks at the API level but have no
+// output to generate a matching tool_result — causing Anthropic to reject the request
+// with "tool_use ids were found without tool_result blocks immediately after".
+// This happens when a session errors mid-tool-execution (e.g. context overflow) and
+// the tool part remains in pending/running state on the next transform.
+// Converting to error state generates both tool_use + tool_result(is_error=true).
+function sanitizeToolParts(
+  messages: MessageWithParts[],
+): MessageWithParts[] {
+  let changed = false;
+  const result = messages.map((msg) => {
+    if (msg.info.role !== "assistant") return msg;
+
+    let partsChanged = false;
+    const parts = msg.parts.map((part) => {
+      if (part.type !== "tool") return part;
+      const { status } = part.state;
+      if (status === "completed" || status === "error") return part;
+
+      // pending or running → convert to error so SDK emits tool_result
+      partsChanged = true;
+      const now = Date.now();
+      return {
+        ...part,
+        state: {
+          status: "error" as const,
+          input: part.state.input,
+          error: "[tool execution interrupted — session recovered]",
+          metadata:
+            "metadata" in part.state ? part.state.metadata : undefined,
+          time: {
+            start: "time" in part.state ? part.state.time.start : now,
+            end: now,
+          },
+        },
+      } as Part;
+    });
+
+    if (!partsChanged) return msg;
+    changed = true;
+    return { ...msg, parts };
+  });
+
+  return changed ? result : messages;
+}
+
 function stripToolOutputs(parts: Part[]): Part[] {
   return parts.map((part) => {
     if (part.type !== "tool") return part;
@@ -1075,6 +1122,12 @@ export function transform(input: {
   sessionID?: string;
 }): TransformResult {
   const result = transformInner(input);
+
+  // Sanitize non-terminal tool parts before the window reaches the SDK.
+  // Must run after transformInner (covers all layers 0-4) and before the
+  // trailing-drop loop in index.ts sees the messages.
+  result.messages = sanitizeToolParts(result.messages);
+
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   if (sid) {
     const state = getSessionState(sid);

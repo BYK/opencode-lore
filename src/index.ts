@@ -593,14 +593,14 @@ export const LorePlugin: Plugin = async (ctx) => {
         // This must run at ALL layers, including layer 0 (passthrough) — the error
         // can occur even when messages fit within the context budget.
         //
-        // Crucially, assistant messages that contain tool parts (completed OR pending)
-        // must NOT be dropped:
-        // - Completed tool parts: OpenCode's SDK converts these into tool_result blocks
-        //   sent as user-role messages at the API level. The conversation already ends
-        //   with a user message — dropping would strip the entire current agentic turn
-        //   and cause an infinite tool-call loop (the model restarts from scratch).
-        // - Pending tool parts: the tool call hasn't returned yet; dropping would make
-        //   the model re-issue the same tool call on the next turn.
+        // Crucially, assistant messages that contain tool parts must NOT be dropped:
+        // - Completed/error tool parts: OpenCode's SDK converts these into tool_result
+        //   blocks sent as user-role messages at the API level. The conversation already
+        //   ends with a user message — dropping would strip the entire current agentic
+        //   turn and cause an infinite tool-call loop (the model restarts from scratch).
+        // - Note: pending/running tool parts are converted to error state upstream by
+        //   sanitizeToolParts() in gradient.ts, so by this point all tool parts have a
+        //   terminal state (completed or error) and will generate tool_result blocks.
         //
         // Note: at layer 0, result.messages === output.messages (same reference), so
         // mutating result.messages here also trims output.messages in place — which is
