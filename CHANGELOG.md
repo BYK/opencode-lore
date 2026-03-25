@@ -1,4 +1,10 @@
 # Changelog
+## 0.7.1
+
+### Bug Fixes 🐛
+
+- Sanitize pending/running tool parts to prevent orphaned tool_use by @BYK in [#54](https://github.com/BYK/opencode-lore/pull/54)
+
 ## 0.7.0
 
 ### New Features ✨
