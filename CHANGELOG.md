@@ -1,4 +1,10 @@
 # Changelog
+## 0.7.2
+
+### Bug Fixes 🐛
+
+- Lower curation threshold, add per-session tracking, and improve observability by @BYK in [#56](https://github.com/BYK/opencode-lore/pull/56)
+
 ## 0.7.1
 
 ### Bug Fixes 🐛
