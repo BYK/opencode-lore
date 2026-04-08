@@ -37,11 +37,11 @@ export const LoreConfig = z.object({
     .object({
       enabled: z.boolean().default(true),
       onIdle: z.boolean().default(true),
-      afterTurns: z.number().min(1).default(10),
+      afterTurns: z.number().min(1).default(3),
       /** Max knowledge entries per project before consolidation triggers. Default: 25. */
       maxEntries: z.number().min(10).default(25),
     })
-    .default({ enabled: true, onIdle: true, afterTurns: 10, maxEntries: 25 }),
+    .default({ enabled: true, onIdle: true, afterTurns: 3, maxEntries: 25 }),
   pruning: z
     .object({
       /** Days to keep distilled temporal messages before pruning. Default: 120. */

@@ -64,8 +64,10 @@ function parseOps(text: string): CuratorOp[] {
   }
 }
 
-// Track which messages we've already curated
-let lastCuratedAt = 0;
+// Track which messages we've already curated — per session to prevent
+// cross-session leaking (curation on session A advancing the timestamp
+// past session B's messages, causing B's curation to find < 3 recent).
+const lastCuratedAt = new Map<string, number>();
 
 export async function run(input: {
   client: Client;
@@ -78,7 +80,8 @@ export async function run(input: {
 
   // Get recent messages since last curation
   const all = temporal.bySession(input.projectPath, input.sessionID);
-  const recent = all.filter((m) => m.created_at > lastCuratedAt);
+  const sessionCuratedAt = lastCuratedAt.get(input.sessionID) ?? 0;
+  const recent = all.filter((m) => m.created_at > sessionCuratedAt);
   if (recent.length < 3) return { created: 0, updated: 0, deleted: 0 };
 
   const text = recent.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
@@ -170,12 +173,16 @@ export async function run(input: {
     }
   }
 
-  lastCuratedAt = Date.now();
+  lastCuratedAt.set(input.sessionID, Date.now());
   return { created, updated, deleted };
 }
 
-export function resetCurationTracker() {
-  lastCuratedAt = 0;
+export function resetCurationTracker(sessionID?: string) {
+  if (sessionID) {
+    lastCuratedAt.delete(sessionID);
+  } else {
+    lastCuratedAt.clear();
+  }
 }
 
 /**
