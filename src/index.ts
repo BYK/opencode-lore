@@ -299,8 +299,9 @@ export const LorePlugin: Plugin = async (ctx) => {
               calibrate(actualInput, msg.sessionID, getLastTransformedCount(msg.sessionID));
             }
           }
-        } catch {
+        } catch (e) {
           // Message may not be fetchable yet during streaming
+          log.warn(`message.updated: failed to fetch message ${msg.id} for session ${msg.sessionID.substring(0, 16)}:`, e);
         }
       }
 
@@ -377,7 +378,10 @@ export const LorePlugin: Plugin = async (ctx) => {
       if (event.type === "session.idle") {
         const sessionID = event.properties.sessionID;
         if (await shouldSkip(sessionID)) return;
-        if (!activeSessions.has(sessionID)) return;
+        if (!activeSessions.has(sessionID)) {
+          log.info(`session ${sessionID.substring(0, 16)} idle but not in activeSessions — skipping`);
+          return;
+        }
 
         // Run background distillation for any remaining undistilled messages
         await backgroundDistill(sessionID);
@@ -388,13 +392,15 @@ export const LorePlugin: Plugin = async (ctx) => {
         // caused onIdle=true (default) to short-circuit, running the curator
         // on EVERY session.idle — an LLM worker call after every agent turn.
         const cfg = config();
-        if (
-          cfg.knowledge.enabled &&
-          cfg.curator.onIdle &&
-          turnsSinceCuration >= cfg.curator.afterTurns
-        ) {
-          await backgroundCurate(sessionID);
-          turnsSinceCuration = 0;
+        if (cfg.knowledge.enabled && cfg.curator.onIdle) {
+          if (turnsSinceCuration >= cfg.curator.afterTurns) {
+            await backgroundCurate(sessionID);
+            turnsSinceCuration = 0;
+          } else {
+            log.info(
+              `curation skipped: ${turnsSinceCuration}/${cfg.curator.afterTurns} user turns since last curation`,
+            );
+          }
         }
 
         // Consolidate entries if count exceeds cfg.curator.maxEntries.
@@ -444,8 +450,13 @@ export const LorePlugin: Plugin = async (ctx) => {
         try {
           const agentsCfg = cfg.agentsFile;
           if (isValidProjectPath(projectPath) && cfg.knowledge.enabled && agentsCfg.enabled) {
-            const filePath = join(projectPath, agentsCfg.path);
-            exportToFile({ projectPath, filePath });
+            const entries = ltm.forProject(projectPath, false);
+            if (entries.length === 0) {
+              log.info("agents-file export: 0 knowledge entries for project, skipping write");
+            } else {
+              const filePath = join(projectPath, agentsCfg.path);
+              exportToFile({ projectPath, filePath });
+            }
           }
         } catch (e) {
           log.error("agents-file export error:", e);

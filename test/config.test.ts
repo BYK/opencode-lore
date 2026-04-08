@@ -58,11 +58,11 @@ describe("LoreConfig — knowledge schema", () => {
 });
 
 describe("LoreConfig — curator schema", () => {
-  test("curator defaults: enabled=true, onIdle=true, afterTurns=10, maxEntries=25", () => {
+  test("curator defaults: enabled=true, onIdle=true, afterTurns=3, maxEntries=25", () => {
     const cfg = LoreConfig.parse({});
     expect(cfg.curator.enabled).toBe(true);
     expect(cfg.curator.onIdle).toBe(true);
-    expect(cfg.curator.afterTurns).toBe(10);
+    expect(cfg.curator.afterTurns).toBe(3);
     expect(cfg.curator.maxEntries).toBe(25);
   });
 
