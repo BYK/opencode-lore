@@ -1,4 +1,16 @@
 # Changelog
+## 0.8.0
+
+### New Features ✨
+
+- Content-aware deduplication pre-pass in gradient transform by @BYK in [#60](https://github.com/BYK/opencode-lore/pull/60)
+- Multi-provider embeddings, distillation vector search, and cross-project recall by @BYK in [#58](https://github.com/BYK/opencode-lore/pull/58)
+
+### Bug Fixes 🐛
+
+- Switch publish workflow to Node 24, drop broken npm upgrade step by @BYK in [#62](https://github.com/BYK/opencode-lore/pull/62)
+- Lower curation threshold, add per-session tracking, and improve observability by @BYK in [#56](https://github.com/BYK/opencode-lore/pull/56)
+
 ## 0.7.1
 
 ### Bug Fixes 🐛
