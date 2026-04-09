@@ -4,7 +4,7 @@ import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import * as embedding from "./embedding";
-import { db, ensureProject } from "./db";
+import { db, ensureProject, projectName } from "./db";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, reciprocalRankFusion, expandQuery } from "./search";
 import { serialize, inline, h, p, ul, lip, liph, t, root } from "./markdown";
 import type { LoreConfig } from "./config";
@@ -146,6 +146,7 @@ function formatResults(input: {
 
 type TaggedResult =
   | { source: "knowledge"; item: ltm.ScoredKnowledgeEntry }
+  | { source: "cross-knowledge"; item: ltm.ScoredKnowledgeEntry; projectLabel: string }
   | { source: "distillation"; item: ScoredDistillation }
   | { source: "temporal"; item: temporal.ScoredTemporalMessage };
 
@@ -162,6 +163,14 @@ function formatFusedResults(
         return liph(
           t(
             `**[knowledge/${k.category}]** ${inline(k.title)}: ${inline(k.content)}`,
+          ),
+        );
+      }
+      case "cross-knowledge": {
+        const k = tagged.item;
+        return liph(
+          t(
+            `**[knowledge/${k.category} from: ${tagged.projectLabel}]** ${inline(k.title)}: ${inline(k.content)}`,
           ),
         );
       }
@@ -311,30 +320,89 @@ export function createRecallTool(
         );
       }
 
-      // Vector search: embed query and find similar knowledge entries
-      if (embedding.isAvailable() && knowledgeEnabled && scope !== "session") {
+      // Vector search: embed query and find similar knowledge entries + distillations
+      if (embedding.isAvailable() && scope !== "session") {
         try {
           const [queryVec] = await embedding.embed([args.query], "query");
-          const vectorHits = embedding.vectorSearch(queryVec, limit);
-          const vectorTagged: TaggedResult[] = [];
-          for (const hit of vectorHits) {
-            const entry = ltm.get(hit.id);
-            if (entry) {
-              vectorTagged.push({
-                source: "knowledge",
-                item: { ...entry, rank: -hit.similarity },
+
+          // Knowledge vector search
+          if (knowledgeEnabled) {
+            const vectorHits = embedding.vectorSearch(queryVec, limit);
+            const vectorTagged: TaggedResult[] = [];
+            for (const hit of vectorHits) {
+              const entry = ltm.get(hit.id);
+              if (entry) {
+                vectorTagged.push({
+                  source: "knowledge",
+                  item: { ...entry, rank: -hit.similarity },
+                });
+              }
+            }
+            if (vectorTagged.length) {
+              // Same `k:` key prefix as BM25 knowledge — RRF merges, not duplicates
+              allRrfLists.push({
+                items: vectorTagged,
+                key: (r) => `k:${r.item.id}`,
               });
             }
           }
-          if (vectorTagged.length) {
-            // Same `k:` key prefix as BM25 knowledge — RRF merges, not duplicates
-            allRrfLists.push({
-              items: vectorTagged,
-              key: (r) => `k:${r.item.id}`,
-            });
+
+          // Distillation vector search
+          if (scope !== "knowledge") {
+            const distVectorHits = embedding.vectorSearchDistillations(queryVec, limit);
+            const distVectorTagged: TaggedResult[] = distVectorHits
+              .map((hit): TaggedResult | null => {
+                // Look up the distillation to get its full fields
+                const row = db()
+                  .query(
+                    "SELECT id, observations, generation, created_at, session_id FROM distillations WHERE id = ?",
+                  )
+                  .get(hit.id) as Distillation | null;
+                if (!row) return null;
+                return {
+                  source: "distillation",
+                  item: { ...row, rank: -hit.similarity },
+                };
+              })
+              .filter((r): r is TaggedResult => r !== null);
+            if (distVectorTagged.length) {
+              // Same `d:` key prefix as BM25 distillations — RRF merges, not duplicates
+              allRrfLists.push({
+                items: distVectorTagged,
+                key: (r) => `d:${r.item.id}`,
+              });
+            }
           }
         } catch (err) {
           log.info("recall: vector search failed:", err);
+        }
+      }
+
+      // Cross-project knowledge discovery: find relevant entries from other projects.
+      // Only runs in "all" scope — "project", "session", and "knowledge" scopes are
+      // intentionally limited to the current project context.
+      if (knowledgeEnabled && scope === "all") {
+        try {
+          const crossProjectResults = ltm.searchScoredOtherProjects({
+            query: args.query,
+            excludeProjectPath: projectPath,
+            limit,
+          });
+          if (crossProjectResults.length) {
+            allRrfLists.push({
+              items: crossProjectResults.map((item: ltm.ScoredKnowledgeEntry) => {
+                const label = (item.project_id ? projectName(item.project_id) : null) ?? "other";
+                return {
+                  source: "cross-knowledge" as const,
+                  item,
+                  projectLabel: label,
+                } as TaggedResult;
+              }),
+              key: (r) => `xk:${r.item.id}`,
+            });
+          }
+        } catch (err) {
+          log.info("recall: cross-project knowledge search failed:", err);
         }
       }
 

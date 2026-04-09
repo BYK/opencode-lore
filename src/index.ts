@@ -735,9 +735,12 @@ End with "I'm ready to continue." so the agent knows to pick up where it left of
 
   // Background: backfill embeddings for entries that don't have one yet.
   // Fires once when embeddings are first enabled — subsequent entries
-  // get embedded on create/update via ltm.ts hooks.
+  // get embedded on create/update via ltm.ts and distillation.ts hooks.
   if (embedding.isAvailable()) {
-    embedding.backfillEmbeddings().catch((err) => {
+    Promise.all([
+      embedding.backfillEmbeddings(),
+      embedding.backfillDistillationEmbeddings(),
+    ]).catch((err) => {
       log.info("embedding backfill failed:", err);
     });
   }

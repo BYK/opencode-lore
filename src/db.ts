@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 const MIGRATIONS: string[] = [
   `
@@ -220,6 +220,14 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   );
   `,
+  `
+  -- Version 9: Embedding BLOB column for distillation vector search.
+  -- Same pattern as knowledge embeddings (version 8). Enables semantic
+  -- search over distilled session summaries via cosine similarity.
+  -- No backfill — entries get embedded lazily on next distillation
+  -- or via explicit backfill when embeddings are first enabled.
+  ALTER TABLE distillations ADD COLUMN embedding BLOB;
+  `,
 ];
 
 function dataDir() {
@@ -314,6 +322,14 @@ export function projectId(path: string): string | undefined {
     .query("SELECT id FROM projects WHERE path = ?")
     .get(path) as { id: string } | null;
   return row?.id;
+}
+
+/** Look up a project's display name by its internal ID. */
+export function projectName(id: string): string | null {
+  const row = db()
+    .query("SELECT name FROM projects WHERE id = ?")
+    .get(id) as { name: string } | null;
+  return row?.name ?? null;
 }
 
 /**

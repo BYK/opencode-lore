@@ -66,21 +66,29 @@ export const LoreConfig = z.object({
        *  When enabled, the configured model generates 2–3 alternative query phrasings
        *  before search, improving recall for ambiguous queries. */
       queryExpansion: z.boolean().default(false),
-      /** Vector embedding search via Voyage AI.
-       *  Automatically enabled when VOYAGE_API_KEY env var is set.
+      /** Vector embedding search.
+       *  Supports multiple providers: "voyage" (Voyage AI, VOYAGE_API_KEY),
+       *  "openai" (OpenAI, OPENAI_API_KEY).
+       *  Automatically enabled when the configured provider's API key env var is set.
        *  Set enabled: false to explicitly disable even with the key present. */
       embeddings: z
         .object({
           /** Enable/disable vector embedding search. Default: true.
-           *  Set to false to explicitly disable even when VOYAGE_API_KEY is set. */
+           *  Set to false to explicitly disable even when the API key is set. */
           enabled: z.boolean().default(true),
-          /** Voyage AI model ID. Default: voyage-code-3. */
+          /** Embedding provider. Default: "voyage".
+           *  Each provider reads its own env var for the API key:
+           *  - "voyage": VOYAGE_API_KEY (default model: voyage-code-3, 1024 dims)
+           *  - "openai": OPENAI_API_KEY (default model: text-embedding-3-small, 1536 dims) */
+          provider: z.enum(["voyage", "openai"]).default("voyage"),
+          /** Model ID for the embedding provider. Default depends on provider. */
           model: z.string().default("voyage-code-3"),
           /** Embedding dimensions. Default: 1024. */
           dimensions: z.number().min(256).max(2048).default(1024),
         })
         .default({
           enabled: true,
+          provider: "voyage",
           model: "voyage-code-3",
           dimensions: 1024,
         }),
@@ -89,7 +97,7 @@ export const LoreConfig = z.object({
       ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
       recallLimit: 10,
       queryExpansion: false,
-      embeddings: { enabled: true, model: "voyage-code-3", dimensions: 1024 },
+      embeddings: { enabled: true, provider: "voyage" as const, model: "voyage-code-3", dimensions: 1024 },
     }),
   crossProject: z.boolean().default(false),
   agentsFile: z

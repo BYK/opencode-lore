@@ -514,6 +514,52 @@ export function searchScored(input: {
   }
 }
 
+/**
+ * Search knowledge entries from OTHER projects — entries that are project-specific
+ * (cross_project=0) and belong to a different project_id than the given one.
+ * Used by the recall tool in "all" scope to surface relevant knowledge from
+ * the user's other projects ("tunnel" discovery across projects).
+ */
+export function searchScoredOtherProjects(input: {
+  query: string;
+  excludeProjectPath: string;
+  limit?: number;
+}): ScoredKnowledgeEntry[] {
+  const limit = input.limit ?? 10;
+  const q = ftsQuery(input.query);
+  if (q === EMPTY_QUERY) return [];
+
+  const excludePid = ensureProject(input.excludeProjectPath);
+  const { title, content, category } = ftsWeights();
+
+  // Find entries from other projects that are NOT cross-project (those are
+  // already included in the normal search via the cross_project=1 filter).
+  // Also exclude entries with no project_id (global) — already included.
+  const ftsSQL = `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
+     JOIN knowledge_fts f ON k.rowid = f.rowid
+     WHERE knowledge_fts MATCH ?
+     AND k.project_id IS NOT NULL
+     AND k.project_id != ?
+     AND k.cross_project = 0
+     AND k.confidence > 0.2
+     ORDER BY rank LIMIT ?`;
+
+  const ftsParams = [title, content, category, q, excludePid, limit];
+
+  try {
+    const results = db().query(ftsSQL).all(...ftsParams) as ScoredKnowledgeEntry[];
+    if (results.length) return results;
+
+    // AND returned nothing — try OR fallback
+    const qOr = ftsQueryOr(input.query);
+    if (qOr === EMPTY_QUERY) return [];
+    const ftsParamsOr = [title, content, category, qOr, excludePid, limit];
+    return db().query(ftsSQL).all(...ftsParamsOr) as ScoredKnowledgeEntry[];
+  } catch {
+    return [];
+  }
+}
+
 export function get(id: string): KnowledgeEntry | null {
   return db()
     .query(`SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE id = ?`)

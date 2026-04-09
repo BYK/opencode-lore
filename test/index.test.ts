@@ -808,7 +808,8 @@ function restoreDistillationTables() {
       token_count INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       observations TEXT NOT NULL DEFAULT '',
-      archived INTEGER NOT NULL DEFAULT 0
+      archived INTEGER NOT NULL DEFAULT 0,
+      embedding BLOB
     )
   `);
   // Post-migration indexes: compound indexes from v6, single-column idx_distillation_project dropped
