@@ -341,6 +341,145 @@ function toolStripAnnotation(toolName: string, output: string): string {
   return annotation;
 }
 
+// ---------------------------------------------------------------------------
+// Content-aware deduplication
+// ---------------------------------------------------------------------------
+// Inspired by Dirac's ContextManager file-read deduplication: detects when the
+// same content appears multiple times in the conversation (e.g., the same file
+// read multiple times, or the same command output repeated) and replaces earlier
+// occurrences with compact annotations. This reduces token pressure before layer
+// selection, potentially keeping sessions at lower (less lossy) gradient layers.
+
+// Minimum output size (chars) to consider for dedup — annotations for smaller
+// outputs would cost more tokens than the original content.
+const DEDUP_MIN_CHARS = 600;
+
+/** Fast FNV-1a hash for content comparison. */
+function simpleHash(str: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = (hash * 0x01000193) >>> 0;
+  }
+  return hash;
+}
+
+/** Extract file path from a tool's input JSON.
+ *  Handles common formats: {"path": "/foo.ts"}, {"filePath": "/foo.ts"},
+ *  and plain text fallback. */
+function extractFilePath(input: string): string | undefined {
+  try {
+    const parsed = JSON.parse(input);
+    return parsed.path || parsed.filePath || parsed.file;
+  } catch {
+    // Plain text — try to extract a path-like string
+    const match = input.match(/(?:[\w.-]+\/)+[\w.-]+\.\w{1,5}/);
+    return match?.[0];
+  }
+}
+
+/** Annotation for deduplicated tool output — follows the toolStripAnnotation() pattern. */
+function dedupAnnotation(toolName: string, filePath?: string): string {
+  if (filePath) {
+    return `[earlier version of ${filePath} — see latest read below for current content]`;
+  }
+  return `[duplicate output — same content as later ${toolName} in this session — use recall for details]`;
+}
+
+/**
+ * Replace duplicate tool outputs with compact back-references, keeping only
+ * the latest occurrence of each unique output. Reduces context token usage
+ * without information loss — the model sees the most recent content intact.
+ *
+ * Deduplicates by:
+ * 1. Exact content hash: identical tool outputs (same file read twice, same command output)
+ * 2. Same-file reads: read_file outputs for the same path (content may differ due to edits)
+ *
+ * The current turn (from currentTurnIdx onward) is never touched — the model
+ * needs full context for its active work. Tool parts are never removed entirely;
+ * only state.output is replaced with a compact annotation.
+ *
+ * Returns the original array reference (not a copy) when no duplicates exist.
+ */
+export function deduplicateToolOutputs(
+  messages: MessageWithParts[],
+  currentTurnIdx: number,
+): MessageWithParts[] {
+  // Track latest occurrence: contentKey → latest message index
+  const contentLatest = new Map<string, number>();
+  // Track latest read by file path: "read:path" → latest message index
+  const fileLatest = new Map<string, number>();
+
+  // Also include current-turn reads in the "latest" tracking so we properly
+  // recognize earlier reads as duplicates of current-turn content.
+  for (let i = 0; i < messages.length; i++) {
+    for (const part of messages[i].parts) {
+      if (part.type !== "tool" || part.state.status !== "completed") continue;
+      const output = part.state.output;
+      if (!output || output.length < DEDUP_MIN_CHARS) continue;
+
+      const key = `${part.tool}:${simpleHash(output)}`;
+      contentLatest.set(key, i);
+
+      // For read-type tools, also track by file path
+      if (part.tool === "read_file" || part.tool === "read") {
+        const inputStr = typeof part.state.input === "string"
+          ? part.state.input
+          : JSON.stringify(part.state.input);
+        const fp = extractFilePath(inputStr);
+        if (fp) fileLatest.set(`read:${fp}`, i);
+      }
+    }
+  }
+
+  // Second pass: replace earlier occurrences (but never touch the current turn)
+  let changed = false;
+  const result = messages.map((msg, msgIdx) => {
+    if (msgIdx >= currentTurnIdx) return msg; // sacred boundary
+
+    let partsChanged = false;
+    const parts = msg.parts.map((part) => {
+      if (part.type !== "tool" || part.state.status !== "completed") return part;
+      const output = part.state.output;
+      if (!output || output.length < DEDUP_MIN_CHARS) return part;
+
+      // Check exact-match dedup: is this the latest occurrence of this content?
+      const contentKey = `${part.tool}:${simpleHash(output)}`;
+      const isLatestContent = contentLatest.get(contentKey) === msgIdx;
+
+      // Check file-path dedup for read tools: is this the latest read of this file?
+      let filePath: string | undefined;
+      let isLatestFile = true;
+      if (part.tool === "read_file" || part.tool === "read") {
+        const inputStr = typeof part.state.input === "string"
+          ? part.state.input
+          : JSON.stringify(part.state.input);
+        filePath = extractFilePath(inputStr);
+        if (filePath) isLatestFile = fileLatest.get(`read:${filePath}`) === msgIdx;
+      }
+
+      // Keep if this is both the latest content AND latest file read (or not a read tool)
+      if (isLatestContent && isLatestFile) return part;
+
+      // This is a duplicate — replace with compact annotation
+      partsChanged = true;
+      return {
+        ...part,
+        state: {
+          ...part.state,
+          output: dedupAnnotation(part.tool, filePath),
+        },
+      } as Part;
+    });
+
+    if (!partsChanged) return msg;
+    changed = true;
+    return { ...msg, parts };
+  });
+
+  return changed ? result : messages;
+}
+
 // Ensure every tool part in the window has a terminal state (completed or error).
 // Pending/running tool parts produce tool_use blocks at the API level but have no
 // output to generate a matching tool_result — causing Anthropic to reject the request
@@ -993,6 +1132,13 @@ function transformInner(input: {
 
   // --- Gradient mode: context exhausted (or force-escalated), compress older messages ---
 
+  // Pre-pass: deduplicate repeated tool outputs before layer selection.
+  // Keeps only the latest occurrence of each unique output, replacing earlier
+  // ones with compact annotations. This can save thousands of tokens for sessions
+  // with repeated file reads, potentially avoiding escalation to higher layers.
+  const turnStart = currentTurnStart(input.messages);
+  const dedupMessages = deduplicateToolOutputs(input.messages, turnStart);
+
   const distillations = sid ? loadDistillations(input.projectPath, sid) : [];
 
   // Layer 1 uses the append-only cached prefix (Approach C) to keep the
@@ -1014,7 +1160,7 @@ function transformInner(input: {
   if (effectiveMinLayer <= 1) {
     const layer1 = sid
       ? tryFitStable({
-          messages: input.messages,
+          messages: dedupMessages,
           prefix: cached.messages,
           prefixTokens: cached.tokens,
           distilledBudget,
@@ -1023,7 +1169,7 @@ function transformInner(input: {
           sessState,
         })
       : tryFit({
-          messages: input.messages,
+          messages: dedupMessages,
           prefix: cached.messages,
           prefixTokens: cached.tokens,
           distilledBudget,
@@ -1041,7 +1187,7 @@ function transformInner(input: {
   // Skipped when force-escalated to layer 3+.
   if (effectiveMinLayer <= 2) {
     const layer2 = tryFit({
-      messages: input.messages,
+      messages: dedupMessages,
       prefix: cached.messages,
       prefixTokens: cached.tokens,
       distilledBudget,
@@ -1063,7 +1209,7 @@ function transformInner(input: {
     0,
   );
   const layer3 = tryFit({
-    messages: input.messages,
+    messages: dedupMessages,
     prefix: trimmedPrefix,
     prefixTokens: trimmedPrefixTokens,
     distilledBudget: Math.floor(usable * 0.15),

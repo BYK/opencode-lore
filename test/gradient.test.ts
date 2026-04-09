@@ -13,6 +13,7 @@ import {
   setForceMinLayer,
   getLastLayer,
   estimateMessages,
+  deduplicateToolOutputs,
 } from "../src/gradient";
 import type { Message, Part } from "@opencode-ai/sdk";
 
@@ -1331,5 +1332,186 @@ describe("gradient — calibration oscillation fix", () => {
     // so r2 would be layer 0 passthrough (sending all 175K tokens).
     // After the fix: per-session state — r2 must stay at layer >= 1.
     expect(r2.layer).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Content-aware deduplication tests
+// ---------------------------------------------------------------------------
+
+function makeMsgWithTool(
+  id: string,
+  role: "user" | "assistant",
+  toolName: string,
+  input: string,
+  output: string,
+  sessionID = "dedup-sess",
+): { info: Message; parts: Part[] } {
+  const base = makeMsg(id, role, "", sessionID);
+  return {
+    info: base.info,
+    parts: [
+      {
+        id: `tool-${id}`,
+        sessionID,
+        messageID: id,
+        type: "tool",
+        tool: toolName,
+        callID: `call-${id}`,
+        title: toolName,
+        state: {
+          status: "completed" as const,
+          input: JSON.parse(input) as { [key: string]: unknown },
+          output,
+          title: toolName,
+          metadata: {},
+          time: { start: Date.now(), end: Date.now() },
+        },
+        time: { start: Date.now(), end: Date.now() },
+      } as Part,
+    ],
+  };
+}
+
+/** Helper to extract output from a completed tool part. */
+function getToolOutput(part: Part): string | undefined {
+  if (part.type === "tool" && part.state.status === "completed") {
+    return part.state.output;
+  }
+  return undefined;
+}
+
+describe("deduplicateToolOutputs", () => {
+  const LARGE_CONTENT = "x".repeat(800); // above DEDUP_MIN_CHARS (600)
+
+  test("deduplicates identical tool outputs, keeps latest", () => {
+    const msgs = [
+      makeMsg("u1", "user", "read file A"),
+      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsg("u2", "user", "now edit"),
+      makeMsg("a2", "assistant", "done editing"),
+      makeMsg("u3", "user", "read file A again"),
+      makeMsgWithTool("a3", "assistant", "read_file", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsg("u4", "user", "looks good"), // current turn
+    ];
+
+    const result = deduplicateToolOutputs(msgs, 6);
+
+    // First read (index 1) should be deduplicated
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier version of src/foo.ts");
+
+    // Latest read (index 5) should be intact
+    expect(getToolOutput(result[5].parts[0])).toBe(LARGE_CONTENT);
+  });
+
+  test("deduplicates same-file reads with different content", () => {
+    const oldContent = "old version " + "y".repeat(800);
+    const newContent = "new version " + "z".repeat(800);
+    const msgs = [
+      makeMsg("u1", "user", "read file"),
+      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"src/bar.ts"}', oldContent),
+      makeMsg("u2", "user", "edit it"),
+      makeMsg("a2", "assistant", "edited"),
+      makeMsg("u3", "user", "read it again"),
+      makeMsgWithTool("a3", "assistant", "read_file", '{"path":"src/bar.ts"}', newContent),
+      makeMsg("u4", "user", "verify"), // current turn
+    ];
+
+    const result = deduplicateToolOutputs(msgs, 6);
+
+    // First read (old content) should be replaced — same file, not latest
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier version of src/bar.ts");
+
+    // Latest read (new content) should be intact
+    expect(getToolOutput(result[5].parts[0])).toBe(newContent);
+  });
+
+  test("does not touch current turn messages", () => {
+    const msgs = [
+      makeMsg("u1", "user", "first"),
+      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsg("u2", "user", "read again"), // current turn starts here (index 2)
+      makeMsgWithTool("a2", "assistant", "read_file", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+    ];
+
+    const result = deduplicateToolOutputs(msgs, 2);
+
+    // Earlier read (index 1) should be deduped since latest is in current turn
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier version");
+
+    // Current-turn read (index 3) should NOT be touched
+    expect(getToolOutput(result[3].parts[0])).toBe(LARGE_CONTENT);
+  });
+
+  test("skips small outputs (below threshold)", () => {
+    const smallContent = "short"; // well below DEDUP_MIN_CHARS
+    const msgs = [
+      makeMsg("u1", "user", "read"),
+      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"small.txt"}', smallContent),
+      makeMsg("u2", "user", "read again"),
+      makeMsgWithTool("a2", "assistant", "read_file", '{"path":"small.txt"}', smallContent),
+      makeMsg("u3", "user", "done"), // current turn
+    ];
+
+    const result = deduplicateToolOutputs(msgs, 4);
+
+    // Both small outputs should be untouched
+    expect(getToolOutput(result[1].parts[0])).toBe(smallContent);
+    expect(getToolOutput(result[3].parts[0])).toBe(smallContent);
+  });
+
+  test("returns same array reference when no duplicates", () => {
+    const msgs = [
+      makeMsg("u1", "user", "hello"),
+      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"a.ts"}', LARGE_CONTENT),
+      makeMsg("u2", "user", "read different"),
+      makeMsgWithTool("a2", "assistant", "read_file", '{"path":"b.ts"}', "different " + LARGE_CONTENT),
+      makeMsg("u3", "user", "done"), // current turn
+    ];
+
+    const result = deduplicateToolOutputs(msgs, 4);
+    expect(result).toBe(msgs); // same reference — no copy
+  });
+
+  test("deduplicates non-read tools by exact content hash", () => {
+    const bashOutput = "npm test\n" + "PASS ".repeat(200); // large enough
+    const msgs = [
+      makeMsg("u1", "user", "run tests"),
+      makeMsgWithTool("a1", "assistant", "bash", '{"command":"npm test"}', bashOutput),
+      makeMsg("u2", "user", "run tests again"),
+      makeMsgWithTool("a2", "assistant", "bash", '{"command":"npm test"}', bashOutput),
+      makeMsg("u3", "user", "ok"), // current turn
+    ];
+
+    const result = deduplicateToolOutputs(msgs, 4);
+
+    // First bash (index 1) should be deduped — exact same output
+    const firstOut = getToolOutput(result[1].parts[0])!;
+    expect(firstOut).toContain("duplicate output");
+    expect(firstOut).toContain("bash");
+
+    // Latest bash (index 3) should be intact
+    expect(getToolOutput(result[3].parts[0])).toBe(bashOutput);
+  });
+
+  test("handles three reads of the same file — only latest survives", () => {
+    const msgs = [
+      makeMsg("u1", "user", "read"),
+      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"src/x.ts"}', LARGE_CONTENT),
+      makeMsg("u2", "user", "read again"),
+      makeMsgWithTool("a2", "assistant", "read_file", '{"path":"src/x.ts"}', LARGE_CONTENT),
+      makeMsg("u3", "user", "read third time"),
+      makeMsgWithTool("a3", "assistant", "read_file", '{"path":"src/x.ts"}', LARGE_CONTENT),
+      makeMsg("u4", "user", "done"), // current turn
+    ];
+
+    const result = deduplicateToolOutputs(msgs, 6);
+
+    // First two reads should be deduped
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier version");
+    expect(getToolOutput(result[3].parts[0])).toContain("earlier version");
+
+    // Third (latest) should be intact
+    expect(getToolOutput(result[5].parts[0])).toBe(LARGE_CONTENT);
   });
 });
