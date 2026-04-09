@@ -2,6 +2,7 @@ import type { createOpencodeClient } from "@opencode-ai/sdk";
 import { db, ensureProject } from "./db";
 import { config } from "./config";
 import * as temporal from "./temporal";
+import * as embedding from "./embedding";
 import * as log from "./log";
 import {
   DISTILLATION_SYSTEM,
@@ -402,7 +403,7 @@ async function distillSegment(input: {
   const result = parseDistillationResult(responsePart.text);
   if (!result) return null;
 
-  storeDistillation({
+  const distillId = storeDistillation({
     projectPath: input.projectPath,
     sessionID: input.sessionID,
     observations: result.observations,
@@ -410,6 +411,12 @@ async function distillSegment(input: {
     generation: 0,
   });
   temporal.markDistilled(input.messages.map((m) => m.id));
+
+  // Fire-and-forget: embed the distillation for vector search
+  if (embedding.isAvailable()) {
+    embedding.embedDistillation(distillId, result.observations);
+  }
+
   return result;
 }
 
@@ -458,13 +465,18 @@ async function metaDistill(input: {
   // Store the meta-distillation at generation N+1
   const maxGen = Math.max(...existing.map((d) => d.generation));
   const allSourceIDs = existing.flatMap((d) => d.source_ids);
-  storeDistillation({
+  const metaId = storeDistillation({
     projectPath: input.projectPath,
     sessionID: input.sessionID,
     observations: result.observations,
     sourceIDs: allSourceIDs,
     generation: maxGen + 1,
   });
+
+  // Fire-and-forget: embed the meta-distillation for vector search
+  if (embedding.isAvailable()) {
+    embedding.embedDistillation(metaId, result.observations);
+  }
 
   // Archive the gen-0 distillations that were merged into gen-1+.
   // They remain searchable via recall but excluded from the in-context prefix.

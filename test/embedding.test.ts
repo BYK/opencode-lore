@@ -7,6 +7,7 @@ import {
   isAvailable,
   vectorSearch,
   checkConfigChange,
+  resetProvider,
 } from "../src/embedding";
 
 describe("cosineSimilarity", () => {
@@ -86,8 +87,10 @@ describe("isAvailable", () => {
     // In test environment, VOYAGE_API_KEY should not be set
     const original = process.env.VOYAGE_API_KEY;
     delete process.env.VOYAGE_API_KEY;
+    resetProvider(); // Clear cached provider so isAvailable re-evaluates
     expect(isAvailable()).toBe(false);
     if (original) process.env.VOYAGE_API_KEY = original;
+    resetProvider(); // Restore cached provider state
   });
 });
 
