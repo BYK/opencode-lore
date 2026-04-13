@@ -20,6 +20,7 @@ import {
 import { formatKnowledge, formatDistillations } from "./prompt";
 import { createRecallTool } from "./reflect";
 import { shouldImport, importFromFile, exportToFile } from "./agents-file";
+import * as latReader from "./lat-reader";
 import * as embedding from "./embedding";
 import * as log from "./log";
 
@@ -121,6 +122,16 @@ export const LorePlugin: Plugin = async (ctx) => {
     if (pruned > 0) {
       log.info(`pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
       invalidateLtmCache();
+    }
+  }
+
+  // Index lat.md/ directory sections at startup (if the directory exists).
+  // Content-hash-based — skips unchanged files, so this is cheap on repeat runs.
+  if (isValidProjectPath(projectPath)) {
+    try {
+      latReader.refresh(projectPath);
+    } catch (e) {
+      log.error("lat-reader startup refresh error:", e);
     }
   }
 
@@ -460,6 +471,28 @@ export const LorePlugin: Plugin = async (ctx) => {
           }
         } catch (e) {
           log.error("agents-file export error:", e);
+        }
+
+        // Clean dead knowledge cross-references (entries deleted by curation/consolidation).
+        if (cfg.knowledge.enabled) {
+          try {
+            const cleaned = ltm.cleanDeadRefs();
+            if (cleaned > 0) {
+              log.info(`cleaned ${cleaned} dead knowledge cross-references`);
+              invalidateLtmCache();
+            }
+          } catch (e) {
+            log.error("dead-ref cleanup error:", e);
+          }
+        }
+
+        // Re-scan lat.md/ directory to pick up changes made by the agent.
+        if (isValidProjectPath(projectPath)) {
+          try {
+            latReader.refresh(projectPath);
+          } catch (e) {
+            log.error("lat-reader idle refresh error:", e);
+          }
         }
       }
     },
