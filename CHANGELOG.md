@@ -1,4 +1,10 @@
 # Changelog
+## 0.9.0
+
+### New Features ✨
+
+- Lat.md integration, knowledge cross-references, and integrity checking by @BYK in [#65](https://github.com/BYK/opencode-lore/pull/65)
+
 ## 0.8.0
 
 ### New Features ✨
