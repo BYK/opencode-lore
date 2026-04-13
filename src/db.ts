@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 const MIGRATIONS: string[] = [
   `
@@ -227,6 +227,59 @@ const MIGRATIONS: string[] = [
   -- No backfill — entries get embedded lazily on next distillation
   -- or via explicit backfill when embeddings are first enabled.
   ALTER TABLE distillations ADD COLUMN embedding BLOB;
+  `,
+  `
+  -- Version 10: lat.md section cache + knowledge cross-references.
+
+  -- lat.md section cache for recall integration.
+  -- Parsed from lat.md/ directory markdown files, FTS5-indexed for search.
+  CREATE TABLE IF NOT EXISTS lat_sections (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    file TEXT NOT NULL,
+    heading TEXT NOT NULL,
+    depth INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    first_paragraph TEXT,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS lat_sections_fts USING fts5(
+    heading,
+    content,
+    content=lat_sections,
+    content_rowid=rowid,
+    tokenize='porter unicode61'
+  );
+
+  CREATE TRIGGER IF NOT EXISTS lat_fts_insert AFTER INSERT ON lat_sections BEGIN
+    INSERT INTO lat_sections_fts(rowid, heading, content)
+    VALUES (new.rowid, new.heading, new.content);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS lat_fts_delete AFTER DELETE ON lat_sections BEGIN
+    INSERT INTO lat_sections_fts(lat_sections_fts, rowid, heading, content)
+    VALUES('delete', old.rowid, old.heading, old.content);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS lat_fts_update AFTER UPDATE ON lat_sections BEGIN
+    INSERT INTO lat_sections_fts(lat_sections_fts, rowid, heading, content)
+    VALUES('delete', old.rowid, old.heading, old.content);
+    INSERT INTO lat_sections_fts(rowid, heading, content)
+    VALUES (new.rowid, new.heading, new.content);
+  END;
+
+  CREATE INDEX IF NOT EXISTS idx_lat_sections_project ON lat_sections(project_id);
+  CREATE INDEX IF NOT EXISTS idx_lat_sections_file ON lat_sections(project_id, file);
+
+  -- Knowledge cross-references via [[entry-id]] wiki links.
+  -- ON DELETE CASCADE: when either entry is deleted, the ref row is auto-removed.
+  CREATE TABLE IF NOT EXISTS knowledge_refs (
+    from_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+    to_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+    PRIMARY KEY (from_id, to_id)
+  );
   `,
 ];
 

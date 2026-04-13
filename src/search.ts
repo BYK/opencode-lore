@@ -139,7 +139,7 @@ export const EMPTY_QUERY = '""';
  * No general length filter — short but meaningful tokens like "DB", "CI",
  * "IO", "PR" are preserved. Only single chars are dropped.
  */
-function filterTerms(raw: string): string[] {
+export function filterTerms(raw: string): string[] {
   const words = raw
     .replace(/[^\w\s]/g, " ")
     .split(/\s+/)

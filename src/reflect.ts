@@ -2,6 +2,7 @@ import { tool } from "@opencode-ai/plugin/tool";
 import type { createOpencodeClient } from "@opencode-ai/sdk";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
+import * as latReader from "./lat-reader";
 import * as log from "./log";
 import * as embedding from "./embedding";
 import { db, ensureProject, projectName } from "./db";
@@ -148,7 +149,8 @@ type TaggedResult =
   | { source: "knowledge"; item: ltm.ScoredKnowledgeEntry }
   | { source: "cross-knowledge"; item: ltm.ScoredKnowledgeEntry; projectLabel: string }
   | { source: "distillation"; item: ScoredDistillation }
-  | { source: "temporal"; item: temporal.ScoredTemporalMessage };
+  | { source: "temporal"; item: temporal.ScoredTemporalMessage }
+  | { source: "lat-section"; item: latReader.ScoredLatSection };
 
 function formatFusedResults(
   results: Array<{ item: TaggedResult; score: number }>,
@@ -192,6 +194,15 @@ function formatFusedResults(
             : m.content;
         return lip(
           `**[temporal/${m.role}]** (session: ${m.session_id.slice(0, 8)}...) ${inline(preview)}`,
+        );
+      }
+      case "lat-section": {
+        const s = tagged.item;
+        const preview = s.first_paragraph
+          ? inline(s.first_paragraph)
+          : inline(s.content.length > 300 ? s.content.slice(0, 300) + "..." : s.content);
+        return liph(
+          t(`**[lat.md/${s.file}]** ${inline(s.heading)}: ${preview}`),
         );
       }
     }
@@ -375,6 +386,30 @@ export function createRecallTool(
           }
         } catch (err) {
           log.info("recall: vector search failed:", err);
+        }
+      }
+
+      // lat.md section search: if the project has a lat.md/ directory, include
+      // its sections in the recall results. lat.md sections are human-authored
+      // design documentation that complements Lore's LLM-curated knowledge.
+      if (scope !== "session" && latReader.hasLatDir(projectPath)) {
+        try {
+          const latResults = latReader.searchScored({
+            query: args.query,
+            projectPath,
+            limit,
+          });
+          if (latResults.length) {
+            allRrfLists.push({
+              items: latResults.map((item) => ({
+                source: "lat-section" as const,
+                item,
+              })),
+              key: (r) => `lat:${(r as { source: "lat-section"; item: latReader.ScoredLatSection }).item.id}`,
+            });
+          }
+        } catch (err) {
+          log.info("recall: lat.md section search failed:", err);
         }
       }
 
