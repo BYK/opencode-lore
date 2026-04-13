@@ -200,7 +200,7 @@ Once Lore is active, you should notice several changes:
 All data lives locally in `~/.local/share/opencode-lore/lore.db`:
 
 - **Session observations** — timestamped event log of each conversation: what was asked, what was done, decisions made, errors found
-- **Long-term knowledge** — patterns, gotchas, and architectural decisions curated across sessions and projects
+- **Long-term knowledge** — patterns, gotchas, and architectural decisions curated across sessions and projects. Entries can reference each other with `[[entry-id]]` wiki links, forming a navigable knowledge graph. Dead references are automatically cleaned up when entries are deleted or consolidated.
 - **Raw messages** — full message history in FTS5-indexed SQLite for the `recall` tool
 
 ## The `recall` tool
@@ -210,6 +210,18 @@ The assistant gets a `recall` tool that searches across stored messages and know
 - "What did we decide about auth last week?"
 - "What was the error from the migration?"
 - "What's my database schema convention?"
+
+## lat.md compatibility
+
+If your project uses [lat.md](https://github.com/1st1/lat.md) to maintain a knowledge graph, Lore automatically indexes the `lat.md/` directory and includes its sections in recall results. No configuration needed — if the directory exists, Lore parses the markdown files, extracts sections, and ranks them alongside its own knowledge entries using BM25 + RRF fusion.
+
+This means the `recall` tool searches both:
+- Lore's LLM-curated memory (distillations, knowledge entries, raw messages)
+- lat.md's human-authored design documentation (architecture, specs, decisions)
+
+lat.md sections also participate in LTM injection — the most relevant sections for the current session are included in the system prompt alongside Lore's own knowledge entries, ranked by session-context relevance.
+
+Lore re-scans the `lat.md/` directory periodically (on session idle), so changes made by the agent or by hand are picked up automatically.
 
 ## Standing on the shoulders of
 

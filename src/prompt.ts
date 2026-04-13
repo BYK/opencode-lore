@@ -236,6 +236,12 @@ PREFER UPDATES OVER CREATES:
   bugs in the same module), consolidate them: update one with merged insights, delete the
   rest. Fewer, denser entries are better than many scattered ones.
 
+CROSS-REFERENCES between entries:
+- When an entry relates to another entry, reference it with [[entry-uuid]] using the entry's ID
+  from the existing entries list. This creates navigable links between entries.
+- Only reference entries you can see in the existing entries list — don't guess IDs.
+- Example: "Uses the gradient system [[019c904b-791e-772a-ab2b-93ac892a960c]] for context management."
+
 crossProject flag:
 - Default is true — most useful knowledge is worth sharing across projects
 - Set crossProject to false for things that are meaningless outside this specific repo (e.g. a config path, a project-local naming convention that conflicts with your usual style)

@@ -134,6 +134,8 @@ export async function run(input: {
   let updated = 0;
   let deleted = 0;
 
+  const idsToSync: string[] = [];
+
   for (const op of ops) {
     if (op.op === "create") {
       // Truncate oversized content — the model should stay within the prompt's
@@ -143,7 +145,7 @@ export async function run(input: {
           ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
             " [truncated — entry too long]"
           : op.content;
-      ltm.create({
+      const id = ltm.create({
         projectPath: op.scope === "project" ? input.projectPath : undefined,
         category: op.category,
         title: op.title,
@@ -152,6 +154,7 @@ export async function run(input: {
         scope: op.scope,
         crossProject: op.crossProject ?? true,
       });
+      idsToSync.push(id);
       created++;
     } else if (op.op === "update") {
       const entry = ltm.get(op.id);
@@ -162,6 +165,7 @@ export async function run(input: {
               " [truncated — entry too long]"
             : op.content;
         ltm.update(op.id, { content, confidence: op.confidence });
+        if (op.content !== undefined) idsToSync.push(op.id);
         updated++;
       }
     } else if (op.op === "delete") {
@@ -171,6 +175,11 @@ export async function run(input: {
         deleted++;
       }
     }
+  }
+
+  // Sync cross-references for created/updated entries
+  for (const id of idsToSync) {
+    ltm.syncRefs(id);
   }
 
   lastCuratedAt.set(input.sessionID, Date.now());

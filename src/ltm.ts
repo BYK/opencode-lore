@@ -3,6 +3,8 @@ import { db, ensureProject } from "./db";
 import { config } from "./config";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, extractTopTerms } from "./search";
 import * as embedding from "./embedding";
+import * as latReader from "./lat-reader";
+import * as log from "./log";
 
 // ~3 chars per token — validated as best heuristic against real API data.
 function estimateTokens(text: string): number {
@@ -373,6 +375,38 @@ export function forSession(
     used += cost;
   }
 
+  // --- 6. Pack lat.md sections into remaining budget ---
+  // lat.md sections compete for the remaining token budget (shared LTM pool).
+  // They are scored separately by BM25 relevance against the same session context.
+  if (latReader.hasLatDir(projectPath) && used < maxTokens) {
+    const latSections = latReader.scoreForSession(
+      projectPath,
+      sessionContext,
+      maxTokens - used,
+    );
+    for (const section of latSections) {
+      if (used >= maxTokens) break;
+      const display = section.first_paragraph ?? section.content;
+      const cost = estimateTokens(section.heading + display) + 10;
+      if (used + cost > maxTokens) continue;
+      // Convert lat section to a synthetic KnowledgeEntry for formatKnowledge()
+      result.push({
+        id: section.id,
+        project_id: section.project_id,
+        category: "lat.md",
+        title: `[${section.file}] ${section.heading}`,
+        content: display,
+        source_session: null,
+        cross_project: 0,
+        confidence: 1.0,
+        created_at: section.updated_at,
+        updated_at: section.updated_at,
+        metadata: null,
+      });
+      used += cost;
+    }
+  }
+
   return result;
 }
 
@@ -583,4 +617,243 @@ export function pruneOversized(maxLength: number): number {
     )
     .run(Date.now(), maxLength);
   return result.changes;
+}
+
+// ---------------------------------------------------------------------------
+// Wiki-link cross-references ([[entry-id]] / [[Entry Title]])
+// ---------------------------------------------------------------------------
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const WIKI_LINK_RE = /\[\[([^\]]+)\]\]/g;
+
+/**
+ * Resolve a wiki-link reference to a knowledge entry ID.
+ * - UUID format → direct O(1) lookup
+ * - Title text → FTS5 best-match search
+ * Returns null if the reference can't be resolved.
+ */
+export function resolveRef(ref: string): string | null {
+  if (UUID_RE.test(ref)) {
+    const entry = get(ref);
+    return entry ? entry.id : null;
+  }
+  // Title search — FTS5 best match
+  const results = search({ query: ref, limit: 1 });
+  return results.length ? results[0].id : null;
+}
+
+/**
+ * Extract [[...]] wiki-link references from entry content.
+ * Returns the raw ref strings (UUIDs or titles).
+ */
+export function extractRefs(content: string): string[] {
+  const refs: string[] = [];
+  let match;
+  const re = new RegExp(WIKI_LINK_RE.source, WIKI_LINK_RE.flags);
+  while ((match = re.exec(content)) !== null) {
+    refs.push(match[1]);
+  }
+  return refs;
+}
+
+/**
+ * Populate the knowledge_refs join table for an entry by resolving its [[...]] links.
+ * Clears existing outgoing refs for this entry first.
+ */
+export function syncRefs(entryId: string): number {
+  const entry = get(entryId);
+  if (!entry) return 0;
+
+  // Clear existing outgoing refs
+  db().query("DELETE FROM knowledge_refs WHERE from_id = ?").run(entryId);
+
+  const refs = extractRefs(entry.content);
+  if (!refs.length) return 0;
+
+  let synced = 0;
+  const insertStmt = db().query(
+    "INSERT OR IGNORE INTO knowledge_refs (from_id, to_id) VALUES (?, ?)",
+  );
+
+  for (const ref of refs) {
+    const targetId = resolveRef(ref);
+    if (targetId && targetId !== entryId) {
+      insertStmt.run(entryId, targetId);
+      synced++;
+    }
+  }
+
+  return synced;
+}
+
+/**
+ * Cascade-replace an entry ID in all knowledge content and the refs table.
+ * Used when an entry ID changes (future-proofing — current consolidation
+ * uses update-in-place so IDs don't change, but the mechanism exists).
+ */
+export function cascadeRefReplace(oldId: string, newId: string): number {
+  const oldRef = `[[${oldId}]]`;
+  const newRef = `[[${newId}]]`;
+
+  // Rewrite content in entries that reference the old ID
+  const result = db()
+    .query(
+      `UPDATE knowledge SET content = REPLACE(content, ?, ?), updated_at = ?
+       WHERE content LIKE ?`,
+    )
+    .run(oldRef, newRef, Date.now(), `%${oldRef}%`);
+
+  // Update the join table
+  db().query("UPDATE OR IGNORE knowledge_refs SET to_id = ? WHERE to_id = ?").run(newId, oldId);
+  db().query("UPDATE OR IGNORE knowledge_refs SET from_id = ? WHERE from_id = ?").run(newId, oldId);
+
+  // Clean up any rows that became self-referential
+  db().query("DELETE FROM knowledge_refs WHERE from_id = to_id").run();
+
+  return result.changes;
+}
+
+/**
+ * Clean dead references — remove [[uuid]] patterns pointing to deleted entries.
+ * Strips dead refs from content and purges orphan knowledge_refs rows.
+ *
+ * @returns Number of entries whose content was cleaned
+ */
+export function cleanDeadRefs(): number {
+  // Step 1: Find orphan refs (target entry no longer exists)
+  const orphans = db()
+    .query(
+      `SELECT DISTINCT kr.from_id, kr.to_id FROM knowledge_refs kr
+       WHERE NOT EXISTS (SELECT 1 FROM knowledge k WHERE k.id = kr.to_id)`,
+    )
+    .all() as Array<{ from_id: string; to_id: string }>;
+
+  if (!orphans.length) return 0;
+
+  // Step 2: Strip [[dead-uuid]] from referring entries' content
+  const now = Date.now();
+  let cleaned = 0;
+
+  for (const ref of orphans) {
+    const deadRef = `[[${ref.to_id}]]`;
+    const result = db()
+      .query(
+        `UPDATE knowledge SET content = REPLACE(content, ?, ''), updated_at = ?
+         WHERE id = ? AND content LIKE ?`,
+      )
+      .run(deadRef, now, ref.from_id, `%${deadRef}%`);
+    if (result.changes > 0) cleaned++;
+  }
+
+  // Step 3: Delete orphan rows from knowledge_refs
+  db()
+    .query(
+      "DELETE FROM knowledge_refs WHERE to_id NOT IN (SELECT id FROM knowledge)",
+    )
+    .run();
+
+  if (cleaned > 0) {
+    log.info(`cleaned ${cleaned} entries with dead [[ref]] links`);
+  }
+
+  return cleaned;
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge integrity checking
+// ---------------------------------------------------------------------------
+
+export type IntegrityIssue = {
+  entryId: string;
+  type: "duplicate" | "stale-path" | "oversized" | "empty";
+  description: string;
+  suggestion?: string;
+};
+
+/**
+ * Check knowledge entries for integrity issues.
+ * Returns a list of issues found — does NOT auto-fix.
+ *
+ * Checks:
+ * 1. Duplicate detection — FTS5 title similarity between entries
+ * 2. Content quality — empty content, oversized entries
+ */
+export function check(projectPath: string): IntegrityIssue[] {
+  const entries = forProject(projectPath, false);
+  const issues: IntegrityIssue[] = [];
+
+  // Oversized entries (>1200 chars with confidence > 0)
+  for (const entry of entries) {
+    if (entry.content.length > 1200) {
+      issues.push({
+        entryId: entry.id,
+        type: "oversized",
+        description: `Content is ${entry.content.length} chars (max 1200)`,
+        suggestion: "Trim or split into multiple entries",
+      });
+    }
+  }
+
+  // Empty or near-empty content
+  for (const entry of entries) {
+    if (entry.content.trim().length < 10) {
+      issues.push({
+        entryId: entry.id,
+        type: "empty",
+        description: `Content is empty or near-empty (${entry.content.trim().length} chars)`,
+        suggestion: "Delete or add meaningful content",
+      });
+    }
+  }
+
+  // Duplicate detection: for each entry, search by title and check for high overlap
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (seen.has(entry.id)) continue;
+    const q = ftsQuery(entry.title);
+    if (q === EMPTY_QUERY) continue;
+
+    try {
+      const { title, content, category } = config().search.ftsWeights;
+      const matches = db()
+        .query(
+          `SELECT k.id, k.title FROM knowledge k
+           JOIN knowledge_fts f ON k.rowid = f.rowid
+           WHERE knowledge_fts MATCH ?
+           AND k.id != ?
+           AND k.confidence > 0.2
+           ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT 3`,
+        )
+        .all(q, entry.id, title, content, category) as Array<{
+        id: string;
+        title: string;
+      }>;
+
+      for (const match of matches) {
+        if (seen.has(match.id)) continue;
+        // Check title similarity (case-insensitive)
+        const a = entry.title.toLowerCase();
+        const b = match.title.toLowerCase();
+        // Simple overlap: if one title contains the other or they share >70% of words
+        const wordsA = new Set(a.split(/\s+/));
+        const wordsB = new Set(b.split(/\s+/));
+        const intersection = [...wordsA].filter((w) => wordsB.has(w));
+        const overlap = intersection.length / Math.min(wordsA.size, wordsB.size);
+        if (overlap >= 0.7) {
+          issues.push({
+            entryId: entry.id,
+            type: "duplicate",
+            description: `Possibly duplicates "${match.title}" (${match.id.slice(0, 8)}...)`,
+            suggestion: `Merge with ${match.id}`,
+          });
+          seen.add(match.id);
+        }
+      }
+    } catch {
+      // FTS5 error — skip this entry
+    }
+    seen.add(entry.id);
+  }
+
+  return issues;
 }
