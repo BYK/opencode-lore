@@ -1,4 +1,11 @@
 # Changelog
+## 0.9.1
+
+### Bug Fixes 🐛
+
+- Sanitize unpaired Unicode surrogates in recall and temporal storage by @BYK in [#68](https://github.com/BYK/opencode-lore/pull/68)
+- Resilient worker prompting with agent-not-found retry by @BYK in [#67](https://github.com/BYK/opencode-lore/pull/67)
+
 ## 0.9.0
 
 ### New Features ✨
