@@ -1,5 +1,6 @@
 import { db, ensureProject } from "./db";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY } from "./search";
+import { sanitizeSurrogates } from "./markdown";
 import type { Message, Part } from "@opencode-ai/sdk";
 
 // ~3 chars per token — validated as best heuristic against real API data.
@@ -16,7 +17,10 @@ function partsToText(parts: Part[]): string {
     else if (part.type === "tool" && part.state.status === "completed")
       chunks.push(`[tool:${part.tool}] ${part.state.output}`);
   }
-  return chunks.join("\n");
+  // Sanitize unpaired surrogates from tool outputs and other raw text.
+  // Without this, surrogates survive into the DB and later break JSON
+  // serialization when included in recall tool responses.
+  return sanitizeSurrogates(chunks.join("\n"));
 }
 
 function messageMetadata(info: Message, parts: Part[]): string {

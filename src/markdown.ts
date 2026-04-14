@@ -22,12 +22,31 @@ export function serialize(tree: Root): string {
   return processor.stringify(tree);
 }
 
+/**
+ * Replace unpaired Unicode surrogates with U+FFFD (replacement character).
+ *
+ * Unpaired surrogates (a high surrogate U+D800-U+DBFF without a following low
+ * surrogate U+DC00-U+DFFF, or a lone low surrogate) are technically invalid in
+ * UTF-8/JSON. They can appear in tool outputs (binary file contents, command
+ * output) and survive through SQLite storage into recall results. When the
+ * resulting string is serialized to JSON for the LLM API, the API rejects it
+ * with "no low surrogate in string".
+ */
+export function sanitizeSurrogates(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    "\uFFFD",
+  );
+}
+
 // Collapse newlines in LLM-generated text before inserting into a text node.
 // Embedded blank lines (\n\n) cause list items to become "spread" (loose),
 // which then breaks the surrounding markdown structure on re-parse.
 // Newlines within a single fact/narrative are replaced with a space.
+// Also sanitizes unpaired surrogates to prevent JSON serialization failures.
 export function inline(value: string): string {
-  return value.replace(/\s*\n\s*/g, " ").trim();
+  return sanitizeSurrogates(value).replace(/\s*\n\s*/g, " ").trim();
 }
 
 // Normalize arbitrary markdown via parse → stringify roundtrip.
