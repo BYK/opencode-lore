@@ -23,6 +23,7 @@ import { shouldImport, importFromFile, exportToFile } from "./agents-file";
 import * as latReader from "./lat-reader";
 import * as embedding from "./embedding";
 import * as log from "./log";
+import { isWorkerSession } from "./worker";
 
 /**
  * Detect whether an error from session.error is a context overflow ("prompt too long").
@@ -167,7 +168,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   const skipSessions = new Set<string>();
 
   async function shouldSkip(sessionID: string): Promise<boolean> {
-    if (distillation.isWorkerSession(sessionID)) return true;
+    if (isWorkerSession(sessionID)) return true;
     if (skipSessions.has(sessionID)) return true;
     if (activeSessions.has(sessionID)) return false; // already known good
     // First encounter — check if this is a child session.

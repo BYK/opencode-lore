@@ -272,7 +272,7 @@ export function reciprocalRankFusion<T>(
 // ---------------------------------------------------------------------------
 
 import type { createOpencodeClient } from "@opencode-ai/sdk";
-import { workerSessionIDs } from "./distillation";
+import { workerSessionIDs, promptWorker } from "./worker";
 import { QUERY_EXPANSION_SYSTEM } from "./prompt";
 import * as log from "./log";
 
@@ -326,39 +326,26 @@ export async function expandQuery(
     ];
 
     // Race the LLM call against a timeout
-    const result = await Promise.race([
-      client.session.prompt({
-        path: { id: workerID },
-        body: {
-          parts,
-          agent: "lore-query-expand",
-          ...(model ? { model } : {}),
-        },
+    const responseText = await Promise.race([
+      promptWorker({
+        client,
+        workerID,
+        parts,
+        agent: "lore-query-expand",
+        model,
+        sessionMap: expansionWorkerSessions,
+        sessionKey: sessionID,
       }),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), TIMEOUT_MS)),
     ]);
 
-    // Rotate worker session so the next call starts fresh
-    expansionWorkerSessions.delete(sessionID);
-
-    if (!result) {
-      log.info("query expansion timed out, using original query");
+    if (!responseText) {
+      log.info("query expansion timed out or failed, using original query");
       return [query];
     }
 
-    // Read the response
-    const msgs = await client.session.messages({
-      path: { id: workerID },
-      query: { limit: 2 },
-    });
-    const last = msgs.data?.at(-1);
-    if (!last || last.info.role !== "assistant") return [query];
-
-    const responsePart = last.parts.find((p) => p.type === "text");
-    if (!responsePart || responsePart.type !== "text") return [query];
-
     // Parse JSON array from response
-    const cleaned = responsePart.text
+    const cleaned = responseText
       .trim()
       .replace(/^```json?\s*/i, "")
       .replace(/\s*```$/i, "");

@@ -11,20 +11,16 @@ import {
   recursiveUser,
 } from "./prompt";
 import { needsUrgentDistillation } from "./gradient";
+import { workerSessionIDs, promptWorker } from "./worker";
+
+// Re-export for backwards compat — index.ts and others may still import from here.
+export { workerSessionIDs };
 
 type Client = ReturnType<typeof createOpencodeClient>;
 type TemporalMessage = temporal.TemporalMessage;
 
 // Worker sessions keyed by parent session ID — hidden children, one per source session
 const workerSessions = new Map<string, string>();
-
-// Set of worker session IDs — used to skip storage and distillation for worker sessions
-// Exported so curator.ts can register its own worker sessions here too
-export const workerSessionIDs = new Set<string>();
-
-export function isWorkerSession(sessionID: string): boolean {
-  return workerSessionIDs.has(sessionID);
-}
 
 async function ensureWorkerSession(
   client: Client,
@@ -108,6 +104,17 @@ function latestObservations(
   return row?.observations || undefined;
 }
 
+/** Safely parse the source_ids JSON column. Defaults to [] on corrupt data. */
+export function parseSourceIds(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    log.warn("corrupt source_ids in distillation, defaulting to []");
+    return [];
+  }
+}
+
 export type Distillation = {
   id: string;
   project_id: string;
@@ -141,7 +148,7 @@ export function loadForSession(
   }>;
   return rows.map((r) => ({
     ...r,
-    source_ids: JSON.parse(r.source_ids) as string[],
+    source_ids: parseSourceIds(r.source_ids),
   }));
 }
 
@@ -208,7 +215,7 @@ function loadGen0(projectPath: string, sessionID: string): Distillation[] {
   }>;
   return rows.map((r) => ({
     ...r,
-    source_ids: JSON.parse(r.source_ids) as string[],
+    source_ids: parseSourceIds(r.source_ids),
   }));
 }
 
@@ -242,7 +249,7 @@ function resetOrphans(projectPath: string, sessionID: string): number {
     .all(pid, sessionID) as Array<{ source_ids: string }>;
   const covered = new Set<string>();
   for (const r of rows) {
-    for (const id of JSON.parse(r.source_ids) as string[]) covered.add(id);
+    for (const id of parseSourceIds(r.source_ids)) covered.add(id);
   }
   if (rows.length === 0) {
     // No distillations at all — reset everything to undistilled
@@ -375,32 +382,18 @@ async function distillSegment(input: {
     { type: "text" as const, text: `${DISTILLATION_SYSTEM}\n\n${userContent}` },
   ];
 
-  await input.client.session.prompt({
-    path: { id: workerID },
-    body: {
-      parts,
-      agent: "lore-distill",
-      ...(model ? { model } : {}),
-    },
+  const responseText = await promptWorker({
+    client: input.client,
+    workerID,
+    parts,
+    agent: "lore-distill",
+    model,
+    sessionMap: workerSessions,
+    sessionKey: input.sessionID,
   });
+  if (!responseText) return null;
 
-  // Read the response
-  const msgs = await input.client.session.messages({
-    path: { id: workerID },
-    query: { limit: 2 },
-  });
-  // Rotate worker session so the next call starts fresh — prevents
-  // accumulating multiple assistant messages with reasoning/thinking parts,
-  // which providers reject ("Multiple reasoning_opaque values").
-  workerSessions.delete(input.sessionID);
-
-  const last = msgs.data?.at(-1);
-  if (!last || last.info.role !== "assistant") return null;
-
-  const responsePart = last.parts.find((p) => p.type === "text");
-  if (!responsePart || responsePart.type !== "text") return null;
-
-  const result = parseDistillationResult(responsePart.text);
+  const result = parseDistillationResult(responseText);
   if (!result) return null;
 
   const distillId = storeDistillation({
@@ -437,29 +430,18 @@ async function metaDistill(input: {
     { type: "text" as const, text: `${RECURSIVE_SYSTEM}\n\n${userContent}` },
   ];
 
-  await input.client.session.prompt({
-    path: { id: workerID },
-    body: {
-      parts,
-      agent: "lore-distill",
-      ...(model ? { model } : {}),
-    },
+  const responseText = await promptWorker({
+    client: input.client,
+    workerID,
+    parts,
+    agent: "lore-distill",
+    model,
+    sessionMap: workerSessions,
+    sessionKey: input.sessionID,
   });
+  if (!responseText) return null;
 
-  const msgs = await input.client.session.messages({
-    path: { id: workerID },
-    query: { limit: 2 },
-  });
-  // Rotate worker session — see distillSegment() comment.
-  workerSessions.delete(input.sessionID);
-
-  const last = msgs.data?.at(-1);
-  if (!last || last.info.role !== "assistant") return null;
-
-  const responsePart = last.parts.find((p) => p.type === "text");
-  if (!responsePart || responsePart.type !== "text") return null;
-
-  const result = parseDistillationResult(responsePart.text);
+  const result = parseDistillationResult(responseText);
   if (!result) return null;
 
   // Store the meta-distillation at generation N+1
