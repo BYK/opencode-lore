@@ -24,6 +24,9 @@
 <!-- lore:019d15f7-4d00-781e-9512-a4f3e3109f18 -->
 * **OpenCode plugin SDK has no embedding API — vector search blocked**: The OpenCode plugin SDK (\`@opencode-ai/plugin\`, \`@opencode-ai/sdk\`) exposes only session/chat/tool operations. There is no \`client.embed()\`, embeddings endpoint, or raw model inference API. The only LLM access is \`client.session.prompt()\` which creates full chat roundtrips through the agentic loop. This means Lore cannot do vector/embedding search without either: (1) OpenCode adding an embedding API, or (2) direct \`fetch()\` to provider APIs bypassing the SDK (fragile — requires key extraction from \`client.config.providers()\`). The FTS5 + RRF search infrastructure is designed to be additive — vector search would layer on top as another RRF input list, not replace BM25.
 
+<!-- lore:019d8c54-e51c-7fe8-87ba-273269c39b7a -->
+* **Worker session prompt helper with agent-not-found retry**: src/worker.ts owns workerSessionIDs Set, isWorkerSession(), and promptWorker(). promptWorker() calls session.prompt() and uses the return value directly (no redundant session.messages() call). On 'agent not found' errors (detected via regex on JSON.stringify(result.error)), it retries once without the agent parameter on a fresh session. All callers (distillation×2, curator×2, search×1) use this shared helper. Session rotation (deleting from the caller's Map) happens after every call. The retry creates a new child session via client.session.create() and registers its ID in workerSessionIDs.
+
 ### Decision
 
 <!-- lore:019c904b-7924-7187-8471-8ad2423b8946 -->

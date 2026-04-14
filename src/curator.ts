@@ -2,8 +2,9 @@ import type { createOpencodeClient } from "@opencode-ai/sdk";
 import { config } from "./config";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
+import * as log from "./log";
 import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
-import { workerSessionIDs } from "./distillation";
+import { workerSessionIDs, promptWorker } from "./worker";
 
 /**
  * Maximum length (chars) for a single knowledge entry's content.
@@ -103,33 +104,18 @@ export async function run(input: {
     { type: "text" as const, text: `${CURATOR_SYSTEM}\n\n${userContent}` },
   ];
 
-  await input.client.session.prompt({
-    path: { id: workerID },
-    body: {
-      parts,
-      agent: "lore-curator",
-      ...(model ? { model } : {}),
-    },
+  const responseText = await promptWorker({
+    client: input.client,
+    workerID,
+    parts,
+    agent: "lore-curator",
+    model,
+    sessionMap: workerSessions,
+    sessionKey: input.sessionID,
   });
+  if (!responseText) return { created: 0, updated: 0, deleted: 0 };
 
-  const msgs = await input.client.session.messages({
-    path: { id: workerID },
-    query: { limit: 2 },
-  });
-  // Rotate worker session so the next call starts fresh — prevents
-  // accumulating multiple assistant messages with reasoning/thinking parts,
-  // which providers reject ("Multiple reasoning_opaque values").
-  workerSessions.delete(input.sessionID);
-
-  const last = msgs.data?.at(-1);
-  if (!last || last.info.role !== "assistant")
-    return { created: 0, updated: 0, deleted: 0 };
-
-  const responsePart = last.parts.find((p) => p.type === "text");
-  if (!responsePart || responsePart.type !== "text")
-    return { created: 0, updated: 0, deleted: 0 };
-
-  const ops = parseOps(responsePart.text);
+  const ops = parseOps(responseText);
   let created = 0;
   let updated = 0;
   let deleted = 0;
@@ -230,29 +216,18 @@ export async function consolidate(input: {
     { type: "text" as const, text: `${CONSOLIDATION_SYSTEM}\n\n${userContent}` },
   ];
 
-  await input.client.session.prompt({
-    path: { id: workerID },
-    body: {
-      parts,
-      agent: "lore-curator",
-      ...(model ? { model } : {}),
-    },
+  const responseText = await promptWorker({
+    client: input.client,
+    workerID,
+    parts,
+    agent: "lore-curator",
+    model,
+    sessionMap: workerSessions,
+    sessionKey: input.sessionID,
   });
+  if (!responseText) return { updated: 0, deleted: 0 };
 
-  const msgs = await input.client.session.messages({
-    path: { id: workerID },
-    query: { limit: 2 },
-  });
-  // Rotate worker session — see run() comment.
-  workerSessions.delete(input.sessionID);
-
-  const last = msgs.data?.at(-1);
-  if (!last || last.info.role !== "assistant") return { updated: 0, deleted: 0 };
-
-  const responsePart = last.parts.find((p) => p.type === "text");
-  if (!responsePart || responsePart.type !== "text") return { updated: 0, deleted: 0 };
-
-  const ops = parseOps(responsePart.text);
+  const ops = parseOps(responseText);
   let updated = 0;
   let deleted = 0;
 
