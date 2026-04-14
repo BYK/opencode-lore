@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import fc from "fast-check";
 import { remark } from "remark";
-import { normalize, unescapeMarkdown } from "../src/markdown";
+import { normalize, unescapeMarkdown, sanitizeSurrogates, inline } from "../src/markdown";
 import { formatDistillations, formatKnowledge } from "../src/prompt";
 import { isContextOverflow, buildRecoveryMessage } from "../src/index";
 
@@ -349,5 +349,58 @@ describe("buildRecoveryMessage", () => {
     const msg = buildRecoveryMessage([]);
     expect(msg).toContain("<system-reminder>");
     expect(msg).toContain("No distilled history available");
+  });
+});
+
+describe("sanitizeSurrogates", () => {
+  test("passes through normal text unchanged", () => {
+    expect(sanitizeSurrogates("hello world")).toBe("hello world");
+  });
+
+  test("passes through valid surrogate pairs (emoji)", () => {
+    // 😀 is U+1F600 = surrogate pair \uD83D\uDE00
+    expect(sanitizeSurrogates("hello 😀 world")).toBe("hello 😀 world");
+  });
+
+  test("replaces lone high surrogate with U+FFFD", () => {
+    const bad = "before\uD800after";
+    expect(sanitizeSurrogates(bad)).toBe("before\uFFFDafter");
+  });
+
+  test("replaces lone low surrogate with U+FFFD", () => {
+    const bad = "before\uDC00after";
+    expect(sanitizeSurrogates(bad)).toBe("before\uFFFDafter");
+  });
+
+  test("replaces high surrogate at end of string", () => {
+    const bad = "trailing\uD800";
+    expect(sanitizeSurrogates(bad)).toBe("trailing\uFFFD");
+  });
+
+  test("replaces multiple unpaired surrogates", () => {
+    const bad = "\uD800x\uDBFF\uDC00y\uDC00";
+    // \uD800 = lone high → replaced
+    // \uDBFF\uDC00 = valid pair → preserved
+    // \uDC00 = lone low → replaced
+    expect(sanitizeSurrogates(bad)).toBe("\uFFFDx\uDBFF\uDC00y\uFFFD");
+  });
+
+  test("result is always valid for JSON.stringify", () => {
+    // Construct string with various surrogate scenarios
+    const nasty = "ok\uD800\uDBFFpair\uDBFF\uDC00tail\uDC00";
+    const sanitized = sanitizeSurrogates(nasty);
+    // Must not throw when serialized to JSON
+    const json = JSON.stringify(sanitized);
+    expect(JSON.parse(json)).toBe(sanitized);
+  });
+});
+
+describe("inline sanitizes surrogates", () => {
+  test("inline strips unpaired surrogates from text", () => {
+    const bad = "line one\n  \uD800middle\n  end";
+    const result = inline(bad);
+    expect(result).toBe("line one \uFFFDmiddle end");
+    // Must be JSON-safe
+    expect(() => JSON.stringify(result)).not.toThrow();
   });
 });
