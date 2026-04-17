@@ -616,7 +616,8 @@ export function pruneOversized(maxLength: number): number {
       "UPDATE knowledge SET confidence = 0, updated_at = ? WHERE LENGTH(content) > ? AND confidence > 0",
     )
     .run(Date.now(), maxLength);
-  return result.changes;
+  // node:sqlite returns `changes` as `number | bigint`; coerce for cross-runtime parity.
+  return Number(result.changes);
 }
 
 // ---------------------------------------------------------------------------
@@ -710,7 +711,8 @@ export function cascadeRefReplace(oldId: string, newId: string): number {
   // Clean up any rows that became self-referential
   db().query("DELETE FROM knowledge_refs WHERE from_id = to_id").run();
 
-  return result.changes;
+  // node:sqlite returns `changes` as `number | bigint`; coerce for cross-runtime parity.
+  return Number(result.changes);
 }
 
 /**

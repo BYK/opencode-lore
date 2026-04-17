@@ -258,7 +258,9 @@ function resetOrphans(projectPath: string, sessionID: string): number {
         "UPDATE temporal_messages SET distilled = 0 WHERE project_id = ? AND session_id = ? AND distilled = 1",
       )
       .run(pid, sessionID);
-    return result.changes;
+    // node:sqlite returns `changes` as `number | bigint`; bun:sqlite returns `number`.
+    // Coerce to number — SQLite will never return a row count > 2^53.
+    return Number(result.changes);
   }
   // Find orphans: marked distilled but not in any source_ids
   const distilled = db()
