@@ -10,8 +10,7 @@
  */
 
 import { parseArgs } from "util";
-import { load } from "../src/config";
-import { db } from "../src/db";
+import { load, db } from "@loreai/core";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),

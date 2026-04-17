@@ -1,12 +1,14 @@
 import type { Plugin, Hooks } from "@opencode-ai/plugin";
 import { join } from "path";
-import { load, config } from "./config";
-import { ensureProject, isFirstRun } from "./db";
-import * as temporal from "./temporal";
-import * as ltm from "./ltm";
-import * as distillation from "./distillation";
-import * as curator from "./curator";
 import {
+  load,
+  config,
+  ensureProject,
+  isFirstRun,
+  temporal,
+  ltm,
+  distillation,
+  curator,
   transform,
   setModelLimits,
   needsUrgentDistillation,
@@ -16,14 +18,17 @@ import {
   setForceMinLayer,
   getLastTransformedCount,
   getLastTransformEstimate,
-} from "./gradient";
-import { formatKnowledge, formatDistillations } from "./prompt";
+  formatKnowledge,
+  formatDistillations,
+  shouldImport,
+  importFromFile,
+  exportToFile,
+  latReader,
+  embedding,
+  log,
+  isWorkerSession,
+} from "@loreai/core";
 import { createRecallTool } from "./reflect";
-import { shouldImport, importFromFile, exportToFile } from "./agents-file";
-import * as latReader from "./lat-reader";
-import * as embedding from "./embedding";
-import * as log from "./log";
-import { isWorkerSession } from "./worker";
 
 /**
  * Detect whether an error from session.error is a context overflow ("prompt too long").

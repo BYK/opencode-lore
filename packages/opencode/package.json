@@ -1,0 +1,50 @@
+{
+  "name": "opencode-lore",
+  "version": "0.9.1",
+  "type": "module",
+  "license": "MIT",
+  "description": "Three-tier memory architecture for OpenCode — distillation, not summarization",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bun run script/build.ts"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.1.0"
+  },
+  "dependencies": {
+    "@loreai/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.1.39",
+    "@opencode-ai/sdk": "^1.1.39"
+  },
+  "files": [
+    "src/",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BYK/opencode-lore.git",
+    "directory": "packages/opencode"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "memory",
+    "agent",
+    "distillation",
+    "llm"
+  ],
+  "author": "BYK"
+}

@@ -16,10 +16,7 @@
 
 import { parseArgs } from "util";
 import { createOpencodeClient } from "@opencode-ai/sdk";
-import { load, config } from "../src/config";
-import { ensureProject } from "../src/db";
-import * as temporal from "../src/temporal";
-import * as distillation from "../src/distillation";
+import { load, config, ensureProject, temporal, distillation } from "@loreai/core";
 
 const { values, positionals } = parseArgs({
   args: Bun.argv.slice(2),
