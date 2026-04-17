@@ -1,8 +1,6 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { isContextOverflow, buildRecoveryMessage, LorePlugin, isValidProjectPath } from "../src/index";
-import * as ltm from "../src/ltm";
-import { db } from "../src/db";
-import { getLtmTokens, setModelLimits, calibrate, setLtmTokens } from "../src/gradient";
+import { ltm, db, getLtmTokens, setModelLimits, calibrate, setLtmTokens } from "@loreai/core";
 import type { Plugin } from "@opencode-ai/plugin";
 import type { Message, Part } from "@opencode-ai/sdk";
 

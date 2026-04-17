@@ -10,7 +10,7 @@
  */
 import { parseArgs } from "util";
 import { Database } from "bun:sqlite";
-import { DISTILLATION_SYSTEM, distillationUser } from "../src/prompt";
+import { DISTILLATION_SYSTEM, distillationUser } from "@loreai/core";
 
 // --- Config ---
 const BASE_URL = "http://localhost:4096";

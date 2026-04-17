@@ -1,6 +1,6 @@
 import { parseArgs } from "util";
 import { Database } from "bun:sqlite";
-import { DISTILLATION_SYSTEM, distillationUser } from "../src/prompt";
+import { DISTILLATION_SYSTEM, distillationUser } from "@loreai/core";
 
 const BASE_URL = "http://localhost:4096";
 const MODEL = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };

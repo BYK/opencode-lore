@@ -1,0 +1,58 @@
+{
+  "name": "@loreai/core",
+  "version": "0.9.1",
+  "type": "module",
+  "license": "MIT",
+  "description": "Shared memory engine for Lore — three-tier storage, distillation, gradient context management",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "default": "./dist/node/index.js"
+    }
+  },
+  "imports": {
+    "#db/driver": {
+      "bun": "./src/db/driver.bun.ts",
+      "default": "./src/db/driver.node.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bun run script/build.ts"
+  },
+  "dependencies": {
+    "remark": "^15.0.1",
+    "uuidv7": "^1.1.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@opencode-ai/sdk": "^1.1.39",
+    "@types/mdast": "^4.0.4"
+  },
+  "files": [
+    "src/",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BYK/opencode-lore.git",
+    "directory": "packages/core"
+  },
+  "keywords": [
+    "lore",
+    "memory",
+    "llm",
+    "sqlite",
+    "fts5",
+    "distillation"
+  ],
+  "author": "BYK"
+}

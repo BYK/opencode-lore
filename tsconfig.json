@@ -1,16 +1,14 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "outDir": "dist",
-    "rootDir": "src",
-    "declaration": true,
-    "types": ["bun"]
+    "noEmit": true
   },
-  "include": ["src"],
-  "exclude": ["node_modules", "dist", "test"]
+  "include": [
+    "packages/*/src",
+    "packages/*/test",
+    "packages/*/script",
+    "packages/*/scripts",
+    "packages/*/eval"
+  ],
+  "exclude": ["node_modules", "**/dist"]
 }

@@ -1,14 +1,30 @@
 import { tool } from "@opencode-ai/plugin/tool";
 import type { createOpencodeClient } from "@opencode-ai/sdk";
-import * as temporal from "./temporal";
-import * as ltm from "./ltm";
-import * as latReader from "./lat-reader";
-import * as log from "./log";
-import * as embedding from "./embedding";
-import { db, ensureProject, projectName } from "./db";
-import { ftsQuery, ftsQueryOr, EMPTY_QUERY, reciprocalRankFusion, expandQuery } from "./search";
-import { serialize, inline, h, p, ul, lip, liph, t, root } from "./markdown";
-import type { LoreConfig } from "./config";
+import {
+  temporal,
+  ltm,
+  latReader,
+  log,
+  embedding,
+  db,
+  ensureProject,
+  projectName,
+  ftsQuery,
+  ftsQueryOr,
+  EMPTY_QUERY,
+  reciprocalRankFusion,
+  expandQuery,
+  serialize,
+  inline,
+  h,
+  p,
+  ul,
+  lip,
+  liph,
+  t,
+  root,
+  type LoreConfig,
+} from "@loreai/core";
 
 type Client = ReturnType<typeof createOpencodeClient>;
 
