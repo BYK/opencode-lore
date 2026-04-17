@@ -35,7 +35,7 @@ type SessionRow = {
 const projectFilter = values.project;
 
 const rows = db()
-  .query<SessionRow, []>(
+  .query(
     `SELECT
        p.path AS project_path,
        t.session_id,
@@ -48,7 +48,7 @@ const rows = db()
      GROUP BY t.project_id, t.session_id
      ORDER BY last_msg DESC`,
   )
-  .all();
+  .all() as SessionRow[];
 
 const filtered = projectFilter
   ? rows.filter((r) => r.project_path.includes(projectFilter))

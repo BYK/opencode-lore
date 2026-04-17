@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 export const LoreConfig = z.object({
   model: z
@@ -119,9 +121,9 @@ export function config(): LoreConfig {
 }
 
 export async function load(directory: string): Promise<LoreConfig> {
-  const file = Bun.file(`${directory}/.lore.json`);
-  if (await file.exists()) {
-    const raw = await file.json();
+  const path = join(directory, ".lore.json");
+  if (existsSync(path)) {
+    const raw = JSON.parse(readFileSync(path, "utf8"));
     current = LoreConfig.parse(raw);
     return current;
   }

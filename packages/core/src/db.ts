@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database } from "#db/driver";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
@@ -303,7 +303,11 @@ export function db(): Database {
     mkdirSync(dir, { recursive: true });
     path = join(dir, "lore.db");
   }
-  instance = new Database(path, { create: true });
+  // Both `bun:sqlite` and `node:sqlite` create the file by default if it doesn't
+  // exist, so no special option is needed. (bun:sqlite's `{ create: true }`
+  // exists only to opt INTO creation when you want readonly=false — which is
+  // already the default for our case.)
+  instance = new Database(path);
   instance.exec("PRAGMA journal_mode = WAL");
   instance.exec("PRAGMA foreign_keys = ON");
   // Return freed pages to the OS incrementally on each transaction commit

@@ -14,6 +14,7 @@ import { join, relative, basename } from "path";
 import { remark } from "remark";
 import type { Root, Heading, Paragraph, Text } from "mdast";
 import { db, ensureProject } from "./db";
+import { sha256 } from "#db/driver";
 import { ftsQuery, ftsQueryOr, extractTopTerms, EMPTY_QUERY } from "./search";
 import * as log from "./log";
 
@@ -171,9 +172,7 @@ function listMarkdownFiles(dir: string): string[] {
 
 /** Compute SHA-256 hash of file content for change detection. */
 function contentHash(content: string): string {
-  const hasher = new Bun.CryptoHasher("sha256");
-  hasher.update(content);
-  return hasher.digest("hex");
+  return sha256(content);
 }
 
 // ---- Public API ----
