@@ -4,6 +4,10 @@
   "type": "module",
   "license": "MIT",
   "description": "Monorepo root for Lore — three-tier memory architecture",
+  "main": "./packages/opencode/src/index.ts",
+  "exports": {
+    ".": "./packages/opencode/src/index.ts"
+  },
   "workspaces": [
     "packages/*"
   ],
