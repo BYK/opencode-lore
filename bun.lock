@@ -20,7 +20,6 @@
         "zod": "^4.3.6",
       },
       "devDependencies": {
-        "@opencode-ai/sdk": "^1.1.39",
         "@types/mdast": "^4.0.4",
       },
     },

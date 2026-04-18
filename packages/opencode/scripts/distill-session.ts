@@ -17,6 +17,7 @@
 import { parseArgs } from "util";
 import { createOpencodeClient } from "@opencode-ai/sdk";
 import { load, config, ensureProject, temporal, distillation } from "@loreai/core";
+import { createOpenCodeLLMClient } from "../src/llm-adapter";
 
 const { values, positionals } = parseArgs({
   args: Bun.argv.slice(2),
@@ -72,10 +73,11 @@ if (pending < minMessages && !force) {
 }
 
 const client = createOpencodeClient({ baseUrl: serverUrl });
+const llm = createOpenCodeLLMClient(client, sessionID);
 
 console.log("Running distillation...");
 const { rounds, distilled } = await distillation.run({
-  client,
+  llm,
   projectPath,
   sessionID,
   model: cfg.model,

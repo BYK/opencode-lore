@@ -1,5 +1,4 @@
 import { tool } from "@opencode-ai/plugin/tool";
-import type { createOpencodeClient } from "@opencode-ai/sdk";
 import {
   temporal,
   ltm,
@@ -24,9 +23,8 @@ import {
   t,
   root,
   type LoreConfig,
+  type LLMClient,
 } from "@loreai/core";
-
-type Client = ReturnType<typeof createOpencodeClient>;
 
 type Distillation = {
   id: string;
@@ -230,7 +228,7 @@ function formatFusedResults(
 export function createRecallTool(
   projectPath: string,
   knowledgeEnabled = true,
-  client?: Client,
+  llmFactory?: (sessionID: string) => LLMClient,
   searchConfig?: LoreConfig["search"],
 ): ReturnType<typeof tool> {
   return tool({
@@ -261,9 +259,9 @@ export function createRecallTool(
 
       // Optional query expansion: generate alternative phrasings via LLM
       let queries = [args.query];
-      if (searchConfig?.queryExpansion && client && sid) {
+      if (searchConfig?.queryExpansion && llmFactory && sid) {
         try {
-          queries = await expandQuery(client, args.query, sid);
+          queries = await expandQuery(llmFactory(sid), args.query);
         } catch (err) {
           log.info("recall: query expansion failed, using original:", err);
         }

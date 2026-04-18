@@ -1,10 +1,9 @@
-import type { createOpencodeClient } from "@opencode-ai/sdk";
 import { config } from "./config";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
-import { workerSessionIDs, promptWorker } from "./worker";
+import type { LLMClient } from "./types";
 
 /**
  * Maximum length (chars) for a single knowledge entry's content.
@@ -13,25 +12,6 @@ import { workerSessionIDs, promptWorker } from "./worker";
  * so truncation is a last-resort safety net.
  */
 const MAX_ENTRY_CONTENT_LENGTH = 1200;
-
-type Client = ReturnType<typeof createOpencodeClient>;
-
-const workerSessions = new Map<string, string>();
-
-async function ensureWorkerSession(
-  client: Client,
-  parentID: string,
-): Promise<string> {
-  const existing = workerSessions.get(parentID);
-  if (existing) return existing;
-  const session = await client.session.create({
-    body: { parentID, title: "lore curator" },
-  });
-  const id = session.data!.id;
-  workerSessions.set(parentID, id);
-  workerSessionIDs.add(id);
-  return id;
-}
 
 type CuratorOp =
   | {
@@ -71,7 +51,7 @@ function parseOps(text: string): CuratorOp[] {
 const lastCuratedAt = new Map<string, number>();
 
 export async function run(input: {
-  client: Client;
+  llm: LLMClient;
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
@@ -98,21 +78,12 @@ export async function run(input: {
     messages: text,
     existing: existingForPrompt,
   });
-  const workerID = await ensureWorkerSession(input.client, input.sessionID);
   const model = input.model ?? cfg.model;
-  const parts = [
-    { type: "text" as const, text: `${CURATOR_SYSTEM}\n\n${userContent}` },
-  ];
-
-  const responseText = await promptWorker({
-    client: input.client,
-    workerID,
-    parts,
-    agent: "lore-curator",
-    model,
-    sessionMap: workerSessions,
-    sessionKey: input.sessionID,
-  });
+  const responseText = await input.llm.prompt(
+    CURATOR_SYSTEM,
+    userContent,
+    { model, workerID: "lore-curator" },
+  );
   if (!responseText) return { created: 0, updated: 0, deleted: 0 };
 
   const ops = parseOps(responseText);
@@ -188,7 +159,7 @@ export function resetCurationTracker(sessionID?: string) {
  * Only "update" and "delete" ops are applied — consolidation never creates entries.
  */
 export async function consolidate(input: {
-  client: Client;
+  llm: LLMClient;
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
@@ -210,21 +181,12 @@ export async function consolidate(input: {
     entries: entriesForPrompt,
     targetMax: cfg.curator.maxEntries,
   });
-  const workerID = await ensureWorkerSession(input.client, input.sessionID);
   const model = input.model ?? cfg.model;
-  const parts = [
-    { type: "text" as const, text: `${CONSOLIDATION_SYSTEM}\n\n${userContent}` },
-  ];
-
-  const responseText = await promptWorker({
-    client: input.client,
-    workerID,
-    parts,
-    agent: "lore-curator",
-    model,
-    sessionMap: workerSessions,
-    sessionKey: input.sessionID,
-  });
+  const responseText = await input.llm.prompt(
+    CONSOLIDATION_SYSTEM,
+    userContent,
+    { model, workerID: "lore-curator" },
+  );
   if (!responseText) return { updated: 0, deleted: 0 };
 
   const ops = parseOps(responseText);
