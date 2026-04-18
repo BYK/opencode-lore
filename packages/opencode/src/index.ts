@@ -1,4 +1,5 @@
 import type { Plugin, Hooks } from "@opencode-ai/plugin";
+import type { LoreMessageWithParts } from "@loreai/core";
 import { join } from "path";
 import {
   load,
@@ -29,6 +30,7 @@ import {
   isWorkerSession,
 } from "@loreai/core";
 import { createRecallTool } from "./reflect";
+import { createOpenCodeLLMClient } from "./llm-adapter";
 
 /**
  * Detect whether an error from session.error is a context overflow ("prompt too long").
@@ -212,7 +214,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         needsUrgentDistillation()
       ) {
         await distillation.run({
-          client: ctx.client,
+          llm: createOpenCodeLLMClient(ctx.client, sessionID),
           projectPath,
           sessionID,
           model: cfg.model,
@@ -231,7 +233,7 @@ export const LorePlugin: Plugin = async (ctx) => {
       const cfg = config();
       if (!cfg.curator.enabled) return;
       await curator.run({
-        client: ctx.client,
+        llm: createOpenCodeLLMClient(ctx.client, sessionID),
         projectPath,
         sessionID,
         model: cfg.model,
@@ -430,7 +432,7 @@ export const LorePlugin: Plugin = async (ctx) => {
               `entry count ${allEntries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
             );
             const { updated, deleted } = await curator.consolidate({
-              client: ctx.client,
+              llm: createOpenCodeLLMClient(ctx.client, sessionID),
               projectPath,
               sessionID,
               model: cfg.model,
@@ -631,8 +633,10 @@ export const LorePlugin: Plugin = async (ctx) => {
         // state, worker sessions waste CPU on transform() for no benefit.
         if (sessionID && await shouldSkip(sessionID)) return;
 
+        // OpenCode's Message/Part types are a superset of Lore's internal types.
+        // Cast at the boundary — both are structurally compatible at runtime.
         const result = transform({
-          messages: output.messages,
+          messages: output.messages as unknown as LoreMessageWithParts[],
           projectPath,
           sessionID,
         });
@@ -680,7 +684,14 @@ export const LorePlugin: Plugin = async (ctx) => {
         // Layer 0 means all messages fit within the context budget — leave them alone
         // so the append-only sequence stays intact for prompt caching.
         if (result.layer > 0) {
-          output.messages.splice(0, output.messages.length, ...result.messages);
+          // Cast back to OpenCode's message type — Lore's LoreMessageWithParts
+          // is a structural subset, and the gradient transform preserves all
+          // host-specific fields via spread operators on the original objects.
+          output.messages.splice(
+            0,
+            output.messages.length,
+            ...(result.messages as unknown as typeof output.messages),
+          );
         }
 
         if (result.layer >= 2 && sessionID) {
@@ -761,7 +772,7 @@ End with "I'm ready to continue." so the agent knows to pick up where it left of
       recall: createRecallTool(
         projectPath,
         config().knowledge.enabled,
-        ctx.client,
+        (sessionID) => createOpenCodeLLMClient(ctx.client, sessionID),
         config().search,
       ),
     },

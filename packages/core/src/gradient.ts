@@ -1,10 +1,11 @@
-import type { Message, Part } from "@opencode-ai/sdk";
+import type { LoreMessage, LorePart, LoreMessageWithParts, LoreToolPart, LoreTextPart, LoreToolState, LoreToolStateCompleted } from "./types";
+import { isTextPart, isReasoningPart, isToolPart } from "./types";
 import { db, ensureProject, loadForceMinLayer, saveForceMinLayer } from "./db";
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
 import { normalize } from "./markdown";
 
-type MessageWithParts = { info: Message; parts: Part[] };
+type MessageWithParts = LoreMessageWithParts;
 
 // Token estimate: ~3 chars per token. Validated against real API data across
 // 200+ turn-pairs: chars/3 gives ~1.68x ratio (actual/estimate), best among
@@ -14,13 +15,13 @@ function estimate(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
-function estimateParts(parts: Part[]): number {
+function estimateParts(parts: LorePart[]): number {
   let total = 0;
   for (const part of parts) {
-    if (part.type === "text") total += estimate(part.text);
-    else if (part.type === "reasoning" && part.text)
+    if (isTextPart(part)) total += estimate(part.text);
+    else if (isReasoningPart(part) && part.text)
       total += estimate(part.text);
-    else if (part.type === "tool" && part.state.status === "completed")
+    else if (isToolPart(part) && part.state.status === "completed")
       total += estimate(part.state.output) + estimate(part.tool) + 50;
     else total += 20; // metadata overhead for other part types
   }
@@ -293,18 +294,18 @@ function stripSystemReminders(text: string): string {
     .trim();
 }
 
-function cleanParts(parts: Part[]): Part[] {
+function cleanParts(parts: LorePart[]): LorePart[] {
   const cleaned = parts.map((part) => {
-    if (part.type !== "text") return part;
+    if (!isTextPart(part)) return part;
     const text = stripSystemReminders(part.text);
     if (text === part.text) return part;
-    return { ...part, text } as Part;
+    return { ...part, text } as LorePart;
   });
   // Filter out text parts that became empty after stripping
   const filtered = cleaned.filter(
     (part) =>
-      part.type !== "text" ||
-      (part as Extract<Part, { type: "text" }>).text.trim().length > 0,
+      !isTextPart(part) ||
+      part.text.trim().length > 0,
   );
   // If all parts were stripped (e.g. a user message that was purely build-switch synthetic
   // content), keep a minimal placeholder so the message survives toModelMessages.
@@ -312,8 +313,8 @@ function cleanParts(parts: Part[]): Part[] {
   // causing Anthropic's "does not support assistant message prefill" error.
   if (filtered.length === 0 && parts.length > 0) {
     const first = parts[0];
-    if (first.type === "text") {
-      return [{ ...first, text: "..." } as Part];
+    if (isTextPart(first)) {
+      return [{ ...first, text: "..." } as LorePart];
     }
   }
   return filtered.length > 0 ? filtered : parts;
@@ -414,7 +415,7 @@ export function deduplicateToolOutputs(
   // recognize earlier reads as duplicates of current-turn content.
   for (let i = 0; i < messages.length; i++) {
     for (const part of messages[i].parts) {
-      if (part.type !== "tool" || part.state.status !== "completed") continue;
+      if (!isToolPart(part) || part.state.status !== "completed") continue;
       const output = part.state.output;
       if (!output || output.length < DEDUP_MIN_CHARS) continue;
 
@@ -439,7 +440,7 @@ export function deduplicateToolOutputs(
 
     let partsChanged = false;
     const parts = msg.parts.map((part) => {
-      if (part.type !== "tool" || part.state.status !== "completed") return part;
+      if (!isToolPart(part) || part.state.status !== "completed") return part;
       const output = part.state.output;
       if (!output || output.length < DEDUP_MIN_CHARS) return part;
 
@@ -469,7 +470,7 @@ export function deduplicateToolOutputs(
           ...part.state,
           output: dedupAnnotation(part.tool, filePath),
         },
-      } as Part;
+      } as LorePart;
     });
 
     if (!partsChanged) return msg;
@@ -496,7 +497,7 @@ function sanitizeToolParts(
 
     let partsChanged = false;
     const parts = msg.parts.map((part) => {
-      if (part.type !== "tool") return part;
+      if (!isToolPart(part)) return part;
       const { status } = part.state;
       if (status === "completed" || status === "error") return part;
 
@@ -516,7 +517,7 @@ function sanitizeToolParts(
             end: now,
           },
         },
-      } as Part;
+      } as LorePart;
     });
 
     if (!partsChanged) return msg;
@@ -527,9 +528,9 @@ function sanitizeToolParts(
   return changed ? result : messages;
 }
 
-function stripToolOutputs(parts: Part[]): Part[] {
+function stripToolOutputs(parts: LorePart[]): LorePart[] {
   return parts.map((part) => {
-    if (part.type !== "tool") return part;
+    if (!isToolPart(part)) return part;
     if (part.state.status !== "completed") return part;
     return {
       ...part,
@@ -537,23 +538,23 @@ function stripToolOutputs(parts: Part[]): Part[] {
         ...part.state,
         output: toolStripAnnotation(part.tool, part.state.output),
       },
-    } as Part;
+    } as LorePart;
   });
 }
 
-function stripToTextOnly(parts: Part[]): Part[] {
+function stripToTextOnly(parts: LorePart[]): LorePart[] {
   const stripped = parts
-    .filter((p) => p.type === "text")
+    .filter(isTextPart)
     .map((p) => ({
       ...p,
       text: normalize(stripSystemReminders(p.text)),
     }))
-    .filter((p) => p.text.trim().length > 0) as Part[];
+    .filter((p) => p.text.trim().length > 0) as LorePart[];
   // Guard against empty result — keep a placeholder so the message survives
   // toModelMessages and the conversation doesn't end with an assistant message.
   if (stripped.length === 0 && parts.length > 0) {
-    const first = parts.find((p) => p.type === "text");
-    if (first) return [{ ...first, text: "..." } as Part];
+    const first = parts.find(isTextPart);
+    if (first) return [{ ...first, text: "..." } as LorePart];
   }
   return stripped;
 }

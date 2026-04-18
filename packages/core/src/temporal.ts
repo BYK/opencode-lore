@@ -1,20 +1,21 @@
 import { db, ensureProject } from "./db";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY } from "./search";
 import { sanitizeSurrogates } from "./markdown";
-import type { Message, Part } from "@opencode-ai/sdk";
+import type { LoreMessage, LorePart } from "./types";
+import { isTextPart, isReasoningPart, isToolPart } from "./types";
 
 // ~3 chars per token — validated as best heuristic against real API data.
 function estimate(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
-function partsToText(parts: Part[]): string {
+function partsToText(parts: LorePart[]): string {
   const chunks: string[] = [];
   for (const part of parts) {
-    if (part.type === "text") chunks.push(part.text);
-    else if (part.type === "reasoning" && part.text)
+    if (isTextPart(part)) chunks.push(part.text);
+    else if (isReasoningPart(part) && part.text)
       chunks.push(`[reasoning] ${part.text}`);
-    else if (part.type === "tool" && part.state.status === "completed")
+    else if (isToolPart(part) && part.state.status === "completed")
       chunks.push(`[tool:${part.tool}] ${part.state.output}`);
   }
   // Sanitize unpaired surrogates from tool outputs and other raw text.
@@ -23,7 +24,7 @@ function partsToText(parts: Part[]): string {
   return sanitizeSurrogates(chunks.join("\n"));
 }
 
-function messageMetadata(info: Message, parts: Part[]): string {
+function messageMetadata(info: LoreMessage, parts: LorePart[]): string {
   const meta: Record<string, unknown> = {};
   if (info.role === "user") {
     meta.agent = info.agent;
@@ -33,17 +34,15 @@ function messageMetadata(info: Message, parts: Part[]): string {
     meta.providerID = info.providerID;
     meta.mode = info.mode;
   }
-  const tools = parts
-    .filter((p) => p.type === "tool")
-    .map((p) => (p as Extract<Part, { type: "tool" }>).tool);
+  const tools = parts.filter(isToolPart).map((p) => p.tool);
   if (tools.length) meta.tools = tools;
   return JSON.stringify(meta);
 }
 
 export function store(input: {
   projectPath: string;
-  info: Message;
-  parts: Part[];
+  info: LoreMessage;
+  parts: LorePart[];
 }) {
   const pid = ensureProject(input.projectPath);
   const content = partsToText(input.parts);

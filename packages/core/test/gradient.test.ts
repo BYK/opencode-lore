@@ -15,7 +15,8 @@ import {
   estimateMessages,
   deduplicateToolOutputs,
 } from "../src/gradient";
-import type { Message, Part } from "@opencode-ai/sdk";
+import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
+import { isToolPart } from "../src/types";
 
 const PROJECT = "/test/gradient/project";
 
@@ -24,8 +25,8 @@ function makeMsg(
   role: "user" | "assistant",
   text: string,
   sessionID = "grad-sess",
-): { info: Message; parts: Part[] } {
-  const info: Message =
+): LoreMessageWithParts {
+  const info: LoreMessage =
     role === "user"
       ? {
           id,
@@ -548,8 +549,8 @@ function makeStep(
   parentUserID: string,
   text: string,
   sessionID = "grad-sess",
-): { info: Message; parts: Part[] } {
-  const info: Message = {
+): LoreMessageWithParts {
+  const info: LoreMessage = {
     id,
     sessionID,
     role: "assistant",
@@ -697,8 +698,8 @@ function makeStepWithTool(
   toolName: string,
   toolOutput: string,
   sessionID = "grad-sess",
-): { info: Message; parts: Part[] } {
-  const info: Message = {
+): LoreMessageWithParts {
+  const info: LoreMessage = {
     id,
     sessionID,
     role: "assistant",
@@ -724,7 +725,7 @@ function makeStepWithTool(
         sessionID,
         messageID: id,
         type: "step-start",
-      } as Part,
+      } as LorePart,
       {
         id: `tool-${id}`,
         sessionID,
@@ -740,7 +741,7 @@ function makeStepWithTool(
           metadata: {},
           time: { start: Date.now(), end: Date.now() },
         },
-      } as unknown as Part,
+      } as unknown as LorePart,
       {
         id: `step-finish-${id}`,
         sessionID,
@@ -749,7 +750,7 @@ function makeStepWithTool(
         reason: "tool_use",
         cost: 0,
         tokens: { input: 50, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
-      } as unknown as Part,
+      } as unknown as LorePart,
     ],
   };
 }
@@ -767,8 +768,8 @@ function makeStepWithPendingTool(
   parentUserID: string,
   toolName: string,
   sessionID = "grad-sess",
-): { info: Message; parts: Part[] } {
-  const info: Message = {
+): LoreMessageWithParts {
+  const info: LoreMessage = {
     id,
     sessionID,
     role: "assistant",
@@ -794,7 +795,7 @@ function makeStepWithPendingTool(
         sessionID,
         messageID: id,
         type: "step-start",
-      } as Part,
+      } as LorePart,
       {
         id: `tool-${id}`,
         sessionID,
@@ -807,7 +808,7 @@ function makeStepWithPendingTool(
           input: { command: "ls" },
           raw: '{"command": "ls"}',
         },
-      } as unknown as Part,
+      } as unknown as LorePart,
     ],
   };
 }
@@ -817,8 +818,8 @@ function makeStepWithRunningTool(
   parentUserID: string,
   toolName: string,
   sessionID = "grad-sess",
-): { info: Message; parts: Part[] } {
-  const info: Message = {
+): LoreMessageWithParts {
+  const info: LoreMessage = {
     id,
     sessionID,
     role: "assistant",
@@ -845,7 +846,7 @@ function makeStepWithRunningTool(
         sessionID,
         messageID: id,
         type: "step-start",
-      } as Part,
+      } as LorePart,
       {
         id: `tool-${id}`,
         sessionID,
@@ -860,7 +861,7 @@ function makeStepWithRunningTool(
           metadata: { cwd: "/test" },
           time: { start: startTime },
         },
-      } as unknown as Part,
+      } as unknown as LorePart,
     ],
   };
 }
@@ -942,7 +943,7 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
             type: "text",
             text: "Let me run two commands",
             time: { start: Date.now(), end: Date.now() },
-          } as Part,
+          } as LorePart,
           // completed tool part
           {
             id: "tool-completed-san-a4",
@@ -959,7 +960,7 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
               metadata: {},
               time: { start: Date.now(), end: Date.now() },
             },
-          } as unknown as Part,
+          } as unknown as LorePart,
           // pending tool part
           {
             id: "tool-pending-san-a4",
@@ -973,7 +974,7 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
               input: { command: "cat file1.ts" },
               raw: '{"command": "cat file1.ts"}',
             },
-          } as unknown as Part,
+          } as unknown as LorePart,
         ],
       },
     ];
@@ -1346,7 +1347,7 @@ function makeMsgWithTool(
   input: string,
   output: string,
   sessionID = "dedup-sess",
-): { info: Message; parts: Part[] } {
+): LoreMessageWithParts {
   const base = makeMsg(id, role, "", sessionID);
   return {
     info: base.info,
@@ -1368,14 +1369,14 @@ function makeMsgWithTool(
           time: { start: Date.now(), end: Date.now() },
         },
         time: { start: Date.now(), end: Date.now() },
-      } as Part,
+      } as LorePart,
     ],
   };
 }
 
 /** Helper to extract output from a completed tool part. */
-function getToolOutput(part: Part): string | undefined {
-  if (part.type === "tool" && part.state.status === "completed") {
+function getToolOutput(part: LorePart): string | undefined {
+  if (isToolPart(part) && part.state.status === "completed") {
     return part.state.output;
   }
   return undefined;

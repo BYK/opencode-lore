@@ -1,4 +1,3 @@
-import type { createOpencodeClient } from "@opencode-ai/sdk";
 import { db, ensureProject } from "./db";
 import { config } from "./config";
 import * as temporal from "./temporal";
@@ -11,31 +10,13 @@ import {
   recursiveUser,
 } from "./prompt";
 import { needsUrgentDistillation } from "./gradient";
-import { workerSessionIDs, promptWorker } from "./worker";
+import { workerSessionIDs } from "./worker";
+import type { LLMClient } from "./types";
 
 // Re-export for backwards compat — index.ts and others may still import from here.
 export { workerSessionIDs };
 
-type Client = ReturnType<typeof createOpencodeClient>;
 type TemporalMessage = temporal.TemporalMessage;
-
-// Worker sessions keyed by parent session ID — hidden children, one per source session
-const workerSessions = new Map<string, string>();
-
-async function ensureWorkerSession(
-  client: Client,
-  parentID: string,
-): Promise<string> {
-  const existing = workerSessions.get(parentID);
-  if (existing) return existing;
-  const session = await client.session.create({
-    body: { parentID, title: "lore distillation" },
-  });
-  const id = session.data!.id;
-  workerSessions.set(parentID, id);
-  workerSessionIDs.add(id);
-  return id;
-}
 
 // Segment detection: group related messages together
 function detectSegments(
@@ -286,7 +267,7 @@ function resetOrphans(projectPath: string, sessionID: string): number {
 
 // Main distillation entry point — called on session.idle or when urgent
 export async function run(input: {
-  client: Client;
+  llm: LLMClient;
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
@@ -320,7 +301,7 @@ export async function run(input: {
       const segments = detectSegments(pending, cfg.distillation.maxSegment);
       for (const segment of segments) {
         const result = await distillSegment({
-          client: input.client,
+          llm: input.llm,
           projectPath: input.projectPath,
           sessionID: input.sessionID,
           messages: segment,
@@ -339,7 +320,7 @@ export async function run(input: {
       cfg.distillation.metaThreshold
     ) {
       await metaDistill({
-        client: input.client,
+        llm: input.llm,
         projectPath: input.projectPath,
         sessionID: input.sessionID,
         model: input.model,
@@ -355,7 +336,7 @@ export async function run(input: {
 }
 
 async function distillSegment(input: {
-  client: Client;
+  llm: LLMClient;
   projectPath: string;
   sessionID: string;
   messages: TemporalMessage[];
@@ -378,21 +359,12 @@ async function distillSegment(input: {
     messages: text,
   });
 
-  const workerID = await ensureWorkerSession(input.client, input.sessionID);
   const model = input.model ?? config().model;
-  const parts = [
-    { type: "text" as const, text: `${DISTILLATION_SYSTEM}\n\n${userContent}` },
-  ];
-
-  const responseText = await promptWorker({
-    client: input.client,
-    workerID,
-    parts,
-    agent: "lore-distill",
-    model,
-    sessionMap: workerSessions,
-    sessionKey: input.sessionID,
-  });
+  const responseText = await input.llm.prompt(
+    DISTILLATION_SYSTEM,
+    userContent,
+    { model, workerID: "lore-distill" },
+  );
   if (!responseText) return null;
 
   const result = parseDistillationResult(responseText);
@@ -416,7 +388,7 @@ async function distillSegment(input: {
 }
 
 async function metaDistill(input: {
-  client: Client;
+  llm: LLMClient;
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
@@ -426,21 +398,12 @@ async function metaDistill(input: {
 
   const userContent = recursiveUser(existing);
 
-  const workerID = await ensureWorkerSession(input.client, input.sessionID);
   const model = input.model ?? config().model;
-  const parts = [
-    { type: "text" as const, text: `${RECURSIVE_SYSTEM}\n\n${userContent}` },
-  ];
-
-  const responseText = await promptWorker({
-    client: input.client,
-    workerID,
-    parts,
-    agent: "lore-distill",
-    model,
-    sessionMap: workerSessions,
-    sessionKey: input.sessionID,
-  });
+  const responseText = await input.llm.prompt(
+    RECURSIVE_SYSTEM,
+    userContent,
+    { model, workerID: "lore-distill" },
+  );
   if (!responseText) return null;
 
   const result = parseDistillationResult(responseText);
