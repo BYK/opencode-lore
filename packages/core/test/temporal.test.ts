@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { db, ensureProject } from "../src/db";
 import * as temporal from "../src/temporal";
 import { ftsQuery } from "../src/search";
-import type { Message, Part } from "@opencode-ai/sdk";
+import type { LoreMessage, LorePart } from "../src/types";
 
 const PROJECT = "/test/temporal/project";
 
@@ -10,7 +10,7 @@ function makeMessage(
   id: string,
   role: "user" | "assistant",
   sessionID = "sess-1",
-): Message {
+): LoreMessage {
   if (role === "user") {
     return {
       id,
@@ -41,7 +41,7 @@ function makeMessage(
   };
 }
 
-function makeParts(messageID: string, text: string): Part[] {
+function makeParts(messageID: string, text: string): LorePart[] {
   return [
     {
       id: `part-${messageID}`,

@@ -271,30 +271,9 @@ export function reciprocalRankFusion<T>(
 // LLM query expansion (Phase 4)
 // ---------------------------------------------------------------------------
 
-import type { createOpencodeClient } from "@opencode-ai/sdk";
-import { workerSessionIDs, promptWorker } from "./worker";
 import { QUERY_EXPANSION_SYSTEM } from "./prompt";
 import * as log from "./log";
-
-type Client = ReturnType<typeof createOpencodeClient>;
-
-// Worker sessions for query expansion — keyed by parent session ID
-const expansionWorkerSessions = new Map<string, string>();
-
-async function ensureExpansionWorkerSession(
-  client: Client,
-  parentID: string,
-): Promise<string> {
-  const existing = expansionWorkerSessions.get(parentID);
-  if (existing) return existing;
-  const session = await client.session.create({
-    body: { parentID, title: "lore query expansion" },
-  });
-  const id = session.data!.id;
-  expansionWorkerSessions.set(parentID, id);
-  workerSessionIDs.add(id);
-  return id;
-}
+import type { LLMClient } from "./types";
 
 /**
  * Expand a user query into multiple search variants using the configured LLM.
@@ -303,39 +282,25 @@ async function ensureExpansionWorkerSession(
  * Uses a 3-second timeout — if the LLM is slow, returns only the original query.
  * Errors are caught silently (logged) and the original query is returned.
  *
- * @param client    OpenCode client for LLM calls
+ * @param llm       LLM client for prompt calls
  * @param query     The original user query
- * @param sessionID Parent session ID (for worker session creation)
  * @param model     Optional model override
  */
 export async function expandQuery(
-  client: Client,
+  llm: LLMClient,
   query: string,
-  sessionID: string,
   model?: { providerID: string; modelID: string },
 ): Promise<string[]> {
   const TIMEOUT_MS = 3000;
 
   try {
-    const workerID = await ensureExpansionWorkerSession(client, sessionID);
-    const parts = [
-      {
-        type: "text" as const,
-        text: `${QUERY_EXPANSION_SYSTEM}\n\nInput: "${query}"`,
-      },
-    ];
-
     // Race the LLM call against a timeout
     const responseText = await Promise.race([
-      promptWorker({
-        client,
-        workerID,
-        parts,
-        agent: "lore-query-expand",
-        model,
-        sessionMap: expansionWorkerSessions,
-        sessionKey: sessionID,
-      }),
+      llm.prompt(
+        QUERY_EXPANSION_SYSTEM,
+        `Input: "${query}"`,
+        { model, workerID: "lore-query-expand" },
+      ),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), TIMEOUT_MS)),
     ]);
 

@@ -17,6 +17,25 @@ export * as embedding from "./embedding";
 export * as latReader from "./lat-reader";
 export * as log from "./log";
 
+export type {
+  LoreMessage,
+  LoreUserMessage,
+  LoreAssistantMessage,
+  LorePart,
+  LoreTextPart,
+  LoreReasoningPart,
+  LoreToolPart,
+  LoreGenericPart,
+  LoreToolState,
+  LoreToolStatePending,
+  LoreToolStateRunning,
+  LoreToolStateCompleted,
+  LoreToolStateError,
+  LoreMessageWithParts,
+  LLMClient,
+} from "./types";
+export { isTextPart, isReasoningPart, isToolPart } from "./types";
+
 export { load, config, type LoreConfig } from "./config";
 export {
   db,
@@ -54,7 +73,7 @@ export {
   QUERY_EXPANSION_SYSTEM,
 } from "./prompt";
 export { shouldImport, importFromFile, exportToFile } from "./agents-file";
-export { workerSessionIDs, promptWorker, isWorkerSession } from "./worker";
+export { workerSessionIDs, isWorkerSession } from "./worker";
 export {
   ftsQuery,
   ftsQueryOr,
