@@ -15,7 +15,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "bun run script/build.ts"
+    "build": "echo 'opencode-lore ships raw TS — no build step needed'"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.1.0"
