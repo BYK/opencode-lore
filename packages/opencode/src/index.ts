@@ -89,6 +89,26 @@ export function isValidProjectPath(p: string): boolean {
 
 export const LorePlugin: Plugin = async (ctx) => {
   const projectPath = ctx.worktree || ctx.directory;
+
+  // Per-session LTM cache — reuse exact formatted bytes across turns to
+  // preserve the system prompt prefix for Anthropic's prompt caching.
+  // Without this, forSession() re-scores entries every turn (session context
+  // changes → different terms → different entries → system prompt bytes change
+  // at position 0 → total cache invalidation). Cleared when knowledge
+  // mutations occur (curation, consolidation, pruning, import).
+  //
+  // Declared up-front before any code path that calls invalidateLtmCache()
+  // — startup AGENTS.md import, pruneOversized, etc. all fire before the
+  // hooks are registered, and a TDZ reference would fail the whole plugin.
+  const ltmSessionCache = new Map<string, { formatted: string; tokenCount: number }>();
+  function invalidateLtmCache() {
+    ltmSessionCache.clear();
+  }
+
+  // Sessions where LTM injection failed and the fallback note was pushed.
+  // Used to decide whether recovering LTM is worth the prompt cache bust.
+  const ltmDegradedSessions = new Set<string>();
+
   try {
     await load(ctx.directory);
     let firstRun = isFirstRun();
@@ -145,21 +165,6 @@ export const LorePlugin: Plugin = async (ctx) => {
 
   // Track user turns for periodic curation
   let turnsSinceCuration = 0;
-
-  // Per-session LTM cache — reuse exact formatted bytes across turns to
-  // preserve the system prompt prefix for Anthropic's prompt caching.
-  // Without this, forSession() re-scores entries every turn (session context
-  // changes → different terms → different entries → system prompt bytes change
-  // at position 0 → total cache invalidation). Cleared when knowledge
-  // mutations occur (curation, consolidation, pruning, import).
-  const ltmSessionCache = new Map<string, { formatted: string; tokenCount: number }>();
-  function invalidateLtmCache() {
-    ltmSessionCache.clear();
-  }
-
-  // Sessions where LTM injection failed and the fallback note was pushed.
-  // Used to decide whether recovering LTM is worth the prompt cache bust.
-  const ltmDegradedSessions = new Set<string>();
 
   // Track active sessions for distillation
   const activeSessions = new Set<string>();
