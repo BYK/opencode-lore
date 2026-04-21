@@ -1,4 +1,42 @@
 # Changelog
+## 0.10.0
+
+### New Features ✨
+
+- (pi) @loreai/pi extension — Lore memory for Pi coding-agent by @BYK in [#78](https://github.com/BYK/loreai/pull/78)
+
+### Bug Fixes 🐛
+
+- (opencode) Hoist ltmSessionCache to avoid TDZ on startup by @BYK in [#77](https://github.com/BYK/loreai/pull/77)
+- (publish) Add registry-url to setup-node for npm OIDC by @BYK in [#85](https://github.com/BYK/loreai/pull/85)
+- (release) Custom bump script to work around npm workspace:* incompatibility by @BYK in [#83](https://github.com/BYK/loreai/pull/83)
+- Add root exports trampoline for file:// plugin loading by @BYK in [#73](https://github.com/BYK/loreai/pull/73)
+
+### Documentation 📚
+
+- Per-package README and LICENSE for npm by @BYK in [#80](https://github.com/BYK/loreai/pull/80)
+
+### Internal Changes 🔧
+
+#### Agents Md
+
+- Sync curator entries before release by @BYK in [#82](https://github.com/BYK/loreai/pull/82)
+- Monorepo milestone — root trampoline documented by @BYK in [#74](https://github.com/BYK/loreai/pull/74)
+- Sync curator-managed knowledge entries by @BYK in [#70](https://github.com/BYK/loreai/pull/70)
+
+#### Core
+
+- Decouple from @opencode-ai/sdk with host-agnostic types and LLMClient by @BYK in [#76](https://github.com/BYK/loreai/pull/76)
+- Add esbuild build script for node + bun targets by @BYK in [#75](https://github.com/BYK/loreai/pull/75)
+- Abstract SQLite driver behind #db/driver subpath by @BYK in [#72](https://github.com/BYK/loreai/pull/72)
+
+#### Other
+
+- Update repository URLs to BYK/loreai after rename by @BYK in [#86](https://github.com/BYK/loreai/pull/86)
+- Rename opencode-lore to @loreai/opencode with legacy mirror by @BYK in [#81](https://github.com/BYK/loreai/pull/81)
+- Multi-package release pipeline for @loreai scope by @BYK in [#79](https://github.com/BYK/loreai/pull/79)
+- Split into @loreai/core + opencode-lore monorepo by @BYK in [#71](https://github.com/BYK/loreai/pull/71)
+
 ## 0.9.1
 
 ### Bug Fixes 🐛
