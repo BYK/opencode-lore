@@ -8,9 +8,11 @@ Lore is published as three packages, all sharing the same SQLite database at `~/
 
 | Package | For | Install |
 |---|---|---|
-| [`opencode-lore`](https://www.npmjs.com/package/opencode-lore) | [OpenCode](https://opencode.ai) plugin | Add to `opencode.json` `plugin` array |
+| [`@loreai/opencode`](https://www.npmjs.com/package/@loreai/opencode) | [OpenCode](https://opencode.ai) plugin | Add to `opencode.json` `plugin` array |
 | [`@loreai/pi`](https://www.npmjs.com/package/@loreai/pi) | [Pi coding-agent](https://github.com/badlogic/pi-mono) extension | `pi install npm:@loreai/pi` |
 | [`@loreai/core`](https://www.npmjs.com/package/@loreai/core) | Shared memory engine | Dependency of the host packages above |
+
+The OpenCode plugin is also published as [`opencode-lore`](https://www.npmjs.com/package/opencode-lore) (legacy alias). Both names contain identical code at every release — use whichever you prefer.
 
 Because all three share the same database, switching between OpenCode and Pi on the same project preserves the curated knowledge, distillations, and AGENTS.md sync.
 
@@ -94,17 +96,17 @@ This plugin was built in a few intense sessions. Some highlights:
 
 ### OpenCode
 
-Add `opencode-lore` to the `plugin` array in your project's `opencode.json`:
+Add `@loreai/opencode` to the `plugin` array in your project's `opencode.json`:
 
 ```json
 {
   "plugin": [
-    "opencode-lore"
+    "@loreai/opencode"
   ]
 }
 ```
 
-Restart OpenCode and the plugin will be installed automatically.
+Restart OpenCode and the plugin will be installed automatically. The legacy name `opencode-lore` still works if you have an existing setup.
 
 ### Pi
 

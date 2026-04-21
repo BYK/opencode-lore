@@ -1,4 +1,4 @@
-# opencode-lore
+# @loreai/opencode
 
 > **Experimental** — Under active development. APIs, storage format, and behavior may change.
 
@@ -13,18 +13,20 @@ Add to your project's `opencode.json`:
 ```json
 {
   "plugin": [
-    "opencode-lore"
+    "@loreai/opencode"
   ]
 }
 ```
 
 Restart OpenCode and the plugin will be installed automatically.
 
+> This package is also published as [`opencode-lore`](https://www.npmjs.com/package/opencode-lore) (legacy alias). Both names ship identical code at every release — either works.
+
 ## Companion packages
 
 Lore ships as three packages sharing the same SQLite database at `~/.local/share/opencode-lore/lore.db`:
 
-- **`opencode-lore`** (you are here) — OpenCode plugin
+- **`@loreai/opencode`** (you are here) — OpenCode plugin
 - [`@loreai/pi`](https://www.npmjs.com/package/@loreai/pi) — [Pi coding-agent](https://github.com/badlogic/pi-mono) extension
 - [`@loreai/core`](https://www.npmjs.com/package/@loreai/core) — shared memory engine
 

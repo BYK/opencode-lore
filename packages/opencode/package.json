@@ -1,5 +1,5 @@
 {
-  "name": "opencode-lore",
+  "name": "@loreai/opencode",
   "version": "0.9.1",
   "type": "module",
   "license": "MIT",
@@ -15,7 +15,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "echo 'opencode-lore ships raw TS — no build step needed'"
+    "build": "echo '@loreai/opencode ships raw TS — no build step needed'"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.1.0"
@@ -39,6 +39,9 @@
     "type": "git",
     "url": "git+https://github.com/BYK/opencode-lore.git",
     "directory": "packages/opencode"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "opencode",

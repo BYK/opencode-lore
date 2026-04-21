@@ -9,11 +9,22 @@ artifactProvider:
     artifacts:
       CI: npm-tarball
 targets:
-  # Discover all public workspace packages and publish each as its own npm
-  # target in dependency order (@loreai/core first, then opencode-lore + @loreai/pi
-  # which depend on it). Craft filters out the private monorepo root automatically.
+  # Publish the 3 workspace packages (@loreai/core, @loreai/opencode, @loreai/pi).
+  # Craft discovers these from the root package.json `workspaces` field and
+  # auto-generates per-package targets with `includeNames` set to the default
+  # artifact regex (e.g. `/^loreai-opencode-\d.*\.tgz$/`).
   - name: npm
     access: public
     oidc: true
     workspaces: true
+  # Mirror @loreai/opencode as the legacy `opencode-lore` package name.
+  # The CI pack step produces `opencode-lore-<version>.tgz` with identical
+  # content to `loreai-opencode-<version>.tgz` but a different `name` in
+  # package.json. This is a non-workspace target so Craft doesn't try to
+  # auto-discover it — we scope it with `includeNames`.
+  - name: npm
+    id: opencode-lore
+    access: public
+    oidc: true
+    includeNames: /^opencode-lore-\d.*\.tgz$/
   - name: github
