@@ -2,7 +2,7 @@
 
 > **Experimental** — Under active development. APIs, storage format, and behavior may change.
 
-[Lore](https://github.com/BYK/opencode-lore)'s memory engine as a [Pi coding-agent](https://github.com/badlogic/pi-mono) extension. Three-tier storage, distillation, curation, gradient context management, and FTS5-backed recall — wired into Pi's extension hooks.
+[Lore](https://github.com/BYK/loreai)'s memory engine as a [Pi coding-agent](https://github.com/badlogic/pi-mono) extension. Three-tier storage, distillation, curation, gradient context management, and FTS5-backed recall — wired into Pi's extension hooks.
 
 ## Install
 
@@ -30,7 +30,7 @@ Switching between OpenCode and Pi on the same project preserves the curated know
 
 ## Documentation
 
-Full architecture, benchmarks, configuration, and rationale: **[github.com/BYK/opencode-lore](https://github.com/BYK/opencode-lore)**
+Full architecture, benchmarks, configuration, and rationale: **[github.com/BYK/loreai](https://github.com/BYK/loreai)**
 
 ## License
 
