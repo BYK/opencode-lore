@@ -17,6 +17,16 @@ export * as embedding from "./embedding";
 export * as latReader from "./lat-reader";
 export * as log from "./log";
 
+export {
+  runRecall,
+  RECALL_TOOL_DESCRIPTION,
+  RECALL_PARAM_DESCRIPTIONS,
+  type RecallInput,
+  type RecallResult,
+  type RecallScope,
+  type ScoredDistillation,
+} from "./recall";
+
 export type {
   LoreMessage,
   LoreUserMessage,

@@ -1,0 +1,50 @@
+{
+  "name": "@loreai/pi",
+  "version": "0.9.1",
+  "type": "module",
+  "license": "MIT",
+  "description": "Lore memory engine as a Pi (@mariozechner/pi-coding-agent) extension",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bun run script/build.ts"
+  },
+  "dependencies": {
+    "@loreai/core": "workspace:*",
+    "@mariozechner/pi-agent-core": "^0.68.0",
+    "@mariozechner/pi-ai": "^0.68.0",
+    "@mariozechner/pi-coding-agent": "^0.68.0",
+    "@sinclair/typebox": "^0.34.41"
+  },
+  "files": [
+    "src/",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BYK/opencode-lore.git",
+    "directory": "packages/pi"
+  },
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "lore",
+    "memory",
+    "llm",
+    "distillation"
+  ],
+  "author": "BYK"
+}
