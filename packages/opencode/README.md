@@ -34,7 +34,7 @@ Switching between OpenCode and Pi on the same project preserves the curated know
 
 ## Documentation
 
-Full architecture, benchmarks, configuration, and rationale: **[github.com/BYK/opencode-lore](https://github.com/BYK/opencode-lore)**
+Full architecture, benchmarks, configuration, and rationale: **[github.com/BYK/loreai](https://github.com/BYK/loreai)**
 
 ## License
 

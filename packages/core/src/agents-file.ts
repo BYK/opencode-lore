@@ -18,7 +18,7 @@ import { serialize, inline, h, ul, liph, strong, t, root, unescapeMarkdown } fro
 // ---------------------------------------------------------------------------
 
 export const LORE_SECTION_START =
-  "<!-- This section is maintained by the coding agent via lore (https://github.com/BYK/opencode-lore) -->";
+  "<!-- This section is maintained by the coding agent via lore (https://github.com/BYK/loreai) -->";
 export const LORE_SECTION_END = "<!-- End lore-managed section -->";
 
 /**
@@ -29,6 +29,8 @@ export const LORE_SECTION_END = "<!-- End lore-managed section -->";
  */
 const ALL_START_MARKERS = [
   LORE_SECTION_START,
+  // Pre-rename URL (BYK/opencode-lore → BYK/loreai).
+  "<!-- This section is maintained by the coding agent via lore (https://github.com/BYK/opencode-lore) -->",
   "<!-- This section is auto-maintained by lore (https://github.com/BYK/opencode-lore) -->",
 ] as const;
 
