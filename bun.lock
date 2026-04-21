@@ -42,10 +42,18 @@
       "version": "0.10.1",
       "dependencies": {
         "@loreai/core": "workspace:*",
+      },
+      "devDependencies": {
         "@mariozechner/pi-agent-core": "^0.68.0",
         "@mariozechner/pi-ai": "^0.68.0",
         "@mariozechner/pi-coding-agent": "^0.68.0",
         "@sinclair/typebox": "^0.34.41",
+      },
+      "peerDependencies": {
+        "@mariozechner/pi-agent-core": "*",
+        "@mariozechner/pi-ai": "*",
+        "@mariozechner/pi-coding-agent": "*",
+        "@sinclair/typebox": "*",
       },
     },
   },

@@ -12,12 +12,31 @@
       "default": "./dist/index.js"
     }
   },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "bun run script/build.ts"
   },
   "dependencies": {
-    "@loreai/core": "workspace:*",
+    "@loreai/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-agent-core": { "optional": true },
+    "@mariozechner/pi-ai": { "optional": true },
+    "@mariozechner/pi-coding-agent": { "optional": true },
+    "@sinclair/typebox": { "optional": true }
+  },
+  "devDependencies": {
     "@mariozechner/pi-agent-core": "^0.68.0",
     "@mariozechner/pi-ai": "^0.68.0",
     "@mariozechner/pi-coding-agent": "^0.68.0",
