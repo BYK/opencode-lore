@@ -4,9 +4,20 @@
  * Pi runs on Node exclusively (unlike OpenCode which is Bun), so we only
  * build one target with `node:sqlite` imports preserved via `conditions: ["node"]`.
  *
- * External: @mariozechner/* (peer-installed with Pi itself), @loreai/core
- * (published separately), and Node built-ins. Third-party pure-JS deps
- * (@sinclair/typebox) are bundled.
+ * External — all of these are resolved at consumer install time, NOT bundled:
+ *
+ * - `@loreai/core` — published separately; users picking up a new core
+ *   version (security/bug fix) automatically benefit without a pi republish.
+ * - `@mariozechner/*` — Pi bundles these internally and injects them via
+ *   jiti's virtualModules when loading extensions. Bundling our own copies
+ *   would break: jiti resolves imports to the virtual modules, but if we
+ *   inline a copy in our bundle, code that depends on module identity
+ *   (extension type checks, event bus registrations) sees two different
+ *   instances and silently fails to register.
+ * - `@sinclair/typebox` — Pi bundles this via the same virtualModules
+ *   mechanism. Pi's docs explicitly require pi-package authors to mark
+ *   it as a peerDependency. We inlined it previously, which is why our
+ *   v0.10.1 extension silently didn't register in real Pi installs.
  */
 import * as esbuild from "esbuild";
 import { rmSync, mkdirSync, cpSync, existsSync } from "node:fs";
@@ -21,15 +32,6 @@ const distDir = join(packageDir, "dist");
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });
 
-// External — resolved at consumer install time, not bundled.
-//
-// `@loreai/core` stays external so users picking up a new core version
-// (security/bug fix) automatically benefit without a pi republish.
-//
-// `@mariozechner/*` stays external because Pi users already have those
-// packages in their environment — bundling them would duplicate every
-// pi-ai provider SDK (Anthropic, OpenAI, Google, etc.) and bloat the
-// extension several MB.
 const external = [
   "node:*",
   "@loreai/core",
@@ -37,6 +39,7 @@ const external = [
   "@mariozechner/pi-ai",
   "@mariozechner/pi-agent-core",
   "@mariozechner/pi-tui",
+  "@sinclair/typebox",
 ];
 
 await esbuild.build({
