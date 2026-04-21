@@ -45,9 +45,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # `registry-url` is required for npm OIDC trusted publishing — without
+      # it, setup-node doesn't configure the authenticated .npmrc and
+      # `npm publish` errors with ENEEDAUTH even though the workflow has
+      # `id-token: write` permission.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Install Craft
         run: |
