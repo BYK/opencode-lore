@@ -4,11 +4,11 @@
   "type": "module",
   "license": "MIT",
   "description": "Lore memory engine as a Pi (@mariozechner/pi-coding-agent) extension",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
   },
@@ -36,6 +36,9 @@
     "type": "git",
     "url": "git+https://github.com/BYK/opencode-lore.git",
     "directory": "packages/pi"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "pi",

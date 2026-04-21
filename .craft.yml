@@ -9,7 +9,11 @@ artifactProvider:
     artifacts:
       CI: npm-tarball
 targets:
+  # Discover all public workspace packages and publish each as its own npm
+  # target in dependency order (@loreai/core first, then opencode-lore + @loreai/pi
+  # which depend on it). Craft filters out the private monorepo root automatically.
   - name: npm
     access: public
     oidc: true
+    workspaces: true
   - name: github
