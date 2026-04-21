@@ -1,4 +1,10 @@
 # Changelog
+## 0.10.2
+
+### Bug Fixes 🐛
+
+- (pi) Add pi.extensions manifest and externalize pi ecosystem deps by @BYK in [#90](https://github.com/BYK/loreai/pull/90)
+
 ## 0.10.1
 
 ### Bug Fixes 🐛
