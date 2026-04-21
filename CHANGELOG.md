@@ -1,4 +1,10 @@
 # Changelog
+## 0.10.1
+
+### Bug Fixes 🐛
+
+- (release) Patch bun.lock workspace versions during bump by @BYK in [#88](https://github.com/BYK/loreai/pull/88)
+
 ## 0.10.0
 
 ### New Features ✨
