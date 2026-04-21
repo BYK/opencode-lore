@@ -4,8 +4,8 @@
   "type": "module",
   "license": "MIT",
   "description": "Shared memory engine for Lore — three-tier storage, distillation, gradient context management",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/node/index.js",
+  "types": "./dist/node/index.d.ts",
   "exports": {
     ".": {
       "bun": "./src/index.ts",
@@ -43,6 +43,9 @@
     "type": "git",
     "url": "git+https://github.com/BYK/opencode-lore.git",
     "directory": "packages/core"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "lore",

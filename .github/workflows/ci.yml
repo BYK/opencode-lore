@@ -16,6 +16,11 @@ jobs:
         with:
           bun-version: latest
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
       - run: bun install
 
       - name: Typecheck
@@ -24,13 +29,31 @@ jobs:
       - name: Test
         run: bun test
 
-      - name: Pack tarball
+      - name: Build all packages
         if: startsWith(github.ref, 'refs/heads/release/')
-        run: npm pack
+        run: bun run build
 
-      - name: Upload tarball
+      # Pack each workspace package into its own tarball. Craft's npm target
+      # with `workspaces: true` discovers all three and publishes them in
+      # dependency order (@loreai/core → opencode-lore + @loreai/pi).
+      #
+      # We use `bun pm pack` (not `npm pack`) because Bun automatically rewrites
+      # `workspace:*` dependency specifiers to the actual version being packed.
+      # `npm pack` leaves the literal "workspace:*" in the tarball's
+      # package.json which breaks installs.
+      - name: Pack tarballs
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: |
+          mkdir -p dist-tarballs
+          for pkg in packages/core packages/opencode packages/pi; do
+            echo "Packing $pkg"
+            (cd "$pkg" && bun pm pack --destination ../../dist-tarballs)
+          done
+          ls -la dist-tarballs/
+
+      - name: Upload tarballs
         if: startsWith(github.ref, 'refs/heads/release/')
         uses: actions/upload-artifact@v4
         with:
           name: npm-tarball
-          path: '*.tgz'
+          path: dist-tarballs/*.tgz

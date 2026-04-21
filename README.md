@@ -1,8 +1,18 @@
-# opencode-lore
+# Lore
 
-> **Experimental** — This plugin is under active development. APIs, storage format, and behavior may change.
+> **Experimental** — Under active development. APIs, storage format, and behavior may change.
 
-An implementation of [Sanity's Nuum](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) memory architecture and [Mastra's Observational Memory](https://mastra.ai/research/observational-memory) system as a plugin for [OpenCode](https://opencode.ai). Both projects pioneered the idea that coding agents need **distillation, not summarization** — preserving operational intelligence (file paths, error messages, exact decisions) rather than narrative summaries that lose the details agents need to keep working. This plugin brings those ideas to OpenCode.
+An implementation of [Sanity's Nuum](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) memory architecture and [Mastra's Observational Memory](https://mastra.ai/research/observational-memory) system for coding agents. Both projects pioneered the idea that coding agents need **distillation, not summarization** — preserving operational intelligence (file paths, error messages, exact decisions) rather than narrative summaries that lose the details agents need to keep working.
+
+Lore is published as three packages, all sharing the same SQLite database at `~/.local/share/opencode-lore/lore.db`:
+
+| Package | For | Install |
+|---|---|---|
+| [`opencode-lore`](https://www.npmjs.com/package/opencode-lore) | [OpenCode](https://opencode.ai) plugin | Add to `opencode.json` `plugin` array |
+| [`@loreai/pi`](https://www.npmjs.com/package/@loreai/pi) | [Pi coding-agent](https://github.com/badlogic/pi-mono) extension | `pi install npm:@loreai/pi` |
+| [`@loreai/core`](https://www.npmjs.com/package/@loreai/core) | Shared memory engine | Dependency of the host packages above |
+
+Because all three share the same database, switching between OpenCode and Pi on the same project preserves the curated knowledge, distillations, and AGENTS.md sync.
 
 ## Why
 
@@ -82,11 +92,7 @@ This plugin was built in a few intense sessions. Some highlights:
 
 ## Installation
 
-### Prerequisites
-
-- [OpenCode](https://opencode.ai)
-
-### Setup
+### OpenCode
 
 Add `opencode-lore` to the `plugin` array in your project's `opencode.json`:
 
@@ -100,17 +106,26 @@ Add `opencode-lore` to the `plugin` array in your project's `opencode.json`:
 
 Restart OpenCode and the plugin will be installed automatically.
 
-#### Development setup
+### Pi
 
-To use a local clone instead of the published package:
+Pi discovers extensions via your `~/.pi/settings.json`:
 
 ```json
 {
-  "plugin": [
-    "file:///absolute/path/to/opencode-lore"
+  "packages": [
+    "npm:@loreai/pi@latest"
   ]
 }
 ```
+
+Then run `pi install` once. The extension auto-loads on every Pi session.
+
+### Development setup
+
+To use a local clone instead of the published packages:
+
+- **OpenCode**: `{ "plugin": ["file:///absolute/path/to/opencode-lore"] }`
+- **Pi**: symlink the built package into `~/.pi/agent/extensions/`, or add a local path to `~/.pi/settings.json` `packages`
 
 ## Configuration
 

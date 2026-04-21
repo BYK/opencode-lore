@@ -10,7 +10,7 @@
     ".": {
       "types": "./src/index.ts",
       "bun": "./src/index.ts",
-      "default": "./dist/index.js"
+      "default": "./src/index.ts"
     }
   },
   "scripts": {
@@ -29,10 +29,12 @@
   },
   "files": [
     "src/",
-    "dist/",
     "README.md",
     "LICENSE"
   ],
+  "engines": {
+    "bun": ">=1.2.0"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BYK/opencode-lore.git",
