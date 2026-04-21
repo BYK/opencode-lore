@@ -6,7 +6,7 @@ Shared memory engine for [Lore](https://github.com/BYK/opencode-lore) — three-
 
 This package is host-agnostic. It doesn't ship a user-facing extension on its own; it's consumed by adapter packages that wire it into a specific coding agent:
 
-- [`opencode-lore`](https://www.npmjs.com/package/opencode-lore) — [OpenCode](https://opencode.ai) plugin
+- [`@loreai/opencode`](https://www.npmjs.com/package/@loreai/opencode) — [OpenCode](https://opencode.ai) plugin (also published as [`opencode-lore`](https://www.npmjs.com/package/opencode-lore) legacy alias)
 - [`@loreai/pi`](https://www.npmjs.com/package/@loreai/pi) — [Pi coding-agent](https://github.com/badlogic/pi-mono) extension
 
 ## Install

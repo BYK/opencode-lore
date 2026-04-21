@@ -35,12 +35,16 @@ jobs:
 
       # Pack each workspace package into its own tarball. Craft's npm target
       # with `workspaces: true` discovers all three and publishes them in
-      # dependency order (@loreai/core → opencode-lore + @loreai/pi).
+      # dependency order (@loreai/core → @loreai/opencode + @loreai/pi).
       #
       # We use `bun pm pack` (not `npm pack`) because Bun automatically rewrites
       # `workspace:*` dependency specifiers to the actual version being packed.
       # `npm pack` leaves the literal "workspace:*" in the tarball's
       # package.json which breaks installs.
+      #
+      # We also mirror @loreai/opencode → opencode-lore by repacking with the
+      # package name swapped. Both tarballs have identical content; the two
+      # names are published in parallel so existing users keep working.
       - name: Pack tarballs
         if: startsWith(github.ref, 'refs/heads/release/')
         run: |
@@ -49,7 +53,24 @@ jobs:
             echo "Packing $pkg"
             (cd "$pkg" && bun pm pack --destination ../../dist-tarballs)
           done
+
+          # Mirror @loreai/opencode as opencode-lore (legacy alias).
+          # Extract the tarball, swap the package name in package.json, repack.
+          version=$(jq -r '.version' packages/opencode/package.json)
+          mirror_dir=$(mktemp -d)
+          tar -xzf "dist-tarballs/loreai-opencode-${version}.tgz" -C "$mirror_dir"
+          jq '.name = "opencode-lore"' "$mirror_dir/package/package.json" > "$mirror_dir/package/package.json.tmp"
+          mv "$mirror_dir/package/package.json.tmp" "$mirror_dir/package/package.json"
+          (cd "$mirror_dir" && tar -czf "$GITHUB_WORKSPACE/dist-tarballs/opencode-lore-${version}.tgz" package)
+          rm -rf "$mirror_dir"
+
+          echo "--- Final tarballs: ---"
           ls -la dist-tarballs/
+          echo "--- Package name in each: ---"
+          for t in dist-tarballs/*.tgz; do
+            name=$(tar -xzOf "$t" package/package.json | jq -r '.name')
+            echo "$(basename "$t") → $name"
+          done
 
       - name: Upload tarballs
         if: startsWith(github.ref, 'refs/heads/release/')
