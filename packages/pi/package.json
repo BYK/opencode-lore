@@ -1,6 +1,6 @@
 {
   "name": "@loreai/pi",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "type": "module",
   "license": "MIT",
   "description": "Lore memory engine as a Pi (@mariozechner/pi-coding-agent) extension",
@@ -31,10 +31,18 @@
     "@sinclair/typebox": "*"
   },
   "peerDependenciesMeta": {
-    "@mariozechner/pi-agent-core": { "optional": true },
-    "@mariozechner/pi-ai": { "optional": true },
-    "@mariozechner/pi-coding-agent": { "optional": true },
-    "@sinclair/typebox": { "optional": true }
+    "@mariozechner/pi-agent-core": {
+      "optional": true
+    },
+    "@mariozechner/pi-ai": {
+      "optional": true
+    },
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    },
+    "@sinclair/typebox": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@mariozechner/pi-agent-core": "^0.68.0",
