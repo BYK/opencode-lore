@@ -3,6 +3,9 @@ changelog:
   policy: auto
 versioning:
   policy: auto
+# Custom version bump script — bypasses craft's built-in npm-based auto-bumping
+# which fails on our `workspace:*` deps. See scripts/bump-version.sh for details.
+preReleaseCommand: bash scripts/bump-version.sh
 artifactProvider:
   name: github
   config:
