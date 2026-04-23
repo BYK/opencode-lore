@@ -33,29 +33,100 @@ import {
 import { createRecallTool } from "./reflect";
 import { createOpenCodeLLMClient } from "./llm-adapter";
 
+// Mirrors upstream OpenCode's OVERFLOW_PATTERNS at
+// packages/opencode/src/provider/error.ts (commit be20f865a added the HTTP 413
+// regex; list otherwise tracks upstream's provider coverage). Keep this list
+// aligned with upstream when they add / change patterns — diff the arrays to
+// catch drift.
+// TODO(F10): add a contract test that diffs this array against upstream's
+// source file when available, so drift fails loudly instead of silently.
+const OVERFLOW_PATTERNS: RegExp[] = [
+  /prompt is too long/i, // Anthropic
+  /input is too long for requested model/i, // Amazon Bedrock
+  /exceeds the context window/i, // OpenAI
+  /input token count.*exceeds the maximum/i, // Google Gemini
+  /maximum prompt length is \d+/i, // xAI Grok
+  /reduce the length of the messages/i, // Groq
+  /maximum context length is \d+ tokens/i, // OpenRouter, DeepSeek, vLLM
+  /exceeds the limit of \d+/i, // GitHub Copilot
+  /exceeds the available context size/i, // llama.cpp
+  /greater than the context length/i, // LM Studio
+  /context window exceeds limit/i, // MiniMax
+  /exceeded model token limit/i, // Kimi / Moonshot
+  /context[_ ]length[_ ]exceeded/i, // Generic fallback
+  /request entity too large/i, // HTTP 413 (added upstream be20f865a)
+  /context length is only \d+ tokens/i, // vLLM
+  /input length.*exceeds.*context length/i, // vLLM
+  /prompt too long; exceeded (?:max )?context length/i, // Ollama
+  /too large for model with \d+ maximum context length/i, // Mistral
+  /model_context_window_exceeded/i, // z.ai
+  /^4(00|13)\s*(status code)?\s*\(no body\)/i, // Cerebras, Mistral no-body responses
+];
+
+// Patterns retained from Lore's historic detector that upstream doesn't
+// include. Kept for safety since the previous substring-based detector used
+// them. Remove only after (a) a user-report window goes quiet and (b) we've
+// confirmed the specific provider wordings they catch are covered by
+// OVERFLOW_PATTERNS above. Lore has no hit telemetry for these today.
+const LORE_LEGACY_PATTERNS: RegExp[] = [
+  /ContextWindowExceededError/i, // surfaces in some wrapped error messages
+  /too many tokens/i, // broad; catches non-standard wordings
+];
+
 /**
- * Detect whether an error from session.error is a context overflow ("prompt too long").
- * Matches by error name (ContextOverflowError — covers both API-level and OpenCode
- * compaction overflow) and by message text patterns for provider-specific strings.
+ * Detect context overflow from session.error payloads.
+ *
+ * Upstream ships errors to plugins via `namedSchemaError(...).toObject()`, so
+ * we receive one of these wire shapes:
+ *   - ContextOverflowError: { name: "ContextOverflowError", data: { message, responseBody? } }
+ *   - APIError:             { name: "APIError", data: { message, statusCode?, isRetryable?, ... } }
+ *   - Unknown:              { name: "Unknown", data: { message? } }
+ *
+ * Detection strategy (ordered, fail-open):
+ *   1. Structural tag: `error.name === "ContextOverflowError"` — upstream already
+ *      classified it as overflow.
+ *   2. HTTP 413 on APIError: `data.statusCode === 413` — belt-and-suspenders for
+ *      cases where upstream's `parseAPICallError` didn't fire (e.g. if the error
+ *      reached Lore before passing through `provider/error.ts`).
+ *   3. Regex match on `data.message` / `message` — mirrors upstream's
+ *      OVERFLOW_PATTERNS list for all provider wordings + legacy Lore patterns
+ *      for defensive coverage.
+ *
+ * When upstream revises OVERFLOW_PATTERNS, re-sync here. See
+ * `.opencode/plans/f8-context-overflow-detection-audit.md` for rationale and
+ * the ground-truth reference report.
  */
 export function isContextOverflow(rawError: unknown): boolean {
-  const error = rawError as
-    | { name?: string; message?: string; data?: { message?: string } }
-    | undefined;
+  if (!rawError || typeof rawError !== "object") return false;
 
-  // Match by error name — covers both API context overflow and OpenCode's
-  // compaction overflow ("Conversation history too large to compact").
-  if (error?.name === "ContextOverflowError") return true;
+  const error = rawError as {
+    name?: string;
+    message?: string;
+    data?: {
+      message?: string;
+      statusCode?: number;
+    };
+  };
 
-  const errorMessage = error?.data?.message ?? error?.message ?? "";
-  return (
-    typeof errorMessage === "string" &&
-    (errorMessage.includes("prompt is too long") ||
-      errorMessage.includes("context length exceeded") ||
-      errorMessage.includes("maximum context length") ||
-      errorMessage.includes("ContextWindowExceededError") ||
-      errorMessage.includes("too many tokens"))
-  );
+  // 1. Structural tag — upstream's already-classified overflow. Covers both
+  //    API-level overflow and OpenCode's compaction overflow ("Conversation
+  //    history too large to compact...").
+  if (error.name === "ContextOverflowError") return true;
+
+  // 2. HTTP 413 on APIError-shaped payloads. ContextOverflowError strips
+  //    statusCode in .toObject(), so this only matches non-classified leaks.
+  if (error.data?.statusCode === 413) return true;
+
+  // 3. Regex against message text (data.message preferred, top-level message
+  //    as fallback — the latter is dropped for named errors but may be
+  //    present for raw Error instances that somehow reach us).
+  const text = error.data?.message ?? error.message ?? "";
+  if (typeof text !== "string" || text.length === 0) return false;
+
+  if (OVERFLOW_PATTERNS.some((re) => re.test(text))) return true;
+  if (LORE_LEGACY_PATTERNS.some((re) => re.test(text))) return true;
+
+  return false;
 }
 
 /**

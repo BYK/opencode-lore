@@ -78,6 +78,121 @@ describe("isContextOverflow", () => {
   });
 });
 
+// Provider-specific overflow wordings. These mirror upstream OpenCode's
+// OVERFLOW_PATTERNS list in packages/opencode/src/provider/error.ts. When
+// upstream adds or changes a pattern, add/update the corresponding case here.
+describe("isContextOverflow — provider-specific regex patterns", () => {
+  const cases: Array<[string, string]> = [
+    ["Anthropic", "prompt is too long: 250000 tokens > 200000 maximum"],
+    ["Amazon Bedrock", "Input is too long for requested model."],
+    ["OpenAI", "the request exceeds the context window for this model"],
+    [
+      "Google Gemini",
+      "Input token count 250000 exceeds the maximum number of tokens allowed (200000).",
+    ],
+    ["xAI Grok", "Maximum prompt length is 131072"],
+    ["Groq", "Please reduce the length of the messages or completion."],
+    ["OpenRouter", "maximum context length is 128000 tokens"],
+    ["GitHub Copilot", "Request exceeds the limit of 4096 tokens."],
+    ["llama.cpp", "Input exceeds the available context size"],
+    ["LM Studio", "Input is greater than the context length"],
+    ["MiniMax", "Context window exceeds limit."],
+    ["Kimi/Moonshot", "exceeded model token limit"],
+    ["Generic context_length_exceeded", "context_length_exceeded"],
+    ["Generic context length exceeded (spaced)", "context length exceeded"],
+    ["HTTP 413", "Request Entity Too Large"],
+    ["vLLM alt1", "context length is only 4096 tokens"],
+    [
+      "vLLM alt2",
+      "Input length 5000 tokens exceeds max context length 4096 tokens",
+    ],
+    ["Ollama", "prompt too long; exceeded max context length"],
+    [
+      "Mistral",
+      "Request is too large for model with 8192 maximum context length",
+    ],
+    ["z.ai", "model_context_window_exceeded"],
+    ["Cerebras 413 no-body", "413 (no body)"],
+    ["Cerebras 400 no-body", "400 status code (no body)"],
+  ];
+
+  for (const [provider, message] of cases) {
+    test(`detects ${provider}`, () => {
+      expect(
+        isContextOverflow({ name: "APIError", data: { message } }),
+      ).toBe(true);
+    });
+  }
+});
+
+// Wire-shape coverage. Upstream publishes errors via `namedSchemaError.toObject()`
+// — structural shape is { name, data: {...} } without top-level message or
+// statusCode. These tests pin the shapes we actually see in production.
+describe("isContextOverflow — wire shape coverage", () => {
+  test("APIError with data.statusCode === 413 matches even when message text doesn't", () => {
+    expect(
+      isContextOverflow({
+        name: "APIError",
+        data: { statusCode: 413, message: "whatever non-matching text" },
+      }),
+    ).toBe(true);
+  });
+
+  test("APIError with 413 wording in message but no statusCode", () => {
+    expect(
+      isContextOverflow({
+        name: "APIError",
+        data: { message: "HTTP 413 Request Entity Too Large" },
+      }),
+    ).toBe(true);
+  });
+
+  test("ContextOverflowError with responseBody (real upstream wire shape)", () => {
+    expect(
+      isContextOverflow({
+        name: "ContextOverflowError",
+        data: { message: "prompt is too long", responseBody: "{...}" },
+      }),
+    ).toBe(true);
+  });
+
+  test("rejects APIError with unrelated 4xx status codes", () => {
+    expect(
+      isContextOverflow({ name: "APIError", data: { statusCode: 400 } }),
+    ).toBe(false);
+    expect(
+      isContextOverflow({ name: "APIError", data: { statusCode: 429 } }),
+    ).toBe(false);
+  });
+
+  test("rejects non-object errors", () => {
+    expect(isContextOverflow("string error")).toBe(false);
+    expect(isContextOverflow(123)).toBe(false);
+    expect(isContextOverflow([])).toBe(false);
+  });
+
+  test("empty-string message does not crash or match", () => {
+    expect(
+      isContextOverflow({ name: "APIError", data: { message: "" } }),
+    ).toBe(false);
+  });
+});
+
+// Case-insensitivity regression guard. Real Anthropic errors have been seen
+// with Title Case wording; Lore's prior implementation used case-sensitive
+// `.includes()` and silently missed them.
+describe("isContextOverflow — case-insensitivity", () => {
+  test("matches Title Case wording", () => {
+    expect(isContextOverflow({ message: "Prompt Is Too Long" })).toBe(true);
+  });
+
+  test("matches UPPERCASE wording", () => {
+    expect(
+      isContextOverflow({ message: "CONTEXT_LENGTH_EXCEEDED" }),
+    ).toBe(true);
+  });
+});
+
 describe("buildRecoveryMessage", () => {
   test("includes distilled summaries when provided", () => {
     const msg = buildRecoveryMessage([
