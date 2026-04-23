@@ -81,6 +81,8 @@ export {
   CONSOLIDATION_SYSTEM,
   consolidationUser,
   QUERY_EXPANSION_SYSTEM,
+  COMPACT_SUMMARY_TEMPLATE,
+  buildCompactPrompt,
 } from "./prompt";
 export { shouldImport, importFromFile, exportToFile } from "./agents-file";
 export { workerSessionIDs, isWorkerSession } from "./worker";

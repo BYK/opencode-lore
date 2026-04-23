@@ -388,6 +388,81 @@ export function formatDistillations(
   return sections.join("\n\n");
 }
 
+// Strict Markdown skeleton for the /compact session summary. Task-oriented
+// sections so the next agent starting from the compacted context has a clear
+// "where am I, what's next, what's blocked" briefing. Derived from upstream
+// OpenCode's SUMMARY_TEMPLATE (session/compaction.ts in #23870) with a "(none)"
+// directive added for explicit empty sections and a closing "I'm ready to
+// continue." sentinel to preserve Lore's post-compact UX.
+export const COMPACT_SUMMARY_TEMPLATE = `Output exactly this Markdown structure. Keep every section in this order, even when empty (use "(none)").
+
+---
+## Goal
+- [single-sentence task summary]
+
+## Constraints & Preferences
+- [user constraints, preferences, specs, or "(none)"]
+
+## Progress
+### Done
+- [completed work or "(none)"]
+
+### In Progress
+- [current work or "(none)"]
+
+### Blocked
+- [blockers or "(none)"]
+
+## Key Decisions
+- [decision and why, or "(none)"]
+
+## Next Steps
+- [ordered next actions or "(none)"]
+
+## Critical Context
+- [important technical facts, errors, open questions, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+---
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, commands, error strings, and identifiers when known.
+- Do not mention the summary process or that context was compacted.
+- End with "I'm ready to continue." on its own line after the closing "---".`;
+
+// Build the user-facing prompt passed to the compaction agent during /compact.
+// Lore injects pre-computed distillations as context separately; this prompt
+// just tells the model how to render its summary.
+//
+// NOTE: Upstream's SUMMARY_TEMPLATE path also supports `<previous-summary>`
+// anchoring for repeat /compact invocations. Lore does not implement that yet —
+// see F1b follow-up for the persistence+retrieval needed to do it safely
+// (gen>0 meta-distillations are XML observation dumps, not prior /compact
+// output, so we can't reuse them as anchors).
+//
+// `hasDistillations` is a boolean rather than the full array because this
+// function only cares about presence — the distillation bodies are pushed into
+// `output.context` separately by the caller. Passing the array shape would be
+// misleading dead weight.
+export function buildCompactPrompt(input: {
+  hasDistillations: boolean;
+  knowledge?: string;
+}): string {
+  const distillSection = input.hasDistillations
+    ? "Lore has pre-computed chunked summaries of the session history (injected above as context). Use them as the authoritative source — do NOT re-read raw conversation messages that conflict with them.\n\n"
+    : "";
+
+  const knowledgeBlock = input.knowledge ? `\n${input.knowledge}\n` : "";
+
+  return `You are producing a compacted session summary for an AI coding agent. This summary will be the ONLY context available in the next part of the conversation.
+
+${distillSection}${COMPACT_SUMMARY_TEMPLATE}
+${knowledgeBlock}`;
+}
+
 // ~3 chars per token — validated as best heuristic against real API data.
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3);
