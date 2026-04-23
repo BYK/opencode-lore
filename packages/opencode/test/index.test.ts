@@ -1024,3 +1024,126 @@ describe("transform hook error handling", () => {
     }
   });
 });
+
+// ── experimental.session.compacting hook ────────────────────────────
+//
+// Wiring-level tests: the hook must populate output.prompt with the
+// SUMMARY_TEMPLATE body (via buildCompactPrompt) and push a distillations
+// context block into output.context when any distillations exist for the
+// session. These tests don't assert anything about the prompt-body shape
+// itself — that's covered by packages/core/test/prompt.test.ts.
+
+async function callCompacting(
+  hooks: Awaited<ReturnType<typeof LorePlugin>>,
+  input: { sessionID?: string },
+): Promise<{ prompt: string | undefined; context: string[] }> {
+  const hook = (hooks as Record<string, unknown>)[
+    "experimental.session.compacting"
+  ] as (
+    input: unknown,
+    output: { context: string[]; prompt: string | undefined },
+  ) => Promise<void>;
+  const output = { context: [] as string[], prompt: undefined as string | undefined };
+  await hook(input, output);
+  return output;
+}
+
+describe("experimental.session.compacting", () => {
+  test("sets output.prompt to the SUMMARY_TEMPLATE body", async () => {
+    const { hooks, cleanup } = await initPlugin();
+    try {
+      const { prompt, context } = await callCompacting(hooks!, {
+        sessionID: "ses_compact_template_001",
+      });
+      expect(prompt).toBeTruthy();
+      // Body contains template section headings.
+      expect(prompt).toContain("## Goal");
+      expect(prompt).toContain("## Progress");
+      expect(prompt).toContain("### Done");
+      expect(prompt).toContain("### In Progress");
+      expect(prompt).toContain("### Blocked");
+      expect(prompt).toContain("## Next Steps");
+      expect(prompt).toContain("## Critical Context");
+      expect(prompt).toContain("## Relevant Files");
+      expect(prompt).toContain("I'm ready to continue.");
+      // No distillations seeded, no context pushed.
+      expect(context).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("pushes a Lore Pre-computed Session Summaries block into output.context when distillations exist", async () => {
+    const { hooks, tmpDir, cleanup } = await initPlugin();
+    try {
+      const sessionID = "ses_compact_context_001";
+      const pid = db()
+        .query("SELECT id FROM projects WHERE path = ?")
+        .get(tmpDir) as { id: string };
+      // Seed a gen-0 distillation directly so the hook sees it.
+      db()
+        .query(
+          `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          crypto.randomUUID(),
+          pid.id,
+          sessionID,
+          "",
+          "[]",
+          "seeded distillation observation body",
+          "[]",
+          0,
+          10,
+          Date.now(),
+        );
+
+      const { prompt, context } = await callCompacting(hooks!, { sessionID });
+
+      // Context block pushed.
+      expect(context).toHaveLength(1);
+      expect(context[0]).toContain("Lore Pre-computed Session Summaries");
+      expect(context[0]).toContain("seeded distillation observation body");
+
+      // Prompt references that distillations are pre-computed.
+      expect(prompt).toContain("Lore has pre-computed chunked summaries");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("includes long-term knowledge in the prompt when knowledge entries exist", async () => {
+    const { hooks, tmpDir, cleanup } = await initPlugin();
+    try {
+      ltm.create({
+        projectPath: tmpDir,
+        category: "decision",
+        title: "Compact-hook knowledge entry",
+        content: "Entry that should appear in /compact prompt knowledge block",
+        scope: "project",
+      });
+
+      const { prompt } = await callCompacting(hooks!, {
+        sessionID: "ses_compact_knowledge_001",
+      });
+      expect(prompt).toContain("Long-term Knowledge");
+      expect(prompt).toContain("Compact-hook knowledge entry");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("works when input.sessionID is missing (no DB reads)", async () => {
+    const { hooks, cleanup } = await initPlugin();
+    try {
+      const { prompt, context } = await callCompacting(hooks!, {});
+      // Prompt still emitted with template body.
+      expect(prompt).toContain("## Goal");
+      // No distillations possible → no context block.
+      expect(context).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+});

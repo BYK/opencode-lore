@@ -21,6 +21,7 @@ import {
   getLastTransformEstimate,
   formatKnowledge,
   formatDistillations,
+  buildCompactPrompt,
   shouldImport,
   importFromFile,
   exportToFile,
@@ -712,7 +713,10 @@ export const LorePlugin: Plugin = async (ctx) => {
     // Strategy: run chunked distillation first so all messages are captured in segments
     // that each fit within the model's context, then inject the pre-computed summaries
     // as context so the model consolidates them rather than re-reading all raw messages.
-    // This prevents the overflow→compaction→overflow stuck loop.
+    // Output format is the task-oriented SUMMARY_TEMPLATE from @loreai/core's
+    // buildCompactPrompt (Goal / Progress / Next Steps / Blocked / etc.), derived from
+    // upstream OpenCode's template so the next agent starting from the compacted
+    // context has a clear "where am I, what's next" briefing.
     "experimental.session.compacting": async (input, output) => {
       // Chunked distillation: split all undistilled messages into segments that each
       // fit within the model's context window and distill them independently.
@@ -755,21 +759,10 @@ export const LorePlugin: Plugin = async (ctx) => {
         );
       }
 
-      output.prompt = `You are creating a distilled memory summary for an AI coding agent. This summary will be the ONLY context available in the next part of the conversation.
-
-${distillations.length > 0 ? "Lore has pre-computed chunked summaries of the session history (injected above as context). Consolidate those summaries into a single coherent narrative. Do NOT re-read or re-summarize the raw conversation messages — trust the pre-computed summaries.\n\n" : ""}Structure your response as follows:
-
-## Session History
-
-For each major topic or task covered in the conversation, write:
-- A 1-3 sentence narrative of what happened (past tense, focus on outcomes)
-- A bullet list of specific, actionable facts (file paths, values, decisions, what failed and why)
-
-PRESERVE: file paths, specific values, decisions with rationale, user preferences, failed approaches with reasons, environment details.
-DROP: debugging back-and-forth, verbose tool output, pleasantries, redundant restatements.
-
-${knowledge ? `\n${knowledge}\n` : ""}
-End with "I'm ready to continue." so the agent knows to pick up where it left off.`;
+      output.prompt = buildCompactPrompt({
+        hasDistillations: distillations.length > 0,
+        knowledge,
+      });
     },
 
     // Register the recall tool
