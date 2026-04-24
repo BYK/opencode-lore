@@ -9,7 +9,7 @@ import {
   RECURSIVE_SYSTEM,
   recursiveUser,
 } from "./prompt";
-import { needsUrgentDistillation } from "./gradient";
+import { needsUrgentDistillation, toolStripAnnotation } from "./gradient";
 import { workerSessionIDs } from "./worker";
 import type { LLMClient } from "./types";
 
@@ -53,9 +53,110 @@ function formatTime(ms: number): string {
   return `${h}:${m}`;
 }
 
-function messagesToText(messages: TemporalMessage[]): string {
+// Chunk-boundary regex for content produced by temporal.partsToText (which
+// joins chunks with "\n"). A chunk boundary is the start of a new chunk we
+// can structurally identify: "[tool:<name>] " or "[reasoning] " at line start.
+//
+// Tool names are restricted to lowercase identifier-shaped strings so that
+// literal occurrences of `[tool:...]` inside tool payloads (e.g. when an
+// agent reads a file that documents this very serialization format) are
+// less likely to be mis-split into fabricated envelopes. Real tool names
+// in the OpenCode/Lore ecosystem are always lowercase alphanumeric with
+// `_` or `-` separators (`read`, `grep`, `read_file`, `query-expand`, ...).
+//
+// Two known ambiguity directions caused by the lossy serialization:
+//
+//   1. TRAILING-TEXT SWALLOW: plain text chunks have no structural prefix,
+//      so a text chunk that follows a tool chunk is indistinguishable from
+//      a continuation of the tool output. Such text is attributed to the
+//      preceding tool envelope's payload. This includes the case of a
+//      short tool output followed by a long assistant text reply — the
+//      text can push the combined chunk over the cap and get swallowed.
+//
+//   2. EMBEDDED-ENVELOPE FABRICATION: if a tool output legitimately
+//      contains `\n[tool:<identifier>] ` or `\n[reasoning] ` (e.g. reading
+//      AGENTS.md, this project's source, or any file that documents the
+//      format), the truncator will split on that literal occurrence and
+//      treat the remainder as if it were a separate envelope. The
+//      tightened identifier regex mitigates but doesn't eliminate this.
+//
+// Both limitations could be removed by changing partsToText in temporal.ts
+// to emit an unambiguous terminator plus a DB format bump. That's
+// disproportionate for a background-distill input renderer; the
+// distillation LLM's output is a summary, not a structural parse, so
+// occasional fabrication/swallow results in mildly noisy observations
+// rather than a user-visible bug.
+// TODO: if telemetry or user reports show this materially affects distill
+// quality, file a follow-up to add an unambiguous chunk terminator to
+// temporal.partsToText (DB format change — requires migration).
+const CHUNK_BOUNDARY_RE = /\n(?=\[(?:tool:[a-z][a-z0-9_-]*|reasoning)\] )/g;
+
+/**
+ * Truncate tool outputs within a pre-flattened `TemporalMessage.content` string
+ * (the format produced by `temporal.partsToText`). Plain text and `[reasoning]`
+ * chunks pass through untouched.
+ *
+ * Tool-output payloads longer than `maxChars` are replaced with
+ * `toolStripAnnotation(...)` — a compact marker preserving line count, error
+ * flag, and file paths. Matches the annotation style used by the runtime
+ * gradient so the distillation LLM sees the same affordance it sees during
+ * live turns.
+ *
+ * Exported primarily for tests. If future renderers need the same semantics
+ * (e.g. a recall-time preview), they can reuse this.
+ */
+export function truncateToolOutputsInContent(
+  content: string,
+  maxChars: number,
+): string {
+  if (maxChars <= 0 || content.length === 0) return content;
+
+  // Split on identifiable chunk boundaries. This correctly separates:
+  //   - leading text chunks from any subsequent [tool:*] / [reasoning] chunks
+  //   - consecutive [tool:*] / [reasoning] chunks from each other
+  // It does NOT separate a [tool:*] chunk from a trailing plain-text chunk
+  // (text has no structural prefix). That's documented in CHUNK_BOUNDARY_RE.
+  const chunks = content.split(CHUNK_BOUNDARY_RE);
+
+  // Return early if nothing in the content could be an oversized tool output.
+  let anyToolChunk = false;
+  for (const c of chunks) if (c.startsWith("[tool:")) { anyToolChunk = true; break; }
+  if (!anyToolChunk) return content;
+
+  const truncated = chunks.map((chunk) => {
+    if (!chunk.startsWith("[tool:")) return chunk; // plain text or [reasoning]
+    // Parse envelope: "[tool:<name>] <payload...>"
+    const closeBracket = chunk.indexOf("] ");
+    if (closeBracket < 0) return chunk; // malformed; leave alone
+    const toolName = chunk.slice(6, closeBracket); // 6 = "[tool:".length
+    const payload = chunk.slice(closeBracket + 2);
+    if (payload.length <= maxChars) return chunk;
+    return `[tool:${toolName}] ${toolStripAnnotation(toolName, payload)}`;
+  });
+
+  return truncated.join("\n");
+}
+
+/**
+ * Render a sequence of TemporalMessages as a single string for the distillation
+ * LLM. User messages pass through verbatim; assistant and tool messages have
+ * oversized tool outputs truncated via {@link truncateToolOutputsInContent}.
+ *
+ * Exported so tests can verify truncation on realistic message fixtures without
+ * spinning up a full distillSegment round trip.
+ */
+export function messagesToText(
+  messages: TemporalMessage[],
+  toolOutputMaxChars?: number,
+): string {
+  const cap = toolOutputMaxChars ?? config().distillation.toolOutputMaxChars;
   return messages
-    .map((m) => `[${m.role}] (${formatTime(m.created_at)}) ${m.content}`)
+    .map((m) => {
+      // User text is always signal — never truncate.
+      const body =
+        m.role === "user" ? m.content : truncateToolOutputsInContent(m.content, cap);
+      return `[${m.role}] (${formatTime(m.created_at)}) ${body}`;
+    })
     .join("\n\n");
 }
 

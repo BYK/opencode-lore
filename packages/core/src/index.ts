@@ -68,6 +68,7 @@ export {
   setForceMinLayer,
   getLastTransformedCount,
   getLastTransformEstimate,
+  toolStripAnnotation,
 } from "./gradient";
 export {
   formatKnowledge,
