@@ -18,6 +18,24 @@ export const LoreConfig = z.object({
       ltm: z.number().min(0.02).max(0.3).default(0.10),
     })
     .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.10 }),
+  /**
+   * Cold-cache idle-resume handling.
+   *
+   * Anthropic's prompt cache evicts entries after ~5 min (default tier) /
+   * ~1 hour (extended tier). When a session resumes after the eviction window,
+   * Lore's byte-identity caches (distilled prefix, raw window pin, LTM block)
+   * are providing no value because the underlying provider cache is already
+   * cold. On detection, Lore refreshes those caches so the next turn can
+   * produce a better-fitting window without paying a cache cost it would
+   * otherwise be trying to preserve. Reasoning blocks are NOT touched —
+   * Anthropic's April 23 postmortem identified dropping reasoning blocks as
+   * the root cause of forgetfulness/repetition.
+   *
+   * `idleResumeMinutes` is the threshold in minutes. Default 60 — matches
+   * Anthropic's extended-cache eviction window, conservative across providers.
+   * Set to 0 to disable the feature.
+   */
+  idleResumeMinutes: z.number().min(0).max(24 * 60).default(60),
   distillation: z
     .object({
       minMessages: z.number().min(3).default(8),

@@ -69,6 +69,12 @@ export {
   getLastTransformedCount,
   getLastTransformEstimate,
   toolStripAnnotation,
+  onIdleResume,
+  consumeCameOutOfIdle,
+  // Test-only — exposed at the barrel so host-package tests can simulate idle
+  // gaps without sleeping. Not part of the public API.
+  setLastTurnAtForTest,
+  inspectSessionState,
 } from "./gradient";
 export {
   formatKnowledge,

@@ -14,6 +14,10 @@ import {
   getLastLayer,
   estimateMessages,
   deduplicateToolOutputs,
+  onIdleResume,
+  consumeCameOutOfIdle,
+  inspectSessionState,
+  setLastTurnAtForTest,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
 import { isToolPart } from "../src/types";
@@ -1514,5 +1518,217 @@ describe("deduplicateToolOutputs", () => {
 
     // Third (latest) should be intact
     expect(getToolOutput(result[5].parts[0])).toBe(LARGE_CONTENT);
+  });
+});
+
+describe("onIdleResume", () => {
+  const SID = "idle-resume-sess";
+  const ONE_HOUR_MS = 60 * 60_000;
+
+  beforeEach(() => {
+    resetCalibration(SID);
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+  });
+
+  test("first turn — no lastTurnAt yet, never triggers", () => {
+    const result = onIdleResume(SID, ONE_HOUR_MS);
+    expect(result.triggered).toBe(false);
+    const state = inspectSessionState(SID);
+    expect(state).not.toBeNull();
+    expect(state!.cameOutOfIdle).toBe(false);
+  });
+
+  test("under threshold — does not trigger or reset caches", () => {
+    // Seed a recent last-turn timestamp.
+    const now = 1_000_000_000_000; // arbitrary epoch ms
+    setLastTurnAtForTest(SID, now - 30 * 60_000); // 30 min ago
+    // Run a transform first to populate prefix/raw caches (best effort).
+    transform({
+      messages: [
+        {
+          info: {
+            id: "u1",
+            sessionID: SID,
+            role: "user",
+            time: { created: now },
+            agent: "build",
+            model: { providerID: "anthropic", modelID: "x" },
+          },
+          parts: [
+            {
+              id: "p1",
+              sessionID: SID,
+              messageID: "u1",
+              type: "text",
+              text: "hi",
+              time: { start: now, end: now },
+            },
+          ],
+        },
+      ],
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    // Re-seed lastTurnAt (transform overwrote it to Date.now()).
+    setLastTurnAtForTest(SID, now - 30 * 60_000);
+
+    const result = onIdleResume(SID, ONE_HOUR_MS, now);
+    expect(result.triggered).toBe(false);
+    const state = inspectSessionState(SID);
+    expect(state!.cameOutOfIdle).toBe(false);
+  });
+
+  test("over threshold — triggers, resets caches, sets cameOutOfIdle", () => {
+    const now = 1_000_000_000_000;
+    setLastTurnAtForTest(SID, now - 2 * ONE_HOUR_MS); // 2 hours ago
+
+    // Force at least one cache to be populated so we can observe the reset.
+    // We use the testing inspector path: directly induce state by calling
+    // transform() so the prefix cache might populate. But for a deterministic
+    // assertion we just check the post-call state — onIdleResume itself sets
+    // them to null regardless of whether they were populated.
+    const result = onIdleResume(SID, ONE_HOUR_MS, now);
+    expect(result.triggered).toBe(true);
+    if (result.triggered) {
+      expect(result.idleMs).toBe(2 * ONE_HOUR_MS);
+    }
+    const state = inspectSessionState(SID);
+    expect(state!.hasPrefixCache).toBe(false);
+    expect(state!.hasRawWindowCache).toBe(false);
+    expect(state!.cameOutOfIdle).toBe(true);
+  });
+
+  test("threshold of 0 disables the feature entirely", () => {
+    const now = 1_000_000_000_000;
+    setLastTurnAtForTest(SID, now - 30 * 24 * 60 * 60_000); // 30 days ago
+    const result = onIdleResume(SID, 0, now);
+    expect(result.triggered).toBe(false);
+    const state = inspectSessionState(SID);
+    expect(state!.cameOutOfIdle).toBe(false);
+  });
+
+  test("consumeCameOutOfIdle is one-shot", () => {
+    const now = 1_000_000_000_000;
+    setLastTurnAtForTest(SID, now - 2 * ONE_HOUR_MS);
+    onIdleResume(SID, ONE_HOUR_MS, now);
+    expect(inspectSessionState(SID)!.cameOutOfIdle).toBe(true);
+
+    expect(consumeCameOutOfIdle(SID)).toBe(true);
+    expect(inspectSessionState(SID)!.cameOutOfIdle).toBe(false);
+
+    // Second call returns false — flag was cleared.
+    expect(consumeCameOutOfIdle(SID)).toBe(false);
+  });
+
+  test("consumeCameOutOfIdle on unknown session returns false", () => {
+    expect(consumeCameOutOfIdle("never-existed-session")).toBe(false);
+  });
+
+  test("transform() updates lastTurnAt — subsequent calls see no idle gap", () => {
+    const before = Date.now();
+    transform({
+      messages: [
+        {
+          info: {
+            id: "u1",
+            sessionID: SID,
+            role: "user",
+            time: { created: before },
+            agent: "build",
+            model: { providerID: "anthropic", modelID: "x" },
+          },
+          parts: [
+            {
+              id: "p1",
+              sessionID: SID,
+              messageID: "u1",
+              type: "text",
+              text: "hello world",
+              time: { start: before, end: before },
+            },
+          ],
+        },
+      ],
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    const state = inspectSessionState(SID);
+    expect(state!.lastTurnAt).toBeGreaterThanOrEqual(before);
+    // Without a real idle gap, onIdleResume should not trigger.
+    const result = onIdleResume(SID, ONE_HOUR_MS);
+    expect(result.triggered).toBe(false);
+  });
+});
+
+describe("reasoning preservation (F-REASONING-AUDIT mini-pin)", () => {
+  // Fast structural check — full coverage lives in gradient-reasoning.test.ts.
+  // This guards against an accidental change to estimateParts/cleanParts that
+  // would silently drop reasoning blocks across all gradient layers.
+  test("layer 0 preserves reasoning parts unchanged", () => {
+    const SID = "reasoning-mini-sess";
+    resetCalibration(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    const messages: LoreMessageWithParts[] = [
+      makeMsg("rm-u1", "user", "Plan something."),
+      {
+        info: {
+          id: "rm-a1",
+          sessionID: SID,
+          role: "assistant",
+          time: { created: Date.now() },
+          parentID: "parent-rm-a1",
+          modelID: "claude-opus-4-7",
+          providerID: "anthropic",
+          mode: "build",
+          path: { cwd: "/test", root: "/test" },
+          cost: 0,
+          tokens: {
+            input: 100,
+            output: 50,
+            reasoning: 200,
+            cache: { read: 0, write: 0 },
+          },
+        },
+        parts: [
+          {
+            id: "rm-r1",
+            sessionID: SID,
+            messageID: "rm-a1",
+            type: "reasoning",
+            text: "I should consider the trade-offs carefully here.",
+            time: { start: Date.now(), end: Date.now() },
+          } as LorePart,
+          {
+            id: "rm-t1",
+            sessionID: SID,
+            messageID: "rm-a1",
+            type: "text",
+            text: "Here is my plan.",
+            time: { start: Date.now(), end: Date.now() },
+          },
+        ],
+      },
+    ];
+
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(result.layer).toBe(0);
+    // Layer 0 returns the input array by reference
+    expect(result.messages).toBe(messages);
+    // Reasoning part still present, byte-identical
+    const assistantParts = result.messages[1].parts;
+    const reasoningPart = assistantParts.find((p) => p.type === "reasoning") as
+      | { type: "reasoning"; text: string }
+      | undefined;
+    expect(reasoningPart).toBeDefined();
+    expect(reasoningPart!.text).toBe(
+      "I should consider the trade-offs carefully here.",
+    );
   });
 });
