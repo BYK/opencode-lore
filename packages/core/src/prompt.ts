@@ -184,14 +184,30 @@ EXACT NUMBERS: When two segments report different numbers for what seems like th
 
 EARLY-SESSION CONTENT: Bug fixes, code changes, and decisions from the start of a session are just as important as later work. Never drop them just because the segment is short or old. If the first segment contains a specific bug fix with file paths and root cause, it MUST survive into the reflection.
 
+ANCHORED UPDATES: If the prompt includes a <previous-meta-summary> block, treat it as the current consolidated state. Update it using the NEW observation segments — preserve still-true details, remove stale details, and merge in new facts. Keep the same section headings. Do NOT re-derive unchanged sections verbatim unless the new segments contradict them.
+
 Output ONLY an <observations> block with the consolidated observations.`;
 
 export function recursiveUser(
   distillations: Array<{ observations: string }>,
+  previousMeta?: string,
 ): string {
   const entries = distillations.map(
     (d, i) => `Segment ${i + 1}:\n${d.observations}`,
   );
+  if (previousMeta) {
+    return `Update the anchored meta-summary below using the NEW observation segments. Preserve still-true details, remove stale details, and merge in new facts. Keep the same section headings.
+
+<previous-meta-summary>
+${previousMeta}
+</previous-meta-summary>
+
+---
+
+New observation segments to merge (chronological order):
+
+${entries.join("\n\n---\n\n")}`;
+  }
   return `Observation segments to consolidate (chronological order):
 
 ${entries.join("\n\n---\n\n")}`;

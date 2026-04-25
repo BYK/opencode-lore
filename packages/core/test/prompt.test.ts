@@ -1,5 +1,9 @@
 import { describe, test, expect } from "bun:test";
-import { buildCompactPrompt, COMPACT_SUMMARY_TEMPLATE } from "../src/prompt";
+import {
+  buildCompactPrompt,
+  COMPACT_SUMMARY_TEMPLATE,
+  recursiveUser,
+} from "../src/prompt";
 
 // All required section headings emitted by COMPACT_SUMMARY_TEMPLATE. Pinning
 // this list keeps Lore's /compact output aligned with the upstream OpenCode
@@ -145,5 +149,75 @@ describe("buildCompactPrompt", () => {
     expect(summaryBodyIdx).toBeGreaterThan(anchorIdx);
     expect(templateIdx).toBeGreaterThan(anchorIdx);
     expect(knowledgeIdx).toBeGreaterThan(templateIdx);
+  });
+});
+
+// ─── F2: recursiveUser anchor parameter ──────────────────────────────
+
+describe("recursiveUser", () => {
+  const segments = [
+    { observations: "obs A" },
+    { observations: "obs B" },
+  ];
+
+  test("no anchor: emits plain consolidation prompt", () => {
+    const out = recursiveUser(segments);
+    expect(out).toContain("Observation segments to consolidate");
+    expect(out).toContain("Segment 1:\nobs A");
+    expect(out).toContain("Segment 2:\nobs B");
+    expect(out).not.toContain("<previous-meta-summary>");
+  });
+
+  test("undefined previousMeta is byte-identical to no parameter", () => {
+    const withParam = recursiveUser(segments, undefined);
+    const withoutParam = recursiveUser(segments);
+    expect(withParam).toBe(withoutParam);
+  });
+
+  test("empty-string previousMeta is treated as absent (falsy check)", () => {
+    const withEmpty = recursiveUser(segments, "");
+    const withoutParam = recursiveUser(segments);
+    expect(withEmpty).toBe(withoutParam);
+    expect(withEmpty).not.toContain("<previous-meta-summary>");
+  });
+
+  test("with anchor: emits <previous-meta-summary> block + new-segments header", () => {
+    const priorMeta =
+      "### Current State\n- working on auth module\n### Key Decisions\n- chose OAuth2";
+    const out = recursiveUser(segments, priorMeta);
+    expect(out).toContain("<previous-meta-summary>");
+    expect(out).toContain(priorMeta);
+    expect(out).toContain("</previous-meta-summary>");
+    // Update-in-place instruction.
+    expect(out).toContain("Update the anchored meta-summary below");
+    expect(out).toContain("Preserve still-true details");
+    // New segments still present.
+    expect(out).toContain("New observation segments to merge");
+    expect(out).toContain("Segment 1:\nobs A");
+    expect(out).toContain("Segment 2:\nobs B");
+  });
+
+  test("anchor block placement: instruction → anchor → new segments", () => {
+    const priorMeta = "PRIOR_META_TOKEN";
+    const out = recursiveUser(segments, priorMeta);
+    const instructionIdx = out.indexOf("Update the anchored meta-summary");
+    const anchorOpenIdx = out.indexOf("<previous-meta-summary>");
+    const anchorBodyIdx = out.indexOf(priorMeta);
+    const segmentsHeaderIdx = out.indexOf("New observation segments");
+
+    expect(instructionIdx).toBeGreaterThan(-1);
+    expect(anchorOpenIdx).toBeGreaterThan(instructionIdx);
+    expect(anchorBodyIdx).toBeGreaterThan(anchorOpenIdx);
+    expect(segmentsHeaderIdx).toBeGreaterThan(anchorBodyIdx);
+  });
+
+  test("with anchor + 0 segments: still emits anchor block (caller's threshold gate)", () => {
+    // metaDistill rejects 0-segment input early; recursiveUser doesn't enforce
+    // a minimum and produces a valid prompt either way. Pin this to keep the
+    // helper's contract independent of the caller's thresholding.
+    const out = recursiveUser([], "PRIOR_META");
+    expect(out).toContain("<previous-meta-summary>");
+    expect(out).toContain("PRIOR_META");
+    expect(out).toContain("New observation segments to merge");
   });
 });
