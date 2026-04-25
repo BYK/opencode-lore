@@ -437,29 +437,39 @@ Rules:
 // Lore injects pre-computed distillations as context separately; this prompt
 // just tells the model how to render its summary.
 //
-// NOTE: Upstream's SUMMARY_TEMPLATE path also supports `<previous-summary>`
-// anchoring for repeat /compact invocations. Lore does not implement that yet —
-// see F1b follow-up for the persistence+retrieval needed to do it safely
-// (gen>0 meta-distillations are XML observation dumps, not prior /compact
-// output, so we can't reuse them as anchors).
-//
 // `hasDistillations` is a boolean rather than the full array because this
 // function only cares about presence — the distillation bodies are pushed into
 // `output.context` separately by the caller. Passing the array shape would be
 // misleading dead weight.
+//
+// `previousSummary` is the prior `/compact` output text (typically from the
+// most recent assistant message with `info.summary === true`). When present,
+// the prompt asks the model to UPDATE the anchored summary in place rather
+// than re-derive from scratch — matching upstream OpenCode's behavior at
+// `compaction.ts:121-132` (`buildPrompt`). When absent, the prompt is
+// byte-identical to today's non-anchored output.
+//
+// F1b (this parameter) is OpenCode-specific: the retrieval path uses
+// `client.session.messages` to find the prior summary by `info.summary === true`.
+// See `findPreviousCompactSummary` in `packages/opencode/src/index.ts`.
 export function buildCompactPrompt(input: {
   hasDistillations: boolean;
   knowledge?: string;
+  previousSummary?: string;
 }): string {
   const distillSection = input.hasDistillations
     ? "Lore has pre-computed chunked summaries of the session history (injected above as context). Use them as the authoritative source — do NOT re-read raw conversation messages that conflict with them.\n\n"
+    : "";
+
+  const anchorBlock = input.previousSummary
+    ? `A prior compacted summary exists for this session. Update it using the conversation history above: preserve still-true details, remove stale details, and merge in new facts. Keep every section in place.\n\n<previous-summary>\n${input.previousSummary}\n</previous-summary>\n\n`
     : "";
 
   const knowledgeBlock = input.knowledge ? `\n${input.knowledge}\n` : "";
 
   return `You are producing a compacted session summary for an AI coding agent. This summary will be the ONLY context available in the next part of the conversation.
 
-${distillSection}${COMPACT_SUMMARY_TEMPLATE}
+${distillSection}${anchorBlock}${COMPACT_SUMMARY_TEMPLATE}
 ${knowledgeBlock}`;
 }
 

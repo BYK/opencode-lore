@@ -6,6 +6,7 @@ import {
   isMediaMime,
   stripMediaPart,
   getLastRealUserMessage,
+  findPreviousCompactSummary,
   LorePlugin,
   isValidProjectPath,
 } from "../src/index";
@@ -795,6 +796,214 @@ describe("getLastRealUserMessage", () => {
     };
     const result = await getLastRealUserMessage(client, "ses_test");
     expect(result?.parts[0]).toMatchObject({ type: "text", text: "ok" });
+  });
+});
+
+// ── F1b: findPreviousCompactSummary — pure helper tests ──────────────
+
+describe("findPreviousCompactSummary", () => {
+  test("returns the most recent assistant message text where info.summary is true", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { id: "u1", role: "user" },
+                parts: [{ type: "text", text: "first user turn" }],
+              },
+              {
+                info: { id: "a1", role: "assistant", summary: true, mode: "compaction" },
+                parts: [
+                  { type: "text", text: "## Goal\n- prior session goal\n## Progress\n- step 1" },
+                ],
+              },
+              {
+                info: { id: "u2", role: "user" },
+                parts: [{ type: "text", text: "follow-up question" }],
+              },
+              {
+                info: { id: "a2", role: "assistant" },
+                parts: [{ type: "text", text: "regular assistant reply" }],
+              },
+            ],
+          }),
+      },
+    };
+    const result = await findPreviousCompactSummary(client, "ses_test");
+    expect(result).toBe("## Goal\n- prior session goal\n## Progress\n- step 1");
+  });
+
+  test("returns the MOST RECENT summary when multiple exist", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { id: "a1", role: "assistant", summary: true },
+                parts: [{ type: "text", text: "older summary" }],
+              },
+              {
+                info: { id: "a2", role: "assistant", summary: true },
+                parts: [{ type: "text", text: "newer summary" }],
+              },
+            ],
+          }),
+      },
+    };
+    expect(await findPreviousCompactSummary(client, "ses_test")).toBe("newer summary");
+  });
+
+  test("returns undefined when no assistant has summary === true", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { id: "a1", role: "assistant" },
+                parts: [{ type: "text", text: "regular reply" }],
+              },
+              {
+                info: { id: "a2", role: "assistant", summary: false },
+                parts: [{ type: "text", text: "explicitly-false flag" }],
+              },
+            ],
+          }),
+      },
+    };
+    expect(await findPreviousCompactSummary(client, "ses_test")).toBeUndefined();
+  });
+
+  test("returns undefined for empty session", async () => {
+    const client = {
+      session: { messages: () => Promise.resolve({ data: [] }) },
+    };
+    expect(await findPreviousCompactSummary(client, "ses_test")).toBeUndefined();
+  });
+
+  test("returns undefined when SDK call throws (logs warning, swallows)", async () => {
+    const client = {
+      session: {
+        messages: () => Promise.reject(new Error("network blip")),
+      },
+    };
+    expect(await findPreviousCompactSummary(client, "ses_test")).toBeUndefined();
+  });
+
+  test("joins multiple text parts with paragraph break (matches upstream summaryText)", async () => {
+    // Upstream's summaryText (compaction.ts:93-101) joins trimmed parts with
+    // "\n\n" after dropping empties. Lore mirrors that.
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { id: "a1", role: "assistant", summary: true },
+                parts: [
+                  { type: "text", text: "## Goal\n- ship F1b" },
+                  { type: "text", text: "  " }, // whitespace-only — dropped
+                  { type: "text", text: "## Progress\n- writing tests" },
+                ],
+              },
+            ],
+          }),
+      },
+    };
+    const result = await findPreviousCompactSummary(client, "ses_test");
+    expect(result).toBe("## Goal\n- ship F1b\n\n## Progress\n- writing tests");
+  });
+
+  test("ignores reasoning/tool parts on the matched message", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { id: "a1", role: "assistant", summary: true },
+                parts: [
+                  { type: "reasoning", text: "internal thought" },
+                  { type: "text", text: "actual summary body" },
+                  { type: "tool", tool: "grep", state: { status: "completed", output: "x" } },
+                ],
+              },
+            ],
+          }),
+      },
+    };
+    expect(await findPreviousCompactSummary(client, "ses_test")).toBe("actual summary body");
+  });
+
+  test("skips assistants where summary is falsy (matches upstream's truthy check)", async () => {
+    // Upstream's completedCompactions uses `!msg.info.summary` (truthy check).
+    // Confirm Lore matches: false, null, 0, "" are all rejected; only the
+    // earlier "summary === true" case from the matching tests qualifies.
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { id: "a1", role: "assistant", summary: false },
+                parts: [{ type: "text", text: "explicit false" }],
+              },
+              {
+                info: { id: "a2", role: "assistant", summary: null },
+                parts: [{ type: "text", text: "explicit null" }],
+              },
+              {
+                info: { id: "a3", role: "assistant", summary: 0 },
+                parts: [{ type: "text", text: "numeric zero" }],
+              },
+              {
+                info: { id: "a4", role: "assistant", summary: "" },
+                parts: [{ type: "text", text: "empty string" }],
+              },
+            ],
+          }),
+      },
+    };
+    expect(await findPreviousCompactSummary(client, "ses_test")).toBeUndefined();
+  });
+
+  test("tolerates malformed entries (null, missing info, missing parts)", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              null,
+              { info: null, parts: [] },
+              { info: { role: "user" } },
+              {
+                info: { role: "assistant", summary: true },
+                parts: [{ type: "text", text: "valid summary" }],
+              },
+            ],
+          }),
+      },
+    };
+    expect(await findPreviousCompactSummary(client, "ses_test")).toBe("valid summary");
+  });
+
+  test("returns undefined when summary message has no non-empty text parts", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { role: "assistant", summary: true },
+                parts: [{ type: "text", text: "   " }, { type: "reasoning", text: "thought" }],
+              },
+            ],
+          }),
+      },
+    };
+    expect(await findPreviousCompactSummary(client, "ses_test")).toBeUndefined();
   });
 });
 
@@ -1883,6 +2092,110 @@ describe("experimental.session.compacting", () => {
       expect(prompt).toContain("## Goal");
       // No distillations possible → no context block.
       expect(context).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  // F1b: anchor on prior /compact summary
+
+  test("F1b: emits <previous-summary> anchor when a prior /compact summary exists in the session", async () => {
+    const priorSummaryText =
+      "## Goal\n- Refactor the auth module\n## Progress\n### Done\n- Added OAuth\n### In Progress\n- Token refresh\n## Next Steps\n- Write integration tests";
+    const { hooks, cleanup } = await initPluginCustomClient((c) => {
+      (c.session as any).messages = () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { id: "u1", role: "user" },
+              parts: [{ type: "text", text: "first user turn" }],
+            },
+            {
+              info: { id: "a1", role: "assistant", summary: true, mode: "compaction" },
+              parts: [{ type: "text", text: priorSummaryText }],
+            },
+            {
+              info: { id: "u2", role: "user" },
+              parts: [{ type: "text", text: "more conversation after compact" }],
+            },
+          ],
+        });
+    });
+    try {
+      const { prompt } = await callCompacting(hooks!, {
+        sessionID: "ses_f1b_anchor_001",
+      });
+      expect(prompt).toContain("<previous-summary>");
+      expect(prompt).toContain(priorSummaryText);
+      expect(prompt).toContain("</previous-summary>");
+      expect(prompt).toContain("Update it using the conversation history above");
+      // Template body still emitted alongside.
+      expect(prompt).toContain("## Goal");
+      expect(prompt).toContain("## Next Steps");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("F1b: no anchor block when session has no prior /compact summary", async () => {
+    const { hooks, cleanup } = await initPluginCustomClient((c) => {
+      (c.session as any).messages = () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { id: "u1", role: "user" },
+              parts: [{ type: "text", text: "first user turn" }],
+            },
+            {
+              info: { id: "a1", role: "assistant" },
+              parts: [{ type: "text", text: "regular assistant reply" }],
+            },
+          ],
+        });
+    });
+    try {
+      const { prompt } = await callCompacting(hooks!, {
+        sessionID: "ses_f1b_noanchor_001",
+      });
+      expect(prompt).not.toContain("<previous-summary>");
+      expect(prompt).not.toContain("Update it using the conversation history");
+      // Template body still emitted.
+      expect(prompt).toContain("## Goal");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("F1b: SDK failure on session.messages falls through to non-anchored prompt", async () => {
+    const { hooks, cleanup } = await initPluginCustomClient((c) => {
+      (c.session as any).messages = () =>
+        Promise.reject(new Error("simulated SDK failure"));
+    });
+    try {
+      const { prompt } = await callCompacting(hooks!, {
+        sessionID: "ses_f1b_sdkfail_001",
+      });
+      // Recovery: no anchor, but prompt still produced with template body.
+      expect(prompt).not.toContain("<previous-summary>");
+      expect(prompt).toContain("## Goal");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("F1b: missing input.sessionID skips anchor lookup entirely", async () => {
+    let messagesCalled = false;
+    const { hooks, cleanup } = await initPluginCustomClient((c) => {
+      (c.session as any).messages = () => {
+        messagesCalled = true;
+        return Promise.resolve({ data: [] });
+      };
+    });
+    try {
+      const { prompt } = await callCompacting(hooks!, {});
+      expect(messagesCalled).toBe(false);
+      expect(prompt).not.toContain("<previous-summary>");
+      expect(prompt).toContain("## Goal");
     } finally {
       cleanup();
     }

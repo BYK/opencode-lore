@@ -251,6 +251,69 @@ export async function getLastRealUserMessage(
 }
 
 /**
+ * Walk session messages newest-first to find the most recent prior `/compact`
+ * summary text. The compaction agent (upstream `compaction.ts:410-435`) emits
+ * an assistant message in the same session with `info.summary === true` and
+ * `info.mode === "compaction"` — this helper recovers the joined text-part
+ * content so the next `/compact` can anchor on it.
+ *
+ * Returns the joined text of the matched assistant message, or `undefined`
+ * when no prior summary exists or the SDK call fails. The caller falls
+ * through to non-anchored compaction in either case (byte-identical to the
+ * pre-F1b behavior).
+ *
+ * Approximates upstream's `completedCompactions` detection at
+ * `compaction.ts:104-118`. Upstream additionally checks `info.finish &&
+ * !info.error` and that the parent user message contains a `compaction` part;
+ * Lore relies on the upstream invariant that `summary` is only set on
+ * successfully completed compaction-agent assistant messages so the simpler
+ * `summary` check is sufficient in practice. Text-part assembly mirrors
+ * upstream's `summaryText` (`compaction.ts:93-101`): per-part trim, drop
+ * empties, join with paragraph breaks.
+ */
+export async function findPreviousCompactSummary(
+  client: SessionMessagesClient,
+  sessionID: string,
+): Promise<string | undefined> {
+  let resp;
+  try {
+    resp = await client.session.messages({ path: { id: sessionID } });
+  } catch (e) {
+    log.warn(`findPreviousCompactSummary: session.messages failed for ${sessionID.substring(0, 16)}:`, e);
+    return undefined;
+  }
+  const msgs = resp?.data ?? [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const raw = msgs[i];
+    if (!raw || typeof raw !== "object") continue;
+    const m = raw as { info?: unknown; parts?: unknown };
+    const info = m.info;
+    if (!info || typeof info !== "object") continue;
+    if ((info as { role?: unknown }).role !== "assistant") continue;
+    // Truthy check (matches upstream: `!msg.info.summary` rejects falsy).
+    // Production data only ever sets the flag to literal `true`; the looser
+    // check still rejects undefined / false / null / 0 / "" without
+    // false-positive matching string-typed truthy values from a
+    // hypothetical malformed SDK response.
+    if (!(info as { summary?: unknown }).summary) continue;
+    const partsRaw = m.parts;
+    const parts: Array<Record<string, unknown>> = Array.isArray(partsRaw)
+      ? (partsRaw as Array<Record<string, unknown>>)
+      : [];
+    const text = parts
+      .filter(
+        (p) =>
+          p && typeof p === "object" && p.type === "text" && typeof p.text === "string",
+      )
+      .map((p) => (p.text as string).trim())
+      .filter((s) => s.length > 0)
+      .join("\n\n");
+    if (text.length > 0) return text;
+  }
+  return undefined;
+}
+
+/**
  * Build a media-aware recovery message that extends the plain version with
  * (a) a list of stripped attachments and (b) the user's original text from
  * the failed turn. The plain `buildRecoveryMessage` should be preferred
@@ -1011,6 +1074,12 @@ export const LorePlugin: Plugin = async (ctx) => {
     // buildCompactPrompt (Goal / Progress / Next Steps / Blocked / etc.), derived from
     // upstream OpenCode's template so the next agent starting from the compacted
     // context has a clear "where am I, what's next" briefing.
+    //
+    // F1b: when a prior /compact summary exists in the session (assistant
+    // message with `info.summary === true`), retrieve it via
+    // `findPreviousCompactSummary` and pass as `previousSummary` so the
+    // model UPDATES the anchored summary rather than re-deriving from
+    // scratch. Mirrors upstream's `<previous-summary>` behavior.
     "experimental.session.compacting": async (input, output) => {
       // Chunked distillation: split all undistilled messages into segments that each
       // fit within the model's context window and distill them independently.
@@ -1024,6 +1093,13 @@ export const LorePlugin: Plugin = async (ctx) => {
       const distillations = input.sessionID
         ? distillation.loadForSession(projectPath, input.sessionID)
         : [];
+
+      // F1b anchor: find the prior /compact assistant summary (if any).
+      // SDK failure / no prior summary → undefined → byte-identical to
+      // pre-F1b prompt output.
+      const previousSummary = input.sessionID
+        ? await findPreviousCompactSummary(ctx.client, input.sessionID)
+        : undefined;
 
       const entries = config().knowledge.enabled
         ? ltm.forProject(projectPath, config().crossProject)
@@ -1056,6 +1132,7 @@ export const LorePlugin: Plugin = async (ctx) => {
       output.prompt = buildCompactPrompt({
         hasDistillations: distillations.length > 0,
         knowledge,
+        previousSummary,
       });
     },
 
