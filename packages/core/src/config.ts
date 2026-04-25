@@ -23,8 +23,18 @@ export const LoreConfig = z.object({
       minMessages: z.number().min(3).default(8),
       maxSegment: z.number().min(5).default(50),
       metaThreshold: z.number().min(3).default(10),
+      /** Max chars per tool output when rendering temporal messages for distillation input.
+       *  Outputs longer than this are replaced with a compact annotation preserving line
+       *  count, error signals, and file paths. Default: 2000 (matches upstream OpenCode's
+       *  TOOL_OUTPUT_MAX_CHARS during compaction). Set to 0 to disable. */
+      toolOutputMaxChars: z.number().min(0).default(2_000),
     })
-    .default({ minMessages: 8, maxSegment: 50, metaThreshold: 10 }),
+    .default({
+      minMessages: 8,
+      maxSegment: 50,
+      metaThreshold: 10,
+      toolOutputMaxChars: 2_000,
+    }),
   knowledge: z
     .object({
       /** Set to false to disable long-term knowledge storage and system-prompt injection.

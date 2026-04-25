@@ -320,20 +320,41 @@ function cleanParts(parts: LorePart[]): LorePart[] {
   return filtered.length > 0 ? filtered : parts;
 }
 
+// Upper bound on how much of the output the path-extraction regex scans.
+// Two mitigations for catastrophic backtracking in `PATH_RE`:
+//   1. Skip entirely if the input contains no '/' (a path requires at least
+//      one separator, so without one the regex has no possible match yet
+//      still backtracks O(n²) on long runs of [\w.-]).
+//   2. Cap the scanned slice at this limit so even crafted inputs with a
+//      '/' somewhere don't stall the worker. The annotation only needs a
+//      few representative paths — sampling the first 64KB is plenty.
+const ANNOTATION_PATH_SCAN_LIMIT = 64 * 1024;
+const PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.\w{1,5}/g;
+
 // Build a metadata annotation for a stripped tool output, preserving key signals
 // about what was lost without requiring an LLM call. Inspired by the per-token
 // scalar bias β from "Fast KV Compaction via Attention Matching" (Zweiger et al.,
 // 2025) — when tokens are removed, preserving metadata about the removed content
 // helps the model compensate for information loss and decide whether to recall.
 // Reference: https://arxiv.org/abs/2602.16284
-function toolStripAnnotation(toolName: string, output: string): string {
+export function toolStripAnnotation(toolName: string, output: string): string {
   const lines = output.split("\n").length;
-  const chars = output.length;
 
   // Detect key signals via lightweight heuristics — no LLM call
   const hasError = /\b(?:error|fail(?:ed|ure)?|exception|panic|traceback)\b/i.test(output);
-  const paths = output.match(/(?:[\w.-]+\/)+[\w.-]+\.\w{1,5}/g);
-  const uniquePaths = paths ? [...new Set(paths)].slice(0, 5) : [];
+
+  // Path extraction: skip entirely if no '/' is present (cheap O(n) check
+  // via indexOf) to avoid PATH_RE's O(n²) backtracking on long runs of
+  // [\w.-] without a separator. Otherwise sample the first N KB.
+  let uniquePaths: string[] = [];
+  if (output.indexOf("/") !== -1) {
+    const pathScan =
+      output.length > ANNOTATION_PATH_SCAN_LIMIT
+        ? output.slice(0, ANNOTATION_PATH_SCAN_LIMIT)
+        : output;
+    const paths = pathScan.match(PATH_RE);
+    if (paths) uniquePaths = [...new Set(paths)].slice(0, 5);
+  }
 
   let annotation = `[output omitted — ${toolName}: ${lines} lines`;
   if (hasError) annotation += ", contained errors";
