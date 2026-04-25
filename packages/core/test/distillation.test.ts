@@ -3,10 +3,19 @@ import {
   messagesToText,
   truncateToolOutputsInContent,
 } from "../src/distillation";
-import type * as temporal from "../src/temporal";
+import * as temporal from "../src/temporal";
+import { CHUNK_TERMINATOR, partsToText } from "../src/temporal";
+import type { LorePart } from "../src/types";
 
 // Fixed timestamp so [hh:mm] prefixes are deterministic across runs.
 const T = new Date("2026-04-24T09:15:00Z").getTime();
+
+// Join chunks the way temporal.partsToText does (post-F3b): "\n\x1f"
+// between chunks. Tests use this to construct realistic content
+// fixtures without needing a full producer round trip every time.
+function seal(...chunks: string[]): string {
+  return chunks.join("\n" + CHUNK_TERMINATOR);
+}
 
 function msg(
   role: "user" | "assistant" | "tool",
@@ -29,197 +38,37 @@ function msg(
 
 // ─── truncateToolOutputsInContent ─────────────────────────────────────
 //
-// Operates on the flattened-content shape produced by temporal.partsToText
-// (see temporal.ts: chunks joined with "\n", tool outputs wrapped in
-// "[tool:<name>] ..."). Per-envelope truncation preserves plain text and
-// [reasoning] blocks untouched; only tool payloads above the cap are
-// replaced with a compact annotation.
+// Operates on the post-F3b chunk format produced by temporal.partsToText:
+// chunks separated by "\n\x1f" so the structural parser is unambiguous
+// regardless of payload contents. Single-chunk content (no \x1f) takes
+// a fast path that truncates the whole content as one chunk if it's an
+// oversized tool envelope. Multi-chunk content splits on the separator
+// and truncates each tool envelope independently.
 
-describe("truncateToolOutputsInContent", () => {
-  test("passthrough: content with no tool envelopes is unchanged", () => {
-    const plain = "User asked about auth.\n[reasoning] Thinking about flow";
+describe("truncateToolOutputsInContent — single-chunk fast path", () => {
+  test("plain text passes through unchanged", () => {
+    const plain = "Just a user message about auth.";
     expect(truncateToolOutputsInContent(plain, 2_000)).toBe(plain);
   });
 
-  test("passthrough: short tool output below cap is unchanged", () => {
+  test("short tool envelope below cap is unchanged", () => {
     const content = "[tool:read] file contents are small";
     expect(truncateToolOutputsInContent(content, 2_000)).toBe(content);
   });
 
-  test("truncates oversized single tool envelope", () => {
+  test("oversized single tool envelope is truncated", () => {
     const output = "x".repeat(5_000);
     const content = `[tool:grep] ${output}`;
     const result = truncateToolOutputsInContent(content, 2_000);
-    // Annotation replaces the payload wholesale.
     expect(result).toContain("[tool:grep] [output omitted — grep:");
     expect(result).toContain("lines");
     expect(result.length).toBeLessThan(content.length);
-    // Original payload must not survive.
-    expect(result).not.toContain("xxxxxxxxxx"); // 10 x's would be in the body
+    expect(result).not.toContain("xxxxxxxxxx");
   });
 
-  test("preserves plain text BEFORE an oversized envelope", () => {
-    const output = "y".repeat(5_000);
-    const content = [
-      "I need to search for that symbol.",
-      `[tool:grep] ${output}`,
-    ].join("\n");
-    const result = truncateToolOutputsInContent(content, 2_000);
-    expect(result).toContain("I need to search for that symbol.");
-    expect(result).toContain("[output omitted — grep:");
-  });
-
-  test("known limitation (1a): plain text AFTER a tool chunk is attributed to the payload", () => {
-    // partsToText joins chunks with "\n" and plain text has no structural
-    // prefix, so a text chunk that follows a tool chunk is indistinguishable
-    // from a continuation of the tool output. The truncator attributes the
-    // trailing text to the tool payload. Acceptable trade-off — see
-    // CHUNK_BOUNDARY_RE comment in src/distillation.ts.
-    const output = "y".repeat(5_000);
-    const content = [
-      `[tool:grep] ${output}`,
-      "Follow-up text attributed to grep output.",
-    ].join("\n");
-    const result = truncateToolOutputsInContent(content, 2_000);
-    // Annotation is emitted; trailing text is swallowed into the annotation.
-    expect(result).toContain("[output omitted — grep:");
-    expect(result).not.toContain("Follow-up text attributed");
-  });
-
-  test("known limitation (1b): short tool + long trailing text gets the text swallowed", () => {
-    // Inverse of the above: a tool chunk with small output that's followed
-    // by a big assistant text-reply. The combined chunk exceeds the cap,
-    // so the trailing analysis disappears into the annotation. This is
-    // the same CHUNK_BOUNDARY_RE limitation (direction: long text after
-    // small tool) and is acceptable for background distill input — the
-    // summary-level observations still capture the interaction shape.
-    const longTrailingText = "This is a long analysis after the tool call. ".repeat(100);
-    const content = [
-      "[tool:grep] found 3 matches",
-      longTrailingText,
-    ].join("\n");
-    const result = truncateToolOutputsInContent(content, 2_000);
-    // Truncation fires because the combined chunk > cap.
-    expect(result).toContain("[output omitted — grep:");
-    // The trailing analysis is gone.
-    expect(result).not.toContain("long analysis after");
-  });
-
-  test("known limitation (2): embedded [tool:<name>] inside a payload fabricates a boundary", () => {
-    // If a tool output legitimately contains the literal sequence
-    // `\n[tool:<identifier>] ` (e.g. reading a file that documents this
-    // serialization format), the truncator splits on it. The tightened
-    // tool-name regex `[a-z][a-z0-9_-]*` reduces the surface (a literal
-    // `[tool:Fake]` inside a body won't split because of the uppercase F),
-    // but valid-identifier-shaped literals still fabricate a split. Pinning
-    // the behavior so it's not silently rediscovered.
-    const big = "x".repeat(3_000);
-    const content = [
-      `[tool:read] reading AGENTS.md`,
-      `File contents include the literal envelope prefix below:`,
-      `[tool:bash] this is a legitimate part of the read payload`,
-      big,
-    ].join("\n");
-    const result = truncateToolOutputsInContent(content, 2_000);
-    // The embedded `[tool:bash]` prefix creates a fabricated second chunk.
-    // The fabricated chunk contains the big payload and gets truncated as
-    // if it were a real bash call — producing an annotation that references
-    // "bash" even though no bash call occurred.
-    expect(result).toContain("[output omitted — bash:");
-    // The first read chunk body is short so it survives untruncated.
-    expect(result).toContain("[tool:read] reading AGENTS.md");
-  });
-
-  test("tightened regex: uppercase tool name inside a payload does NOT split", () => {
-    // Tool names with uppercase letters don't match the identifier regex,
-    // so literal `[tool:Fake]` occurrences in payloads stay inline.
-    const body = "first line\n[tool:Fake] mid-payload text with uppercase F\nmore data";
-    const content = `[tool:grep] ${body}`;
-    const result = truncateToolOutputsInContent(content, 2_000);
-    // Single chunk, under cap — passes through verbatim.
-    expect(result).toBe(content);
-  });
-
-  test("perf: 100KB single-letter payload without '/' annotates in <500ms", () => {
-    // Regression guard against catastrophic backtracking in the
-    // path-extraction regex inside toolStripAnnotation. Pathological
-    // inputs (minified JS, base64 blobs, binary dumps) used to stall
-    // the background worker for ~30s on this repro. The no-slash
-    // fast-exit in gradient.ts makes this O(n).
-    const pathological = "x".repeat(100_000);
-    const content = `[tool:grep] ${pathological}`;
-    const start = performance.now();
-    const result = truncateToolOutputsInContent(content, 2_000);
-    const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(500);
-    expect(result).toContain("[output omitted — grep:");
-  });
-
-  test("perf: 100KB payload WITH '/' still completes in <1s via scan limit", () => {
-    // Even with a single '/' present (so the no-slash fast-exit doesn't
-    // help), the 64KB scan cap on the path regex keeps runtime bounded.
-    // The fragment before '/' is only 64KB of `x`, which the slicing
-    // prevents from backtracking for too long.
-    const pathological = "x".repeat(50_000) + "/file.ts " + "y".repeat(50_000);
-    const content = `[tool:grep] ${pathological}`;
-    const start = performance.now();
-    const result = truncateToolOutputsInContent(content, 2_000);
-    const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(1000);
-    expect(result).toContain("[output omitted — grep:");
-  });
-
-  test("separates a tool chunk from a following [reasoning] chunk", () => {
-    // Unlike plain text, [reasoning] has a structural prefix so the
-    // boundary regex correctly separates it from a preceding tool chunk.
-    const output = "y".repeat(5_000);
-    const content = [
-      `[tool:grep] ${output}`,
-      "[reasoning] Post-search reasoning",
-    ].join("\n");
-    const result = truncateToolOutputsInContent(content, 2_000);
-    expect(result).toContain("[output omitted — grep:");
-    expect(result).toContain("[reasoning] Post-search reasoning");
-  });
-
-  test("truncates multiple oversized envelopes independently", () => {
-    const big = "z".repeat(5_000);
-    const content = [
-      "[tool:grep] " + big,
-      "[tool:read] " + big,
-    ].join("\n");
-    const result = truncateToolOutputsInContent(content, 2_000);
-    // Both envelopes replaced with separate annotations.
-    expect(result).toContain("[tool:grep] [output omitted — grep:");
-    expect(result).toContain("[tool:read] [output omitted — read:");
-    expect(result.length).toBeLessThan(content.length);
-  });
-
-  test("mixed sizes: only the oversized envelope is truncated", () => {
-    const big = "q".repeat(5_000);
-    const small = "small output lines";
-    const content = [
-      `[tool:grep] ${big}`,
-      `[tool:ls] ${small}`,
-    ].join("\n");
-    const result = truncateToolOutputsInContent(content, 2_000);
-    expect(result).toContain("[tool:grep] [output omitted — grep:");
-    // The small envelope survives verbatim.
-    expect(result).toContain(`[tool:ls] ${small}`);
-  });
-
-  test("line-start anchor: mid-line [tool:X] does not split the envelope", () => {
-    // A tool-call JSON or prose that mentions `[tool:grep]` as literal
-    // text *not at the start of a line* must not be mistaken for a new
-    // envelope. The boundary regex requires a preceding `\n`, so
-    // mid-line occurrences preceded by a space (as here) are preserved.
-    // The adjacent "known limitation (2)" test covers the
-    // newline-preceded-embedded-envelope path.
-    const body = "some text [tool:grep] mid-line, no split\nmore data";
-    const content = `[tool:read] ${body}`;
-    const result = truncateToolOutputsInContent(content, 2_000);
-    // Below threshold — full content passes through.
-    expect(result).toBe(content);
+  test("malformed envelope (no `] ` close) is left alone", () => {
+    const content = "[tool:grep no close bracket text continues forever";
+    expect(truncateToolOutputsInContent(content, 2_000)).toBe(content);
   });
 
   test("maxChars <= 0 disables truncation", () => {
@@ -250,6 +99,131 @@ describe("truncateToolOutputsInContent", () => {
   });
 });
 
+describe("truncateToolOutputsInContent — multi-chunk path", () => {
+  test("plain text BEFORE an oversized envelope is preserved", () => {
+    const output = "y".repeat(5_000);
+    const content = seal("I need to search for that symbol.", `[tool:grep] ${output}`);
+    const result = truncateToolOutputsInContent(content, 2_000);
+    expect(result).toContain("I need to search for that symbol.");
+    expect(result).toContain("[output omitted — grep:");
+  });
+
+  test("plain text AFTER a tool chunk is preserved (former F3 known limitation 1a)", () => {
+    // Pre-F3b this test asserted the trailing text was SWALLOWED into the
+    // tool annotation. The new \x1f separator makes the boundary
+    // unambiguous, so the trailing text now survives untouched.
+    const output = "y".repeat(5_000);
+    const content = seal(`[tool:grep] ${output}`, "Follow-up text after the tool call.");
+    const result = truncateToolOutputsInContent(content, 2_000);
+    expect(result).toContain("[output omitted — grep:");
+    expect(result).toContain("Follow-up text after the tool call.");
+  });
+
+  test("short tool + long trailing text preserves both (former F3 known limitation 1b)", () => {
+    // Pre-F3b: short tool envelope + long trailing text resulted in the
+    // trailing text being swallowed into the annotation when the combined
+    // chunk exceeded the cap. With \x1f separators, the trailing text is
+    // its own chunk and is preserved verbatim regardless of size.
+    const longTrailingText = "Long analysis after the tool call. ".repeat(100);
+    const content = seal("[tool:grep] found 3 matches", longTrailingText);
+    const result = truncateToolOutputsInContent(content, 2_000);
+    // The short tool chunk survives; trailing text survives in full.
+    expect(result).toContain("[tool:grep] found 3 matches");
+    expect(result).toContain("Long analysis after the tool call.");
+    // No annotation emitted because no chunk exceeded the cap.
+    expect(result).not.toContain("[output omitted —");
+  });
+
+  test("embedded literal [tool:<id>] inside a payload does NOT fabricate a split (former F3 known limitation 2)", () => {
+    // Pre-F3b: a tool output that legitimately contained `\n[tool:bash] ...`
+    // (e.g. reading AGENTS.md or this project's source) was split on the
+    // literal occurrence, producing a fabricated [tool:bash] envelope the
+    // distill LLM would treat as a real tool call. With \x1f separators,
+    // the literal text inside a payload has no terminator after it, so no
+    // fabrication occurs.
+    const big = "x".repeat(3_000);
+    const toolPayload = [
+      "reading AGENTS.md",
+      "File contents include the literal envelope prefix below:",
+      "[tool:bash] this is a legitimate part of the read payload",
+      big,
+    ].join("\n");
+    const content = `[tool:read] ${toolPayload}`;
+    const result = truncateToolOutputsInContent(content, 2_000);
+    // The whole envelope is truncated as `read` (no fabricated `bash` annotation).
+    expect(result).toContain("[output omitted — read:");
+    expect(result).not.toContain("[output omitted — bash:");
+  });
+
+  test("multiple oversized envelopes are truncated independently", () => {
+    const big = "z".repeat(5_000);
+    const content = seal(`[tool:grep] ${big}`, `[tool:read] ${big}`);
+    const result = truncateToolOutputsInContent(content, 2_000);
+    expect(result).toContain("[tool:grep] [output omitted — grep:");
+    expect(result).toContain("[tool:read] [output omitted — read:");
+    expect(result.length).toBeLessThan(content.length);
+  });
+
+  test("only the oversized envelope is truncated; small siblings survive", () => {
+    const big = "q".repeat(5_000);
+    const small = "small output lines";
+    const content = seal(`[tool:grep] ${big}`, `[tool:ls] ${small}`);
+    const result = truncateToolOutputsInContent(content, 2_000);
+    expect(result).toContain("[tool:grep] [output omitted — grep:");
+    expect(result).toContain(`[tool:ls] ${small}`);
+  });
+
+  test("[reasoning] chunks pass through untouched", () => {
+    const big = "y".repeat(5_000);
+    const content = seal(`[tool:grep] ${big}`, "[reasoning] Post-search reasoning");
+    const result = truncateToolOutputsInContent(content, 2_000);
+    expect(result).toContain("[output omitted — grep:");
+    expect(result).toContain("[reasoning] Post-search reasoning");
+  });
+
+  test("text-only multi-chunk content (no tool envelopes) returns input unchanged", () => {
+    const content = seal("First text chunk.", "[reasoning] Some reasoning.");
+    expect(truncateToolOutputsInContent(content, 2_000)).toBe(content);
+  });
+
+  test("uppercase tool name inside a payload (e.g. JSON dump) is preserved verbatim", () => {
+    // Tool payloads containing arbitrary content — including text that
+    // looks like an envelope — are preserved as-is by the new format
+    // because only \x1f boundaries are structural.
+    const body = "first line\n[tool:Fake] mid-payload text\nmore data";
+    const content = `[tool:read] ${body}`;
+    const result = truncateToolOutputsInContent(content, 2_000);
+    expect(result).toBe(content);
+  });
+});
+
+describe("truncateToolOutputsInContent — perf regression guards", () => {
+  test("100KB single-letter payload without '/' annotates in <500ms", () => {
+    // Regression guard against catastrophic backtracking in the
+    // path-extraction regex inside toolStripAnnotation. Pathological
+    // inputs (minified JS, base64 blobs, binary dumps) used to stall
+    // the background worker for ~30s on this repro. The no-slash
+    // fast-exit in gradient.ts makes this O(n).
+    const pathological = "x".repeat(100_000);
+    const content = `[tool:grep] ${pathological}`;
+    const start = performance.now();
+    const result = truncateToolOutputsInContent(content, 2_000);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(500);
+    expect(result).toContain("[output omitted — grep:");
+  });
+
+  test("100KB payload WITH '/' completes in <1s via scan limit", () => {
+    const pathological = "x".repeat(50_000) + "/file.ts " + "y".repeat(50_000);
+    const content = `[tool:grep] ${pathological}`;
+    const start = performance.now();
+    const result = truncateToolOutputsInContent(content, 2_000);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(1000);
+    expect(result).toContain("[output omitted — grep:");
+  });
+});
+
 // ─── messagesToText ────────────────────────────────────────────────────
 //
 // Wraps truncateToolOutputsInContent with role-aware routing. User messages
@@ -261,7 +235,6 @@ describe("messagesToText", () => {
     const huge = "u".repeat(10_000);
     const msgs = [msg("user", huge)];
     const out = messagesToText(msgs, 2_000);
-    // Full user content present verbatim.
     expect(out).toContain(huge);
     expect(out).not.toContain("[output omitted —");
   });
@@ -290,13 +263,8 @@ describe("messagesToText", () => {
   });
 
   test("prefixes each message with [role] and a time stamp", () => {
-    const msgs = [
-      msg("user", "Hello there"),
-      msg("assistant", "Hi back"),
-    ];
+    const msgs = [msg("user", "Hello there"), msg("assistant", "Hi back")];
     const out = messagesToText(msgs, 2_000);
-    // Time format is HH:MM; content of the stamp varies by local TZ, so pin
-    // only the structural shape.
     expect(out).toMatch(/\[user\] \(\d\d:\d\d\) Hello there/);
     expect(out).toMatch(/\[assistant\] \(\d\d:\d\d\) Hi back/);
   });
@@ -304,7 +272,6 @@ describe("messagesToText", () => {
   test("joins multiple messages with a blank line separator", () => {
     const msgs = [msg("user", "first"), msg("user", "second")];
     const out = messagesToText(msgs, 2_000);
-    // Exactly one blank line between the two `[user] (...) ...` lines.
     const lines = out.split("\n\n");
     expect(lines).toHaveLength(2);
   });
@@ -312,7 +279,6 @@ describe("messagesToText", () => {
   test("explicit toolOutputMaxChars override wins over config default", () => {
     const body = "c".repeat(1_000);
     const msgs = [msg("assistant", `[tool:grep] ${body}`)];
-    // Cap of 100 forces truncation even though the body is only 1KB.
     const out = messagesToText(msgs, 100);
     expect(out).toContain("[output omitted — grep:");
   });
@@ -325,26 +291,104 @@ describe("messagesToText", () => {
     expect(out).not.toContain("[output omitted —");
   });
 
-  test("handles mixed content: assistant text, reasoning, and tool output", () => {
-    // Chunks before the tool envelope survive because the boundary regex
-    // finds the [tool:grep] prefix. Trailing [reasoning] also survives
-    // because it has a structural prefix. See CHUNK_BOUNDARY_RE docs in
-    // src/distillation.ts for the plain-text-after-tool caveat.
+  test("handles mixed content: assistant text, reasoning, tool, more text", () => {
+    // Multi-chunk content with all four chunk types in order. The new
+    // format preserves trailing plain text after a tool chunk (former
+    // F3 known limitation 1a, now a positive assertion).
     const big = "e".repeat(5_000);
-    const content = [
+    const content = seal(
       "I'll search for that.",
       "[reasoning] Planning the search",
       `[tool:grep] ${big}`,
-      "[reasoning] Found what I needed.",
-    ].join("\n");
+      "Found what I needed.",
+    );
     const msgs = [msg("assistant", content)];
     const out = messagesToText(msgs, 2_000);
-    // Plain text and both reasoning chunks preserved.
     expect(out).toContain("I'll search for that.");
     expect(out).toContain("[reasoning] Planning the search");
-    expect(out).toContain("[reasoning] Found what I needed.");
-    // Tool body truncated.
     expect(out).toContain("[output omitted — grep:");
+    // Trailing plain text survives.
+    expect(out).toContain("Found what I needed.");
     expect(out).not.toContain("e".repeat(100));
+  });
+});
+
+// ─── Round-trip via partsToText ────────────────────────────────────────
+//
+// Pin the producer/consumer contract end-to-end: a LorePart[] containing
+// arbitrary content (including payloads that look like envelopes) flows
+// through partsToText → truncateToolOutputsInContent without fabrication
+// or trailing-text loss. This is the F3b correctness guarantee.
+
+function textPart(text: string): LorePart {
+  return { type: "text", text } as LorePart;
+}
+function reasoningPart(text: string): LorePart {
+  return { type: "reasoning", text } as LorePart;
+}
+function toolPart(tool: string, output: string): LorePart {
+  return {
+    type: "tool",
+    tool,
+    state: { status: "completed", output },
+  } as unknown as LorePart;
+}
+
+describe("partsToText + truncateToolOutputsInContent round trip", () => {
+  test("produces \\n\\x1f boundaries between chunks", () => {
+    const content = partsToText([
+      textPart("first"),
+      reasoningPart("thinking"),
+      toolPart("grep", "results"),
+      textPart("last"),
+    ]);
+    // Expect exactly 3 separators for 4 chunks.
+    const separatorCount =
+      content.split("\n" + CHUNK_TERMINATOR).length - 1;
+    expect(separatorCount).toBe(3);
+  });
+
+  test("\\x1f appears ONLY at structural boundaries, not inside payloads", () => {
+    const adversarialOutput = [
+      "reading AGENTS.md",
+      "[tool:bash] this is INSIDE a tool payload, not a real envelope",
+      "still inside the read output",
+    ].join("\n");
+    const content = partsToText([
+      textPart("Searching for X"),
+      toolPart("read", adversarialOutput),
+      textPart("Found it."),
+    ]);
+    // Three chunks → two separators.
+    const separators = content.split("\n" + CHUNK_TERMINATOR);
+    expect(separators).toHaveLength(3);
+    // The middle chunk owns the entire adversarial payload — no \x1f leaks
+    // into it because partsToText only injects \x1f between chunks.
+    expect(separators[1]).toContain("[tool:read] reading AGENTS.md");
+    expect(separators[1]).toContain("[tool:bash] this is INSIDE");
+    expect(separators[1]).toContain("still inside the read output");
+    // Trailing text is its own chunk.
+    expect(separators[2]).toBe("Found it.");
+  });
+
+  test("truncating an adversarial round-trip preserves trailing text and rejects fabrication", () => {
+    const big = "x".repeat(3_000);
+    const adversarialOutput = [
+      "Reading repo source.",
+      "[tool:bash] embedded literal that could fabricate pre-F3b",
+      big,
+    ].join("\n");
+    const content = partsToText([
+      textPart("Looking up the format spec."),
+      toolPart("read", adversarialOutput),
+      textPart("Now I understand the chunk format."),
+    ]);
+    const result = truncateToolOutputsInContent(content, 2_000);
+    // Tool envelope is truncated as `read` (no fabricated `bash` envelope).
+    expect(result).toContain("[output omitted — read:");
+    expect(result).not.toContain("[output omitted — bash:");
+    // Both surrounding text chunks survive.
+    expect(result).toContain("Looking up the format spec.");
+    expect(result).toContain("Now I understand the chunk format.");
   });
 });

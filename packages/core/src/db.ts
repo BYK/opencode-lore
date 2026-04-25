@@ -2,7 +2,7 @@ import { Database } from "#db/driver";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 const MIGRATIONS: string[] = [
   `
@@ -280,6 +280,58 @@ const MIGRATIONS: string[] = [
     to_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
     PRIMARY KEY (from_id, to_id)
   );
+  `,
+  `
+  -- Version 11: F3b -- unambiguous chunk terminator in temporal_messages.content.
+  --
+  -- Pre-F3b, partsToText joined chunks with a newline. Tool-output payloads
+  -- can contain newlines too, so the boundary between a tool envelope and a
+  -- following plain-text or [reasoning] chunk was structurally ambiguous.
+  -- This caused two known limitations in the F3 distill-input truncator:
+  -- trailing text could be swallowed into a tool payload, and embedded
+  -- literal envelope strings inside a payload (e.g. when reading AGENTS.md)
+  -- could fabricate fake boundaries.
+  --
+  -- F3b switches the chunk separator to newline plus ASCII Unit Separator
+  -- (char 31). The Unit Separator is non-word so FTS5's unicode61 tokenizer
+  -- ignores it (zero BM25 impact). New rows are written via the post-F3b
+  -- partsToText. Existing rows are rewritten in place by the UPDATE below,
+  -- which uses pure SQL replace() to inject the Unit Separator after every
+  -- legacy chunk-prefix sequence -- the same boundary patterns the legacy
+  -- F3 reader was already trying to recover.
+  --
+  -- Trade-off (acceptable): any embedded legacy chunk-prefix sequence
+  -- inside a tool payload becomes a structural boundary post-migration.
+  -- This matches what the legacy F3 reader did at read-time anyway, baked
+  -- into the row permanently. The migration runs once per machine.
+  --
+  -- Idempotent: a row that already contains the Unit Separator before a
+  -- chunk prefix no longer matches the search literal (the separator
+  -- interposes), so re-running the UPDATE is a no-op for migrated rows.
+  -- (Important: migrate() in db.ts runs each migration via database.exec()
+  -- with no explicit BEGIN/COMMIT around the whole loop. SQLite makes this
+  -- single UPDATE statement atomic per-statement, so partial progress on
+  -- crash is safe to retry thanks to the idempotency above.)
+  --
+  -- char(10) = newline, char(31) = Unit Separator. SQLite has no native
+  -- regex, but two nested replace() calls on the literal prefixes are
+  -- sufficient because both legacy chunk prefixes match at line-start.
+  --
+  -- Each row UPDATE fires the temporal_fts_update trigger once; because
+  -- the Unit Separator is a non-word character, the re-indexed content
+  -- tokenizes identically -- net no-op for FTS scoring.
+  UPDATE temporal_messages
+  SET content = replace(
+    replace(
+      content,
+      char(10) || '[tool:',
+      char(10) || char(31) || '[tool:'
+    ),
+    char(10) || '[reasoning] ',
+    char(10) || char(31) || '[reasoning] '
+  )
+  WHERE content LIKE '%' || char(10) || '[tool:%'
+     OR content LIKE '%' || char(10) || '[reasoning] %';
   `,
 ];
 
