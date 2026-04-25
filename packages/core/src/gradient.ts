@@ -83,6 +83,25 @@ type SessionState = {
   prefixCache: PrefixCache | null;
   /** Raw window pin cache (Approach B) */
   rawWindowCache: RawWindowCache | null;
+  /**
+   * Wall-clock timestamp (epoch ms) of the most recent transform() call for this
+   * session. Used by onIdleResume() to detect cold-cache resumption — when the
+   * gap between turns exceeds Anthropic's prompt cache eviction window (5 min
+   * default / 1 hour extended), the byte-identity caching subsystems
+   * (prefixCache, rawWindowCache) are providing no value because the cache is
+   * already cold. Refreshing them on resume lets us produce a better-fitting
+   * window without paying a cache cost we'd otherwise be trying to preserve.
+   * 0 = never set (first turn).
+   */
+  lastTurnAt: number;
+  /**
+   * Set true by onIdleResume() when an idle-resume reset just fired; consumed
+   * (and cleared) by the LTM degraded-recovery branch in the OpenCode hook to
+   * skip the conversation-vs-LTM token comparison. After idle eviction the
+   * cache-bust cost is effectively zero, so we should always recover LTM on
+   * the post-idle turn regardless of conversation size.
+   */
+  cameOutOfIdle: boolean;
 };
 
 function makeSessionState(): SessionState {
@@ -97,6 +116,8 @@ function makeSessionState(): SessionState {
     lastTransformEstimate: 0,
     prefixCache: null,
     rawWindowCache: null,
+    lastTurnAt: 0,
+    cameOutOfIdle: false,
   };
 }
 
@@ -114,6 +135,65 @@ function getSessionState(sessionID: string): SessionState {
     sessionStates.set(sessionID, state);
   }
   return state;
+}
+
+/**
+ * Detect cold-cache resumption and refresh byte-identity caches.
+ *
+ * Anthropic's prompt cache evicts entries after ~5 minutes (default tier) /
+ * ~1 hour (extended tier). When a session resumes after the eviction window,
+ * the cache is provably cold — every prefix we've been carefully keeping
+ * byte-stable (`prefixCache`, `rawWindowCache`, plus the host's per-session
+ * LTM cache) provides no benefit on this turn. Worse, the LTM block was
+ * scored against the conversation context as it was on the previous turn,
+ * which may have drifted significantly in N hours.
+ *
+ * On resume after `thresholdMs`:
+ *   - reset the distilled prefix cache (next turn re-renders from scratch)
+ *   - reset the raw window pin cache (next turn picks a fresh cutoff)
+ *   - set `cameOutOfIdle` so the OpenCode host can also clear `ltmSessionCache`
+ *     and bypass the conversation-vs-LTM cost comparison in the LTM
+ *     degraded-recovery branch
+ *
+ * Importantly, this does NOT touch:
+ *   - reasoning blocks (Anthropic's April 23 postmortem identifies dropping
+ *     reasoning blocks as the root cause of forgetfulness/repetition; Lore
+ *     preserves reasoning by policy across all gradient layers)
+ *   - the gradient layer (cold cache doesn't change token budgets;
+ *     calibration's actualInput = input + cache.read + cache.write already
+ *     accounts for cache misses correctly)
+ *   - calibration state (`lastKnownInput`, overhead EMA, message-ID set) —
+ *     the next API response will refresh these via the normal calibrate() path
+ *
+ * Set `thresholdMs <= 0` to disable. Returns true if a reset fired so the
+ * caller can log/observe.
+ */
+export function onIdleResume(
+  sessionID: string,
+  thresholdMs: number,
+  now: number = Date.now(),
+): { triggered: false } | { triggered: true; idleMs: number } {
+  if (thresholdMs <= 0) return { triggered: false };
+  const state = getSessionState(sessionID);
+  if (state.lastTurnAt === 0) return { triggered: false }; // first turn — nothing to refresh
+  const idleMs = now - state.lastTurnAt;
+  if (idleMs < thresholdMs) return { triggered: false };
+  state.prefixCache = null;
+  state.rawWindowCache = null;
+  state.cameOutOfIdle = true;
+  return { triggered: true, idleMs };
+}
+
+/**
+ * Read-and-clear the cameOutOfIdle flag. The OpenCode host's LTM degraded-
+ * recovery branch consumes this to decide whether to bypass the
+ * conversation-vs-LTM token comparison on a post-idle turn.
+ */
+export function consumeCameOutOfIdle(sessionID: string): boolean {
+  const state = sessionStates.get(sessionID);
+  if (!state || !state.cameOutOfIdle) return false;
+  state.cameOutOfIdle = false;
+  return true;
 }
 
 // LTM tokens injected via system transform hook this turn.
@@ -249,6 +329,37 @@ export function resetCalibration(sessionID?: string) {
     }
     sessionStates.clear();
   }
+}
+
+/**
+ * For testing only — observe session-state cache fields without exposing the
+ * full type. Returns null when the session has no state. The boolean fields
+ * answer "does this cache hold something right now?" — sufficient for asserting
+ * that onIdleResume() reset them.
+ */
+export function inspectSessionState(sessionID: string): {
+  hasPrefixCache: boolean;
+  hasRawWindowCache: boolean;
+  cameOutOfIdle: boolean;
+  lastTurnAt: number;
+} | null {
+  const state = sessionStates.get(sessionID);
+  if (!state) return null;
+  return {
+    hasPrefixCache: state.prefixCache !== null,
+    hasRawWindowCache: state.rawWindowCache !== null,
+    cameOutOfIdle: state.cameOutOfIdle,
+    lastTurnAt: state.lastTurnAt,
+  };
+}
+
+/**
+ * For testing only — set the session's lastTurnAt field. Used to simulate
+ * idle gaps without sleeping. Creates the session state if not present so
+ * tests don't need to seed it via a transform() call.
+ */
+export function setLastTurnAtForTest(sessionID: string, ms: number): void {
+  getSessionState(sessionID).lastTurnAt = ms;
 }
 
 type Distillation = {
@@ -1303,6 +1414,10 @@ export function transform(input: {
     state.lastTransformEstimate = result.totalTokens;
     state.lastLayer = result.layer;
     state.lastWindowMessageIDs = new Set(result.messages.map((m) => m.info.id));
+    // Mark wall-clock for onIdleResume() — must record on every transform()
+    // so the next-turn idle check has an accurate baseline. Done after the
+    // result fields above so a thrown transformInner doesn't update it.
+    state.lastTurnAt = Date.now();
   }
   return result;
 }

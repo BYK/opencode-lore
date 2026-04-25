@@ -19,6 +19,8 @@ import {
   setForceMinLayer,
   getLastTransformedCount,
   getLastTransformEstimate,
+  onIdleResume,
+  consumeCameOutOfIdle,
   formatKnowledge,
   formatDistillations,
   buildCompactPrompt,
@@ -602,6 +604,26 @@ export const LorePlugin: Plugin = async (ctx) => {
 
       const cfg = config();
 
+      // Cold-cache idle-resume: when the gap since this session's last turn
+      // exceeds the configured threshold, Anthropic's prompt cache has already
+      // evicted our prefix bytes. Refresh Lore's byte-identity caches before
+      // they're consulted on this turn. Reasoning blocks are NOT touched
+      // (Anthropic's April 23 postmortem identifies that as the root cause of
+      // forgetfulness/repetition). Wired into the system transform hook
+      // because (a) it always fires before the messages transform hook, so
+      // gradient.ts caches are reset before transform() consumes them, and
+      // (b) ltmSessionCache lives in this closure and is consulted below.
+      if (input.sessionID) {
+        const thresholdMs = cfg.idleResumeMinutes * 60_000;
+        const result = onIdleResume(input.sessionID, thresholdMs);
+        if (result.triggered) {
+          ltmSessionCache.delete(input.sessionID);
+          log.info(
+            `session idle ${Math.round(result.idleMs / 60_000)}min — refreshing caches on cold prompt cache`,
+          );
+        }
+      }
+
       // Knowledge injection — only when the knowledge system is enabled.
       // When disabled, LTM budget is zero and no knowledge is injected.
       //
@@ -635,20 +657,27 @@ export const LorePlugin: Plugin = async (ctx) => {
                 // switching to real LTM changes the system prompt prefix → busts the
                 // provider's read-token cache for the entire conversation after this point.
                 // Only recover if the cache invalidation cost is small relative to LTM benefit.
+                //
+                // Exception (F-CACHE-TTL): if onIdleResume() just fired for this session,
+                // the provider's prompt cache is already cold from the wall-clock gap, so
+                // the "cache bust cost" is effectively zero. Recover LTM unconditionally.
                 if (sessionID && ltmDegradedSessions.has(sessionID)) {
-                  const conversationTokens = getLastTransformEstimate(sessionID);
-                  if (conversationTokens > tokenCount) {
-                    // Conversation is larger than LTM — cache bust costs more than
-                    // LTM is worth. Keep the fallback note for this session.
-                    setLtmTokens(0);
-                    output.system.push(
-                      "[Lore plugin] Long-term memory is temporarily unavailable. " +
-                        "Use the recall tool to search for project knowledge, " +
-                        "past decisions, and prior session context when needed.",
-                    );
-                    return;
+                  const postIdle = consumeCameOutOfIdle(sessionID);
+                  if (!postIdle) {
+                    const conversationTokens = getLastTransformEstimate(sessionID);
+                    if (conversationTokens > tokenCount) {
+                      // Conversation is larger than LTM — cache bust costs more than
+                      // LTM is worth. Keep the fallback note for this session.
+                      setLtmTokens(0);
+                      output.system.push(
+                        "[Lore plugin] Long-term memory is temporarily unavailable. " +
+                          "Use the recall tool to search for project knowledge, " +
+                          "past decisions, and prior session context when needed.",
+                      );
+                      return;
+                    }
                   }
-                  // Conversation is small — LTM benefit outweighs cache cost. Recover.
+                  // Conversation is small (or post-idle) — LTM benefit outweighs cache cost. Recover.
                   ltmDegradedSessions.delete(sessionID);
                 }
 
@@ -673,9 +702,16 @@ export const LorePlugin: Plugin = async (ctx) => {
               "Use the recall tool to search for project knowledge, " +
               "past decisions, and prior session context when needed.",
           );
+        } finally {
+          // Hygiene: ensure cameOutOfIdle never lingers across turns. The flag
+          // is meaningful only for the post-idle turn's LTM-recovery decision;
+          // clear it unconditionally here so a healthy turn followed later by
+          // a degraded turn can't falsely bypass the cache-cost comparison.
+          if (sessionID) consumeCameOutOfIdle(sessionID);
         }
       } else {
         setLtmTokens(0);
+        if (input.sessionID) consumeCameOutOfIdle(input.sessionID);
       }
 
       // Remind the agent to include the agents file in commits.

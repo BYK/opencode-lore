@@ -29,6 +29,7 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { Message as PiMessage } from "@mariozechner/pi-ai";
 import {
   config,
+  consumeCameOutOfIdle,
   curator,
   distillation,
   ensureProject,
@@ -41,6 +42,7 @@ import {
   log,
   ltm,
   latReader,
+  onIdleResume,
   setLtmTokens,
   setModelLimits,
   shouldImport,
@@ -214,6 +216,25 @@ export default function lorePiExtension(pi: ExtensionAPI): void {
         const outputReserved = ctx.model?.maxTokens ?? 16_384;
         setModelLimits({ context: contextLimit, output: outputReserved });
         const budget = getLtmBudget(cfg.budget.ltm);
+
+        // Cold-cache idle-resume: when the gap since this session's last turn
+        // exceeds the configured threshold, the provider's prompt cache has
+        // already evicted our prefix bytes. Refresh Lore's byte-identity caches
+        // (gradient prefix/raw window) and the per-session LTM cache before
+        // they're consulted on this turn. Reasoning blocks are NOT touched
+        // (Anthropic's April 23 postmortem identified that as the root cause
+        // of forgetfulness/repetition).
+        const thresholdMs = cfg.idleResumeMinutes * 60_000;
+        const idleResult = onIdleResume(currentSessionID, thresholdMs);
+        if (idleResult.triggered) {
+          ltmSessionCache.delete(currentSessionID);
+          log.info(
+            `pi: session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches on cold prompt cache`,
+          );
+        }
+        // Pi has no LTM-degraded recovery branch (no fallback note path), so
+        // cameOutOfIdle isn't actionable here — clear it for hygiene.
+        consumeCameOutOfIdle(currentSessionID);
 
         // Per-session cache: reuse formatted string across turns for prompt caching.
         let formatted = ltmSessionCache.get(currentSessionID);

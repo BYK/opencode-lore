@@ -1,6 +1,14 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { isContextOverflow, buildRecoveryMessage, LorePlugin, isValidProjectPath } from "../src/index";
-import { ltm, db, getLtmTokens, setModelLimits, calibrate, setLtmTokens } from "@loreai/core";
+import {
+  ltm,
+  db,
+  getLtmTokens,
+  setModelLimits,
+  calibrate,
+  setLtmTokens,
+  setLastTurnAtForTest,
+} from "@loreai/core";
 import type { Plugin } from "@opencode-ai/plugin";
 import type { Message, Part } from "@opencode-ai/sdk";
 
@@ -733,6 +741,103 @@ describe("LTM session cache", () => {
       // Should return an array (may or may not contain LTM depending on
       // cross-project entries from other tests — no assertion on content).
       expect(Array.isArray(result)).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// ── Cold-cache idle-resume hook integration ─────────────────────────
+//
+// Validates that the system transform hook, on detecting a long idle gap,
+// (a) clears the per-session LTM cache so forSession() re-scores against
+// fresh conversation context on the post-idle turn, and (b) the gradient
+// state's prefix/raw window caches were reset by onIdleResume().
+
+describe("idle-resume hook integration", () => {
+  test("long idle gap clears LTM session cache — different bytes on resume", async () => {
+    const { hooks, tmpDir, cleanup } = await initPlugin();
+    try {
+      // Seed an entry so the cache populates.
+      ltm.create({
+        projectPath: tmpDir,
+        category: "decision",
+        title: "Idle resume test entry",
+        content: "Triggers cache population for idle test",
+        scope: "project",
+      });
+
+      const sessionID = "ses_idle_resume_001";
+      const first = await callSystemTransform(hooks!, sessionID);
+      const ltmBlock1 = first.find((s) => s.includes("Long-term Knowledge"));
+      expect(ltmBlock1).toBeTruthy();
+
+      // Simulate >60min gap by directly aging the gradient session state.
+      // callSystemTransform does NOT itself call transform(), so lastTurnAt
+      // wouldn't be set by the first call alone — seed it manually to a value
+      // older than the 60-minute default threshold.
+      setLastTurnAtForTest(sessionID, Date.now() - 2 * 60 * 60_000);
+
+      // Add a NEW entry so the post-resume LTM block has different content
+      // — this proves the cache was cleared (otherwise the cached bytes
+      // from the previous turn would be returned regardless).
+      ltm.create({
+        projectPath: tmpDir,
+        category: "decision",
+        title: "Idle resume new entry post-pause",
+        content: "Added during simulated idle gap — should appear after resume",
+        scope: "project",
+      });
+
+      const second = await callSystemTransform(hooks!, sessionID);
+      const ltmBlock2 = second.find((s) => s.includes("Long-term Knowledge"));
+      expect(ltmBlock2).toBeTruthy();
+      // The new entry was added during the gap, AND the cache was cleared,
+      // so the post-resume LTM block must include it.
+      expect(ltmBlock2).toContain("Idle resume new entry post-pause");
+      // Sanity: the bytes are NOT identical (which would indicate stale cache).
+      expect(ltmBlock2).not.toBe(ltmBlock1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("short gap (under threshold) does NOT clear LTM cache", async () => {
+    const { hooks, tmpDir, cleanup } = await initPlugin();
+    try {
+      ltm.create({
+        projectPath: tmpDir,
+        category: "decision",
+        title: "Short gap cache test",
+        content: "This entry should be cached across short gaps",
+        scope: "project",
+      });
+
+      const sessionID = "ses_idle_resume_002";
+      const first = await callSystemTransform(hooks!, sessionID);
+      const ltmBlock1 = first.find((s) => s.includes("Long-term Knowledge"));
+      expect(ltmBlock1).toBeTruthy();
+
+      // Simulate a 5-minute gap — well under 60min threshold.
+      setLastTurnAtForTest(sessionID, Date.now() - 5 * 60_000);
+
+      // Add a new entry. If the cache was cleared, this would appear; if
+      // the cache survived, it would not.
+      ltm.create({
+        projectPath: tmpDir,
+        category: "decision",
+        title: "Should NOT appear post-short-gap",
+        content: "Cache should still be warm — this entry gets ignored",
+        scope: "project",
+      });
+
+      const second = await callSystemTransform(hooks!, sessionID);
+      const ltmBlock2 = second.find((s) => s.includes("Long-term Knowledge"));
+      expect(ltmBlock2).toBeTruthy();
+      // Cache was preserved — bytes are byte-identical.
+      expect(ltmBlock2).toBe(ltmBlock1);
+      // The new entry from during the short gap is NOT in the cached block.
+      expect(ltmBlock2).not.toContain("Should NOT appear post-short-gap");
     } finally {
       cleanup();
     }
