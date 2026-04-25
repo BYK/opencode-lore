@@ -1,6 +1,7 @@
 import { db, ensureProject } from "./db";
 import { config } from "./config";
 import * as temporal from "./temporal";
+import { CHUNK_TERMINATOR } from "./temporal";
 import * as embedding from "./embedding";
 import * as log from "./log";
 import {
@@ -53,57 +54,32 @@ function formatTime(ms: number): string {
   return `${h}:${m}`;
 }
 
-// Chunk-boundary regex for content produced by temporal.partsToText (which
-// joins chunks with "\n"). A chunk boundary is the start of a new chunk we
-// can structurally identify: "[tool:<name>] " or "[reasoning] " at line start.
+// Chunk separator written by `temporal.partsToText` and recovered by the
+// reader below. As of F3b, chunks are joined with `"\n" + CHUNK_TERMINATOR`
+// — the `\x1f` (Unit Separator) is non-word so FTS5 ignores it, and it
+// cannot legitimately appear in normal content, so the boundary is
+// unambiguous regardless of payload contents.
 //
-// Tool names are restricted to lowercase identifier-shaped strings so that
-// literal occurrences of `[tool:...]` inside tool payloads (e.g. when an
-// agent reads a file that documents this very serialization format) are
-// less likely to be mis-split into fabricated envelopes. Real tool names
-// in the OpenCode/Lore ecosystem are always lowercase alphanumeric with
-// `_` or `-` separators (`read`, `grep`, `read_file`, `query-expand`, ...).
-//
-// Two known ambiguity directions caused by the lossy serialization:
-//
-//   1. TRAILING-TEXT SWALLOW: plain text chunks have no structural prefix,
-//      so a text chunk that follows a tool chunk is indistinguishable from
-//      a continuation of the tool output. Such text is attributed to the
-//      preceding tool envelope's payload. This includes the case of a
-//      short tool output followed by a long assistant text reply — the
-//      text can push the combined chunk over the cap and get swallowed.
-//
-//   2. EMBEDDED-ENVELOPE FABRICATION: if a tool output legitimately
-//      contains `\n[tool:<identifier>] ` or `\n[reasoning] ` (e.g. reading
-//      AGENTS.md, this project's source, or any file that documents the
-//      format), the truncator will split on that literal occurrence and
-//      treat the remainder as if it were a separate envelope. The
-//      tightened identifier regex mitigates but doesn't eliminate this.
-//
-// Both limitations could be removed by changing partsToText in temporal.ts
-// to emit an unambiguous terminator plus a DB format bump. That's
-// disproportionate for a background-distill input renderer; the
-// distillation LLM's output is a summary, not a structural parse, so
-// occasional fabrication/swallow results in mildly noisy observations
-// rather than a user-visible bug.
-// TODO: if telemetry or user reports show this materially affects distill
-// quality, file a follow-up to add an unambiguous chunk terminator to
-// temporal.partsToText (DB format change — requires migration).
-const CHUNK_BOUNDARY_RE = /\n(?=\[(?:tool:[a-z][a-z0-9_-]*|reasoning)\] )/g;
+// The migration in db.ts (version 11) rewrote pre-F3b rows to the new
+// format, so every `temporal_messages.content` value now uses this
+// separator. Before F3b the structural parser used a heuristic regex
+// over `\n` boundaries which had two ambiguity directions
+// (trailing-text swallow + embedded-envelope fabrication); both are
+// gone for migrated and new rows.
+const CHUNK_SEPARATOR = "\n" + CHUNK_TERMINATOR;
 
 /**
- * Truncate tool outputs within a pre-flattened `TemporalMessage.content` string
- * (the format produced by `temporal.partsToText`). Plain text and `[reasoning]`
- * chunks pass through untouched.
+ * Truncate tool outputs within a `TemporalMessage.content` string (produced
+ * by `temporal.partsToText`). Plain text and `[reasoning]` chunks pass
+ * through untouched; only `[tool:<name>] <payload>` envelopes whose payload
+ * exceeds `maxChars` are replaced with a compact `toolStripAnnotation(...)`
+ * marker preserving line count, error flag, and file paths.
  *
- * Tool-output payloads longer than `maxChars` are replaced with
- * `toolStripAnnotation(...)` — a compact marker preserving line count, error
- * flag, and file paths. Matches the annotation style used by the runtime
- * gradient so the distillation LLM sees the same affordance it sees during
- * live turns.
+ * Annotation matches the style used by the runtime gradient so the
+ * distillation LLM sees the same affordance it sees during live turns.
  *
- * Exported primarily for tests. If future renderers need the same semantics
- * (e.g. a recall-time preview), they can reuse this.
+ * Exported primarily for tests. If future renderers need the same
+ * semantics (e.g. a recall-time preview), they can reuse this.
  */
 export function truncateToolOutputsInContent(
   content: string,
@@ -111,30 +87,41 @@ export function truncateToolOutputsInContent(
 ): string {
   if (maxChars <= 0 || content.length === 0) return content;
 
-  // Split on identifiable chunk boundaries. This correctly separates:
-  //   - leading text chunks from any subsequent [tool:*] / [reasoning] chunks
-  //   - consecutive [tool:*] / [reasoning] chunks from each other
-  // It does NOT separate a [tool:*] chunk from a trailing plain-text chunk
-  // (text has no structural prefix). That's documented in CHUNK_BOUNDARY_RE.
-  const chunks = content.split(CHUNK_BOUNDARY_RE);
+  // Fast path: a row with no chunk terminator is single-chunk content.
+  // (After the F3b migration, this only happens for messages with exactly
+  // one part — including all user messages, single-text assistant
+  // responses, and standalone tool outputs.) Truncate as one chunk if
+  // it's a tool envelope.
+  if (content.indexOf(CHUNK_TERMINATOR) === -1) {
+    return truncateSingleChunk(content, maxChars);
+  }
 
-  // Return early if nothing in the content could be an oversized tool output.
+  const chunks = content.split(CHUNK_SEPARATOR);
   let anyToolChunk = false;
-  for (const c of chunks) if (c.startsWith("[tool:")) { anyToolChunk = true; break; }
+  for (const c of chunks) {
+    if (c.startsWith("[tool:")) {
+      anyToolChunk = true;
+      break;
+    }
+  }
   if (!anyToolChunk) return content;
 
-  const truncated = chunks.map((chunk) => {
-    if (!chunk.startsWith("[tool:")) return chunk; // plain text or [reasoning]
-    // Parse envelope: "[tool:<name>] <payload...>"
-    const closeBracket = chunk.indexOf("] ");
-    if (closeBracket < 0) return chunk; // malformed; leave alone
-    const toolName = chunk.slice(6, closeBracket); // 6 = "[tool:".length
-    const payload = chunk.slice(closeBracket + 2);
-    if (payload.length <= maxChars) return chunk;
-    return `[tool:${toolName}] ${toolStripAnnotation(toolName, payload)}`;
-  });
+  const out = chunks.map((chunk) => truncateSingleChunk(chunk, maxChars));
+  return out.join(CHUNK_SEPARATOR);
+}
 
-  return truncated.join("\n");
+// Truncate a single chunk if it's an oversized [tool:<name>] envelope.
+// Returns the chunk unchanged if it's plain text, [reasoning], or a tool
+// chunk under the cap. Helper used by both the multi-chunk path and the
+// single-chunk fast path.
+function truncateSingleChunk(chunk: string, maxChars: number): string {
+  if (!chunk.startsWith("[tool:")) return chunk;
+  const closeBracket = chunk.indexOf("] ");
+  if (closeBracket < 0) return chunk; // malformed; leave alone
+  const toolName = chunk.slice(6, closeBracket); // 6 = "[tool:".length
+  const payload = chunk.slice(closeBracket + 2);
+  if (payload.length <= maxChars) return chunk;
+  return `[tool:${toolName}] ${toolStripAnnotation(toolName, payload)}`;
 }
 
 /**

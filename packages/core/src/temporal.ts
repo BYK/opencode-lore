@@ -9,7 +9,38 @@ function estimate(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
-function partsToText(parts: LorePart[]): string {
+/**
+ * Chunk-boundary terminator inserted between chunks by `partsToText`.
+ *
+ * `\x1f` is ASCII Unit Separator — a non-word control char that:
+ *   - cannot legitimately appear in normal chat or tool content (control
+ *     chars are vanishingly rare even in binary file dumps),
+ *   - is treated as a token separator by FTS5's `unicode61` tokenizer, so
+ *     it has zero effect on BM25 indexing or scoring,
+ *   - survives `sanitizeSurrogates()` (which only touches lone UTF-16
+ *     surrogates, never ASCII control chars).
+ *
+ * Placed AFTER the existing `\n` so display tools that split on `\n`
+ * still render correctly; the structural parser (in `distillation.ts`)
+ * splits on `"\n" + CHUNK_TERMINATOR` for unambiguous chunk recovery.
+ *
+ * Adopted in F3b. Pre-F3b rows are rewritten in-place by a SQL migration
+ * (see `db.ts`); after that migration runs, every `temporal_messages.content`
+ * value uses this format consistently.
+ */
+export const CHUNK_TERMINATOR = "\x1f";
+
+/**
+ * Serialize a list of message parts into a single content string for the
+ * `temporal_messages.content` column. Chunks are separated by
+ * `"\n" + CHUNK_TERMINATOR` so the structural parser can recover chunk
+ * boundaries unambiguously regardless of payload contents (including
+ * payloads that contain literal `[tool:...]` substrings — e.g. when the
+ * agent reads a file that documents this very format).
+ *
+ * Exported so tests can pin producer/consumer round-trip behavior.
+ */
+export function partsToText(parts: LorePart[]): string {
   const chunks: string[] = [];
   for (const part of parts) {
     if (isTextPart(part)) chunks.push(part.text);
@@ -21,7 +52,7 @@ function partsToText(parts: LorePart[]): string {
   // Sanitize unpaired surrogates from tool outputs and other raw text.
   // Without this, surrogates survive into the DB and later break JSON
   // serialization when included in recall tool responses.
-  return sanitizeSurrogates(chunks.join("\n"));
+  return sanitizeSurrogates(chunks.join("\n" + CHUNK_TERMINATOR));
 }
 
 function messageMetadata(info: LoreMessage, parts: LorePart[]): string {
