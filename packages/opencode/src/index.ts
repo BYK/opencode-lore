@@ -134,6 +134,11 @@ export function isContextOverflow(rawError: unknown): boolean {
 /**
  * Build the synthetic recovery message injected after a context overflow.
  * Contains the distilled session history so the model can continue.
+ *
+ * For overflow paths where the failing user message contained media
+ * attachments (image/PDF), prefer `buildMediaAwareRecoveryMessage` —
+ * it preserves the user's text question and lists the dropped
+ * attachments so the model can acknowledge them.
  */
 export function buildRecoveryMessage(
   summaries: Array<{ observations: string; generation: number }>,
@@ -151,6 +156,154 @@ export function buildRecoveryMessage(
     historyText || "(No distilled history available — check recent messages for context.)",
     "</system-reminder>",
   ].join("\n");
+}
+
+/**
+ * Match upstream OpenCode's `isMedia` (`util/media.ts:7-9`) byte-for-byte:
+ * `mime.startsWith("image/") || mime === "application/pdf"`. Used to
+ * decide whether a file part qualifies as a "stripped attachment" worth
+ * surfacing in the media-aware recovery message.
+ */
+export function isMediaMime(mime: string): boolean {
+  return mime.startsWith("image/") || mime === "application/pdf";
+}
+
+/**
+ * Extract a "stripped attachment" descriptor from a `file` part, mirroring
+ * upstream OpenCode's replay stub at `compaction.ts:494` byte-for-byte:
+ * `[Attached <mime>: <filename or "file">]`. Returns undefined when the
+ * part isn't a media file part (so the caller can ignore it).
+ *
+ * Defensive: tolerates missing or non-string `mime`/`filename` fields
+ * since `LoreGenericPart` doesn't constrain shape.
+ */
+export function stripMediaPart(
+  part: { type?: unknown } & Record<string, unknown>,
+): string | undefined {
+  if (part.type !== "file") return undefined;
+  const mime = typeof part.mime === "string" ? part.mime : undefined;
+  if (!mime || !isMediaMime(mime)) return undefined;
+  const filename = typeof part.filename === "string" ? part.filename : "file";
+  return `[Attached ${mime}: ${filename}]`;
+}
+
+// Minimal interface of the OpenCode client surface F9 reads. Typed
+// loosely so tests can stub it without satisfying the full SDK shape.
+// Array elements are `unknown` because the SDK's element type is
+// non-null but real-world tests can pass nulls/malformed entries to
+// exercise the defensive shape-checks in `getLastRealUserMessage`.
+type SessionMessagesClient = {
+  session: {
+    messages: (opts: { path: { id: string } }) => Promise<{
+      data?: ReadonlyArray<unknown>;
+    }>;
+  };
+};
+
+/**
+ * Walk session messages newest-first to find the most recent user message
+ * that is NOT a Lore-injected synthetic recovery (i.e. its parts do not
+ * contain a text part with `synthetic: true`). Returns undefined when no
+ * real user message exists or the SDK call fails — the caller falls
+ * through to plain `buildRecoveryMessage` in either case.
+ *
+ * Uses `client.session.messages` (route `/session/{id}/message`,
+ * confirmed in `@opencode-ai/sdk` `sdk.gen.d.ts:170`). The endpoint
+ * returns all messages by default; F9 doesn't pass `limit` because
+ * recovery is not a hot path.
+ */
+export async function getLastRealUserMessage(
+  client: SessionMessagesClient,
+  sessionID: string,
+): Promise<
+  | { info: { role: string } & Record<string, unknown>; parts: Array<Record<string, unknown>> }
+  | undefined
+> {
+  let resp;
+  try {
+    resp = await client.session.messages({ path: { id: sessionID } });
+  } catch (e) {
+    log.warn(`getLastRealUserMessage: session.messages failed for ${sessionID.substring(0, 16)}:`, e);
+    return undefined;
+  }
+  const msgs = resp?.data ?? [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const raw = msgs[i];
+    if (!raw || typeof raw !== "object") continue;
+    const m = raw as { info?: unknown; parts?: unknown };
+    const info = m.info;
+    if (!info || typeof info !== "object") continue;
+    if ((info as { role?: unknown }).role !== "user") continue;
+    const partsRaw = m.parts;
+    const parts: Array<Record<string, unknown>> = Array.isArray(partsRaw)
+      ? (partsRaw as Array<Record<string, unknown>>)
+      : [];
+    const isSynthetic = parts.some(
+      (p) => p && typeof p === "object" && p.type === "text" && p.synthetic === true,
+    );
+    if (isSynthetic) continue;
+    return {
+      info: info as { role: string } & Record<string, unknown>,
+      parts,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Build a media-aware recovery message that extends the plain version with
+ * (a) a list of stripped attachments and (b) the user's original text from
+ * the failed turn. The plain `buildRecoveryMessage` should be preferred
+ * when no attachments were stripped — see the `session.error` handler.
+ *
+ * Sections (in order, with empty ones omitted):
+ *   - opening "previous turn failed" preamble
+ *   - stripped-attachments notice (only when present)
+ *   - distilled history block (or empty-history fallback)
+ *   - user's original text question (only when present)
+ *   - closing "review and continue" instruction
+ */
+export function buildMediaAwareRecoveryMessage(input: {
+  summaries: Array<{ observations: string; generation: number }>;
+  strippedAttachments: string[];
+  userText: string[];
+}): string {
+  const historyText =
+    input.summaries.length > 0 ? formatDistillations(input.summaries) : "";
+
+  const mediaNotice =
+    input.strippedAttachments.length > 0
+      ? [
+          "",
+          `The user's previous message included ${input.strippedAttachments.length} attachment(s) that were removed because they exceeded the context limit:`,
+          ...input.strippedAttachments.map((s) => `- ${s}`),
+          "If the user was asking about the attachments, acknowledge that they were too large to process and suggest smaller or fewer files.",
+          "",
+        ].join("\n")
+      : "";
+
+  const userQuestion =
+    input.userText.length > 0
+      ? [
+          "",
+          "The user's original question (with attachments removed):",
+          ...input.userText,
+          "",
+        ].join("\n")
+      : "";
+
+  return [
+    "<system-reminder>",
+    "The previous turn failed with a context overflow error (prompt too long).",
+    "Lore has automatically compressed the conversation history.",
+    mediaNotice,
+    historyText || "(No distilled history available — check recent messages for context.)",
+    userQuestion,
+    "Review the above and continue where you left off.",
+    "</system-reminder>",
+  ]
+    .filter((s) => s !== "")
+    .join("\n");
 }
 
 /**
@@ -443,13 +596,47 @@ export const LorePlugin: Plugin = async (ctx) => {
           //    continues where it left off — no user intervention needed.
           recoveringSessions.add(errorSessionID);
           try {
-            const summaries = distillation.loadForSession(projectPath, errorSessionID);
-            const recoveryText = buildRecoveryMessage(
-              summaries.map(s => ({ observations: s.observations, generation: s.generation })),
+            const summaries = distillation
+              .loadForSession(projectPath, errorSessionID)
+              .map((s) => ({
+                observations: s.observations,
+                generation: s.generation,
+              }));
+
+            // Walk back to the last real user message and check whether it
+            // carried media attachments. If yes, route through the
+            // media-aware recovery path so the user's text question + a
+            // list of dropped attachments survive into the synthetic
+            // recovery prompt. Failure of session.messages falls through
+            // to plain recovery.
+            const lastUser = await getLastRealUserMessage(
+              ctx.client,
+              errorSessionID,
             );
+            const strippedAttachments: string[] = [];
+            const userText: string[] = [];
+            if (lastUser) {
+              for (const part of lastUser.parts) {
+                if (part.type === "text" && typeof part.text === "string") {
+                  userText.push(part.text);
+                } else {
+                  const stub = stripMediaPart(part);
+                  if (stub) strippedAttachments.push(stub);
+                }
+              }
+            }
+
+            const recoveryText =
+              strippedAttachments.length > 0
+                ? buildMediaAwareRecoveryMessage({
+                    summaries,
+                    strippedAttachments,
+                    userText,
+                  })
+                : buildRecoveryMessage(summaries);
 
             log.info(
-              `sending auto-recovery message to session ${errorSessionID.substring(0, 16)}`,
+              `sending auto-recovery message to session ${errorSessionID.substring(0, 16)}${strippedAttachments.length > 0 ? ` (media-aware: ${strippedAttachments.length} attachment(s) stripped)` : ""}`,
             );
             await ctx.client.session.prompt({
               path: { id: errorSessionID },

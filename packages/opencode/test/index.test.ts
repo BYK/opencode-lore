@@ -1,5 +1,14 @@
 import { describe, test, expect, beforeEach } from "bun:test";
-import { isContextOverflow, buildRecoveryMessage, LorePlugin, isValidProjectPath } from "../src/index";
+import {
+  isContextOverflow,
+  buildRecoveryMessage,
+  buildMediaAwareRecoveryMessage,
+  isMediaMime,
+  stripMediaPart,
+  getLastRealUserMessage,
+  LorePlugin,
+  isValidProjectPath,
+} from "../src/index";
 import {
   ltm,
   db,
@@ -217,6 +226,183 @@ describe("buildRecoveryMessage", () => {
   });
 });
 
+// ── F9 media-aware recovery — pure helper tests ──────────────────────
+
+describe("isMediaMime", () => {
+  test("accepts image/* mime types", () => {
+    expect(isMediaMime("image/png")).toBe(true);
+    expect(isMediaMime("image/jpeg")).toBe(true);
+    expect(isMediaMime("image/svg+xml")).toBe(true);
+    expect(isMediaMime("image/webp")).toBe(true);
+  });
+
+  test("accepts application/pdf", () => {
+    expect(isMediaMime("application/pdf")).toBe(true);
+  });
+
+  test("rejects non-media types", () => {
+    expect(isMediaMime("text/plain")).toBe(false);
+    expect(isMediaMime("application/json")).toBe(false);
+    expect(isMediaMime("application/x-directory")).toBe(false);
+    expect(isMediaMime("audio/mpeg")).toBe(false);
+    expect(isMediaMime("video/mp4")).toBe(false);
+  });
+
+  test("rejects empty string", () => {
+    expect(isMediaMime("")).toBe(false);
+  });
+});
+
+describe("stripMediaPart", () => {
+  test("formats image part with filename", () => {
+    expect(
+      stripMediaPart({
+        type: "file",
+        mime: "image/png",
+        filename: "screenshot.png",
+        url: "data:image/png;base64,abc",
+      }),
+    ).toBe("[Attached image/png: screenshot.png]");
+  });
+
+  test("falls back to literal 'file' when filename missing (upstream parity)", () => {
+    expect(
+      stripMediaPart({
+        type: "file",
+        mime: "image/png",
+        url: "data:image/png;base64,abc",
+      }),
+    ).toBe("[Attached image/png: file]");
+  });
+
+  test("formats PDF part", () => {
+    expect(
+      stripMediaPart({
+        type: "file",
+        mime: "application/pdf",
+        filename: "spec.pdf",
+        url: "file:///tmp/spec.pdf",
+      }),
+    ).toBe("[Attached application/pdf: spec.pdf]");
+  });
+
+  test("returns undefined for non-media file part", () => {
+    expect(
+      stripMediaPart({
+        type: "file",
+        mime: "text/plain",
+        filename: "notes.txt",
+        url: "file:///tmp/notes.txt",
+      }),
+    ).toBeUndefined();
+  });
+
+  test("returns undefined for non-file parts", () => {
+    expect(stripMediaPart({ type: "text", text: "hello" })).toBeUndefined();
+    expect(
+      stripMediaPart({ type: "tool", tool: "grep", state: { status: "completed", output: "" } }),
+    ).toBeUndefined();
+  });
+
+  test("returns undefined when mime is missing or non-string", () => {
+    expect(stripMediaPart({ type: "file" })).toBeUndefined();
+    expect(stripMediaPart({ type: "file", mime: 42 })).toBeUndefined();
+    expect(stripMediaPart({ type: "file", mime: null })).toBeUndefined();
+  });
+
+  test("uses 'file' fallback when filename is non-string", () => {
+    expect(
+      stripMediaPart({
+        type: "file",
+        mime: "image/png",
+        filename: 42,
+        url: "data:image/png;base64,abc",
+      }),
+    ).toBe("[Attached image/png: file]");
+  });
+});
+
+describe("buildMediaAwareRecoveryMessage", () => {
+  test("emits all sections when attachments + user text + summaries are present", () => {
+    const msg = buildMediaAwareRecoveryMessage({
+      summaries: [
+        { observations: "User fixed bug in auth.ts", generation: 0 },
+      ],
+      strippedAttachments: [
+        "[Attached image/png: screenshot.png]",
+        "[Attached application/pdf: spec.pdf]",
+      ],
+      userText: ["What does this image show?"],
+    });
+    // Opening preamble.
+    expect(msg).toContain("<system-reminder>");
+    expect(msg).toContain("context overflow error");
+    // Media notice with both attachments listed.
+    expect(msg).toContain("included 2 attachment(s) that were removed");
+    expect(msg).toContain("- [Attached image/png: screenshot.png]");
+    expect(msg).toContain("- [Attached application/pdf: spec.pdf]");
+    // Distilled history block.
+    expect(msg).toContain("auth.ts");
+    // User question block.
+    expect(msg).toContain("The user's original question");
+    expect(msg).toContain("What does this image show?");
+    // Closing instruction.
+    expect(msg).toContain("Review the above and continue");
+    expect(msg).toContain("</system-reminder>");
+  });
+
+  test("section order: notice → history → user question", () => {
+    const msg = buildMediaAwareRecoveryMessage({
+      summaries: [{ observations: "DISTILL_TOKEN", generation: 0 }],
+      strippedAttachments: ["[Attached image/png: a.png]"],
+      userText: ["USER_TOKEN"],
+    });
+    const noticeIdx = msg.indexOf("included 1 attachment");
+    const historyIdx = msg.indexOf("DISTILL_TOKEN");
+    const userIdx = msg.indexOf("USER_TOKEN");
+    expect(noticeIdx).toBeGreaterThan(-1);
+    expect(historyIdx).toBeGreaterThan(noticeIdx);
+    expect(userIdx).toBeGreaterThan(historyIdx);
+  });
+
+  test("omits media notice when no attachments stripped", () => {
+    const msg = buildMediaAwareRecoveryMessage({
+      summaries: [{ observations: "obs", generation: 0 }],
+      strippedAttachments: [],
+      userText: ["question"],
+    });
+    expect(msg).not.toContain("attachment(s) that were removed");
+  });
+
+  test("omits user-question block when userText is empty", () => {
+    const msg = buildMediaAwareRecoveryMessage({
+      summaries: [{ observations: "obs", generation: 0 }],
+      strippedAttachments: ["[Attached image/png: a.png]"],
+      userText: [],
+    });
+    expect(msg).not.toContain("The user's original question");
+  });
+
+  test("falls through to empty-history sentinel when summaries empty", () => {
+    const msg = buildMediaAwareRecoveryMessage({
+      summaries: [],
+      strippedAttachments: ["[Attached image/png: a.png]"],
+      userText: ["q"],
+    });
+    expect(msg).toContain("No distilled history available");
+  });
+
+  test("multiple user text parts are joined verbatim", () => {
+    const msg = buildMediaAwareRecoveryMessage({
+      summaries: [],
+      strippedAttachments: ["[Attached image/png: a.png]"],
+      userText: ["First sentence.", "Second sentence."],
+    });
+    expect(msg).toContain("First sentence.");
+    expect(msg).toContain("Second sentence.");
+  });
+});
+
 // ── Plugin integration tests ─────────────────────────────────────────
 
 /**
@@ -290,6 +476,40 @@ async function initPlugin() {
   return {
     hooks,
     calls,
+    tmpDir,
+    cleanup: () => rmSync(tmpDir, { recursive: true, force: true }),
+  };
+}
+
+/**
+ * Variant of `initPlugin` that lets tests customize the mock client BEFORE
+ * the plugin is initialized. The customizer receives the mock client and
+ * can override individual `session.*` methods (e.g. swap in a custom
+ * `session.messages` for F9 media-aware tests). Returns the initialized
+ * hooks + the call tracker + the customized client itself.
+ */
+async function initPluginCustomClient(
+  customize: (client: ReturnType<typeof createMockClient>["client"]) => void,
+) {
+  const { calls, client } = createMockClient();
+  customize(client);
+  const tmpDir = `${import.meta.dir}/__tmp_plugin_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
+  const { mkdirSync, rmSync } = await import("fs");
+  mkdirSync(tmpDir, { recursive: true });
+
+  const hooks = await LorePlugin({
+    client,
+    project: { id: "test", path: tmpDir } as any,
+    directory: tmpDir,
+    worktree: tmpDir,
+    serverUrl: new URL("http://localhost:0"),
+    $: {} as any,
+  });
+
+  return {
+    hooks,
+    calls,
+    client,
     tmpDir,
     cleanup: () => rmSync(tmpDir, { recursive: true, force: true }),
   };
@@ -450,6 +670,307 @@ describe("auto-recovery re-entrancy guard", () => {
       await firstError;
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── F9 media-aware recovery — getLastRealUserMessage + handler integration ──
+
+describe("getLastRealUserMessage", () => {
+  test("returns the most recent non-synthetic user message", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { id: "m1", role: "user" },
+                parts: [{ type: "text", text: "first user question" }],
+              },
+              {
+                info: { id: "m2", role: "assistant" },
+                parts: [{ type: "text", text: "answer" }],
+              },
+              {
+                info: { id: "m3", role: "user" },
+                parts: [{ type: "text", text: "follow-up" }],
+              },
+            ],
+          }),
+      },
+    };
+    const result = await getLastRealUserMessage(client, "ses_test");
+    expect(result).toBeDefined();
+    // Most recent (m3), not the older one.
+    expect((result?.info as any).id).toBe("m3");
+    expect(result?.parts[0]).toMatchObject({ type: "text", text: "follow-up" });
+  });
+
+  test("skips synthetic user messages (Lore's own recovery injections)", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { id: "m1", role: "user" },
+                parts: [{ type: "text", text: "real question" }],
+              },
+              {
+                info: { id: "m2", role: "assistant" },
+                parts: [{ type: "text", text: "answer" }],
+              },
+              {
+                info: { id: "m3", role: "user" },
+                parts: [
+                  {
+                    type: "text",
+                    text: "<system-reminder>...</system-reminder>",
+                    synthetic: true,
+                  },
+                ],
+              },
+            ],
+          }),
+      },
+    };
+    const result = await getLastRealUserMessage(client, "ses_test");
+    // Should skip m3 (synthetic) and return m1.
+    expect((result?.info as any).id).toBe("m1");
+  });
+
+  test("returns undefined when only synthetic user messages exist", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { id: "m1", role: "user" },
+                parts: [{ type: "text", text: "synth", synthetic: true }],
+              },
+            ],
+          }),
+      },
+    };
+    expect(await getLastRealUserMessage(client, "ses_test")).toBeUndefined();
+  });
+
+  test("returns undefined for empty session", async () => {
+    const client = {
+      session: { messages: () => Promise.resolve({ data: [] }) },
+    };
+    expect(await getLastRealUserMessage(client, "ses_test")).toBeUndefined();
+  });
+
+  test("returns undefined when SDK call throws (logs warning, swallows)", async () => {
+    const client = {
+      session: {
+        messages: () => Promise.reject(new Error("network blip")),
+      },
+    };
+    // Must not throw out of the helper.
+    expect(await getLastRealUserMessage(client, "ses_test")).toBeUndefined();
+  });
+
+  test("tolerates missing `data` field on response", async () => {
+    const client = {
+      session: { messages: () => Promise.resolve({}) },
+    };
+    expect(await getLastRealUserMessage(client, "ses_test")).toBeUndefined();
+  });
+
+  test("tolerates messages with malformed shape", async () => {
+    const client = {
+      session: {
+        messages: () =>
+          Promise.resolve({
+            data: [
+              null,
+              { info: null, parts: [] },
+              { info: { role: "user" }, parts: [{ type: "text", text: "ok" }] },
+            ],
+          }),
+      },
+    };
+    const result = await getLastRealUserMessage(client, "ses_test");
+    expect(result?.parts[0]).toMatchObject({ type: "text", text: "ok" });
+  });
+});
+
+describe("auto-recovery — media-aware path (F9)", () => {
+  test("recovery prompt includes attachment list + user text when last user message has media", async () => {
+    const { hooks, calls, client, cleanup } = await initPluginCustomClient((c) => {
+      // Override session.messages to return a user message with an
+      // image attachment + text question.
+      (c.session as any).messages = () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { id: "m1", role: "user" },
+              parts: [
+                { type: "text", text: "Explain this screenshot please." },
+                {
+                  type: "file",
+                  mime: "image/png",
+                  filename: "screenshot.png",
+                  url: "data:image/png;base64,abc",
+                },
+              ],
+            },
+          ],
+        });
+    });
+    try {
+      const sessionID = "ses_f9_media_001";
+      await hooks.event!({
+        event: {
+          type: "session.error",
+          properties: {
+            sessionID,
+            error: { message: "prompt is too long: 250000 tokens" },
+          },
+        } as any,
+      });
+      // Recovery prompt was sent.
+      expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
+      // Inspect the body.
+      const promptArgs = calls["session.prompt"]![0]![0] as {
+        body: { parts: Array<{ text: string }> };
+      };
+      const text = promptArgs.body.parts[0]!.text;
+      expect(text).toContain("[Attached image/png: screenshot.png]");
+      expect(text).toContain("Explain this screenshot please.");
+      expect(text).toContain("compressed the conversation history");
+      expect(text).toContain("attachment(s) that were removed");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("recovery prompt falls back to plain buildRecoveryMessage when no media in last user message", async () => {
+    const { hooks, calls, cleanup } = await initPluginCustomClient((c) => {
+      // User message with text only — no media.
+      (c.session as any).messages = () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { id: "m1", role: "user" },
+              parts: [{ type: "text", text: "ordinary text-only question" }],
+            },
+          ],
+        });
+    });
+    try {
+      const sessionID = "ses_f9_nomedia_001";
+      await hooks.event!({
+        event: {
+          type: "session.error",
+          properties: {
+            sessionID,
+            error: { message: "prompt is too long: 250000 tokens" },
+          },
+        } as any,
+      });
+      expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
+      const promptArgs = calls["session.prompt"]![0]![0] as {
+        body: { parts: Array<{ text: string }> };
+      };
+      const text = promptArgs.body.parts[0]!.text;
+      // Plain recovery contract per F9 D4: byte-identical to today.
+      // We seed no distillations in this test (initPluginCustomClient
+      // creates an empty DB), so the expected payload is the
+      // "no summaries provided" fallback. Pin the full string so any
+      // accidental drift (e.g. an extra blank line, a section sneaking
+      // through the no-media path) is caught.
+      expect(text).toBe(buildRecoveryMessage([]));
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("recovery falls through to plain path when session.messages throws", async () => {
+    const { hooks, calls, cleanup } = await initPluginCustomClient((c) => {
+      (c.session as any).messages = () =>
+        Promise.reject(new Error("simulated SDK failure"));
+    });
+    try {
+      const sessionID = "ses_f9_sdk_fail_001";
+      await hooks.event!({
+        event: {
+          type: "session.error",
+          properties: {
+            sessionID,
+            error: { message: "prompt is too long: 250000 tokens" },
+          },
+        } as any,
+      });
+      // Recovery still happens — falls back to plain message.
+      expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
+      const promptArgs = calls["session.prompt"]![0]![0] as {
+        body: { parts: Array<{ text: string }> };
+      };
+      const text = promptArgs.body.parts[0]!.text;
+      expect(text).not.toContain("attachment(s) that were removed");
+      expect(text).toContain("compressed the conversation history");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("multiple media attachments are all listed in the notice", async () => {
+    const { hooks, calls, cleanup } = await initPluginCustomClient((c) => {
+      (c.session as any).messages = () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { id: "m1", role: "user" },
+              parts: [
+                { type: "text", text: "compare these" },
+                {
+                  type: "file",
+                  mime: "image/png",
+                  filename: "a.png",
+                  url: "data:image/png;base64,a",
+                },
+                {
+                  type: "file",
+                  mime: "image/jpeg",
+                  filename: "b.jpg",
+                  url: "data:image/jpeg;base64,b",
+                },
+                {
+                  type: "file",
+                  mime: "application/pdf",
+                  filename: "c.pdf",
+                  url: "file:///tmp/c.pdf",
+                },
+              ],
+            },
+          ],
+        });
+    });
+    try {
+      const sessionID = "ses_f9_multi_media";
+      await hooks.event!({
+        event: {
+          type: "session.error",
+          properties: {
+            sessionID,
+            error: { message: "prompt is too long: 250000 tokens" },
+          },
+        } as any,
+      });
+      const promptArgs = calls["session.prompt"]![0]![0] as {
+        body: { parts: Array<{ text: string }> };
+      };
+      const text = promptArgs.body.parts[0]!.text;
+      expect(text).toContain("3 attachment(s) that were removed");
+      expect(text).toContain("[Attached image/png: a.png]");
+      expect(text).toContain("[Attached image/jpeg: b.jpg]");
+      expect(text).toContain("[Attached application/pdf: c.pdf]");
+    } finally {
+      cleanup();
     }
   });
 });
