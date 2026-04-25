@@ -173,6 +173,48 @@ function latestObservations(
   return row?.observations || undefined;
 }
 
+/**
+ * Return the most recent gen>0 (meta) distillation observations for this
+ * session, or undefined when none exists. Used by `metaDistill` as the
+ * `<previous-meta-summary>` anchor on second-and-later consolidation rounds:
+ * the LLM updates the prior meta in place rather than re-deriving from
+ * scratch.
+ *
+ * Filters on `generation > 0` explicitly — gen-0 rows are raw segment
+ * observations and aren't a suitable anchor (same constraint that motivated
+ * the F1b SDK live-read for /compact summaries).
+ *
+ * Exported primarily for tests; `metaDistill` is the only production caller.
+ */
+export function latestMetaObservations(
+  projectPath: string,
+  sessionID: string,
+): string | undefined {
+  return latestMeta(projectPath, sessionID)?.observations;
+}
+
+/**
+ * Internal: like `latestMetaObservations` but also returns the generation
+ * number, so `metaDistill` can derive the next gen number for the new row.
+ */
+function latestMeta(
+  projectPath: string,
+  sessionID: string,
+): { observations: string; generation: number } | undefined {
+  const pid = ensureProject(projectPath);
+  const row = db()
+    .query(
+      `SELECT observations, generation FROM distillations
+       WHERE project_id = ? AND session_id = ? AND generation > 0
+       ORDER BY generation DESC, created_at DESC LIMIT 1`,
+    )
+    .get(pid, sessionID) as
+    | { observations: string; generation: number }
+    | null;
+  if (!row || !row.observations) return undefined;
+  return row;
+}
+
 /** Safely parse the source_ids JSON column. Defaults to [] on corrupt data. */
 export function parseSourceIds(raw: string): string[] {
   try {
@@ -195,16 +237,31 @@ export type Distillation = {
   created_at: number;
 };
 
-/** Load all distillations for a session, oldest first. */
+/**
+ * Load distillations for a session, oldest first.
+ *
+ * By default (`includeArchived = false`) skips rows that have been archived
+ * by `archiveDistillations` — typically gen-0 segments that were already
+ * consolidated into a gen>0 meta. This honors the docstring contract that
+ * archived rows are "excluded from the in-context prefix."
+ *
+ * Pre-F2, this function did NOT filter `archived` and so leaked merged
+ * gen-0 rows into `/compact` and overflow-recovery prompts alongside the
+ * meta that consolidated them. The default-false behavior fixes that
+ * divergence; `includeArchived: true` preserves the legacy shape for
+ * rare callers that explicitly want all rows.
+ */
 export function loadForSession(
   projectPath: string,
   sessionID: string,
+  includeArchived = false,
 ): Distillation[] {
   const pid = ensureProject(projectPath);
+  const sql = includeArchived
+    ? "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC"
+    : "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC";
   const rows = db()
-    .query(
-      "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC",
-    )
+    .query(sql)
     .all(pid, sessionID) as Array<{
     id: string;
     project_id: string;
@@ -288,10 +345,13 @@ function loadGen0(projectPath: string, sessionID: string): Distillation[] {
   }));
 }
 
-// Archive distillations instead of deleting them. Archived entries are excluded
-// from the in-context prefix (loadDistillations filters them out) but remain
-// searchable via the recall tool (searchDistillations includes them). This
-// preserves a detailed "zoom-in" layer beneath the compressed gen-1 summary.
+// Archive distillations instead of deleting them. Archived entries are
+// excluded from the in-context prefix (`gradient.loadDistillations` filters
+// `archived = 0`) and from `loadForSession`'s default path (post-F2). They
+// remain searchable via BM25 recall (`search.ts` does not filter archived);
+// vector recall (`embedding.ts`) skips them via `WHERE archived = 0`. This
+// preserves a detailed "zoom-in" layer beneath the compressed gen-1 summary
+// for BM25 callers while keeping the in-context prefix lean.
 // Inspired by Cartridges (Eyuboglu et al., 2025): independently compressed
 // representations remain composable and queryable after consolidation.
 // Reference: https://arxiv.org/abs/2501.17390
@@ -475,16 +535,41 @@ async function distillSegment(input: {
   return result;
 }
 
-async function metaDistill(input: {
+/**
+ * Consolidate a session's gen-0 distillation segments into a higher-generation
+ * meta-distillation. On second-and-later rounds, anchors on the prior meta
+ * via `<previous-meta-summary>` so the LLM updates in place rather than
+ * re-deriving from scratch.
+ *
+ * Exported for tests; `run()` is the production entry point.
+ */
+export async function metaDistill(input: {
   llm: LLMClient;
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
 }): Promise<DistillationResult | null> {
   const existing = loadGen0(input.projectPath, input.sessionID);
-  if (existing.length < 3) return null;
 
-  const userContent = recursiveUser(existing);
+  // F2 anchor: when a prior gen>0 meta exists for this session, feed it back
+  // as <previous-meta-summary> so the LLM updates in place rather than
+  // re-deriving from scratch. Mirrors upstream OpenCode's <previous-summary>
+  // anchoring at compaction.ts:121-132. The `loadGen0` query already filters
+  // archived rows, so `existing` only contains gen-0 distillations created
+  // since the last meta-distill — no overlap with the anchor body.
+  const priorMeta = latestMeta(input.projectPath, input.sessionID);
+
+  // Threshold: first meta needs ≥3 gen-0 segments to consolidate. Subsequent
+  // anchored metas only need ≥1 new gen-0 since the prior meta already covers
+  // earlier history; without this distinction, every meta-distill round would
+  // need a fresh pile of segments and we'd lose the incremental-update benefit.
+  if (priorMeta) {
+    if (existing.length === 0) return null;
+  } else {
+    if (existing.length < 3) return null;
+  }
+
+  const userContent = recursiveUser(existing, priorMeta?.observations);
 
   const model = input.model ?? config().model;
   const responseText = await input.llm.prompt(
@@ -497,8 +582,17 @@ async function metaDistill(input: {
   const result = parseDistillationResult(responseText);
   if (!result) return null;
 
-  // Store the meta-distillation at generation N+1
-  const maxGen = Math.max(...existing.map((d) => d.generation));
+  // Store the meta-distillation at generation N+1, where N is the highest
+  // generation in the merged inputs OR the prior meta's generation, whichever
+  // is greater. Pre-F2, `existing` was the full history (all gen-0 rows that
+  // ever existed for the session, including those merged by prior metas) so
+  // its generation max worked. With F2's archive filter, `existing` only
+  // covers new gen-0 since the last meta — we must consult the prior meta's
+  // generation explicitly to keep the chain monotonic.
+  const maxGen = Math.max(
+    ...existing.map((d) => d.generation),
+    priorMeta?.generation ?? 0,
+  );
   const allSourceIDs = existing.flatMap((d) => d.source_ids);
   const metaId = storeDistillation({
     projectPath: input.projectPath,
@@ -514,7 +608,8 @@ async function metaDistill(input: {
   }
 
   // Archive the gen-0 distillations that were merged into gen-1+.
-  // They remain searchable via recall but excluded from the in-context prefix.
+  // They remain searchable via BM25 recall but are excluded from the
+  // in-context prefix and (post-F2) from `loadForSession`'s default path.
   archiveDistillations(existing.map((d) => d.id));
 
   return result;

@@ -1,11 +1,15 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach } from "bun:test";
 import {
   messagesToText,
   truncateToolOutputsInContent,
+  loadForSession,
+  latestMetaObservations,
+  metaDistill,
 } from "../src/distillation";
 import * as temporal from "../src/temporal";
 import { CHUNK_TERMINATOR, partsToText } from "../src/temporal";
-import type { LorePart } from "../src/types";
+import { db, ensureProject } from "../src/db";
+import type { LorePart, LLMClient } from "../src/types";
 
 // Fixed timestamp so [hh:mm] prefixes are deterministic across runs.
 const T = new Date("2026-04-24T09:15:00Z").getTime();
@@ -390,5 +394,432 @@ describe("partsToText + truncateToolOutputsInContent round trip", () => {
     // Both surrounding text chunks survive.
     expect(result).toContain("Looking up the format spec.");
     expect(result).toContain("Now I understand the chunk format.");
+  });
+});
+
+// ─── F2: meta-distill anchored update + loadForSession archived filter ──
+
+const META_PROJECT = "/test/meta-distill/project";
+const META_SESSION = "sess-meta-distill";
+
+function insertGen0(input: {
+  projectId: string;
+  sessionID: string;
+  observations: string;
+  archived?: 0 | 1;
+  createdAt?: number;
+}): string {
+  const id = crypto.randomUUID();
+  db()
+    .query(
+      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      input.projectId,
+      input.sessionID,
+      "",
+      "[]",
+      input.observations,
+      "[]",
+      0,
+      Math.ceil(input.observations.length / 3),
+      input.archived ?? 0,
+      input.createdAt ?? Date.now(),
+    );
+  return id;
+}
+
+function insertMeta(input: {
+  projectId: string;
+  sessionID: string;
+  observations: string;
+  generation: number;
+  archived?: 0 | 1;
+  createdAt?: number;
+}): string {
+  const id = crypto.randomUUID();
+  db()
+    .query(
+      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      input.projectId,
+      input.sessionID,
+      "",
+      "[]",
+      input.observations,
+      "[]",
+      input.generation,
+      Math.ceil(input.observations.length / 3),
+      input.archived ?? 0,
+      input.createdAt ?? Date.now(),
+    );
+  return id;
+}
+
+/** Build a minimal LLMClient stub that returns a canned response. */
+function makeStubLLM(response: string | null): LLMClient & {
+  prompts: Array<{ system: string; user: string }>;
+} {
+  const prompts: Array<{ system: string; user: string }> = [];
+  return {
+    prompts,
+    prompt: async (system: string, user: string) => {
+      prompts.push({ system, user });
+      return response ?? "";
+    },
+  };
+}
+
+describe("latestMetaObservations", () => {
+  beforeEach(() => {
+    const pid = ensureProject(META_PROJECT);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("returns undefined when no distillations exist", () => {
+    expect(latestMetaObservations(META_PROJECT, META_SESSION)).toBeUndefined();
+  });
+
+  test("returns undefined when only gen-0 rows exist (no meta yet)", () => {
+    const pid = ensureProject(META_PROJECT);
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "raw seg" });
+    expect(latestMetaObservations(META_PROJECT, META_SESSION)).toBeUndefined();
+  });
+
+  test("returns gen-1 observations when one meta exists", () => {
+    const pid = ensureProject(META_PROJECT);
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "raw seg" });
+    insertMeta({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "consolidated meta",
+      generation: 1,
+    });
+    expect(latestMetaObservations(META_PROJECT, META_SESSION)).toBe(
+      "consolidated meta",
+    );
+  });
+
+  test("prefers higher generation over more recent created_at", () => {
+    const pid = ensureProject(META_PROJECT);
+    insertMeta({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "gen-1 newer",
+      generation: 1,
+      createdAt: Date.now(),
+    });
+    insertMeta({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "gen-2 older but higher",
+      generation: 2,
+      createdAt: Date.now() - 10_000,
+    });
+    expect(latestMetaObservations(META_PROJECT, META_SESSION)).toBe(
+      "gen-2 older but higher",
+    );
+  });
+
+  test("scopes to the session — other sessions don't leak", () => {
+    const pid = ensureProject(META_PROJECT);
+    insertMeta({
+      projectId: pid,
+      sessionID: "other-session",
+      observations: "other meta",
+      generation: 1,
+    });
+    expect(latestMetaObservations(META_PROJECT, META_SESSION)).toBeUndefined();
+  });
+});
+
+describe("loadForSession — archived filter", () => {
+  beforeEach(() => {
+    const pid = ensureProject(META_PROJECT);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("excludes archived rows by default", () => {
+    const pid = ensureProject(META_PROJECT);
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "live row", archived: 0 });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "merged row", archived: 1 });
+    const rows = loadForSession(META_PROJECT, META_SESSION);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.observations).toBe("live row");
+  });
+
+  test("includes archived rows when includeArchived: true", () => {
+    const pid = ensureProject(META_PROJECT);
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "live row", archived: 0 });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "merged row", archived: 1 });
+    const rows = loadForSession(META_PROJECT, META_SESSION, true);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.observations).sort()).toEqual([
+      "live row",
+      "merged row",
+    ]);
+  });
+
+  test("returns empty array when no rows exist (default and includeArchived true)", () => {
+    expect(loadForSession(META_PROJECT, META_SESSION)).toHaveLength(0);
+    expect(loadForSession(META_PROJECT, META_SESSION, true)).toHaveLength(0);
+  });
+});
+
+describe("metaDistill — first round (no anchor)", () => {
+  beforeEach(() => {
+    const pid = ensureProject(META_PROJECT);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("consolidates 3+ gen-0 rows; user prompt has no <previous-meta-summary>", async () => {
+    const pid = ensureProject(META_PROJECT);
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs A" });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs B" });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs C" });
+
+    const llm = makeStubLLM("<observations>\nFresh meta from 3 segments\n</observations>");
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.observations).toBe("Fresh meta from 3 segments");
+
+    // No anchor on first run.
+    expect(llm.prompts).toHaveLength(1);
+    expect(llm.prompts[0]!.user).not.toContain("<previous-meta-summary>");
+    // All 3 gen-0 segments appear in the prompt.
+    expect(llm.prompts[0]!.user).toContain("Segment 1:");
+    expect(llm.prompts[0]!.user).toContain("Segment 2:");
+    expect(llm.prompts[0]!.user).toContain("Segment 3:");
+    expect(llm.prompts[0]!.user).toContain("obs A");
+    expect(llm.prompts[0]!.user).toContain("obs C");
+  });
+
+  test("returns null when fewer than 3 gen-0 rows exist (no anchor)", async () => {
+    const pid = ensureProject(META_PROJECT);
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "only one" });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "and two" });
+
+    const llm = makeStubLLM("should not be called");
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    expect(result).toBeNull();
+    expect(llm.prompts).toHaveLength(0);
+  });
+
+  test("archives exactly the merged subset; gen>0 row at gen=1 created", async () => {
+    const pid = ensureProject(META_PROJECT);
+    const id1 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs A" });
+    const id2 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs B" });
+    const id3 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs C" });
+
+    const llm = makeStubLLM("<observations>\nmerged\n</observations>");
+    await metaDistill({ llm, projectPath: META_PROJECT, sessionID: META_SESSION });
+
+    const archivedRows = db()
+      .query(
+        "SELECT id, archived, generation FROM distillations WHERE project_id = ? AND session_id = ?",
+      )
+      .all(pid, META_SESSION) as Array<{
+      id: string;
+      archived: number;
+      generation: number;
+    }>;
+    const byId = Object.fromEntries(archivedRows.map((r) => [r.id, r]));
+    expect(byId[id1]!.archived).toBe(1);
+    expect(byId[id2]!.archived).toBe(1);
+    expect(byId[id3]!.archived).toBe(1);
+    // New gen-1 row exists.
+    const meta = archivedRows.find((r) => r.generation === 1);
+    expect(meta).toBeDefined();
+    expect(meta!.archived).toBe(0);
+  });
+
+  test("does NOT archive rows for unrelated sessions / projects", async () => {
+    const pid = ensureProject(META_PROJECT);
+    const otherSessionRow = insertGen0({
+      projectId: pid,
+      sessionID: "unrelated-session",
+      observations: "other-session row",
+    });
+    const otherProjectPid = ensureProject("/test/meta-distill/other");
+    const otherProjectRow = insertGen0({
+      projectId: otherProjectPid,
+      sessionID: META_SESSION,
+      observations: "other-project row",
+    });
+
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "A" });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "B" });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "C" });
+
+    const llm = makeStubLLM("<observations>\ngood\n</observations>");
+    await metaDistill({ llm, projectPath: META_PROJECT, sessionID: META_SESSION });
+
+    const otherSessionArchived = (
+      db()
+        .query("SELECT archived FROM distillations WHERE id = ?")
+        .get(otherSessionRow) as { archived: number }
+    ).archived;
+    expect(otherSessionArchived).toBe(0);
+
+    const otherProjectArchived = (
+      db()
+        .query("SELECT archived FROM distillations WHERE id = ?")
+        .get(otherProjectRow) as { archived: number }
+    ).archived;
+    expect(otherProjectArchived).toBe(0);
+  });
+
+  test("returns null and archives nothing when LLM returns empty/null", async () => {
+    const pid = ensureProject(META_PROJECT);
+    const id1 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "A" });
+    const id2 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "B" });
+    const id3 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "C" });
+
+    const llm = makeStubLLM(null);
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    expect(result).toBeNull();
+    // Nothing archived; gen-0 rows survive for retry.
+    const rows = db()
+      .query("SELECT id, archived FROM distillations WHERE project_id = ? AND session_id = ?")
+      .all(pid, META_SESSION) as Array<{ id: string; archived: number }>;
+    expect(rows.find((r) => r.id === id1)!.archived).toBe(0);
+    expect(rows.find((r) => r.id === id2)!.archived).toBe(0);
+    expect(rows.find((r) => r.id === id3)!.archived).toBe(0);
+    // No new gen>0 row.
+    const metaRows = db()
+      .query(
+        "SELECT COUNT(*) as c FROM distillations WHERE project_id = ? AND session_id = ? AND generation > 0",
+      )
+      .get(pid, META_SESSION) as { c: number };
+    expect(metaRows.c).toBe(0);
+  });
+
+});
+
+describe("metaDistill — anchored second round", () => {
+  beforeEach(() => {
+    const pid = ensureProject(META_PROJECT);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("anchors on prior gen-1 meta when one exists; only new gen-0 in segments", async () => {
+    const pid = ensureProject(META_PROJECT);
+    // Prior gen-1 meta from a previous round.
+    insertMeta({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "PRIOR_META_BODY",
+      generation: 1,
+    });
+    // Two new gen-0 rows since the prior meta.
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "new obs X" });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "new obs Y" });
+
+    const llm = makeStubLLM(
+      "<observations>\nUpdated meta with X and Y\n</observations>",
+    );
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    expect(result).not.toBeNull();
+    expect(llm.prompts).toHaveLength(1);
+    // Anchor block in the user prompt.
+    expect(llm.prompts[0]!.user).toContain("<previous-meta-summary>");
+    expect(llm.prompts[0]!.user).toContain("PRIOR_META_BODY");
+    expect(llm.prompts[0]!.user).toContain("</previous-meta-summary>");
+    // Only the new gen-0 rows appear as segments (1 and 2, not 3).
+    expect(llm.prompts[0]!.user).toContain("Segment 1:");
+    expect(llm.prompts[0]!.user).toContain("Segment 2:");
+    expect(llm.prompts[0]!.user).not.toContain("Segment 3:");
+    expect(llm.prompts[0]!.user).toContain("new obs X");
+    expect(llm.prompts[0]!.user).toContain("new obs Y");
+  });
+
+  test("returns null without LLM call when anchor exists but no new gen-0 rows", async () => {
+    const pid = ensureProject(META_PROJECT);
+    insertMeta({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "PRIOR_META",
+      generation: 1,
+    });
+    // No new gen-0 rows.
+
+    const llm = makeStubLLM("should not be called");
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    expect(result).toBeNull();
+    expect(llm.prompts).toHaveLength(0);
+  });
+
+  test("anchored round only requires 1 new gen-0 (relaxed from first-round threshold of 3)", async () => {
+    const pid = ensureProject(META_PROJECT);
+    insertMeta({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "PRIOR_META",
+      generation: 1,
+    });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "single new obs" });
+
+    const llm = makeStubLLM("<observations>\nUpdated\n</observations>");
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    expect(result).not.toBeNull();
+    expect(llm.prompts).toHaveLength(1);
+    expect(llm.prompts[0]!.user).toContain("<previous-meta-summary>");
+  });
+
+  test("new gen-1+ row stored at maxGen+1 (gen-2 in this case)", async () => {
+    const pid = ensureProject(META_PROJECT);
+    insertMeta({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "PRIOR_META",
+      generation: 1,
+    });
+    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "new" });
+
+    const llm = makeStubLLM("<observations>\nupdated\n</observations>");
+    await metaDistill({ llm, projectPath: META_PROJECT, sessionID: META_SESSION });
+
+    const metaRows = db()
+      .query(
+        "SELECT generation, observations FROM distillations WHERE project_id = ? AND session_id = ? AND generation > 0 ORDER BY generation ASC",
+      )
+      .all(pid, META_SESSION) as Array<{ generation: number; observations: string }>;
+    expect(metaRows.map((r) => r.generation)).toEqual([1, 2]);
+    expect(metaRows[1]!.observations).toBe("updated");
   });
 });
