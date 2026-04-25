@@ -88,4 +88,62 @@ describe("buildCompactPrompt", () => {
     expect(templateIdx).toBeGreaterThan(reminderIdx);
     expect(knowledgeIdx).toBeGreaterThan(templateIdx);
   });
+
+  // F1b: anchor parameter
+  test("emits a <previous-summary> block when previousSummary is provided", () => {
+    const priorSummary = "## Goal\n- Refactor auth module\n## Progress\n### Done\n- Wrote tests";
+    const prompt = buildCompactPrompt({
+      hasDistillations: false,
+      previousSummary: priorSummary,
+    });
+    expect(prompt).toContain("<previous-summary>");
+    expect(prompt).toContain(priorSummary);
+    expect(prompt).toContain("</previous-summary>");
+    // Update-in-place instruction.
+    expect(prompt).toContain("Update it using the conversation history above");
+  });
+
+  test("no anchor block when previousSummary is undefined (byte-identical to pre-F1b)", () => {
+    const withParam = buildCompactPrompt({
+      hasDistillations: false,
+      previousSummary: undefined,
+    });
+    const withoutParam = buildCompactPrompt({
+      hasDistillations: false,
+    });
+    expect(withParam).toBe(withoutParam);
+    expect(withParam).not.toContain("<previous-summary>");
+    expect(withParam).not.toContain("Update it using the conversation history");
+  });
+
+  test("empty-string previousSummary is treated as absent", () => {
+    const withEmpty = buildCompactPrompt({
+      hasDistillations: false,
+      previousSummary: "",
+    });
+    const withoutParam = buildCompactPrompt({
+      hasDistillations: false,
+    });
+    expect(withEmpty).toBe(withoutParam);
+    expect(withEmpty).not.toContain("<previous-summary>");
+  });
+
+  test("anchor block placement: distill-reminder → anchor → template → knowledge", () => {
+    const prompt = buildCompactPrompt({
+      hasDistillations: true,
+      knowledge: "## Long-term Knowledge\n### Pattern\n- **X**: Y",
+      previousSummary: "PRIOR_SUMMARY_TOKEN",
+    });
+    const reminderIdx = prompt.indexOf("Lore has pre-computed");
+    const anchorIdx = prompt.indexOf("<previous-summary>");
+    const summaryBodyIdx = prompt.indexOf("PRIOR_SUMMARY_TOKEN");
+    const templateIdx = prompt.indexOf("## Goal");
+    const knowledgeIdx = prompt.indexOf("## Long-term Knowledge");
+
+    expect(reminderIdx).toBeGreaterThan(-1);
+    expect(anchorIdx).toBeGreaterThan(reminderIdx);
+    expect(summaryBodyIdx).toBeGreaterThan(anchorIdx);
+    expect(templateIdx).toBeGreaterThan(anchorIdx);
+    expect(knowledgeIdx).toBeGreaterThan(templateIdx);
+  });
 });

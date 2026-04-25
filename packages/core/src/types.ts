@@ -35,6 +35,15 @@ export type LoreAssistantMessage = {
   modelID: string;
   providerID: string;
   mode: string;
+  /**
+   * Set to `true` by the OpenCode compaction agent on the assistant
+   * message that holds a `/compact` summary (see upstream
+   * `compaction.ts:435`). Lore reads this flag in F1b's
+   * `findPreviousCompactSummary` to anchor repeat `/compact`
+   * invocations to the prior summary. Always undefined for normal
+   * assistant turns.
+   */
+  summary?: boolean;
   path: { cwd: string; root: string };
   cost: number;
   tokens: {
