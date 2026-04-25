@@ -129,6 +129,11 @@ To use a local clone instead of the published packages:
 - **OpenCode**: `{ "plugin": ["file:///absolute/path/to/opencode-lore"] }`
 - **Pi**: symlink the built package into `~/.pi/agent/extensions/`, or add a local path to `~/.pi/settings.json` `packages`
 
+Contributors editing prompts in `packages/core/src/prompt.ts` or the
+user-facing system prompt injection in `packages/opencode/src/index.ts` /
+`packages/pi/src/index.ts` should follow the review bar in
+[`docs/PROMPT_CHANGES.md`](docs/PROMPT_CHANGES.md).
+
 ## Configuration
 
 Create a `.lore.json` file in your project root to customize behavior. All fields are optional — defaults are shown below:
