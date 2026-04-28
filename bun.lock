@@ -13,7 +13,7 @@
     },
     "packages/core": {
       "name": "@loreai/core",
-      "version": "0.10.2",
+      "version": "0.11.0",
       "dependencies": {
         "remark": "^15.0.1",
         "uuidv7": "^1.1.0",
@@ -25,7 +25,7 @@
     },
     "packages/opencode": {
       "name": "@loreai/opencode",
-      "version": "0.10.2",
+      "version": "0.11.0",
       "dependencies": {
         "@loreai/core": "workspace:*",
       },
@@ -39,7 +39,7 @@
     },
     "packages/pi": {
       "name": "@loreai/pi",
-      "version": "0.10.2",
+      "version": "0.11.0",
       "dependencies": {
         "@loreai/core": "workspace:*",
       },
