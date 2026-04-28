@@ -12,6 +12,8 @@ import {
   curator,
   transform,
   setModelLimits,
+  setMaxLayer0Tokens,
+  computeLayer0Cap,
   needsUrgentDistillation,
   calibrate,
   setLtmTokens,
@@ -31,6 +33,7 @@ import {
   embedding,
   log,
   isWorkerSession,
+  workerModel,
 } from "@loreai/core";
 import { createRecallTool } from "./reflect";
 import { createOpenCodeLLMClient } from "./llm-adapter";
@@ -460,6 +463,9 @@ export const LorePlugin: Plugin = async (ctx) => {
   // Track active sessions for distillation
   const activeSessions = new Set<string>();
 
+  // System prompt hash per session — for cache-bust diagnostics (LORE_DEBUG)
+  const systemPromptHashes = new Map<string, string>();
+
   // Sessions currently in auto-recovery — prevents infinite loop when
   // the recovery prompt itself triggers another "prompt too long" error.
   // Without this guard: overflow → recovery prompt → overflow → recovery → ...
@@ -496,6 +502,20 @@ export const LorePlugin: Plugin = async (ctx) => {
     return false;
   }
 
+  // The active session model — captured from the system transform hook's input.model.
+  // Used for worker model auto-selection (same-provider lookup).
+  let activeSessionModel: { id: string; providerID: string; cost: { input: number; cache: { read: number } } } | undefined;
+
+  /** Resolve the model to use for background worker calls. */
+  function getWorkerModel(): { providerID: string; modelID: string } | undefined {
+    const cfg = config();
+    return workerModel.resolveWorkerModel(
+      activeSessionModel?.providerID ?? "",
+      cfg.workerModel,
+      cfg.model,
+    );
+  }
+
   // Background distillation — debounced, non-blocking
   let distilling = false;
   async function backgroundDistill(sessionID: string, force?: boolean) {
@@ -513,7 +533,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           llm: createOpenCodeLLMClient(ctx.client, sessionID),
           projectPath,
           sessionID,
-          model: cfg.model,
+          model: getWorkerModel(),
           force,
         });
       }
@@ -532,7 +552,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         llm: createOpenCodeLLMClient(ctx.client, sessionID),
         projectPath,
         sessionID,
-        model: cfg.model,
+        model: getWorkerModel(),
       });
       // Curation may have created/updated/deleted knowledge entries.
       // Invalidate the LTM cache so the next turn picks up the changes.
@@ -765,7 +785,7 @@ export const LorePlugin: Plugin = async (ctx) => {
               llm: createOpenCodeLLMClient(ctx.client, sessionID),
               projectPath,
               sessionID,
-              model: cfg.model,
+              model: getWorkerModel(),
             });
             if (updated > 0 || deleted > 0) {
               log.info(`consolidation: ${updated} updated, ${deleted} deleted`);
@@ -853,7 +873,32 @@ export const LorePlugin: Plugin = async (ctx) => {
         setModelLimits(input.model.limit);
       }
 
+      // Capture the active session model for worker model selection and cost-aware cap.
+      if (input.model) {
+        const m = input.model as { id: string; providerID: string; cost?: { input: number; cache?: { read: number } } };
+        if (m.cost?.cache?.read) {
+          activeSessionModel = {
+            id: m.id,
+            providerID: m.providerID,
+            cost: { input: m.cost.input, cache: { read: m.cost.cache.read } },
+          };
+        }
+      }
+
+      // Cost-aware layer-0 cap: derive from model cache-read pricing.
+      // maxLayer0Tokens explicit config wins > cost formula > disabled (0).
       const cfg = config();
+      if (cfg.budget.maxLayer0Tokens !== undefined) {
+        // Explicit override
+        setMaxLayer0Tokens(cfg.budget.maxLayer0Tokens);
+      } else if (activeSessionModel && cfg.budget.targetCacheReadCostPerTurn > 0) {
+        // Cost-aware auto: cap = target / cache_read_cost_per_token
+        const cap = computeLayer0Cap(
+          cfg.budget.targetCacheReadCostPerTurn,
+          activeSessionModel.cost.cache.read,
+        );
+        setMaxLayer0Tokens(cap);
+      }
 
       // Cold-cache idle-resume: when the gap since this session's last turn
       // exceeds the configured threshold, Anthropic's prompt cache has already
@@ -975,6 +1020,21 @@ export const LorePlugin: Plugin = async (ctx) => {
           `unstaged changes and include it in the commit. This file contains ` +
           `shared project knowledge managed by lore and must be version-controlled.`,
         );
+      }
+
+      // Cache-bust diagnostic: track system prompt byte-identity across turns.
+      // When the system prompt changes between turns, it invalidates the entire
+      // prompt cache. Log when this happens (LORE_DEBUG only).
+      const sessionID = input.sessionID;
+      if (sessionID) {
+        const systemHash = output.system.join("").length.toString();
+        const prev = systemPromptHashes.get(sessionID);
+        if (prev !== undefined && prev !== systemHash) {
+          log.info(
+            `system-prompt changed: session=${sessionID} len=${prev}→${systemHash}`,
+          );
+        }
+        systemPromptHashes.set(sessionID, systemHash);
       }
     },
 
