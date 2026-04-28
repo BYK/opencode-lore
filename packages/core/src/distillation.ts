@@ -594,23 +594,37 @@ export async function metaDistill(input: {
     priorMeta?.generation ?? 0,
   );
   const allSourceIDs = existing.flatMap((d) => d.source_ids);
-  const metaId = storeDistillation({
-    projectPath: input.projectPath,
-    sessionID: input.sessionID,
-    observations: result.observations,
-    sourceIDs: allSourceIDs,
-    generation: maxGen + 1,
-  });
 
-  // Fire-and-forget: embed the meta-distillation for vector search
+  // Atomic: store the new meta row + archive the merged gen-0 rows in one
+  // transaction. Without this, a crash between the two would leave stale
+  // lineage (gen-N+1 meta stored but gen-0 rows un-archived, causing the
+  // next run to re-consolidate the same segments into a duplicate meta).
+  // Uses manual BEGIN/COMMIT because `bun:sqlite` and `node:sqlite` have
+  // incompatible transaction APIs (`.transaction()` vs nothing).
+  let metaId: string;
+  db().exec("BEGIN IMMEDIATE");
+  try {
+    metaId = storeDistillation({
+      projectPath: input.projectPath,
+      sessionID: input.sessionID,
+      observations: result.observations,
+      sourceIDs: allSourceIDs,
+      generation: maxGen + 1,
+    });
+    // Archive the gen-0 distillations that were merged into gen-1+.
+    // They remain searchable via BM25 recall but are excluded from the
+    // in-context prefix and (post-F2) from `loadForSession`'s default path.
+    archiveDistillations(existing.map((d) => d.id));
+    db().exec("COMMIT");
+  } catch (e) {
+    db().exec("ROLLBACK");
+    throw e;
+  }
+
+  // Fire-and-forget OUTSIDE the transaction (async, no rollback needed).
   if (embedding.isAvailable()) {
     embedding.embedDistillation(metaId, result.observations);
   }
-
-  // Archive the gen-0 distillations that were merged into gen-1+.
-  // They remain searchable via BM25 recall but are excluded from the
-  // in-context prefix and (post-F2) from `loadForSession`'s default path.
-  archiveDistillations(existing.map((d) => d.id));
 
   return result;
 }
