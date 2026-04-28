@@ -1,4 +1,44 @@
 # Changelog
+## 0.11.0
+
+### New Features ✨
+
+#### Compact
+
+- Anchor /compact on prior summary via SDK live read by @BYK in [#100](https://github.com/BYK/loreai/pull/100)
+- Adopt upstream SUMMARY_TEMPLATE for /compact prompt by @BYK in [#92](https://github.com/BYK/loreai/pull/92)
+
+#### Distill
+
+- Anchor meta-distillation on prior summary; loadForSession excludes archived by @BYK in [#101](https://github.com/BYK/loreai/pull/101)
+- Truncate oversized tool outputs in distillation input by @BYK in [#94](https://github.com/BYK/loreai/pull/94)
+
+#### Gradient
+
+- Token-budget tail sizing in layer 4 by @BYK in [#104](https://github.com/BYK/loreai/pull/104)
+- Cold-cache idle-resume cache refresh by @BYK in [#95](https://github.com/BYK/loreai/pull/95)
+
+#### Other
+
+- (recovery) Media-aware overflow recovery preserves user intent by @BYK in [#99](https://github.com/BYK/loreai/pull/99)
+- Cost reduction — layer-0 cap, worker model, tighter defaults by @BYK in [#105](https://github.com/BYK/loreai/pull/105)
+
+### Bug Fixes 🐛
+
+- (distill) Wrap metaDistill store+archive in a transaction by @BYK in [#103](https://github.com/BYK/loreai/pull/103)
+- (opencode) Robust context-overflow detection with upstream regex list by @BYK in [#93](https://github.com/BYK/loreai/pull/93)
+- CROSS JOIN for FTS5 queries — prevent server freeze on recall by @BYK in [#107](https://github.com/BYK/loreai/pull/107)
+
+### Documentation 📚
+
+- Add prompt change discipline guide by @BYK in [#97](https://github.com/BYK/loreai/pull/97)
+
+### Internal Changes 🔧
+
+- (gradient) Pin reasoning preservation across all gradient layers by @BYK in [#96](https://github.com/BYK/loreai/pull/96)
+- (opencode) Add upstream-drift contract tests for hook invocation by @BYK in [#102](https://github.com/BYK/loreai/pull/102)
+- (temporal) Unambiguous chunk terminator in partsToText by @BYK in [#98](https://github.com/BYK/loreai/pull/98)
+
 ## 0.10.2
 
 ### Bug Fixes 🐛

@@ -1,6 +1,6 @@
 {
   "name": "@loreai/opencode",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "type": "module",
   "license": "MIT",
   "description": "Three-tier memory architecture for OpenCode — distillation, not summarization",
