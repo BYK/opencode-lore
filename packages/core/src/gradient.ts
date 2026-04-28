@@ -1322,6 +1322,7 @@ function transformInner(input: {
   const turnStart = currentTurnStart(input.messages);
   const dedupMessages = deduplicateToolOutputs(input.messages, turnStart);
 
+
   const distillations = sid ? loadDistillations(input.projectPath, sid) : [];
 
   // Layer 1 uses the append-only cached prefix (Approach C) to keep the
@@ -1545,21 +1546,54 @@ export function estimateMessages(messages: MessageWithParts[]): number {
   return messages.reduce((sum, m) => sum + estimateMessage(m), 0);
 }
 
-// Identify the current agentic turn: the last user message plus all subsequent
-// assistant messages that share its ID as parentID. These messages form an atomic
-// unit — the model must see all of them or it will lose track of its own prior
-// tool calls and re-issue them in an infinite loop.
+// Identify the current agentic turn: walk backwards from the end to find the
+// boundary where it's safe to strip tool outputs. The "current turn" includes:
+// 1. All messages from the last user message onwards (the explicit turn boundary)
+// 2. All messages that are part of an unfinished tool-call chain BEFORE that user
+//    message — because subagent/child user messages can appear mid-chain, and the
+//    parent's tool-call chain must be kept intact or the model re-issues tool calls.
+//
+// The heuristic: walk backwards from the last user message, and if we see assistant
+// messages with tool parts (tool-call chains), keep extending the boundary back.
+// Stop when we hit a user message that's followed by a non-tool assistant (a clean
+// conversational boundary, not a mid-chain subagent injection).
 function currentTurnStart(messages: MessageWithParts[]): number {
-  // Find the last user message
-  let lastUserIdx = -1;
+  if (messages.length === 0) return 0;
+
+  // Start from the last user message
+  let boundary = messages.length;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].info.role === "user") {
-      lastUserIdx = i;
+      boundary = i;
       break;
     }
   }
-  if (lastUserIdx === -1) return 0; // no user message — treat all as current turn
-  return lastUserIdx;
+  if (boundary === messages.length) return 0; // no user message — protect all
+
+  // Now walk backwards past any tool-call chains that precede this user message.
+  // A tool-call chain looks like: ...assistant(tool-calls) → user(subagent) → ...
+  // We keep extending boundary back while we see tool-bearing assistant messages.
+  for (let i = boundary - 1; i >= 0; i--) {
+    const msg = messages[i];
+    const hasToolParts = msg.parts.some(isToolPart);
+    if (hasToolParts) {
+      // This assistant message has tools — it's part of an active chain.
+      // Extend the boundary to include it.
+      boundary = i;
+      continue;
+    }
+    if (msg.info.role === "user") {
+      // A user message with no tool-bearing assistant before it — this might be
+      // another subagent injection. Keep walking back.
+      boundary = i;
+      continue;
+    }
+    // Non-tool assistant message (pure text response) — this is a clean boundary.
+    // The chain above this point is a completed conversation turn.
+    break;
+  }
+
+  return boundary;
 }
 
 function tryFit(input: {
