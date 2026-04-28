@@ -9,15 +9,34 @@ export const LoreConfig = z.object({
       modelID: z.string(),
     })
     .optional(),
+  /** Explicit worker model override. When set, all background workers (distillation,
+   *  curation, query expansion) use this model instead of the session model or the
+   *  auto-selected worker model. Bypasses dynamic worker model selection entirely. */
+  workerModel: z
+    .object({
+      providerID: z.string(),
+      modelID: z.string(),
+    })
+    .optional(),
   budget: z
     .object({
       distilled: z.number().min(0.05).max(0.5).default(0.25),
       raw: z.number().min(0.1).max(0.7).default(0.4),
       output: z.number().min(0.1).max(0.5).default(0.25),
-      /** Max fraction of usable context reserved for LTM system-prompt injection. Default: 0.10 (10%). */
-      ltm: z.number().min(0.02).max(0.3).default(0.10),
+      /** Max fraction of usable context reserved for LTM system-prompt injection. Default: 0.05 (5%). */
+      ltm: z.number().min(0.02).max(0.3).default(0.05),
+      /** Per-turn cache-read cost target in dollars. Controls when layer 0 (full
+       *  passthrough) escalates to layer 1 (compressed). The cap is derived as:
+       *  maxLayer0Tokens = max(target / model.cost.cache.read, 40K).
+       *  Lower = cheaper but earlier compression. Default: 0.10. Set to 0 to
+       *  disable cost-aware capping (use the model's full context). */
+      targetCacheReadCostPerTurn: z.number().min(0).default(0.10),
+      /** Direct override for the layer-0 token cap. When set, bypasses the
+       *  cost-aware formula from targetCacheReadCostPerTurn. 0 = disabled
+       *  (no cap, use full context). Default: undefined (use cost-aware auto). */
+      maxLayer0Tokens: z.number().min(0).optional(),
     })
-    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.10 }),
+    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.05, targetCacheReadCostPerTurn: 0.10 }),
   /**
    * Cold-cache idle-resume handling.
    *
@@ -38,8 +57,8 @@ export const LoreConfig = z.object({
   idleResumeMinutes: z.number().min(0).max(24 * 60).default(60),
   distillation: z
     .object({
-      minMessages: z.number().min(3).default(8),
-      maxSegment: z.number().min(5).default(50),
+      minMessages: z.number().min(3).default(5),
+      maxSegment: z.number().min(5).default(30),
       metaThreshold: z.number().min(3).default(10),
       /** Max chars per tool output when rendering temporal messages for distillation input.
        *  Outputs longer than this are replaced with a compact annotation preserving line
@@ -48,8 +67,8 @@ export const LoreConfig = z.object({
       toolOutputMaxChars: z.number().min(0).default(2_000),
     })
     .default({
-      minMessages: 8,
-      maxSegment: 50,
+      minMessages: 5,
+      maxSegment: 30,
       metaThreshold: 10,
       toolOutputMaxChars: 2_000,
     }),

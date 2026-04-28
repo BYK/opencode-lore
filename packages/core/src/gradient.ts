@@ -4,6 +4,7 @@ import { db, ensureProject, loadForceMinLayer, saveForceMinLayer } from "./db";
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
 import { normalize } from "./markdown";
+import * as log from "./log";
 
 type MessageWithParts = LoreMessageWithParts;
 
@@ -35,6 +36,15 @@ function estimateMessage(msg: MessageWithParts): number {
 // Cached model context limit — set by system transform hook, used by message transform
 let contextLimit = 200_000; // sensible default
 let outputReserved = 32_000;
+
+// Cost-aware layer-0 token cap. When > 0, the layer-0 passthrough gate uses
+// min(maxInput, maxLayer0Tokens) instead of maxInput alone. Derived from the
+// model's cache-read cost: cap = targetCostPerTurn / costPerToken. This prevents
+// expensive models from sending huge contexts at layer 0, where cache-read costs
+// compound linearly across turns. Set to 0 to disable (use full context).
+let maxLayer0Tokens = 0;
+
+const MIN_LAYER0_FLOOR = 40_000;
 
 // Conservative overhead reserve for first-turn (before calibration):
 // accounts for provider system prompt + AGENTS.md + tool definitions + env info
@@ -102,6 +112,10 @@ type SessionState = {
    * the post-idle turn regardless of conversation size.
    */
   cameOutOfIdle: boolean;
+  /** Consecutive turns at layer >= 2. When >= 3, log a compaction hint. */
+  consecutiveHighLayer: number;
+  /** Hash of the first message IDs in the last transform output — for cache-bust diagnostics. */
+  lastPrefixHash: string;
 };
 
 function makeSessionState(): SessionState {
@@ -118,6 +132,8 @@ function makeSessionState(): SessionState {
     rawWindowCache: null,
     lastTurnAt: 0,
     cameOutOfIdle: false,
+    consecutiveHighLayer: 0,
+    lastPrefixHash: "",
   };
 }
 
@@ -209,6 +225,27 @@ export function setModelLimits(limits: { context: number; output: number }) {
   // become wrong — the effective max input would drop from 168K to 72K but our
   // budget would still assume 168K.  At that point, remove the cap.
   outputReserved = Math.min(limits.output || 32_000, 32_000);
+}
+
+/**
+ * Set the cost-aware layer-0 token cap. When the cap > 0, the layer-0
+ * passthrough gate uses `min(maxInput, cap)` instead of `maxInput` alone.
+ *
+ * Call from the host adapter after computing the cap from model pricing:
+ * `cap = max(targetCostPerTurn / model.cost.cache.read, MIN_LAYER0_FLOOR)`
+ */
+export function setMaxLayer0Tokens(tokens: number) {
+  maxLayer0Tokens = Math.max(0, Math.floor(tokens));
+}
+
+/** Compute the layer-0 token cap from a per-turn cost target and cache-read price. */
+export function computeLayer0Cap(
+  targetCostPerTurn: number,
+  cacheReadCostPerToken: number,
+): number {
+  if (targetCostPerTurn <= 0 || cacheReadCostPerToken <= 0) return 0;
+  const rawCap = Math.floor(targetCostPerTurn / cacheReadCostPerToken);
+  return Math.max(rawCap, MIN_LAYER0_FLOOR);
 }
 
 /** Called by the system transform hook after formatting LTM knowledge. */
@@ -1245,7 +1282,20 @@ function transformInner(input: {
   // estimated at 146K passes layer 0 but actually costs 214K → overflow.
   const layer0Input = calibrated ? expectedInput : expectedInput * UNCALIBRATED_SAFETY;
 
-  if (effectiveMinLayer === 0 && layer0Input <= maxInput) {
+  // Cost-aware layer-0 cap: use the smaller of the API limit and the cost-derived
+  // cap. When maxLayer0Tokens is 0 (disabled), fall back to pure maxInput.
+  let layer0Ceiling = maxLayer0Tokens > 0
+    ? Math.min(maxInput, maxLayer0Tokens)
+    : maxInput;
+
+  // Cold-cache awareness: on the first turn (uncalibrated = no prior API data),
+  // the entire context is a cache WRITE at 12.5× the cache-read price. Use 70%
+  // of the normal cap to reduce the cold-write cost.
+  if (!calibrated && layer0Ceiling < maxInput) {
+    layer0Ceiling = Math.floor(layer0Ceiling * 0.7);
+  }
+
+  if (effectiveMinLayer === 0 && layer0Input <= layer0Ceiling) {
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
     const messageTokens = calibrated
@@ -1451,6 +1501,41 @@ export function transform(input: {
     // so the next-turn idle check has an accurate baseline. Done after the
     // result fields above so a thrown transformInner doesn't update it.
     state.lastTurnAt = Date.now();
+
+    // --- Cache-bust diagnostics (LORE_DEBUG only) ---
+    // Track byte-identity of the message prefix. When the prefix hash changes
+    // between consecutive turns, it means Anthropic's prompt cache is invalidated
+    // and the entire context is re-written (12.5× cache-read price). This helps
+    // identify which code paths are breaking byte-identity.
+    const prefixIds = result.messages.slice(0, 5).map((m) => m.info.id).join(",");
+    const prefixHash = `${result.layer}:${prefixIds}`;
+    if (state.lastPrefixHash && state.lastPrefixHash !== prefixHash) {
+      log.info(
+        `cache-bust detected: session=${sid} layer=${state.lastLayer}→${result.layer}` +
+        ` msgs=${state.lastTransformedCount}→${result.messages.length}` +
+        ` prefix=${state.lastPrefixHash.slice(0, 30)}→${prefixHash.slice(0, 30)}`,
+      );
+    }
+    state.lastPrefixHash = prefixHash;
+
+    // --- Compaction hint ---
+    if (result.layer >= 2) {
+      state.consecutiveHighLayer++;
+      if (state.consecutiveHighLayer === 3) {
+        log.info(
+          `session ${sid} has been at gradient layer ${result.layer}+ for 3 consecutive turns.` +
+          ` Consider running /compact to reset the context window.`,
+        );
+      }
+    } else {
+      state.consecutiveHighLayer = 0;
+    }
+
+    log.info(
+      `gradient: session=${sid} layer=${result.layer} tokens=${result.totalTokens}` +
+      ` (distilled=${result.distilledTokens} raw=${result.rawTokens})` +
+      ` usable=${result.usable} cap=${maxLayer0Tokens || "off"}`,
+    );
   }
   return result;
 }

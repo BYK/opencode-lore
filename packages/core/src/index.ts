@@ -60,6 +60,8 @@ export {
 export {
   transform,
   setModelLimits,
+  setMaxLayer0Tokens,
+  computeLayer0Cap,
   needsUrgentDistillation,
   calibrate,
   setLtmTokens,
@@ -93,6 +95,11 @@ export {
 } from "./prompt";
 export { shouldImport, importFromFile, exportToFile } from "./agents-file";
 export { workerSessionIDs, isWorkerSession } from "./worker";
+export * as workerModel from "./worker-model";
+export {
+  WORKER_JUDGE_SYSTEM,
+  workerJudgeUser,
+} from "./worker-model";
 export {
   ftsQuery,
   ftsQueryOr,
