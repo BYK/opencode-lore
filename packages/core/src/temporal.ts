@@ -198,12 +198,12 @@ export function search(input: {
   if (q === EMPTY_QUERY) return [];
 
   const ftsSQL = input.sessionID
-    ? `SELECT m.* FROM temporal_messages m
-       JOIN temporal_fts f ON m.rowid = f.rowid
+    ? `SELECT m.* FROM temporal_fts f
+       CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ?
        ORDER BY rank LIMIT ?`
-    : `SELECT m.* FROM temporal_messages m
-       JOIN temporal_fts f ON m.rowid = f.rowid
+    : `SELECT m.* FROM temporal_fts f
+       CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ?
        ORDER BY rank LIMIT ?`;
   const params = input.sessionID
@@ -253,12 +253,12 @@ export function searchScored(input: {
   if (q === EMPTY_QUERY) return [];
 
   const ftsSQL = input.sessionID
-    ? `SELECT m.*, rank FROM temporal_messages m
-       JOIN temporal_fts f ON m.rowid = f.rowid
+    ? `SELECT m.*, rank FROM temporal_fts f
+       CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ?
        ORDER BY rank LIMIT ?`
-    : `SELECT m.*, rank FROM temporal_messages m
-       JOIN temporal_fts f ON m.rowid = f.rowid
+    : `SELECT m.*, rank FROM temporal_fts f
+       CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ?
        ORDER BY rank LIMIT ?`;
   const params = input.sessionID
