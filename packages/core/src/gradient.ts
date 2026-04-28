@@ -1354,11 +1354,19 @@ function transformInner(input: {
     return { ...layer3!, layer: 3, usable, distilledBudget, rawBudget };
   }
 
-  // Layer 4: Emergency — last 2 distillations, last 3 raw messages with tool parts intact.
+  // Layer 4: Emergency — last 2 distillations + token-budget raw tail.
   // We do NOT strip tool parts here: doing so would cause an infinite tool-call loop because
   // the model would lose sight of its own in-progress tool calls and re-invoke them endlessly.
   // Instead, we aggressively drop old messages and rely on the `recall` tool (which the model
   // is always instructed to use) to retrieve any older details it needs.
+  //
+  // Token-budget tail (F7): instead of a fixed `slice(-3)`, size the raw
+  // tail using `clamp(usable * 0.25, 2_000, 8_000)` tokens — matching
+  // upstream OpenCode's tail-budget formula for compaction. The current
+  // agentic turn (from `currentTurnStart()`) is ALWAYS fully included even
+  // if it alone exceeds the tail budget — layer 4 is the terminal layer
+  // and must always return. Remaining budget is filled backward with older
+  // messages.
   urgentDistillation = true;
   const nuclearDistillations = distillations.slice(-2);
   const nuclearPrefix = distilledPrefix(nuclearDistillations);
@@ -1366,14 +1374,39 @@ function transformInner(input: {
     (sum, m) => sum + estimateMessage(m),
     0,
   );
-  const nuclearRaw = input.messages.slice(-3).map((m) => ({
+
+  // Token budget for the raw tail. clamp(usable * 0.25, 2K, 8K).
+  const tailBudget = Math.max(2_000, Math.min(8_000, Math.floor(usable * 0.25)));
+
+  // Current turn is always included (non-negotiable — dropping it causes
+  // the infinite tool-call loop). Clean parts but never strip tool outputs.
+  const nuclearTurnStart = currentTurnStart(input.messages);
+  const currentTurn = input.messages.slice(nuclearTurnStart).map((m) => ({
     info: m.info,
     parts: cleanParts(m.parts),
   }));
-  const nuclearRawTokens = nuclearRaw.reduce(
+  const currentTurnTokens = currentTurn.reduce(
     (sum, m) => sum + estimateMessage(m),
     0,
   );
+
+  // Fill remaining budget walking backward from the turn boundary.
+  const olderMessages: MessageWithParts[] = [];
+  let olderTokens = 0;
+  const remaining = Math.max(0, tailBudget - currentTurnTokens);
+  for (let i = nuclearTurnStart - 1; i >= 0 && olderTokens < remaining; i--) {
+    const msg = input.messages[i];
+    const est = estimateMessage(msg);
+    if (olderTokens + est > remaining) break;
+    olderMessages.unshift({
+      info: msg.info,
+      parts: cleanParts(msg.parts),
+    });
+    olderTokens += est;
+  }
+
+  const nuclearRaw = [...olderMessages, ...currentTurn];
+  const nuclearRawTokens = olderTokens + currentTurnTokens;
 
   return {
     messages: [...nuclearPrefix, ...nuclearRaw],
