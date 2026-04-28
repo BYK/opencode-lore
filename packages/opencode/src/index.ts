@@ -40,8 +40,9 @@ import { createOpenCodeLLMClient } from "./llm-adapter";
 // regex; list otherwise tracks upstream's provider coverage). Keep this list
 // aligned with upstream when they add / change patterns — diff the arrays to
 // catch drift.
-// TODO(F10): add a contract test that diffs this array against upstream's
-// source file when available, so drift fails loudly instead of silently.
+// Drift detection: packages/opencode/test/upstream-contract.test.ts reads
+// upstream's source file (when present) and asserts OVERFLOW_PATTERNS is
+// still consistent. Fails loudly on the dev machine during dep bumps.
 const OVERFLOW_PATTERNS: RegExp[] = [
   /prompt is too long/i, // Anthropic
   /input is too long for requested model/i, // Amazon Bedrock
