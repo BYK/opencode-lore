@@ -215,11 +215,11 @@ function scoreEntriesFTS(sessionContext: string): Map<string, number> {
   try {
     const results = db()
       .query(
-        `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
-         FROM knowledge k
-         JOIN knowledge_fts f ON k.rowid = f.rowid
-         WHERE knowledge_fts MATCH ?
-         AND k.confidence > 0.2`,
+         `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
+          FROM knowledge_fts f
+          CROSS JOIN knowledge k ON k.rowid = f.rowid
+          WHERE knowledge_fts MATCH ?
+          AND k.confidence > 0.2`,
       )
       .all(title, content, category, q) as Array<{
       id: string;
@@ -460,14 +460,14 @@ export function search(input: {
   const pid = input.projectPath ? ensureProject(input.projectPath) : null;
 
   const ftsSQL = pid
-    ? `SELECT ${KNOWLEDGE_COLS_K} FROM knowledge k
-       JOIN knowledge_fts f ON k.rowid = f.rowid
+    ? `SELECT ${KNOWLEDGE_COLS_K} FROM knowledge_fts f
+       CROSS JOIN knowledge k ON k.rowid = f.rowid
        WHERE knowledge_fts MATCH ?
        AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
        AND k.confidence > 0.2
        ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`
-    : `SELECT ${KNOWLEDGE_COLS_K} FROM knowledge k
-       JOIN knowledge_fts f ON k.rowid = f.rowid
+    : `SELECT ${KNOWLEDGE_COLS_K} FROM knowledge_fts f
+       CROSS JOIN knowledge k ON k.rowid = f.rowid
        WHERE knowledge_fts MATCH ?
        AND k.confidence > 0.2
        ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`;
@@ -517,14 +517,14 @@ export function searchScored(input: {
   const { title, content, category } = ftsWeights();
 
   const ftsSQL = pid
-    ? `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
-       JOIN knowledge_fts f ON k.rowid = f.rowid
+    ? `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge_fts f
+       CROSS JOIN knowledge k ON k.rowid = f.rowid
        WHERE knowledge_fts MATCH ?
        AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
        AND k.confidence > 0.2
        ORDER BY rank LIMIT ?`
-    : `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
-       JOIN knowledge_fts f ON k.rowid = f.rowid
+    : `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge_fts f
+       CROSS JOIN knowledge k ON k.rowid = f.rowid
        WHERE knowledge_fts MATCH ?
        AND k.confidence > 0.2
        ORDER BY rank LIMIT ?`;
@@ -569,8 +569,8 @@ export function searchScoredOtherProjects(input: {
   // Find entries from other projects that are NOT cross-project (those are
   // already included in the normal search via the cross_project=1 filter).
   // Also exclude entries with no project_id (global) — already included.
-  const ftsSQL = `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge k
-     JOIN knowledge_fts f ON k.rowid = f.rowid
+  const ftsSQL = `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge_fts f
+     CROSS JOIN knowledge k ON k.rowid = f.rowid
      WHERE knowledge_fts MATCH ?
      AND k.project_id IS NOT NULL
      AND k.project_id != ?
@@ -819,8 +819,8 @@ export function check(projectPath: string): IntegrityIssue[] {
       const { title, content, category } = config().search.ftsWeights;
       const matches = db()
         .query(
-          `SELECT k.id, k.title FROM knowledge k
-           JOIN knowledge_fts f ON k.rowid = f.rowid
+          `SELECT k.id, k.title FROM knowledge_fts f
+           CROSS JOIN knowledge k ON k.rowid = f.rowid
            WHERE knowledge_fts MATCH ?
            AND k.id != ?
            AND k.confidence > 0.2

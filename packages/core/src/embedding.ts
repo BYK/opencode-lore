@@ -12,6 +12,11 @@ import { db } from "./db";
 import { config } from "./config";
 import * as log from "./log";
 
+/** Timeout for embedding API fetch calls (ms). Prevents a hanging API from
+ *  blocking the recall tool indefinitely. 10s is generous for typical 100-500ms
+ *  embedding calls but bounded enough to avoid minutes-long hangs. */
+const EMBED_TIMEOUT_MS = 10_000;
+
 // ---------------------------------------------------------------------------
 // Provider interface
 // ---------------------------------------------------------------------------
@@ -58,6 +63,7 @@ class VoyageProvider implements EmbeddingProvider {
         input_type: inputType,
         output_dimension: this.dimensions,
       }),
+      signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -112,6 +118,7 @@ class OpenAIProvider implements EmbeddingProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
     });
 
     if (!res.ok) {

@@ -290,8 +290,8 @@ export function searchScored(input: {
   const ftsSQL = `SELECT s.id, s.project_id, s.file, s.heading, s.depth, s.content,
          s.content_hash, s.first_paragraph, s.updated_at,
          bm25(lat_sections_fts, 6.0, 2.0) as rank
-       FROM lat_sections s
-       JOIN lat_sections_fts f ON s.rowid = f.rowid
+       FROM lat_sections_fts f
+       CROSS JOIN lat_sections s ON s.rowid = f.rowid
        WHERE lat_sections_fts MATCH ?
        AND s.project_id = ?
        ORDER BY rank LIMIT ?`;
@@ -335,8 +335,8 @@ export function scoreForSession(
         `SELECT s.id, s.project_id, s.file, s.heading, s.depth, s.content,
                 s.content_hash, s.first_paragraph, s.updated_at,
                 bm25(lat_sections_fts, 6.0, 2.0) as rank
-         FROM lat_sections s
-         JOIN lat_sections_fts f ON s.rowid = f.rowid
+         FROM lat_sections_fts f
+         CROSS JOIN lat_sections s ON s.rowid = f.rowid
          WHERE lat_sections_fts MATCH ?
          AND s.project_id = ?
          ORDER BY rank`,

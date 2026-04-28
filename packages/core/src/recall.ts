@@ -116,14 +116,14 @@ function searchDistillationsScored(input: {
 
   const ftsSQL = input.sessionID
     ? `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, rank
-       FROM distillations d
-       JOIN distillation_fts f ON d.rowid = f.rowid
+       FROM distillation_fts f
+       CROSS JOIN distillations d ON d.rowid = f.rowid
        WHERE distillation_fts MATCH ?
        AND d.project_id = ? AND d.session_id = ?
        ORDER BY rank LIMIT ?`
     : `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, rank
-       FROM distillations d
-       JOIN distillation_fts f ON d.rowid = f.rowid
+       FROM distillation_fts f
+       CROSS JOIN distillations d ON d.rowid = f.rowid
        WHERE distillation_fts MATCH ?
        AND d.project_id = ?
        ORDER BY rank LIMIT ?`;
