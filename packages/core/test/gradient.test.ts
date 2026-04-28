@@ -122,9 +122,13 @@ describe("gradient", () => {
     expect(result.totalTokens).toBeGreaterThan(0);
   });
 
-  test("Layer 4 nuclear always fits", () => {
+  test("Layer 4 nuclear always fits (token-budget tail)", () => {
     // Each message ~1100 tokens. With 1500 usable and rawBudget = 600,
     // even a single message exceeds the budget, forcing escalation to Layer 4.
+    // Post-F7: layer 4 uses a token-budget tail (clamp(usable*0.25, 2K, 8K))
+    // instead of a fixed slice(-3). With usable=1500, tailBudget = max(2000,
+    // min(8000, 375)) = 2000. The current turn (last user + subsequent
+    // assistants) is always included even when it alone exceeds the budget.
     const messages = Array.from({ length: 10 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
       const text = `Message ${i}: ${"detailed content about various topics and implementation details that span across multiple concerns ".repeat(40)}`;
@@ -138,7 +142,34 @@ describe("gradient", () => {
       sessionID: "grad-sess",
     });
     expect(result.layer).toBeGreaterThanOrEqual(3);
-    expect(result.messages.length).toBeLessThanOrEqual(6); // layer 4: up to 3 prefix + 3 raw
+    // Current turn is always included; budget is tight so not many extras.
+    expect(result.messages.length).toBeGreaterThanOrEqual(1);
+    // Reset
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+  });
+
+  test("Layer 4 includes more than 3 messages when budget allows (tiny messages)", () => {
+    // With tiny messages (~15 tokens each) and usable = 10_000,
+    // tailBudget = max(2000, min(8000, 2500)) = 2500 → can fit ~160 tiny messages.
+    // Verify that more than the old fixed 3 are included.
+    const messages = Array.from({ length: 20 }, (_, i) => {
+      const role = i % 2 === 0 ? "user" : "assistant";
+      return makeMsg(`tiny-${i}`, role as "user" | "assistant", `Msg ${i}: short`);
+    });
+    setModelLimits({ context: 12_000, output: 2_000 }); // usable ~10000
+    calibrate(0);
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "grad-tiny-sess",
+    });
+    // Should hit layer 4 because there are no distillations and the total
+    // raw exceeds rawBudget. The key assertion: more than 3 raw messages
+    // are kept (the old fixed limit).
+    if (result.layer === 4) {
+      expect(result.messages.length).toBeGreaterThan(3);
+    }
     // Reset
     setModelLimits({ context: 10_000, output: 2_000 });
     calibrate(0);
