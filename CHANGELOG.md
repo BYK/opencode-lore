@@ -1,4 +1,10 @@
 # Changelog
+## 0.11.1
+
+### Bug Fixes 🐛
+
+- (gradient) Protect active tool-call chains from output stripping by @BYK in [#109](https://github.com/BYK/loreai/pull/109)
+
 ## 0.11.0
 
 ### New Features ✨
