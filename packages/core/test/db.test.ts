@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { db, ensureProject, projectId, loadForceMinLayer, saveForceMinLayer } from "../src/db";
+import { db, close, ensureProject, projectId, loadForceMinLayer, saveForceMinLayer } from "../src/db";
 
 
 describe("db", () => {
@@ -102,5 +102,32 @@ describe("db", () => {
 
   test("loadForceMinLayer returns 0 for unknown session", () => {
     expect(loadForceMinLayer("nonexistent-session")).toBe(0);
+  });
+
+  test("kv_meta table exists (migration v8)", () => {
+    const tables = db()
+      .query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((t) => t.name)).toContain("kv_meta");
+  });
+
+  test("db() re-initializes after close()", () => {
+    // Ensure the singleton is populated
+    const first = db();
+    expect(first).toBeDefined();
+
+    // Close resets the singleton
+    close();
+
+    // Next call should re-create and re-migrate — not return a stale handle
+    const second = db();
+    expect(second).toBeDefined();
+
+    // Verify the new instance is fully migrated (kv_meta exists)
+    const row = second
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'")
+      .get() as { name: string } | null;
+    expect(row).not.toBeNull();
+    expect(row!.name).toBe("kv_meta");
   });
 });

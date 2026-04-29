@@ -359,17 +359,23 @@ export function db(): Database {
   // exist, so no special option is needed. (bun:sqlite's `{ create: true }`
   // exists only to opt INTO creation when you want readonly=false — which is
   // already the default for our case.)
-  instance = new Database(path);
-  instance.exec("PRAGMA journal_mode = WAL");
-  instance.exec("PRAGMA foreign_keys = ON");
+  //
+  // IMPORTANT: Do NOT assign to `instance` until migrate() succeeds. If
+  // migrate() throws (SQLITE_BUSY, partial prior run, disk error), the
+  // module-level singleton must remain undefined so the next db() call
+  // retries initialization instead of returning an un-migrated handle.
+  const database = new Database(path);
+  database.exec("PRAGMA journal_mode = WAL");
+  database.exec("PRAGMA foreign_keys = ON");
   // Retry for up to 5s when another connection holds the write lock (e.g.
   // backgroundDistill's BEGIN IMMEDIATE overlapping with a recall query).
   // Default is 0ms which throws SQLITE_BUSY immediately.
-  instance.exec("PRAGMA busy_timeout = 5000");
+  database.exec("PRAGMA busy_timeout = 5000");
   // Return freed pages to the OS incrementally on each transaction commit
   // instead of accumulating a free-page list that bloats the file.
-  instance.exec("PRAGMA auto_vacuum = INCREMENTAL");
-  migrate(instance);
+  database.exec("PRAGMA auto_vacuum = INCREMENTAL");
+  migrate(database);
+  instance = database;
   return instance;
 }
 
