@@ -1,4 +1,11 @@
 # Changelog
+## 0.11.1
+
+### Bug Fixes 🐛
+
+- (db) Prevent singleton poisoning when migrate() throws by @BYK in [#111](https://github.com/BYK/loreai/pull/111)
+- (gradient) Protect active tool-call chains from output stripping by @BYK in [#109](https://github.com/BYK/loreai/pull/109)
+
 ## 0.11.0
 
 ### New Features ✨
