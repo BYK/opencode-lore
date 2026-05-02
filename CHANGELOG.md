@@ -1,4 +1,14 @@
 # Changelog
+## 0.12.0
+
+### New Features ✨
+
+- Context health diagnostics — C_norm, R_compression, time-gap segmentation, recall recency by @BYK in [#113](https://github.com/BYK/loreai/pull/113)
+
+### Bug Fixes 🐛
+
+- (db) Recover missing kv_meta from partial migration failure by @BYK in [#114](https://github.com/BYK/loreai/pull/114)
+
 ## 0.11.1
 
 ### Bug Fixes 🐛
