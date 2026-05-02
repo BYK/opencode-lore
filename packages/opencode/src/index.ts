@@ -506,6 +506,110 @@ export const LorePlugin: Plugin = async (ctx) => {
   // Used for worker model auto-selection (same-provider lookup).
   let activeSessionModel: { id: string; providerID: string; cost: { input: number; cache: { read: number } } } | undefined;
 
+  // Cached provider model list for worker model discovery.
+  let cachedProviderModels: workerModel.ModelInfo[] | undefined;
+  let workerModelValidating = false;
+
+  /** Lazily fetch the provider model list for worker model selection. */
+  async function getProviderModels(): Promise<workerModel.ModelInfo[]> {
+    if (cachedProviderModels) return cachedProviderModels;
+    try {
+      const result = await ctx.client.provider.list();
+      if (!result.data) return [];
+      const models: workerModel.ModelInfo[] = [];
+      for (const provider of result.data.all) {
+        if (!result.data.connected.includes(provider.id)) continue;
+        for (const model of Object.values(provider.models)) {
+          // SDK provider.list() model shape differs from the hook Model type:
+          // cost is optional, status is optional, capabilities are flat booleans
+          // with modalities array instead of nested capabilities.input.text.
+          const hasTextInput = model.modalities
+            ? model.modalities.input.includes("text")
+            : true; // assume text if no modalities info
+          models.push({
+            id: model.id,
+            providerID: provider.id,
+            cost: { input: model.cost?.input ?? 0 },
+            status: model.status ?? "active",
+            capabilities: { input: { text: hasTextInput } },
+          });
+        }
+      }
+      cachedProviderModels = models;
+      return models;
+    } catch (e) {
+      log.warn("failed to list provider models:", e);
+      return [];
+    }
+  }
+
+  /** Run worker model validation if needed (on idle, non-blocking). */
+  async function maybeValidateWorkerModel(sessionID: string) {
+    if (workerModelValidating) return;
+    if (!activeSessionModel) return;
+    const cfg = config();
+    if (cfg.workerModel) return; // explicit override — skip auto-selection
+
+    const providerModels = await getProviderModels();
+    if (providerModels.length === 0) return;
+
+    const candidates = workerModel.selectWorkerCandidates(
+      activeSessionModel,
+      providerModels,
+    );
+    if (candidates.length === 0) return;
+    // If session model is already the cheapest, no comparison needed
+    if (candidates.length === 1 && candidates[0].id === activeSessionModel.id) return;
+
+    const fingerprint = workerModel.computeModelFingerprint(
+      activeSessionModel.providerID,
+      activeSessionModel.id,
+      providerModels
+        .filter((m) => m.providerID === activeSessionModel!.providerID)
+        .map((m) => m.id),
+    );
+
+    const stored = workerModel.getValidatedWorkerModel(activeSessionModel.providerID);
+    if (!workerModel.isValidationStale(stored, fingerprint)) return;
+
+    // Need reference distillation data — find a recent gen-0 distillation
+    const distillations = distillation.loadForSession(projectPath, sessionID, true);
+    const gen0 = distillations.filter((d) => d.generation === 0);
+    if (gen0.length === 0) return; // no distillation data yet
+
+    const reference = gen0[gen0.length - 1]; // most recent gen-0
+    const sourceIds = reference.source_ids;
+    if (sourceIds.length === 0) return;
+
+    // Load the source temporal messages
+    const allMessages = temporal.bySession(projectPath, sessionID);
+    const sourceSet = new Set(sourceIds);
+    const sourceMessages = allMessages.filter((m) => sourceSet.has(m.id));
+    if (sourceMessages.length === 0) return;
+
+    const messagesText = sourceMessages.map((m) => m.content).join("\n");
+    const date = new Date(sourceMessages[0].created_at).toLocaleDateString("en-US", {
+      year: "numeric", month: "long", day: "numeric",
+    });
+
+    workerModelValidating = true;
+    try {
+      await workerModel.runValidation({
+        llm: createOpenCodeLLMClient(ctx.client, sessionID),
+        providerID: activeSessionModel.providerID,
+        sessionModelID: activeSessionModel.id,
+        candidates,
+        referenceObservations: reference.observations,
+        sourceMessagesText: messagesText,
+        date,
+      });
+    } catch (e) {
+      log.error("worker model validation error:", e);
+    } finally {
+      workerModelValidating = false;
+    }
+  }
+
   /** Resolve the model to use for background worker calls. */
   function getWorkerModel(): { providerID: string; modelID: string } | undefined {
     const cfg = config();
@@ -795,6 +899,12 @@ export const LorePlugin: Plugin = async (ctx) => {
         } catch (e) {
           log.error("consolidation error:", e);
         }
+
+        // Worker model auto-selection: run validation if stale.
+        // Non-blocking — only fires when fingerprint mismatch detected.
+        maybeValidateWorkerModel(sessionID).catch((e) =>
+          log.error("worker model validation error:", e),
+        );
 
         // Prune temporal messages after distillation and curation have run.
         // Pass 1: TTL — remove distilled messages older than retention period.

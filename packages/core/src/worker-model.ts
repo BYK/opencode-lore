@@ -238,6 +238,115 @@ export function parseJudgeScore(response: string): number | null {
 }
 
 // ---------------------------------------------------------------------------
+// Validation orchestration
+// ---------------------------------------------------------------------------
+
+import { DISTILLATION_SYSTEM, distillationUser } from "./prompt";
+import type { LLMClient } from "./types";
+
+export type ValidationInput = {
+  llm: LLMClient;
+  providerID: string;
+  sessionModelID: string;
+  candidates: ModelInfo[];
+  /** Recent gen-0 distillation to use as reference (observations text). */
+  referenceObservations: string;
+  /** Source messages text for re-running distillation with candidates. */
+  sourceMessagesText: string;
+  /** Date string for the distillation prompt. */
+  date: string;
+};
+
+/**
+ * Run the two-phase quality validation for worker model candidates.
+ * Returns the cheapest passing candidate, or null if none pass.
+ */
+export async function runValidation(
+  input: ValidationInput,
+): Promise<WorkerModelResult | null> {
+  const { llm, candidates, referenceObservations, sourceMessagesText, date } = input;
+
+  const userPrompt = distillationUser({
+    messages: sourceMessagesText,
+    date,
+  });
+
+  for (const candidate of candidates) {
+    // Skip the session model — it produced the reference, no need to test
+    if (candidate.id === input.sessionModelID) continue;
+
+    // Phase 1: run distillation with candidate model
+    let candidateObservations: string | null = null;
+    try {
+      const raw = await llm.prompt(DISTILLATION_SYSTEM, userPrompt, {
+        model: { providerID: candidate.providerID, modelID: candidate.id },
+        workerID: "lore-distill",
+      });
+      if (raw) {
+        // Parse <observations>...</observations> block
+        const match = raw.match(/<observations>([\s\S]*?)<\/observations>/);
+        candidateObservations = match ? match[1].trim() : raw.trim();
+      }
+    } catch (e) {
+      log.warn(`worker model validation: candidate ${candidate.id} failed:`, e);
+      continue;
+    }
+
+    const structural = structuralCheck(candidateObservations, referenceObservations);
+    if (!structural.passed) {
+      log.info(
+        `worker model validation: ${candidate.id} failed structural check: ${structural.reason}`,
+      );
+      continue;
+    }
+
+    // Phase 2: LLM judge (using session model)
+    let judgeScore: number | null = null;
+    try {
+      const judgeResponse = await llm.prompt(
+        WORKER_JUDGE_SYSTEM,
+        workerJudgeUser(referenceObservations, candidateObservations!),
+        { workerID: "lore-distill" }, // use session model (no model override)
+      );
+      if (judgeResponse) {
+        judgeScore = parseJudgeScore(judgeResponse);
+      }
+    } catch (e) {
+      log.warn(`worker model validation: judge call failed for ${candidate.id}:`, e);
+    }
+
+    if (judgeScore !== null && judgeScore < 3) {
+      log.info(
+        `worker model validation: ${candidate.id} failed judge (score=${judgeScore})`,
+      );
+      continue;
+    }
+
+    // Candidate passed both phases
+    const fingerprint = computeModelFingerprint(
+      input.providerID,
+      input.sessionModelID,
+      candidates.map((c) => c.id),
+    );
+
+    const result: WorkerModelResult = {
+      modelID: candidate.id,
+      providerID: candidate.providerID,
+      fingerprint,
+      validatedAt: Date.now(),
+      judgeScore,
+    };
+    storeValidatedWorkerModel(result);
+    log.info(
+      `worker model validated: ${candidate.id} (judge=${judgeScore}) for provider ${input.providerID}`,
+    );
+    return result;
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Effective worker model resolution
 // ---------------------------------------------------------------------------
 
