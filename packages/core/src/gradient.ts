@@ -534,6 +534,15 @@ function simpleHash(str: string): number {
   return hash;
 }
 
+/** Parsed read-tool input: file path plus optional line range. */
+type ReadRange = {
+  path: string;
+  /** 1-based start line. undefined = from beginning. */
+  offset: number | undefined;
+  /** Number of lines to read. undefined = to end. */
+  limit: number | undefined;
+};
+
 /** Extract file path from a tool's input JSON.
  *  Handles common formats: {"path": "/foo.ts"}, {"filePath": "/foo.ts"},
  *  and plain text fallback. */
@@ -548,10 +557,72 @@ function extractFilePath(input: string): string | undefined {
   }
 }
 
+/** Extract file path + line range from a read tool's input. */
+function extractReadRange(input: string): ReadRange | undefined {
+  try {
+    const parsed = JSON.parse(input);
+    const path = parsed.path || parsed.filePath || parsed.file;
+    if (!path) return undefined;
+    const offset = typeof parsed.offset === "number" ? parsed.offset : undefined;
+    const limit = typeof parsed.limit === "number" ? parsed.limit : undefined;
+    return { path, offset, limit };
+  } catch {
+    const match = input.match(/(?:[\w.-]+\/)+[\w.-]+\.\w{1,5}/);
+    if (!match) return undefined;
+    return { path: match[0], offset: undefined, limit: undefined };
+  }
+}
+
+/**
+ * Does `later` cover the line range of `earlier`?
+ *
+ * Coverage rules:
+ * - Full-file read (no offset/limit) covers everything for the same path.
+ * - A ranged read covers another ranged read when its [offset, offset+limit)
+ *   interval is a superset of (or equal to) the other's interval.
+ * - A ranged read does NOT cover a full-file read.
+ */
+export function laterReadCovers(later: ReadRange, earlier: ReadRange): boolean {
+  if (later.path !== earlier.path) return false;
+
+  // Full-file read covers everything for the same path.
+  if (later.offset === undefined && later.limit === undefined) return true;
+
+  // Later is a ranged read but earlier is full-file — can't cover.
+  if (earlier.offset === undefined && earlier.limit === undefined) return false;
+
+  // Both have ranges. Compute intervals.
+  const laterStart = later.offset ?? 1;
+  const earlierStart = earlier.offset ?? 1;
+
+  // An open-ended later read (no limit) covers if its start <= earlier start.
+  if (later.limit === undefined) return laterStart <= earlierStart;
+
+  // Earlier is open-ended but later isn't — later can't cover infinite range.
+  if (earlier.limit === undefined) return false;
+
+  // Both bounded: [start, start+limit) superset check.
+  const laterEnd = laterStart + later.limit;
+  const earlierEnd = earlierStart + earlier.limit;
+  return laterStart <= earlierStart && laterEnd >= earlierEnd;
+}
+
+/** Format a range label for dedup annotations. */
+function rangeLabel(range: ReadRange): string {
+  if (range.offset !== undefined && range.limit !== undefined) {
+    return ` lines ${range.offset}-${range.offset + range.limit - 1}`;
+  }
+  if (range.offset !== undefined) {
+    return ` from line ${range.offset}`;
+  }
+  return "";
+}
+
 /** Annotation for deduplicated tool output — follows the toolStripAnnotation() pattern. */
-function dedupAnnotation(toolName: string, filePath?: string): string {
+function dedupAnnotation(toolName: string, filePath?: string, range?: ReadRange): string {
   if (filePath) {
-    return `[earlier version of ${filePath} — see latest read below for current content]`;
+    const rl = range ? rangeLabel(range) : "";
+    return `[earlier read of ${filePath}${rl} — see latest read below for current content]`;
   }
   return `[duplicate output — same content as later ${toolName} in this session — use recall for details]`;
 }
@@ -563,7 +634,9 @@ function dedupAnnotation(toolName: string, filePath?: string): string {
  *
  * Deduplicates by:
  * 1. Exact content hash: identical tool outputs (same file read twice, same command output)
- * 2. Same-file reads: read_file outputs for the same path (content may differ due to edits)
+ * 2. Range-aware file reads: read_file/read outputs for the same path where a later
+ *    read covers the same or wider line range (full-file covers everything; a ranged
+ *    read only covers another ranged read when its interval is a superset).
  *
  * The current turn (from currentTurnIdx onward) is never touched — the model
  * needs full context for its active work. Tool parts are never removed entirely;
@@ -577,11 +650,13 @@ export function deduplicateToolOutputs(
 ): MessageWithParts[] {
   // Track latest occurrence: contentKey → latest message index
   const contentLatest = new Map<string, number>();
-  // Track latest read by file path: "read:path" → latest message index
-  const fileLatest = new Map<string, number>();
 
-  // Also include current-turn reads in the "latest" tracking so we properly
-  // recognize earlier reads as duplicates of current-turn content.
+  // Track all read ranges per file path, ordered by message index (ascending).
+  // Each entry records the range and the message index so the second pass can
+  // check whether any later read covers the current read's range.
+  const fileReads = new Map<string, Array<{ range: ReadRange; msgIdx: number }>>();
+
+  // First pass: scan all messages (including current turn) to build tracking maps.
   for (let i = 0; i < messages.length; i++) {
     for (const part of messages[i].parts) {
       if (!isToolPart(part) || part.state.status !== "completed") continue;
@@ -591,13 +666,20 @@ export function deduplicateToolOutputs(
       const key = `${part.tool}:${simpleHash(output)}`;
       contentLatest.set(key, i);
 
-      // For read-type tools, also track by file path
+      // For read-type tools, record the full range info
       if (part.tool === "read_file" || part.tool === "read") {
         const inputStr = typeof part.state.input === "string"
           ? part.state.input
           : JSON.stringify(part.state.input);
-        const fp = extractFilePath(inputStr);
-        if (fp) fileLatest.set(`read:${fp}`, i);
+        const range = extractReadRange(inputStr);
+        if (range) {
+          let entries = fileReads.get(range.path);
+          if (!entries) {
+            entries = [];
+            fileReads.set(range.path, entries);
+          }
+          entries.push({ range, msgIdx: i });
+        }
       }
     }
   }
@@ -617,19 +699,31 @@ export function deduplicateToolOutputs(
       const contentKey = `${part.tool}:${simpleHash(output)}`;
       const isLatestContent = contentLatest.get(contentKey) === msgIdx;
 
-      // Check file-path dedup for read tools: is this the latest read of this file?
-      let filePath: string | undefined;
-      let isLatestFile = true;
+      // Check range-aware file dedup for read tools: does any later read
+      // of the same file cover this read's range?
+      let readRange: ReadRange | undefined;
+      let coveredByLater = false;
       if (part.tool === "read_file" || part.tool === "read") {
         const inputStr = typeof part.state.input === "string"
           ? part.state.input
           : JSON.stringify(part.state.input);
-        filePath = extractFilePath(inputStr);
-        if (filePath) isLatestFile = fileLatest.get(`read:${filePath}`) === msgIdx;
+        readRange = extractReadRange(inputStr);
+        if (readRange) {
+          const entries = fileReads.get(readRange.path);
+          if (entries) {
+            // Check if any entry with a higher message index covers this range
+            for (const entry of entries) {
+              if (entry.msgIdx > msgIdx && laterReadCovers(entry.range, readRange)) {
+                coveredByLater = true;
+                break;
+              }
+            }
+          }
+        }
       }
 
-      // Keep if this is both the latest content AND latest file read (or not a read tool)
-      if (isLatestContent && isLatestFile) return part;
+      // Keep if this is both the latest content AND not covered by a later read
+      if (isLatestContent && !coveredByLater) return part;
 
       // This is a duplicate — replace with compact annotation
       partsChanged = true;
@@ -637,7 +731,7 @@ export function deduplicateToolOutputs(
         ...part,
         state: {
           ...part.state,
-          output: dedupAnnotation(part.tool, filePath),
+          output: dedupAnnotation(part.tool, readRange?.path, readRange),
         },
       } as LorePart;
     });

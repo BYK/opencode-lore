@@ -14,6 +14,7 @@ import {
   getLastLayer,
   estimateMessages,
   deduplicateToolOutputs,
+  laterReadCovers,
   onIdleResume,
   consumeCameOutOfIdle,
   inspectSessionState,
@@ -1434,7 +1435,7 @@ describe("deduplicateToolOutputs", () => {
     const result = deduplicateToolOutputs(msgs, 6);
 
     // First read (index 1) should be deduplicated
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier version of src/foo.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/foo.ts");
 
     // Latest read (index 5) should be intact
     expect(getToolOutput(result[5].parts[0])).toBe(LARGE_CONTENT);
@@ -1456,7 +1457,7 @@ describe("deduplicateToolOutputs", () => {
     const result = deduplicateToolOutputs(msgs, 6);
 
     // First read (old content) should be replaced — same file, not latest
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier version of src/bar.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/bar.ts");
 
     // Latest read (new content) should be intact
     expect(getToolOutput(result[5].parts[0])).toBe(newContent);
@@ -1473,7 +1474,7 @@ describe("deduplicateToolOutputs", () => {
     const result = deduplicateToolOutputs(msgs, 2);
 
     // Earlier read (index 1) should be deduped since latest is in current turn
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier version");
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier read");
 
     // Current-turn read (index 3) should NOT be touched
     expect(getToolOutput(result[3].parts[0])).toBe(LARGE_CONTENT);
@@ -1544,11 +1545,258 @@ describe("deduplicateToolOutputs", () => {
     const result = deduplicateToolOutputs(msgs, 6);
 
     // First two reads should be deduped
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier version");
-    expect(getToolOutput(result[3].parts[0])).toContain("earlier version");
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier read");
+    expect(getToolOutput(result[3].parts[0])).toContain("earlier read");
 
     // Third (latest) should be intact
     expect(getToolOutput(result[5].parts[0])).toBe(LARGE_CONTENT);
+  });
+});
+
+describe("laterReadCovers", () => {
+  test("full-file covers full-file same path", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: undefined, limit: undefined },
+      { path: "src/foo.ts", offset: undefined, limit: undefined },
+    )).toBe(true);
+  });
+
+  test("full-file covers ranged read", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: undefined, limit: undefined },
+      { path: "src/foo.ts", offset: 10, limit: 40 },
+    )).toBe(true);
+  });
+
+  test("ranged read does NOT cover full-file", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: 10, limit: 40 },
+      { path: "src/foo.ts", offset: undefined, limit: undefined },
+    )).toBe(false);
+  });
+
+  test("exact same range covers", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: 10, limit: 50 },
+      { path: "src/foo.ts", offset: 10, limit: 50 },
+    )).toBe(true);
+  });
+
+  test("wider range covers narrower range", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: 5, limit: 60 },
+      { path: "src/foo.ts", offset: 10, limit: 40 },
+    )).toBe(true);
+  });
+
+  test("narrower range does NOT cover wider range", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: 10, limit: 40 },
+      { path: "src/foo.ts", offset: 5, limit: 60 },
+    )).toBe(false);
+  });
+
+  test("non-overlapping ranges do not cover", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: 100, limit: 50 },
+      { path: "src/foo.ts", offset: 1, limit: 50 },
+    )).toBe(false);
+  });
+
+  test("different paths never cover", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: undefined, limit: undefined },
+      { path: "src/bar.ts", offset: undefined, limit: undefined },
+    )).toBe(false);
+  });
+
+  test("open-ended later covers bounded earlier with lower start", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: 10, limit: undefined },
+      { path: "src/foo.ts", offset: 20, limit: 30 },
+    )).toBe(true);
+  });
+
+  test("bounded later does NOT cover open-ended earlier", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: 10, limit: 50 },
+      { path: "src/foo.ts", offset: 10, limit: undefined },
+    )).toBe(false);
+  });
+
+  test("offset-only later covers offset-only earlier with lower start", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: 5, limit: undefined },
+      { path: "src/foo.ts", offset: 10, limit: undefined },
+    )).toBe(true);
+  });
+
+  test("offset-only later does NOT cover earlier with lower start", () => {
+    expect(laterReadCovers(
+      { path: "src/foo.ts", offset: 20, limit: undefined },
+      { path: "src/foo.ts", offset: 10, limit: undefined },
+    )).toBe(false);
+  });
+});
+
+describe("deduplicateToolOutputs — range-aware", () => {
+  const LARGE_CONTENT = "x".repeat(800);
+
+  test("full-file read covers earlier full-file read (baseline)", () => {
+    const msgs = [
+      makeMsg("u1", "user", "read file"),
+      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsg("u2", "user", "read again"),
+      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsg("u3", "user", "done"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/foo.ts");
+    expect(getToolOutput(result[3].parts[0])).toBe(LARGE_CONTENT);
+  });
+
+  test("full-file read covers earlier ranged read", () => {
+    const rangedContent = "lines 10-50 content " + "y".repeat(800);
+    const fullContent = "full file content " + "z".repeat(800);
+    const msgs = [
+      makeMsg("u1", "user", "read part of file"),
+      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":40}', rangedContent),
+      makeMsg("u2", "user", "read full file"),
+      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts"}', fullContent),
+      makeMsg("u3", "user", "done"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    // Earlier ranged read should be deduped — full-file covers it
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/foo.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain("lines 10-49");
+    // Full-file read should be intact
+    expect(getToolOutput(result[3].parts[0])).toBe(fullContent);
+  });
+
+  test("ranged read does NOT cover earlier full-file read", () => {
+    const fullContent = "full file content " + "y".repeat(800);
+    const rangedContent = "lines 10-50 content " + "z".repeat(800);
+    const msgs = [
+      makeMsg("u1", "user", "read full file"),
+      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts"}', fullContent),
+      makeMsg("u2", "user", "read part"),
+      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":40}', rangedContent),
+      makeMsg("u3", "user", "done"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    // Full-file read should NOT be deduped — narrow later read can't cover it
+    expect(getToolOutput(result[1].parts[0])).toBe(fullContent);
+    // Ranged read is latest for its range — kept
+    expect(getToolOutput(result[3].parts[0])).toBe(rangedContent);
+  });
+
+  test("wider range covers narrower range", () => {
+    const narrowContent = "narrow range " + "a".repeat(800);
+    const wideContent = "wide range " + "b".repeat(800);
+    const msgs = [
+      makeMsg("u1", "user", "read narrow"),
+      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":20,"limit":30}', narrowContent),
+      makeMsg("u2", "user", "read wider"),
+      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":60}', wideContent),
+      makeMsg("u3", "user", "done"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    // Narrow earlier read should be deduped — wider later covers it
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/foo.ts");
+    // Wider read is latest — kept
+    expect(getToolOutput(result[3].parts[0])).toBe(wideContent);
+  });
+
+  test("narrower range does NOT cover wider range", () => {
+    const wideContent = "wide range " + "a".repeat(800);
+    const narrowContent = "narrow range " + "b".repeat(800);
+    const msgs = [
+      makeMsg("u1", "user", "read wide"),
+      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":60}', wideContent),
+      makeMsg("u2", "user", "read narrow"),
+      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":20,"limit":30}', narrowContent),
+      makeMsg("u3", "user", "done"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    // Wide earlier read should NOT be deduped — narrow later can't cover it
+    expect(getToolOutput(result[1].parts[0])).toBe(wideContent);
+    // Narrow read is kept
+    expect(getToolOutput(result[3].parts[0])).toBe(narrowContent);
+  });
+
+  test("non-overlapping ranges both kept", () => {
+    const contentA = "range A " + "a".repeat(800);
+    const contentB = "range B " + "b".repeat(800);
+    const msgs = [
+      makeMsg("u1", "user", "read top"),
+      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":1,"limit":50}', contentA),
+      makeMsg("u2", "user", "read bottom"),
+      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":100,"limit":50}', contentB),
+      makeMsg("u3", "user", "done"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    // Neither covers the other — both kept
+    expect(getToolOutput(result[1].parts[0])).toBe(contentA);
+    expect(getToolOutput(result[3].parts[0])).toBe(contentB);
+  });
+
+  test("annotation includes range info for ranged reads", () => {
+    const content = "ranged " + "x".repeat(800);
+    const msgs = [
+      makeMsg("u1", "user", "read part"),
+      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":40}', content),
+      makeMsg("u2", "user", "read full"),
+      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts"}', "full " + "y".repeat(800)),
+      makeMsg("u3", "user", "done"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    const annotation = getToolOutput(result[1].parts[0])!;
+    expect(annotation).toContain("lines 10-49");
+    expect(annotation).toContain("src/foo.ts");
+  });
+
+  test("content-hash dedup still works for non-read tools", () => {
+    const bashOutput = "npm test\n" + "PASS ".repeat(200);
+    const msgs = [
+      makeMsg("u1", "user", "run tests"),
+      makeMsgWithTool("a1", "assistant", "bash", '{"command":"npm test"}', bashOutput),
+      makeMsg("u2", "user", "run again"),
+      makeMsgWithTool("a2", "assistant", "bash", '{"command":"npm test"}', bashOutput),
+      makeMsg("u3", "user", "ok"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    expect(getToolOutput(result[1].parts[0])).toContain("duplicate output");
+    expect(getToolOutput(result[3].parts[0])).toBe(bashOutput);
+  });
+
+  test("same exact ranged reads deduplicates", () => {
+    const content = "exact range " + "x".repeat(800);
+    const msgs = [
+      makeMsg("u1", "user", "read"),
+      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":50}', content),
+      makeMsg("u2", "user", "read same range"),
+      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":50}', content),
+      makeMsg("u3", "user", "done"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    // Earlier read deduped (both content hash and range match)
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier read");
+    // Latest kept
+    expect(getToolOutput(result[3].parts[0])).toBe(content);
+  });
+
+  test("read_file tool name works with ranges", () => {
+    const content = "read_file content " + "x".repeat(800);
+    const msgs = [
+      makeMsg("u1", "user", "read"),
+      makeMsgWithTool("a1", "assistant", "read_file", '{"filePath":"src/bar.ts","offset":5,"limit":20}', content),
+      makeMsg("u2", "user", "read full"),
+      makeMsgWithTool("a2", "assistant", "read_file", '{"filePath":"src/bar.ts"}', "full " + "y".repeat(800)),
+      makeMsg("u3", "user", "done"),
+    ];
+    const result = deduplicateToolOutputs(msgs, 4);
+    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/bar.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain("lines 5-24");
   });
 });
 
