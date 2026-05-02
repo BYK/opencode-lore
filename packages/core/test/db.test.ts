@@ -130,4 +130,27 @@ describe("db", () => {
     expect(row).not.toBeNull();
     expect(row!.name).toBe("kv_meta");
   });
+
+  test("recoverMissingObjects creates kv_meta when version=latest but table is missing", () => {
+    // Simulate the exact scenario: DB at current version but kv_meta missing
+    // due to a partial migration 7 (ALTER TABLE duplicate column aborted exec
+    // before CREATE TABLE kv_meta).
+    const d = db();
+
+    // Drop kv_meta to simulate the broken state
+    d.exec("DROP TABLE IF EXISTS kv_meta");
+    const before = d
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'")
+      .get();
+    expect(before).toBeNull();
+
+    // Close and re-open — migrate() should recover the missing table
+    close();
+    const fresh = db();
+    const after = fresh
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'")
+      .get() as { name: string } | null;
+    expect(after).not.toBeNull();
+    expect(after!.name).toBe("kv_meta");
+  });
 });
