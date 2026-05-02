@@ -396,7 +396,13 @@ function migrate(database: Database) {
         }
       )?.version ?? 0)
     : 0;
-  if (current >= MIGRATIONS.length) return;
+  if (current >= MIGRATIONS.length) {
+    // Schema is at the expected version but a prior partial run may have left
+    // holes (e.g. ALTER TABLE succeeded but CREATE TABLE in the same migration
+    // string was skipped). Run idempotent recovery for known fragile objects.
+    recoverMissingObjects(database);
+    return;
+  }
   for (let i = current; i < MIGRATIONS.length; i++) {
     if (i === VACUUM_MIGRATION_INDEX) {
       // VACUUM cannot run inside a transaction. Run it directly.
@@ -406,12 +412,68 @@ function migrate(database: Database) {
       database.exec("PRAGMA auto_vacuum = INCREMENTAL");
       database.exec("VACUUM");
     } else {
-      database.exec(MIGRATIONS[i]);
+      try {
+        database.exec(MIGRATIONS[i]);
+      } catch (e: unknown) {
+        // Multi-statement migrations can partially fail when an early
+        // statement (e.g. ALTER TABLE ADD COLUMN) hits a duplicate-column
+        // error from a prior partial run. Swallow duplicate-column errors
+        // so the rest of the migration loop and the version bump proceed.
+        // Any genuinely new error is re-thrown.
+        if (
+          e instanceof Error &&
+          /duplicate column name/i.test(e.message)
+        ) {
+          // The ALTER TABLE already applied — run remaining statements in
+          // this migration by stripping the offending ALTER and re-exec'ing.
+          // (Important: migrate() in db.ts runs each migration via database.exec()
+          // which stops at the first error in a multi-statement string.)
+          const stripped = stripAppliedAlters(MIGRATIONS[i], database);
+          if (stripped.trim()) database.exec(stripped);
+        } else {
+          throw e;
+        }
+      }
     }
   }
   // Update version to latest. Migration 0 inserts version=1 via its own INSERT,
   // but subsequent migrations don't update it, so always normalize to MIGRATIONS.length.
   database.exec(`UPDATE schema_version SET version = ${MIGRATIONS.length}`);
+
+  // Also run recovery for existing DBs that are already at the latest version
+  // but have holes from past partial runs.
+  recoverMissingObjects(database);
+}
+
+/**
+ * Strip ALTER TABLE ADD COLUMN statements for columns that already exist.
+ * Returns the migration string with those statements removed.
+ */
+function stripAppliedAlters(migration: string, database: Database): string {
+  return migration.replace(
+    /ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)\b[^;]*;/gi,
+    (match, table, column) => {
+      const cols = database
+        .query(`PRAGMA table_info(${table})`)
+        .all() as Array<{ name: string }>;
+      if (cols.some((c) => c.name === column)) return ""; // already exists
+      return match; // keep — this ALTER hasn't been applied
+    },
+  );
+}
+
+/**
+ * Idempotent recovery for objects that may be missing due to multi-statement
+ * migration partial failures (e.g. ALTER TABLE throws duplicate-column,
+ * aborting the exec before a subsequent CREATE TABLE in the same string).
+ */
+function recoverMissingObjects(database: Database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS kv_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
 }
 
 export function close() {
