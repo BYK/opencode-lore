@@ -280,6 +280,45 @@ export function searchScored(input: {
   }
 }
 
+/**
+ * Normalized variance of relative-existence weights over message timestamps.
+ *
+ * Measures temporal attention imbalance: 0 means timestamps are evenly
+ * distributed (uniform attention), 1 means a single distant timestamp
+ * dominates (attention stuck in the past). Useful as a lightweight
+ * signal for distillation segmentation, recall time-biasing, and
+ * idle-resume awareness.
+ *
+ * Only meaningful for n ≥ 2. Returns 0 for 0 or 1 timestamps.
+ *
+ * Based on the "Temporal Clustering via Relative Existence" heuristic
+ * from D7x7z49/llm-context-idea.
+ */
+export function temporalCnorm(
+  timestamps: number[],
+  now: number = Date.now(),
+): number {
+  const n = timestamps.length;
+  if (n < 2) return 0;
+
+  // Existence durations: how long each piece has existed
+  const durations = timestamps.map((t) => now - t);
+  const totalDuration = durations.reduce((a, b) => a + b, 0);
+  if (totalDuration <= 0) return 0;
+
+  // Relative existence weights (positive, sum to 1)
+  const weights = durations.map((d) => d / totalDuration);
+
+  // Normalized variance: Var(w) / Var_max
+  // Var(w) = (1/n) * Σ(w_i - 1/n)²
+  // Var_max = (n-1) / n²  (when one weight = 1, rest = 0)
+  const uniform = 1 / n;
+  const variance =
+    weights.reduce((sum, w) => sum + (w - uniform) ** 2, 0) / n;
+  const maxVariance = (n - 1) / (n * n);
+  return maxVariance === 0 ? 0 : variance / maxVariance;
+}
+
 export function count(projectPath: string, sessionID?: string): number {
   const pid = ensureProject(projectPath);
   const query = sessionID

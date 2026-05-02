@@ -5,6 +5,7 @@ import {
   loadForSession,
   latestMetaObservations,
   metaDistill,
+  detectSegments,
 } from "../src/distillation";
 import * as temporal from "../src/temporal";
 import { CHUNK_TERMINATOR, partsToText } from "../src/temporal";
@@ -821,5 +822,108 @@ describe("metaDistill — anchored second round", () => {
       .all(pid, META_SESSION) as Array<{ generation: number; observations: string }>;
     expect(metaRows.map((r) => r.generation)).toEqual([1, 2]);
     expect(metaRows[1]!.observations).toBe("updated");
+  });
+});
+
+// ─── detectSegments (time-gap-aware splitting) ──────────────────────────────
+
+describe("detectSegments", () => {
+  function msgs(n: number, timestamps?: number[]): temporal.TemporalMessage[] {
+    return Array.from({ length: n }, (_, i) =>
+      msg("user", `message ${i}`, {
+        id: `seg-msg-${i}`,
+        created_at: timestamps ? timestamps[i] : T + i * 1000,
+      }),
+    );
+  }
+
+  test("returns single segment when under maxSegment", () => {
+    const result = detectSegments(msgs(10), 30);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toHaveLength(10);
+  });
+
+  test("count-based split with uniform timestamps", () => {
+    // 40 messages at 1-second intervals → no significant time gap
+    // Should split at maxSegment=30 boundary
+    const result = detectSegments(msgs(40), 30);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toHaveLength(30);
+    expect(result[1]).toHaveLength(10);
+  });
+
+  test("time-gap split when a large gap exists", () => {
+    // 20 messages: first 10 at 1s intervals, then a 1-hour gap, then 10 more
+    const timestamps = [
+      ...Array.from({ length: 10 }, (_, i) => T + i * 1000),
+      ...Array.from({ length: 10 }, (_, i) => T + 3_600_000 + i * 1000),
+    ];
+    // maxSegment=15, so count-based would split at 15
+    // but the time gap at index 10 is 3,599,000ms vs median ~1000ms → should split at 10
+    const result = detectSegments(msgs(20, timestamps), 15);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toHaveLength(10);
+    expect(result[1]).toHaveLength(10);
+  });
+
+  test("merges tiny trailing segment into previous", () => {
+    // 32 messages with uniform timestamps, maxSegment=30
+    // First split at 30, leaving 2 → merged into first segment
+    const result = detectSegments(msgs(32), 30);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toHaveLength(32);
+  });
+
+  test("does not merge trailing segment with ≥ 3 messages", () => {
+    // 33 messages with uniform timestamps, maxSegment=30
+    // First split at 30, leaving 3 → NOT merged (≥ MIN_SEGMENT)
+    const result = detectSegments(msgs(33), 30);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toHaveLength(30);
+    expect(result[1]).toHaveLength(3);
+  });
+
+  test("multiple time-gap splits in large message set", () => {
+    // 46 messages in 3 bursts of ~15, separated by 1-hour gaps
+    // With maxSegment=29, the right half (31 msgs) exceeds maxSegment
+    // and triggers a second split at the next time gap
+    const timestamps = [
+      ...Array.from({ length: 15 }, (_, i) => T + i * 1000),
+      ...Array.from({ length: 15 }, (_, i) => T + 3_600_000 + i * 1000),
+      ...Array.from({ length: 16 }, (_, i) => T + 7_200_000 + i * 1000),
+    ];
+    const result = detectSegments(msgs(46, timestamps), 29);
+    expect(result).toHaveLength(3);
+    expect(result[0]).toHaveLength(15);
+    expect(result[1]).toHaveLength(15);
+    expect(result[2]).toHaveLength(16);
+  });
+
+  test("preserves original message references", () => {
+    const messages = msgs(20);
+    const result = detectSegments(messages, 10);
+    const flat = result.flat();
+    expect(flat).toHaveLength(20);
+    // Check all original messages are present
+    for (const m of messages) {
+      expect(flat.find((f) => f.id === m.id)).toBeDefined();
+    }
+  });
+
+  test("ignores time gap if it would create segment < MIN_SEGMENT", () => {
+    // 20 messages: first 2 at t=0, then a huge gap, then 18 more
+    // The gap at index 2 creates a left segment of only 2 (< MIN_SEGMENT=3)
+    // so it should NOT split there → falls back to count-based
+    const timestamps = [
+      T,
+      T + 1000,
+      T + 10_000_000,
+      ...Array.from({ length: 17 }, (_, i) => T + 10_000_000 + (i + 1) * 1000),
+    ];
+    const result = detectSegments(msgs(20, timestamps), 15);
+    // Should use count-based split at 15, not time-gap at 2
+    expect(result).toHaveLength(2);
+    expect(result[0]).toHaveLength(15);
+    expect(result[1]).toHaveLength(5);
   });
 });

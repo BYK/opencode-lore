@@ -19,32 +19,125 @@ export { workerSessionIDs };
 
 type TemporalMessage = temporal.TemporalMessage;
 
-// Segment detection: group related messages together
-function detectSegments(
+/**
+ * Compression health ratio: k / √N.
+ *
+ * k = distilled token count, N = source token count.
+ * Values < 1.0 signal likely lossy compression (below the square-root
+ * boundary). Values > 1.0 signal relatively faithful compression.
+ *
+ * Based on the "LLM Context Square Root Theory" heuristic from
+ * D7x7z49/llm-context-idea. The specific threshold is unvalidated —
+ * use as a diagnostic signal, not a hard gate.
+ */
+export function compressionRatio(
+  distilledTokens: number,
+  sourceTokens: number,
+): number {
+  if (sourceTokens <= 0) return 0;
+  return distilledTokens / Math.sqrt(sourceTokens);
+}
+
+/**
+ * Segment detection: group related messages into distillation-sized chunks.
+ *
+ * When the message count exceeds `maxSegment`, prefers splitting at the
+ * largest inter-message time gap (if it's ≥ 3× the median gap) to respect
+ * natural conversation boundaries. Falls back to count-based splitting at
+ * `maxSegment` when timestamps are uniform.
+ *
+ * Trailing segments with < 3 messages are merged into the previous segment
+ * to avoid tiny distillation inputs with too little context.
+ *
+ * Exported for testing; `run()` is the production caller.
+ */
+export function detectSegments(
   messages: TemporalMessage[],
   maxSegment: number,
 ): TemporalMessage[][] {
   if (messages.length <= maxSegment) return [messages];
-  const segments: TemporalMessage[][] = [];
-  let current: TemporalMessage[] = [];
+  return splitSegments(messages, maxSegment);
+}
 
-  for (const msg of messages) {
-    current.push(msg);
-    // Split on segment size limit
-    if (current.length >= maxSegment) {
-      segments.push(current);
-      current = [];
+/** Minimum segment size — segments smaller than this get merged. */
+const MIN_SEGMENT = 3;
+
+/**
+ * Multiplier for the median gap threshold: a time gap must be at least
+ * this many times the median gap to be used as a split point.
+ */
+const GAP_THRESHOLD_MULTIPLIER = 3;
+
+function splitSegments(
+  messages: TemporalMessage[],
+  maxSegment: number,
+): TemporalMessage[][] {
+  if (messages.length <= maxSegment) return [messages];
+
+  // Find the split point: prefer the largest time gap if it's significant
+  const splitIdx = findSplitIndex(messages, maxSegment);
+
+  const left = messages.slice(0, splitIdx);
+  const right = messages.slice(splitIdx);
+
+  // Recurse on both halves
+  const result = splitSegments(left, maxSegment);
+
+  if (right.length < MIN_SEGMENT) {
+    // Merge tiny trailing segment into the last segment
+    result[result.length - 1].push(...right);
+  } else {
+    result.push(...splitSegments(right, maxSegment));
+  }
+
+  return result;
+}
+
+/**
+ * Choose where to split an oversized message array.
+ *
+ * If there's a time gap ≥ 3× the median gap AND it falls within a range
+ * that would produce segments of at least MIN_SEGMENT size, use it.
+ * Otherwise fall back to the count-based boundary at `maxSegment`.
+ */
+function findSplitIndex(
+  messages: TemporalMessage[],
+  maxSegment: number,
+): number {
+  // Compute consecutive time gaps
+  const gaps: Array<{ index: number; gap: number }> = [];
+  for (let i = 1; i < messages.length; i++) {
+    gaps.push({
+      index: i,
+      gap: messages[i].created_at - messages[i - 1].created_at,
+    });
+  }
+
+  if (gaps.length === 0) return maxSegment;
+
+  // Find median gap
+  const sortedGaps = gaps.map((g) => g.gap).sort((a, b) => a - b);
+  const medianGap = sortedGaps[Math.floor(sortedGaps.length / 2)];
+
+  // Find the largest gap that would produce viable segments (≥ MIN_SEGMENT on each side)
+  let bestGap = { index: -1, gap: 0 };
+  for (const g of gaps) {
+    if (
+      g.gap > bestGap.gap &&
+      g.index >= MIN_SEGMENT &&
+      messages.length - g.index >= MIN_SEGMENT
+    ) {
+      bestGap = g;
     }
   }
-  if (current.length > 0) {
-    // Merge small trailing segment with previous if too small
-    if (current.length < 3 && segments.length > 0) {
-      segments[segments.length - 1].push(...current);
-    } else {
-      segments.push(current);
-    }
+
+  // Use the time gap if it's significantly larger than median
+  if (bestGap.index > 0 && bestGap.gap >= medianGap * GAP_THRESHOLD_MULTIPLIER) {
+    return bestGap.index;
   }
-  return segments;
+
+  // Fall back to count-based splitting
+  return maxSegment;
 }
 
 function formatTime(ms: number): string {
@@ -526,6 +619,19 @@ async function distillSegment(input: {
     generation: 0,
   });
   temporal.markDistilled(input.messages.map((m) => m.id));
+
+  // Diagnostic: log compression health and temporal clustering metrics.
+  // R_compression (k/√N): < 1.0 signals likely lossy distillation.
+  // C_norm: 0 = uniform timestamps, 1 = dominated by distant past.
+  const distilledTokens = Math.ceil(result.observations.length / 3);
+  const sourceTokens = input.messages.reduce((sum, m) => sum + m.tokens, 0);
+  const rComp = compressionRatio(distilledTokens, sourceTokens);
+  const cNorm = temporal.temporalCnorm(input.messages.map((m) => m.created_at));
+  log.info(
+    `distill segment: ${input.messages.length} msgs, ` +
+      `${sourceTokens}→${distilledTokens} tokens, ` +
+      `R=${rComp.toFixed(2)}, C_norm=${cNorm.toFixed(3)}`,
+  );
 
   // Fire-and-forget: embed the distillation for vector search
   if (embedding.isAvailable()) {
