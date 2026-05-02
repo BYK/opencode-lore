@@ -322,6 +322,24 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
         key: (r) => `t:${r.item.id}`,
       },
     );
+
+    // Recency-biased list for temporal results: same candidates re-ranked
+    // by created_at (newest first). RRF naturally boosts messages that
+    // appear in both the BM25 and recency lists — i.e. results that are
+    // both semantically relevant AND recent. Uses the same `t:` key prefix
+    // so RRF merges rather than duplicates.
+    if (temporalResults.length > 0) {
+      const recencySorted = [...temporalResults].sort(
+        (a, b) => b.created_at - a.created_at,
+      );
+      allRrfLists.push({
+        items: recencySorted.map((item) => ({
+          source: "temporal" as const,
+          item,
+        })),
+        key: (r) => `t:${r.item.id}`,
+      });
+    }
   }
 
   // Vector search on the original query (not expansions — avoid redundant embeds).
