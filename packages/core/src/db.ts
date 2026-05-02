@@ -2,7 +2,7 @@ import { Database } from "#db/driver";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 const MIGRATIONS: string[] = [
   `
@@ -332,6 +332,22 @@ const MIGRATIONS: string[] = [
   )
   WHERE content LIKE '%' || char(10) || '[tool:%'
      OR content LIKE '%' || char(10) || '[reasoning] %';
+  `,
+  `
+  -- Version 12: Context health diagnostic columns on distillations.
+  --
+  -- r_compression: k/√N where k = distilled token count, N = source token
+  -- count. Values < 1.0 signal likely lossy compression. NULL for rows
+  -- created before this migration or for meta-distillations (gen > 0)
+  -- where the metric is not computed.
+  --
+  -- c_norm: normalized variance of relative-existence weights over source
+  -- message timestamps. Range [0, 1]; 0 = uniform distribution, 1 = attention
+  -- dominated by distant past. NULL for pre-migration rows or meta-distillations.
+  --
+  -- Both columns are nullable REALs — cheap to add, no backfill needed.
+  ALTER TABLE distillations ADD COLUMN r_compression REAL;
+  ALTER TABLE distillations ADD COLUMN c_norm REAL;
   `,
 ];
 
