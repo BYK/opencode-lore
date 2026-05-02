@@ -328,6 +328,10 @@ export type Distillation = {
   generation: number;
   token_count: number;
   created_at: number;
+  /** k/√N compression ratio. NULL for pre-v12 rows or meta-distillations. */
+  r_compression: number | null;
+  /** Temporal clustering [0,1]. NULL for pre-v12 rows or meta-distillations. */
+  c_norm: number | null;
 };
 
 /**
@@ -351,8 +355,8 @@ export function loadForSession(
 ): Distillation[] {
   const pid = ensureProject(projectPath);
   const sql = includeArchived
-    ? "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC"
-    : "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC";
+    ? "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at, r_compression, c_norm FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC"
+    : "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at, r_compression, c_norm FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC";
   const rows = db()
     .query(sql)
     .all(pid, sessionID) as Array<{
@@ -364,6 +368,8 @@ export function loadForSession(
     generation: number;
     token_count: number;
     created_at: number;
+    r_compression: number | null;
+    c_norm: number | null;
   }>;
   return rows.map((r) => ({
     ...r,
@@ -377,6 +383,8 @@ function storeDistillation(input: {
   observations: string;
   sourceIDs: string[];
   generation: number;
+  rCompression?: number;
+  cNorm?: number;
 }): string {
   const pid = ensureProject(input.projectPath);
   const id = crypto.randomUUID();
@@ -384,8 +392,8 @@ function storeDistillation(input: {
   const tokens = Math.ceil(input.observations.length / 3);
   db()
     .query(
-      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -398,6 +406,8 @@ function storeDistillation(input: {
       input.generation,
       tokens,
       Date.now(),
+      input.rCompression ?? null,
+      input.cNorm ?? null,
     );
   return id;
 }
@@ -420,7 +430,7 @@ function loadGen0(projectPath: string, sessionID: string): Distillation[] {
   const pid = ensureProject(projectPath);
   const rows = db()
     .query(
-      "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0 AND archived = 0 ORDER BY created_at ASC",
+      "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at, r_compression, c_norm FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0 AND archived = 0 ORDER BY created_at ASC",
     )
     .all(pid, sessionID) as Array<{
     id: string;
@@ -431,6 +441,8 @@ function loadGen0(projectPath: string, sessionID: string): Distillation[] {
     generation: number;
     token_count: number;
     created_at: number;
+    r_compression: number | null;
+    c_norm: number | null;
   }>;
   return rows.map((r) => ({
     ...r,
@@ -611,22 +623,23 @@ async function distillSegment(input: {
   const result = parseDistillationResult(responseText);
   if (!result) return null;
 
+  // Compute context health metrics before storing.
+  const distilledTokens = Math.ceil(result.observations.length / 3);
+  const sourceTokens = input.messages.reduce((sum, m) => sum + m.tokens, 0);
+  const rComp = compressionRatio(distilledTokens, sourceTokens);
+  const cNorm = temporal.temporalCnorm(input.messages.map((m) => m.created_at));
+
   const distillId = storeDistillation({
     projectPath: input.projectPath,
     sessionID: input.sessionID,
     observations: result.observations,
     sourceIDs: input.messages.map((m) => m.id),
     generation: 0,
+    rCompression: rComp,
+    cNorm,
   });
   temporal.markDistilled(input.messages.map((m) => m.id));
 
-  // Diagnostic: log compression health and temporal clustering metrics.
-  // R_compression (k/√N): < 1.0 signals likely lossy distillation.
-  // C_norm: 0 = uniform timestamps, 1 = dominated by distant past.
-  const distilledTokens = Math.ceil(result.observations.length / 3);
-  const sourceTokens = input.messages.reduce((sum, m) => sum + m.tokens, 0);
-  const rComp = compressionRatio(distilledTokens, sourceTokens);
-  const cNorm = temporal.temporalCnorm(input.messages.map((m) => m.created_at));
   log.info(
     `distill segment: ${input.messages.length} msgs, ` +
       `${sourceTokens}→${distilledTokens} tokens, ` +

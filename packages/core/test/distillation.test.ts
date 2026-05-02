@@ -6,6 +6,7 @@ import {
   latestMetaObservations,
   metaDistill,
   detectSegments,
+  type Distillation,
 } from "../src/distillation";
 import * as temporal from "../src/temporal";
 import { CHUNK_TERMINATOR, partsToText } from "../src/temporal";
@@ -925,5 +926,57 @@ describe("detectSegments", () => {
     expect(result).toHaveLength(2);
     expect(result[0]).toHaveLength(15);
     expect(result[1]).toHaveLength(5);
+  });
+});
+
+// ─── r_compression / c_norm DB columns ──────────────────────────────────────
+
+describe("context health columns", () => {
+  const HEALTH_PROJECT = "/test/distillation/health";
+  const HEALTH_SESSION = "health-sess";
+
+  test("pre-existing rows have NULL for r_compression and c_norm", () => {
+    const pid = ensureProject(HEALTH_PROJECT);
+    // Insert a row the old way (without the new columns)
+    const id = crypto.randomUUID();
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, '', '[]', ?, '[]', 0, 10, 0, ?)`,
+      )
+      .run(id, pid, HEALTH_SESSION, "old-style observation", Date.now());
+
+    const rows = loadForSession(HEALTH_PROJECT, HEALTH_SESSION);
+    const row = rows.find((r) => r.id === id)!;
+    expect(row).toBeDefined();
+    expect(row.r_compression).toBeNull();
+    expect(row.c_norm).toBeNull();
+  });
+
+  test("rows with metrics have correct r_compression and c_norm", () => {
+    const pid = ensureProject(HEALTH_PROJECT);
+    const id = crypto.randomUUID();
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at, r_compression, c_norm)
+         VALUES (?, ?, ?, '', '[]', ?, '[]', 0, 10, 0, ?, ?, ?)`,
+      )
+      .run(id, pid, HEALTH_SESSION, "observation with metrics", Date.now(), 2.45, 0.037);
+
+    const rows = loadForSession(HEALTH_PROJECT, HEALTH_SESSION);
+    const row = rows.find((r) => r.id === id)!;
+    expect(row).toBeDefined();
+    expect(row.r_compression).toBeCloseTo(2.45, 5);
+    expect(row.c_norm).toBeCloseTo(0.037, 5);
+  });
+
+  test("loadForSession returns both null and valued metrics together", () => {
+    const rows = loadForSession(HEALTH_PROJECT, HEALTH_SESSION);
+    // We inserted 2 rows above: one without metrics, one with
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    const nullRow = rows.find((r) => r.r_compression === null);
+    const valuedRow = rows.find((r) => r.r_compression !== null);
+    expect(nullRow).toBeDefined();
+    expect(valuedRow).toBeDefined();
   });
 });
