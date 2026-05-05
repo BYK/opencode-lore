@@ -707,8 +707,22 @@ export const LorePlugin: Plugin = async (ctx) => {
             activeSessions.add(msg.sessionID);
             if (msg.role === "user") turnsSinceCuration++;
 
-            // Incremental distillation: when undistilled messages accumulate past
-            // maxSegment, distill immediately instead of waiting for session.idle.
+            // Incremental distillation: only fire at turn boundaries (user message)
+            // to avoid producing distillation rows mid-chain that would change the
+            // distilled prefix and bust the prompt cache. The gradient's distillation
+            // snapshot is frozen during tool-call chains, so rows produced mid-chain
+            // can't be consumed until the next turn anyway — deferring to session.idle
+            // or next user message costs nothing but avoids DB churn and cache busts.
+            if (msg.role === "user") {
+              const pending = temporal.undistilledCount(projectPath, msg.sessionID);
+              if (pending >= config().distillation.maxSegment) {
+                log.info(
+                  `incremental distillation (turn boundary): ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
+                );
+                backgroundDistill(msg.sessionID);
+              }
+            }
+
             if (
               msg.role === "assistant" &&
               msg.tokens &&
@@ -719,14 +733,6 @@ export const LorePlugin: Plugin = async (ctx) => {
               // to think only 3 tokens went in and passing the full session as layer 0.
               (msg.tokens.input > 0 || msg.tokens.cache.read > 0 || msg.tokens.cache.write > 0)
             ) {
-              const pending = temporal.undistilledCount(projectPath, msg.sessionID);
-              if (pending >= config().distillation.maxSegment) {
-                log.info(
-                  `incremental distillation: ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
-                );
-                backgroundDistill(msg.sessionID);
-              }
-
               // Calibrate overhead using real token counts from the API response.
               // actualInput = all tokens the model processed (input + cache.read + cache.write).
               // The message estimate comes from the transform's own output (stored in
