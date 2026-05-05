@@ -10,6 +10,7 @@ import {
   getLtmBudget,
   resetPrefixCache,
   resetRawWindowCache,
+  resetDistillationSnapshot,
   setForceMinLayer,
   getLastLayer,
   estimateMessages,
@@ -2009,5 +2010,174 @@ describe("reasoning preservation (F-REASONING-AUDIT mini-pin)", () => {
     expect(reasoningPart!.text).toBe(
       "I should consider the trade-offs carefully here.",
     );
+  });
+});
+
+describe("gradient — distillation snapshot caching", () => {
+  const SID = "distill-snapshot-sess";
+  const PID_KEY = "distill-snapshot-project";
+  let projectId: string;
+
+  function insertDistillation(opts: {
+    sessionID: string;
+    observations: string;
+    archived?: number;
+  }): string {
+    const id = crypto.randomUUID();
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        projectId,
+        opts.sessionID,
+        "",
+        "[]",
+        opts.observations,
+        "[]",
+        0,
+        Math.ceil(opts.observations.length / 3),
+        opts.archived ?? 0,
+        Date.now(),
+      );
+    return id;
+  }
+
+  beforeAll(() => {
+    projectId = ensureProject(`/test/${PID_KEY}`);
+    // Small context to force gradient mode (layer 1+)
+    setModelLimits({ context: 5_000, output: 1_000 });
+    calibrate(0);
+  });
+
+  beforeEach(() => {
+    resetCalibration(SID);
+    resetPrefixCache(SID);
+    resetRawWindowCache(SID);
+    resetDistillationSnapshot(SID);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+  });
+
+  afterAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+  });
+
+  test("consecutive transforms with same user message reuse cached distillation rows", () => {
+    // Insert a distillation row so the prefix has content
+    insertDistillation({
+      sessionID: SID,
+      observations: "- Initial observation about the task\n- Second observation",
+    });
+
+    // Build a conversation big enough to trigger gradient mode (layer 1+)
+    const messages = Array.from({ length: 16 }, (_, i) =>
+      makeMsg(`snap-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(1_000), SID),
+    );
+
+    const projectPath = `/test/${PID_KEY}`;
+    const result1 = transform({ messages, projectPath, sessionID: SID });
+    expect(result1.layer).toBeGreaterThanOrEqual(1);
+
+    // Insert a NEW distillation row between calls — simulates background distill arriving mid-chain
+    insertDistillation({
+      sessionID: SID,
+      observations: "- New observation that should NOT be consumed mid-chain",
+    });
+
+    // Same messages (same last user message) — should get cached snapshot
+    const result2 = transform({ messages, projectPath, sessionID: SID });
+    expect(result2.layer).toBeGreaterThanOrEqual(1);
+
+    // The distilled prefix should be identical (snapshot frozen)
+    // Find prefix messages (those without session ID = distilled)
+    const prefix1 = result1.messages.filter((m) => !m.info.sessionID || m.info.sessionID !== SID);
+    const prefix2 = result2.messages.filter((m) => !m.info.sessionID || m.info.sessionID !== SID);
+
+    // Prefix text should be byte-identical — the new row was NOT consumed
+    const text1 = prefix1.map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join()).join();
+    const text2 = prefix2.map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join()).join();
+    expect(text2).toBe(text1);
+    expect(text1).not.toContain("should NOT be consumed");
+  });
+
+  test("new user message triggers distillation refresh", () => {
+    insertDistillation({
+      sessionID: SID,
+      observations: "- First observation",
+    });
+
+    const projectPath = `/test/${PID_KEY}`;
+
+    // First call with user msg u-0
+    const messages1 = Array.from({ length: 16 }, (_, i) =>
+      makeMsg(`ref-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(1_000), SID),
+    );
+    const result1 = transform({ messages: messages1, projectPath, sessionID: SID });
+    expect(result1.layer).toBeGreaterThanOrEqual(1);
+
+    // Insert a new distillation row
+    insertDistillation({
+      sessionID: SID,
+      observations: "- Second observation after turn boundary",
+    });
+
+    // Append a NEW user message — this is a turn boundary, should refresh
+    const messages2 = [
+      ...messages1,
+      makeMsg("ref-new-user", "user", "New question from the user", SID),
+    ];
+    const result2 = transform({ messages: messages2, projectPath, sessionID: SID });
+    expect(result2.layer).toBeGreaterThanOrEqual(1);
+
+    // The prefix should now contain the new distillation
+    const allText = result2.messages
+      .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+      .join();
+    expect(allText).toContain("Second observation");
+  });
+
+  test("onIdleResume clears distillation snapshot", () => {
+    insertDistillation({
+      sessionID: SID,
+      observations: "- Pre-idle observation",
+    });
+
+    const projectPath = `/test/${PID_KEY}`;
+
+    // Build up state with a transform
+    const messages = Array.from({ length: 16 }, (_, i) =>
+      makeMsg(`idle-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(1_000), SID),
+    );
+    transform({ messages, projectPath, sessionID: SID });
+
+    // Verify snapshot exists via inspectSessionState
+    const state1 = inspectSessionState(SID);
+    expect(state1?.distillationSnapshot).not.toBeNull();
+
+    // Insert new distillation
+    insertDistillation({
+      sessionID: SID,
+      observations: "- Post-idle observation that should appear after resume",
+    });
+
+    // Simulate idle resume — sets lastTurnAt first so onIdleResume triggers
+    setLastTurnAtForTest(SID, Date.now() - 600_000); // 10 minutes ago
+    const idle = onIdleResume(SID, 60_000);
+    expect(idle.triggered).toBe(true);
+
+    // Verify snapshot was cleared
+    const state2 = inspectSessionState(SID);
+    expect(state2?.distillationSnapshot).toBeNull();
+
+    // Next transform should pick up the new distillation (same user messages — but snapshot was cleared)
+    const result = transform({ messages, projectPath, sessionID: SID });
+    const allText = result.messages
+      .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+      .join();
+    expect(allText).toContain("Post-idle observation");
   });
 });
