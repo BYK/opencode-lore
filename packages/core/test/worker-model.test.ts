@@ -12,12 +12,17 @@ import { computeLayer0Cap } from "../src/gradient";
 // selectWorkerCandidates
 // ---------------------------------------------------------------------------
 
-const mkModel = (id: string, provider: string, costInput: number): ModelInfo => ({
+const mkModel = (
+  id: string,
+  provider: string,
+  costInput: number,
+  reasoning?: boolean,
+): ModelInfo => ({
   id,
   providerID: provider,
   cost: { input: costInput },
   status: "active",
-  capabilities: { input: { text: true } },
+  capabilities: { input: { text: true }, reasoning },
 });
 
 describe("selectWorkerCandidates", () => {
@@ -81,6 +86,72 @@ describe("selectWorkerCandidates", () => {
       [],
     );
     expect(candidates.length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectWorkerCandidates — reasoning preference
+// ---------------------------------------------------------------------------
+
+describe("selectWorkerCandidates — reasoning preference", () => {
+  test("prefers non-reasoning model at equal cost", () => {
+    const sonnetReasoning = mkModel("claude-sonnet-4-6-thinking", "anthropic", 3, true);
+    const sonnetPlain = mkModel("claude-sonnet-4-6", "anthropic", 3, false);
+    const opus = mkModel("claude-opus-4-7", "anthropic", 5, true);
+
+    const candidates = selectWorkerCandidates(
+      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
+      [sonnetReasoning, sonnetPlain, opus],
+    );
+
+    // Both are at cost 3: non-reasoning is cheapest (sorted first),
+    // reasoning is one-below-session (last among cost < 5).
+    // The non-reasoning model should come first in the candidates array.
+    expect(candidates.length).toBe(2);
+    expect(candidates[0].id).toBe("claude-sonnet-4-6"); // non-reasoning first
+    expect(candidates[1].id).toBe("claude-sonnet-4-6-thinking");
+  });
+
+  test("cheapest non-reasoning wins over costlier non-reasoning", () => {
+    const haiku = mkModel("claude-haiku-4-5", "anthropic", 1, false);
+    const sonnet = mkModel("claude-sonnet-4-6", "anthropic", 3, false);
+    const opus = mkModel("claude-opus-4-7", "anthropic", 5, true);
+
+    const candidates = selectWorkerCandidates(
+      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
+      [haiku, sonnet, opus],
+    );
+
+    expect(candidates.length).toBe(2);
+    expect(candidates[0].id).toBe("claude-haiku-4-5");
+    expect(candidates[1].id).toBe("claude-sonnet-4-6");
+  });
+
+  test("reasoning model still selected if it is the only cheaper option", () => {
+    const sonnetReasoning = mkModel("claude-sonnet-4-6-thinking", "anthropic", 3, true);
+    const opus = mkModel("claude-opus-4-7", "anthropic", 5, true);
+
+    const candidates = selectWorkerCandidates(
+      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
+      [sonnetReasoning, opus],
+    );
+
+    expect(candidates.length).toBe(1);
+    expect(candidates[0].id).toBe("claude-sonnet-4-6-thinking");
+  });
+
+  test("undefined reasoning is treated as non-reasoning (backwards compat)", () => {
+    const haikuNoFlag = mkModel("claude-haiku-4-5", "anthropic", 1); // reasoning=undefined
+    const haikuReasoning = mkModel("claude-haiku-4-5-thinking", "anthropic", 1, true);
+    const opus = mkModel("claude-opus-4-7", "anthropic", 5, true);
+
+    const candidates = selectWorkerCandidates(
+      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
+      [haikuReasoning, haikuNoFlag, opus],
+    );
+
+    // At equal cost, undefined reasoning (falsy) sorts before reasoning=true
+    expect(candidates[0].id).toBe("claude-haiku-4-5");
   });
 });
 

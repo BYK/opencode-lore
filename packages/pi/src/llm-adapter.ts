@@ -35,6 +35,7 @@ export function createPiLLMClient(
       opts?: {
         model?: { providerID: string; modelID: string };
         workerID?: string;
+        thinking?: boolean;
       },
     ): Promise<string | null> {
       // Resolve the model: opts.model (per-call override) > defaultModel (session model)
@@ -85,6 +86,10 @@ export function createPiLLMClient(
             // Surface the ctx.signal if it's defined — lets user abort
             // cancel pending worker LLM calls. Defined during active turns.
             signal: ctx.signal,
+            // Explicitly disable thinking when requested. Pi's complete()
+            // already defaults to thinkingEnabled: false for streamAnthropic,
+            // but being explicit guards against upstream behavior changes.
+            ...(opts?.thinking === false ? { thinkingEnabled: false } : {}),
           },
         );
 

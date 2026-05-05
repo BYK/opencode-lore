@@ -82,7 +82,7 @@ export async function run(input: {
   const responseText = await input.llm.prompt(
     CURATOR_SYSTEM,
     userContent,
-    { model, workerID: "lore-curator" },
+    { model, workerID: "lore-curator", thinking: false },
   );
   if (!responseText) return { created: 0, updated: 0, deleted: 0 };
 
@@ -185,7 +185,7 @@ export async function consolidate(input: {
   const responseText = await input.llm.prompt(
     CONSOLIDATION_SYSTEM,
     userContent,
-    { model, workerID: "lore-curator" },
+    { model, workerID: "lore-curator", thinking: false },
   );
   if (!responseText) return { updated: 0, deleted: 0 };
 

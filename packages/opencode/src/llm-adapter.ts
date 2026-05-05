@@ -28,6 +28,11 @@ import { workerSessionIDs } from "@loreai/core";
  * prevents accumulating multiple assistant messages with reasoning/thinking
  * parts, which providers reject.
  *
+ * NOTE: `opts.thinking` cannot be honored — OpenCode SDK's `session.prompt()`
+ * has no thinking toggle. Thinking is controlled by model capabilities.
+ * Rely on Part A (non-reasoning model selection in worker-model.ts) to
+ * avoid thinking tokens for background workers.
+ *
  * @param client     The OpenCode SDK client
  * @param parentID   Parent session ID — child sessions are created under this
  */

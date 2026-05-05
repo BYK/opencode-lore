@@ -616,7 +616,7 @@ async function distillSegment(input: {
   const responseText = await input.llm.prompt(
     DISTILLATION_SYSTEM,
     userContent,
-    { model, workerID: "lore-distill" },
+    { model, workerID: "lore-distill", thinking: false },
   );
   if (!responseText) return null;
 
@@ -694,7 +694,7 @@ export async function metaDistill(input: {
   const responseText = await input.llm.prompt(
     RECURSIVE_SYSTEM,
     userContent,
-    { model, workerID: "lore-distill" },
+    { model, workerID: "lore-distill", thinking: false },
   );
   if (!responseText) return null;
 
