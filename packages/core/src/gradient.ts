@@ -72,6 +72,13 @@ let calibratedOverhead: number | null = null;
 // response via UNCALIBRATED_SAFETY.
 // ---------------------------------------------------------------------------
 
+type DistillationSnapshot = {
+  /** Cached distillation rows from the most recent DB read */
+  rows: Distillation[];
+  /** ID of the last user message when this snapshot was taken */
+  lastUserMsgId: string | null;
+};
+
 type SessionState = {
   /** Exact input token count from the last successful API response */
   lastKnownInput: number;
@@ -116,6 +123,19 @@ type SessionState = {
   consecutiveHighLayer: number;
   /** Hash of the first message IDs in the last transform output — for cache-bust diagnostics. */
   lastPrefixHash: string;
+  /**
+   * Distillation row snapshot — cached to avoid hitting the DB on every
+   * transform() call. Refreshed only at turn boundaries (when a new user
+   * message appears) or on first call / idle resume. During autonomous
+   * tool-call chains this stays frozen, keeping the distilled prefix
+   * byte-identical across consecutive API calls and preserving the prompt
+   * cache.
+   *
+   * Cost context: each prefix refresh costs context_size × cache_write_price
+   * (~$1.88 per bust at 500K Sonnet). New distillations have near-zero
+   * marginal value mid-chain since the model already has raw messages.
+   */
+  distillationSnapshot: DistillationSnapshot | null;
 };
 
 function makeSessionState(): SessionState {
@@ -134,6 +154,7 @@ function makeSessionState(): SessionState {
     cameOutOfIdle: false,
     consecutiveHighLayer: 0,
     lastPrefixHash: "",
+    distillationSnapshot: null,
   };
 }
 
@@ -196,6 +217,7 @@ export function onIdleResume(
   if (idleMs < thresholdMs) return { triggered: false };
   state.prefixCache = null;
   state.rawWindowCache = null;
+  state.distillationSnapshot = null;
   state.cameOutOfIdle = true;
   return { triggered: true, idleMs };
 }
@@ -379,6 +401,7 @@ export function inspectSessionState(sessionID: string): {
   hasRawWindowCache: boolean;
   cameOutOfIdle: boolean;
   lastTurnAt: number;
+  distillationSnapshot: DistillationSnapshot | null;
 } | null {
   const state = sessionStates.get(sessionID);
   if (!state) return null;
@@ -387,6 +410,7 @@ export function inspectSessionState(sessionID: string): {
     hasRawWindowCache: state.rawWindowCache !== null,
     cameOutOfIdle: state.cameOutOfIdle,
     lastTurnAt: state.lastTurnAt,
+    distillationSnapshot: state.distillationSnapshot,
   };
 }
 
@@ -423,6 +447,46 @@ function loadDistillations(
   return db()
     .query(query)
     .all(...params) as Distillation[];
+}
+
+// Cached distillation loader — avoids hitting the DB on every transform() call.
+// Refreshed only at turn boundaries (when a new user message appears), on first
+// call (null snapshot), or after idle resume (snapshot cleared by onIdleResume).
+// During autonomous tool-call chains (consecutive assistant→tool→assistant with
+// the same last user message), returns the cached rows so the distilled prefix
+// stays byte-identical and preserves the Anthropic prompt cache.
+function loadDistillationsCached(
+  projectPath: string,
+  sessionID: string,
+  messages: MessageWithParts[],
+  sessState: SessionState,
+): Distillation[] {
+  // Find the last user message ID in the input
+  let lastUserMsgId: string | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].info.role === "user") {
+      lastUserMsgId = messages[i].info.id;
+      break;
+    }
+  }
+
+  const snapshot = sessState.distillationSnapshot;
+
+  // Cache hit: same user message = still in the same tool-call chain
+  if (snapshot && snapshot.lastUserMsgId === lastUserMsgId) {
+    return snapshot.rows;
+  }
+
+  // Cache miss: new user message (turn boundary), first call, or post-idle
+  const rows = loadDistillations(projectPath, sessionID);
+  sessState.distillationSnapshot = { rows, lastUserMsgId };
+
+  log.info(
+    `distillation refresh: ${rows.length} rows` +
+      ` (user msg ${lastUserMsgId?.substring(0, 16) ?? "none"})`,
+  );
+
+  return rows;
 }
 
 // Strip all <system-reminder>...</system-reminder> blocks from message text.
@@ -765,8 +829,14 @@ function sanitizeToolParts(
       if (status === "completed" || status === "error") return part;
 
       // pending or running → convert to error so SDK emits tool_result
+      // Use a deterministic timestamp (0) instead of Date.now() so that
+      // repeated transform() calls on the same stale pending part produce
+      // identical bytes.  OpenCode's prompt-loop cache fix (e148f00aa)
+      // preserves old pending parts across iterations; Date.now() here
+      // would re-stamp them each call → different bytes → cache bust.
       partsChanged = true;
-      const now = Date.now();
+      const existingStart =
+        "time" in part.state ? part.state.time.start : 0;
       return {
         ...part,
         state: {
@@ -776,8 +846,8 @@ function sanitizeToolParts(
           metadata:
             "metadata" in part.state ? part.state.metadata : undefined,
           time: {
-            start: "time" in part.state ? part.state.time.start : now,
-            end: now,
+            start: existingStart,
+            end: existingStart,
           },
         },
       } as LorePart;
@@ -1147,6 +1217,16 @@ export function resetPrefixCache(sessionID?: string) {
   }
 }
 
+// For testing only — reset distillation snapshot for a specific session (or all)
+export function resetDistillationSnapshot(sessionID?: string) {
+  if (sessionID) {
+    const state = sessionStates.get(sessionID);
+    if (state) state.distillationSnapshot = null;
+  } else {
+    for (const state of sessionStates.values()) state.distillationSnapshot = null;
+  }
+}
+
 // --- Approach B: Lazy raw window eviction ---
 //
 // Tracks the ID of the first (oldest) message in the previous raw window.
@@ -1417,7 +1497,9 @@ function transformInner(input: {
   const dedupMessages = deduplicateToolOutputs(input.messages, turnStart);
 
 
-  const distillations = sid ? loadDistillations(input.projectPath, sid) : [];
+  const distillations = sid
+    ? loadDistillationsCached(input.projectPath, sid, input.messages, sessState)
+    : [];
 
   // Layer 1 uses the append-only cached prefix (Approach C) to keep the
   // distilled content byte-identical between distillation runs, preserving

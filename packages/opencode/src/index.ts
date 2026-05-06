@@ -381,7 +381,121 @@ export function isValidProjectPath(p: string): boolean {
   return !!p && p !== "/";
 }
 
+/** Providers the plugin will redirect through the gateway when it's running. */
+const GATEWAY_PROVIDERS: string[] = [
+  "anthropic",
+  "openai",
+  "nvidia",
+  "xai",
+  "mistral",
+  "google",
+];
+
+/** Absolute path to the gateway entry point (src/index.ts in the workspace). */
+const GATEWAY_ENTRY = new URL("../../gateway/src/index.ts", import.meta.url).pathname;
+
+/**
+ * Check if the Lore gateway is reachable at the given base URL.
+ * Short timeout so this doesn't delay OpenCode startup noticeably.
+ */
+async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(`${baseURL}/health`, { signal: controller.signal });
+    clearTimeout(timer);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Spawn the gateway as a background child process and wait for it to be ready.
+ * Returns true if the gateway started and is healthy, false otherwise.
+ */
+async function spawnGateway(gatewayBase: string): Promise<boolean> {
+  try {
+    const child = Bun.spawn(["bun", "run", GATEWAY_ENTRY], {
+      stdout: "ignore",
+      stderr: "pipe",
+      // Detach from the plugin process group so it keeps running
+      // even if the parent signal handler fires.
+    });
+
+    // Pipe gateway stderr to our own stderr with a prefix so it's visible.
+    if (child.stderr) {
+      const reader = child.stderr.getReader();
+      const decoder = new TextDecoder();
+      const pump = async () => {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          process.stderr.write(decoder.decode(value));
+        }
+      };
+      pump().catch(() => {});
+    }
+
+    // Poll until healthy or timeout (5s max, 100ms intervals).
+    for (let i = 0; i < 50; i += 1) {
+      await Bun.sleep(100);
+      if (await probeGateway(gatewayBase, 500)) return true;
+    }
+
+    log.info("gateway did not become healthy within 5s, falling back to plugin mode");
+    child.kill();
+    return false;
+  } catch (e) {
+    log.info("failed to spawn gateway:", e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
+
+/** Config hook returned when the gateway is active. */
+function makeGatewayConfigHook(gatewayBase: string) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return async (cfg: any) => {
+    cfg.provider ??= {};
+    for (const providerID of GATEWAY_PROVIDERS) {
+      cfg.provider[providerID] ??= {};
+      cfg.provider[providerID].options ??= {};
+      cfg.provider[providerID].options!.baseURL = `${gatewayBase}/v1`;
+    }
+  };
+}
+
 export const LorePlugin: Plugin = async (ctx) => {
+  // Resolve the gateway base URL — explicit env var or default.
+  const gatewayBase =
+    (process.env.LORE_GATEWAY_URL ?? "http://127.0.0.1:6969").replace(/\/$/, "");
+
+  // Determine if the gateway is active (probe first, then try to spawn).
+  // Skip in test environments to avoid probing a live gateway during unit tests.
+  // Detect bun test runner: bun test sets NODE_ENV=test in the test file scope
+  // but this may not propagate into imported modules. Use a belt-and-suspenders
+  // approach: check both NODE_ENV and whether we're running inside a .test. file.
+  const inTestEnv =
+    process.env.NODE_ENV === "test" ||
+    process.env.LORE_GATEWAY_MODE === "test" ||
+    process.argv.some((a) => a.includes(".test."));
+
+  let gatewayActive = false;
+  if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
+    if (await probeGateway(gatewayBase)) {
+      log.info(`gateway detected at ${gatewayBase}`);
+      gatewayActive = true;
+    } else {
+      log.info(`starting gateway at ${gatewayBase}…`);
+      if (await spawnGateway(gatewayBase)) {
+        log.info(`gateway started at ${gatewayBase}`);
+        gatewayActive = true;
+      } else {
+        log.info("gateway unavailable, running in plugin mode");
+      }
+    }
+  }
+
   const projectPath = ctx.worktree || ctx.directory;
 
   // Per-session LTM cache — reuse exact formatted bytes across turns to
@@ -710,8 +824,22 @@ export const LorePlugin: Plugin = async (ctx) => {
             activeSessions.add(msg.sessionID);
             if (msg.role === "user") turnsSinceCuration++;
 
-            // Incremental distillation: when undistilled messages accumulate past
-            // maxSegment, distill immediately instead of waiting for session.idle.
+            // Incremental distillation: only fire at turn boundaries (user message)
+            // to avoid producing distillation rows mid-chain that would change the
+            // distilled prefix and bust the prompt cache. The gradient's distillation
+            // snapshot is frozen during tool-call chains, so rows produced mid-chain
+            // can't be consumed until the next turn anyway — deferring to session.idle
+            // or next user message costs nothing but avoids DB churn and cache busts.
+            if (msg.role === "user") {
+              const pending = temporal.undistilledCount(projectPath, msg.sessionID);
+              if (pending >= config().distillation.maxSegment) {
+                log.info(
+                  `incremental distillation (turn boundary): ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
+                );
+                backgroundDistill(msg.sessionID);
+              }
+            }
+
             if (
               msg.role === "assistant" &&
               msg.tokens &&
@@ -722,14 +850,6 @@ export const LorePlugin: Plugin = async (ctx) => {
               // to think only 3 tokens went in and passing the full session as layer 0.
               (msg.tokens.input > 0 || msg.tokens.cache.read > 0 || msg.tokens.cache.write > 0)
             ) {
-              const pending = temporal.undistilledCount(projectPath, msg.sessionID);
-              if (pending >= config().distillation.maxSegment) {
-                log.info(
-                  `incremental distillation: ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
-                );
-                backgroundDistill(msg.sessionID);
-              }
-
               // Calibrate overhead using real token counts from the API response.
               // actualInput = all tokens the model processed (input + cache.read + cache.write).
               // The message estimate comes from the transform's own output (stored in
@@ -1336,6 +1456,73 @@ export const LorePlugin: Plugin = async (ctx) => {
     ]).catch((err) => {
       log.info("embedding backfill failed:", err);
     });
+  }
+
+  // In gateway mode: return observer hooks instead of the full transform hooks.
+  // The gateway already applied gradient + LTM; the plugin runs the same logic
+  // in read-only mode and logs any divergence as [lore:verify] warnings.
+  if (gatewayActive) {
+    process.stderr.write(`[lore] observer mode active — watching gateway at ${gatewayBase}\n`);
+
+    return {
+      config: makeGatewayConfigHook(gatewayBase),
+
+      "experimental.chat.system.transform": async (input, _output) => {
+        // Update model limits so gradient estimates are accurate.
+        if (input.model?.limit) setModelLimits(input.model.limit);
+        if (input.model) {
+          const m = input.model as { id: string; providerID: string; cost?: { input: number; cache?: { read: number } } };
+          if (m.cost?.cache?.read) {
+            activeSessionModel = {
+              id: m.id,
+              providerID: m.providerID,
+              cost: { input: m.cost.input, cache: { read: m.cost.cache.read } },
+            };
+          }
+        }
+
+        // Observe LTM selection — log what the plugin would inject.
+        if (config().knowledge.enabled && input.sessionID) {
+          try {
+            const ltmBudget = getLtmBudget(config().budget.ltm);
+            const entries = ltm.forSession(projectPath, input.sessionID, ltmBudget);
+            log.info(
+              `[verify] ltm: session=${input.sessionID} entries=${entries.length}` +
+              (entries.length ? ` titles=${entries.map((e) => e.title).join(", ")}` : ""),
+            );
+          } catch (e) {
+            log.warn("[verify] ltm selection failed:", e instanceof Error ? e.message : String(e));
+          }
+        }
+      },
+
+      "experimental.chat.messages.transform": async (_input, output) => {
+        if (!output.messages.length) return;
+
+        const sessionID = output.messages[0]?.info.sessionID;
+        if (sessionID && await shouldSkip(sessionID)) return;
+
+        // Gateway uses fingerprint-based session tracking (no content markers).
+        // Observer logs the plugin session ID for correlation with gateway logs.
+        log.info(`[verify] session: plugin=${sessionID}`);
+
+        // Run gradient in read-only mode — compute what we would have done.
+        try {
+          const result = transform({
+            messages: output.messages as unknown as LoreMessageWithParts[],
+            projectPath,
+            sessionID,
+          });
+          log.info(
+            `[verify] gradient: session=${sessionID} layer=${result.layer}` +
+            ` tokens=${result.totalTokens} (raw=${result.rawTokens} distilled=${result.distilledTokens})`,
+          );
+        } catch (e) {
+          log.warn("[verify] gradient failed:", e instanceof Error ? e.message : String(e));
+        }
+        // output.messages intentionally NOT mutated — gateway already did the work.
+      },
+    };
   }
 
   return hooks;

@@ -1,0 +1,53 @@
+{
+  "name": "@loreai/gateway",
+  "version": "0.12.0",
+  "type": "module",
+  "license": "FSL-1.1-Apache-2.0",
+  "description": "Lore as a transparent LLM proxy — context management for any AI coding client",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "lore-gateway": "./dist/index.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bun run script/build.ts",
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "@loreai/core": "workspace:*"
+  },
+  "files": [
+    "src/",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BYK/loreai.git",
+    "directory": "packages/gateway"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "lore",
+    "gateway",
+    "proxy",
+    "llm",
+    "context-management",
+    "anthropic",
+    "openai"
+  ],
+  "author": "BYK"
+}
