@@ -112,15 +112,14 @@ export function buildIdleWorkHandler(
   return async (sessionID: string, state: SessionState) => {
     const cfg = loreConfig();
 
-    // 1. Distillation
+    // 1. Distillation — force-distill ALL pending messages on idle, even
+    // below minMessages. The cache is going cold; aggressive distillation
+    // now means a smaller context on the next turn via post-idle compact.
+    // Meta-distillation is always allowed on idle (cache is cold anyway).
     try {
       const pending = temporal.undistilledCount(projectPath, sessionID);
-      if (pending >= cfg.distillation.minMessages) {
-        // Skip meta-distillation when the prompt cache is likely still warm.
-        const cacheTTLMs = cfg.idleResumeMinutes * 60_000;
-        const lastTurn = getLastTurnAt(sessionID);
-        const cacheWarm = lastTurn > 0 && (Date.now() - lastTurn) < cacheTTLMs;
-        await distillation.run({ llm, projectPath, sessionID, skipMeta: cacheWarm });
+      if (pending > 0) {
+        await distillation.run({ llm, projectPath, sessionID, force: true });
       }
     } catch (e) {
       log.error("idle distillation error:", e);

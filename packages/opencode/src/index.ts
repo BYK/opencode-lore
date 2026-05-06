@@ -999,8 +999,11 @@ export const LorePlugin: Plugin = async (ctx) => {
           return;
         }
 
-        // Run background distillation for any remaining undistilled messages
-        await backgroundDistill(sessionID);
+        // Force-distill ALL pending messages on idle — even below the normal
+        // minMessages threshold. The cache is about to go cold (or already is),
+        // so aggressive distillation now means a smaller, cheaper context on the
+        // next turn via the post-idle compact layer in gradient.ts.
+        await backgroundDistill(sessionID, true);
 
         // Run curator periodically (only when knowledge system is enabled).
         // onIdle gates whether idle events trigger curation at all; afterTurns
