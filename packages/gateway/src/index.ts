@@ -11,6 +11,7 @@
  */
 import { loadConfig } from "./config";
 import { startServer } from "./server";
+import { resetPipelineState } from "./pipeline";
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -28,11 +29,13 @@ console.error(`[lore] Plugin auto-detects gateway — just start OpenCode normal
 // Graceful shutdown
 // ---------------------------------------------------------------------------
 
-function shutdown() {
+async function shutdown() {
   console.error("[lore] Shutting down…");
   server.stop();
+  // Gracefully shut down the batch queue (flushes pending items synchronously)
+  await resetPipelineState();
   process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => shutdown());
+process.on("SIGTERM", () => shutdown());

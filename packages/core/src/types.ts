@@ -217,6 +217,21 @@ export interface LLMClient {
        *   relies on Part A (non-reasoning model selection) instead
        */
       thinking?: boolean;
+      /**
+       * When true, the request must be processed immediately and the result
+       * returned before the next user turn. When false or absent, the request
+       * may be deferred to a batch queue for cost savings (50% discount via
+       * Anthropic's Message Batches API).
+       *
+       * Callers that `await` the result for a blocking operation (compaction,
+       * overflow recovery, query expansion) should set `urgent: true`.
+       * Fire-and-forget background work (incremental distillation, idle
+       * curation) should leave it unset or set `false`.
+       *
+       * Only the gateway's BatchLLMClient honors this flag; other adapters
+       * (OpenCode, Pi) ignore it and always process immediately.
+       */
+      urgent?: boolean;
     },
   ): Promise<string | null>;
 }

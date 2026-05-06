@@ -78,7 +78,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   // Reset any leftover singleton state from a previous harness in this process.
   // Must close the DB BEFORE resetting pipeline state (which may use the DB).
   closeDB();
-  resetPipelineState();
+  await resetPipelineState();
 
   // --- 4. Wire in replay interceptor ---
   setUpstreamInterceptor(getReplayInterceptor(opts.fixtures));
@@ -127,12 +127,12 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   }
 
   // --- 8. teardown() ---
-  function teardown(): void {
+  async function teardown(): Promise<void> {
     server.stop();
     // Close the core DB singleton first so the next harness can open a fresh
     // DB at its own LORE_DB_PATH.
     closeDB();
-    resetPipelineState();
+    await resetPipelineState();
     setUpstreamInterceptor(undefined);
 
     // Delete DB files (main + WAL + SHM)

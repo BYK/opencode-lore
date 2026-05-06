@@ -81,6 +81,7 @@ import {
   getLastSeenApiKey,
   createGatewayLLMClient,
 } from "./llm-adapter";
+import { createBatchLLMClient } from "./batch-queue";
 import type { UpstreamInterceptor } from "./recorder";
 
 // ---------------------------------------------------------------------------
@@ -115,11 +116,15 @@ export function setUpstreamInterceptor(
  * session state, initialization flags, or cached project paths across test
  * suites.
  */
-export function resetPipelineState(): void {
+export async function resetPipelineState(): Promise<void> {
   initialized = false;
   cachedProjectPath = null;
   sessions.clear();
   ltmSessionCache.clear();
+  // Shut down batch queue gracefully before clearing the client
+  if (llmClient && "shutdown" in llmClient) {
+    await (llmClient as LLMClient & { shutdown: () => Promise<void> }).shutdown();
+  }
   llmClient = null;
   activeInterceptor = undefined;
 }
@@ -194,11 +199,25 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       providerID: "anthropic",
       modelID: "claude-sonnet-4-20250514",
     };
-    llmClient = createGatewayLLMClient(
+    const inner = createGatewayLLMClient(
       config.upstreamAnthropic,
       getLastSeenApiKey,
       defaultModel,
     );
+
+    // Wrap with batch queue for 50% cost savings on non-urgent worker calls.
+    // Enabled by default — disable via LORE_BATCH_DISABLED=1.
+    const batchDisabled = process.env.LORE_BATCH_DISABLED === "1";
+    if (batchDisabled) {
+      llmClient = inner;
+    } else {
+      llmClient = createBatchLLMClient(
+        inner,
+        config.upstreamAnthropic,
+        getLastSeenApiKey,
+        defaultModel,
+      );
+    }
   }
   return llmClient;
 }
@@ -573,7 +592,9 @@ function scheduleBackgroundWork(
   const llm = getLLMClient(config);
   const cfg = loreConfig();
 
-  // Check if urgent distillation is needed (gradient flagged it)
+  // Check if urgent distillation is needed (gradient flagged it).
+  // Mark urgent: true so these bypass the batch queue — the gradient is
+  // in overflow and needs the result before the next user turn.
   if (needsUrgentDistillation()) {
     distillation
       .run({
@@ -581,6 +602,7 @@ function scheduleBackgroundWork(
         projectPath,
         sessionID,
         force: true,
+        urgent: true,
       })
       .catch((e) => log.error("background distillation failed:", e));
   }
@@ -631,12 +653,14 @@ async function handleCompaction(
 
   log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
 
-  // 1. Force-distill all undistilled messages
+  // 1. Force-distill all undistilled messages.
+  // Mark urgent: true — client is blocking on the compaction response.
   await distillation.run({
     llm,
     projectPath,
     sessionID,
     force: true,
+    urgent: true,
   });
 
   // 2. Load distillation summaries
@@ -690,6 +714,7 @@ async function handleCompaction(
   const summaryText = await llm.prompt(compactPrompt, userContent, {
     model: cfg.model,
     workerID: "lore-compact",
+    urgent: true, // Client is blocking on this response
   });
 
   const summary = summaryText ?? "(Compaction failed — no summary generated.)";
