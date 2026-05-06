@@ -829,8 +829,14 @@ function sanitizeToolParts(
       if (status === "completed" || status === "error") return part;
 
       // pending or running → convert to error so SDK emits tool_result
+      // Use a deterministic timestamp (0) instead of Date.now() so that
+      // repeated transform() calls on the same stale pending part produce
+      // identical bytes.  OpenCode's prompt-loop cache fix (e148f00aa)
+      // preserves old pending parts across iterations; Date.now() here
+      // would re-stamp them each call → different bytes → cache bust.
       partsChanged = true;
-      const now = Date.now();
+      const existingStart =
+        "time" in part.state ? part.state.time.start : 0;
       return {
         ...part,
         state: {
@@ -840,8 +846,8 @@ function sanitizeToolParts(
           metadata:
             "metadata" in part.state ? part.state.metadata : undefined,
           time: {
-            start: "time" in part.state ? part.state.time.start : now,
-            end: now,
+            start: existingStart,
+            end: existingStart,
           },
         },
       } as LorePart;

@@ -2181,3 +2181,91 @@ describe("gradient — distillation snapshot caching", () => {
     expect(allText).toContain("Post-idle observation");
   });
 });
+
+describe("gradient — sanitizeToolParts determinism", () => {
+  // sanitizeToolParts converts pending/running tool parts to error state.
+  // It must use deterministic timestamps so repeated transform() calls on the
+  // same stale pending part produce identical bytes (prompt cache stability).
+  const SID = "sanitize-determ-sess";
+
+  beforeAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+  });
+
+  afterAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+  });
+
+  function makeAssistantWithPendingTool(
+    id: string,
+    toolName: string,
+  ): LoreMessageWithParts {
+    return {
+      info: {
+        id,
+        sessionID: SID,
+        role: "assistant" as const,
+        time: { created: 1000 },
+        parentID: `parent-${id}`,
+        modelID: "claude-sonnet-4-20250514",
+        providerID: "anthropic",
+        mode: "build",
+        path: { cwd: "/test", root: "/test" },
+        cost: 0,
+        tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+      parts: [
+        {
+          id: `part-text-${id}`,
+          sessionID: SID,
+          messageID: id,
+          type: "text" as const,
+          text: "Let me run this tool.",
+          time: { start: 1000, end: 1000 },
+        },
+        {
+          id: `part-tool-${id}`,
+          sessionID: SID,
+          messageID: id,
+          type: "tool" as const,
+          tool: toolName,
+          callID: `call-${id}`,
+          state: {
+            status: "pending" as const,
+            input: { command: "ls -la" },
+          },
+        },
+      ],
+    };
+  }
+
+  test("consecutive transforms produce identical bytes for stale pending tool parts", () => {
+    const messages: LoreMessageWithParts[] = [
+      makeMsg("san-1", "user", "Hello", SID),
+      makeAssistantWithPendingTool("san-2", "bash"),
+    ];
+
+    const result1 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    // The pending tool part should have been converted to error
+    const toolPart1 = result1.messages
+      .flatMap((m) => m.parts)
+      .find((p) => isToolPart(p));
+    expect(toolPart1).toBeDefined();
+    expect(toolPart1!.state.status).toBe("error");
+
+    // Second call with the exact same messages (simulating OpenCode's cached array)
+    const result2 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    const toolPart2 = result2.messages
+      .flatMap((m) => m.parts)
+      .find((p) => isToolPart(p));
+    expect(toolPart2).toBeDefined();
+    expect(toolPart2!.state.status).toBe("error");
+
+    // The serialized bytes must be identical — this is what Anthropic's cache sees
+    const json1 = JSON.stringify(toolPart1!.state);
+    const json2 = JSON.stringify(toolPart2!.state);
+    expect(json2).toBe(json1);
+  });
+});
