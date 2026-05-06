@@ -526,6 +526,12 @@ export async function run(input: {
   model?: { providerID: string; modelID: string };
   /** Skip minMessages threshold check — distill whatever is pending */
   force?: boolean;
+  /** Skip meta-distillation even when gen-0 count exceeds the threshold.
+   *  Used when the upstream prompt cache is likely still warm — meta-distillation
+   *  rewrites distillation row IDs, which invalidates the distilled prefix cache
+   *  and causes a cache bust on the next turn. Callers should set this to true
+   *  when `Date.now() - getLastTurnAt(sessionID) < cacheTTL`. */
+  skipMeta?: boolean;
 }): Promise<{ rounds: number; distilled: number }> {
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
@@ -567,8 +573,11 @@ export async function run(input: {
       }
     }
 
-    // Check if meta-distillation is needed
+    // Check if meta-distillation is needed (skip when cache is warm to avoid
+    // prefix cache invalidation — row IDs change after meta-distill, busting
+    // the prompt cache on the next turn).
     if (
+      !input.skipMeta &&
       gen0Count(input.projectPath, input.sessionID) >=
       cfg.distillation.metaThreshold
     ) {

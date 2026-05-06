@@ -1548,8 +1548,8 @@ describe("idle-resume hook integration", () => {
       const ltmBlock1 = first.find((s) => s.includes("Long-term Knowledge"));
       expect(ltmBlock1).toBeTruthy();
 
-      // Simulate a 5-minute gap — well under 60min threshold.
-      setLastTurnAtForTest(sessionID, Date.now() - 5 * 60_000);
+      // Simulate a 3-minute gap — well under 5min default threshold.
+      setLastTurnAtForTest(sessionID, Date.now() - 3 * 60_000);
 
       // Add a new entry. If the cache was cleared, this would appear; if
       // the cache survived, it would not.

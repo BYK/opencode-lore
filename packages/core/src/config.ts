@@ -50,11 +50,15 @@ export const LoreConfig = z.object({
    * Anthropic's April 23 postmortem identified dropping reasoning blocks as
    * the root cause of forgetfulness/repetition.
    *
-   * `idleResumeMinutes` is the threshold in minutes. Default 60 — matches
-   * Anthropic's extended-cache eviction window, conservative across providers.
+   * `idleResumeMinutes` is the threshold in minutes. Default 5 — matches
+   * Anthropic's default-tier prompt cache TTL. After 5 min of inactivity the
+   * upstream cache is cold, so preserving byte-identity wastes cache-write cost
+   * for no benefit. Refreshing the caches on resume produces a better-fitting
+   * window at the same cold-write price. Users on Anthropic's extended-cache
+   * tier (1 h TTL) should set this to 60 in `.lore.json`.
    * Set to 0 to disable the feature.
    */
-  idleResumeMinutes: z.number().min(0).max(24 * 60).default(60),
+  idleResumeMinutes: z.number().min(0).max(24 * 60).default(5),
   distillation: z
     .object({
       minMessages: z.number().min(3).default(5),

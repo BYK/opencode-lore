@@ -16,6 +16,7 @@ import {
   latReader,
   log,
   config as loreConfig,
+  getLastTurnAt,
   exportToFile,
   exportLoreFile,
 } from "@loreai/core";
@@ -115,7 +116,11 @@ export function buildIdleWorkHandler(
     try {
       const pending = temporal.undistilledCount(projectPath, sessionID);
       if (pending >= cfg.distillation.minMessages) {
-        await distillation.run({ llm, projectPath, sessionID });
+        // Skip meta-distillation when the prompt cache is likely still warm.
+        const cacheTTLMs = cfg.idleResumeMinutes * 60_000;
+        const lastTurn = getLastTurnAt(sessionID);
+        const cacheWarm = lastTurn > 0 && (Date.now() - lastTurn) < cacheTTLMs;
+        await distillation.run({ llm, projectPath, sessionID, skipMeta: cacheWarm });
       }
     } catch (e) {
       log.error("idle distillation error:", e);
