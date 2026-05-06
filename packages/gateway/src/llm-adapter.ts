@@ -5,6 +5,7 @@
  */
 
 import type { LLMClient } from "@loreai/core";
+import { log } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // API key tracking
@@ -26,6 +27,13 @@ export function getLastSeenApiKey(): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Worker call tracking
+// ---------------------------------------------------------------------------
+
+/** Tracks worker session IDs so temporal capture can skip them. */
+export const activeWorkerCalls = new Set<string>();
+
+// ---------------------------------------------------------------------------
 // LLMClient factory
 // ---------------------------------------------------------------------------
 
@@ -45,11 +53,16 @@ export function createGatewayLLMClient(
     async prompt(system, user, opts) {
       const apiKey = getApiKey();
       if (!apiKey) {
+        log.warn("no API key available for worker call");
         return null;
       }
 
       const model = opts?.model ?? defaultModel;
       const url = `${upstreamUrl.replace(/\/$/, "")}/v1/messages`;
+
+      // Track this call so temporal capture can skip it
+      const callID = `gw-worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      activeWorkerCalls.add(callID);
 
       try {
         const response = await fetch(url, {
@@ -59,6 +72,9 @@ export function createGatewayLLMClient(
             "anthropic-version": "2023-06-01",
             "x-api-key": apiKey,
           },
+          // opts.thinking is intentionally not forwarded — this bare API
+          // call never includes the `thinking` parameter so Anthropic
+          // models won't produce thinking tokens regardless.
           body: JSON.stringify({
             model: model.modelID,
             max_tokens: 8192,
@@ -69,8 +85,8 @@ export function createGatewayLLMClient(
 
         if (!response.ok) {
           const text = await response.text().catch(() => "(no body)");
-          console.error(
-            `[lore:gateway] worker upstream request failed: ${response.status} ${response.statusText} — ${text}`,
+          log.error(
+            `worker upstream request failed: ${response.status} ${response.statusText} — ${text}`,
           );
           return null;
         }
@@ -85,11 +101,10 @@ export function createGatewayLLMClient(
 
         return textBlock?.text ?? null;
       } catch (e) {
-        console.error(
-          "[lore:gateway] worker upstream request error:",
-          e instanceof Error ? e.message : String(e),
-        );
+        log.error("worker prompt failed:", e);
         return null;
+      } finally {
+        activeWorkerCalls.delete(callID);
       }
     },
   };

@@ -645,7 +645,10 @@ export const LorePlugin: Plugin = async (ctx) => {
             providerID: provider.id,
             cost: { input: model.cost?.input ?? 0 },
             status: model.status ?? "active",
-            capabilities: { input: { text: hasTextInput } },
+            capabilities: {
+              input: { text: hasTextInput },
+              reasoning: model.reasoning ?? false,
+            },
           });
         }
       }

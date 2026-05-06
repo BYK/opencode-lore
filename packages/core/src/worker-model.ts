@@ -25,7 +25,11 @@ export type ModelInfo = {
   providerID: string;
   cost: { input: number }; // per-token cost
   status: string;
-  capabilities: { input: { text: boolean } };
+  capabilities: {
+    input: { text: boolean };
+    /** Whether this model supports extended thinking/reasoning. */
+    reasoning?: boolean;
+  };
 };
 
 /** Result of a worker model validation stored in kv_meta. */
@@ -64,8 +68,17 @@ export function selectWorkerCandidates(
 
   if (eligible.length === 0) return [];
 
-  // Sort by cost ascending (cheapest first)
-  const sorted = [...eligible].sort((a, b) => a.cost.input - b.cost.input);
+  // Sort by cost ascending, then prefer non-reasoning models at equal cost.
+  // Non-reasoning models don't produce thinking tokens, avoiding wasted spend
+  // on tokens that background workers discard.
+  const sorted = [...eligible].sort((a, b) => {
+    const costDiff = a.cost.input - b.cost.input;
+    if (costDiff !== 0) return costDiff;
+    // At equal cost, non-reasoning (0) sorts before reasoning (1)
+    const aReasoning = a.capabilities.reasoning ? 1 : 0;
+    const bReasoning = b.capabilities.reasoning ? 1 : 0;
+    return aReasoning - bReasoning;
+  });
 
   // Cheapest overall
   const cheapest = sorted[0];
@@ -281,6 +294,7 @@ export async function runValidation(
       const raw = await llm.prompt(DISTILLATION_SYSTEM, userPrompt, {
         model: { providerID: candidate.providerID, modelID: candidate.id },
         workerID: "lore-distill",
+        thinking: false,
       });
       if (raw) {
         // Parse <observations>...</observations> block
@@ -306,7 +320,7 @@ export async function runValidation(
       const judgeResponse = await llm.prompt(
         WORKER_JUDGE_SYSTEM,
         workerJudgeUser(referenceObservations, candidateObservations!),
-        { workerID: "lore-distill" }, // use session model (no model override)
+        { workerID: "lore-distill", thinking: false }, // use session model (no model override)
       );
       if (judgeResponse) {
         judgeScore = parseJudgeScore(judgeResponse);

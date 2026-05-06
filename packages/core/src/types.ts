@@ -189,7 +189,7 @@ export interface LLMClient {
    *
    * @param system  System prompt text
    * @param user    User message text
-   * @param opts    Optional model selection and worker identification
+   * @param opts    Optional model selection, worker identification, and thinking control
    * @returns The assistant's text response, or null on failure
    */
   prompt(
@@ -203,6 +203,20 @@ export interface LLMClient {
        * (e.g. OpenCode uses this as the session agent name).
        */
       workerID?: string;
+      /**
+       * Disable extended thinking/reasoning for this call.
+       *
+       * Background workers discard thinking tokens — they only extract the
+       * text response. Setting `thinking: false` tells the adapter to avoid
+       * producing (and billing for) thinking tokens when possible.
+       *
+       * Adapter behavior:
+       * - Gateway: no-op (bare API call never triggers thinking)
+       * - Pi: passes `thinkingEnabled: false` to `complete()`
+       * - OpenCode: cannot honor — SDK has no thinking toggle on session.prompt();
+       *   relies on Part A (non-reasoning model selection) instead
+       */
+      thinking?: boolean;
     },
   ): Promise<string | null>;
 }
