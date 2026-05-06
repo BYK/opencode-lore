@@ -98,8 +98,8 @@ describe("vectorSearch", () => {
   const PROJECT = "/test/embedding/vectorsearch";
 
   beforeEach(() => {
-    const pid = ensureProject(PROJECT);
-    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    // vectorSearch has no project filter — clean ALL knowledge to avoid cross-test leaks
+    db().query("DELETE FROM knowledge").run();
   });
 
   test("returns entries sorted by similarity descending", () => {
