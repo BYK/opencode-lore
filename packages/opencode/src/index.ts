@@ -29,6 +29,10 @@ import {
   shouldImport,
   importFromFile,
   exportToFile,
+  exportLoreFile,
+  importLoreFile,
+  shouldImportLoreFile,
+  loreFileExists,
   latReader,
   embedding,
   log,
@@ -532,20 +536,28 @@ export const LorePlugin: Plugin = async (ctx) => {
     }).catch(() => {});
   }
 
-  // Import from AGENTS.md at startup if it has changed since last export
-  // (hand-written entries, edits from other machines, or merge conflicts).
+  // Import knowledge at startup — .lore.md takes precedence, falls back
+  // to agents file (AGENTS.md/CLAUDE.md) for backward compat / migration.
   {
     const cfg = config();
-    if (isValidProjectPath(projectPath) && cfg.knowledge.enabled && cfg.agentsFile.enabled) {
-      const filePath = join(projectPath, cfg.agentsFile.path);
-      if (shouldImport({ projectPath, filePath })) {
-        try {
-          importFromFile({ projectPath, filePath });
-          log.info("imported knowledge from", cfg.agentsFile.path);
-          invalidateLtmCache();
-        } catch (e) {
-          log.error("agents-file import error:", e);
+    if (isValidProjectPath(projectPath) && cfg.knowledge.enabled) {
+      try {
+        if (loreFileExists(projectPath)) {
+          if (shouldImportLoreFile(projectPath)) {
+            importLoreFile(projectPath);
+            log.info("imported knowledge from .lore.md");
+            invalidateLtmCache();
+          }
+        } else if (cfg.agentsFile.enabled) {
+          const filePath = join(projectPath, cfg.agentsFile.path);
+          if (shouldImport({ projectPath, filePath })) {
+            importFromFile({ projectPath, filePath });
+            log.info("imported knowledge from", cfg.agentsFile.path, "(migrating to .lore.md)");
+            invalidateLtmCache();
+          }
         }
+      } catch (e) {
+        log.error("knowledge import error:", e);
       }
     }
   }
@@ -1048,20 +1060,23 @@ export const LorePlugin: Plugin = async (ctx) => {
           log.error("pruning error:", e);
         }
 
-        // Export curated knowledge to AGENTS.md after distillation + curation.
+        // Export curated knowledge to .lore.md (+ pointer in agents file).
         try {
-          const agentsCfg = cfg.agentsFile;
-          if (isValidProjectPath(projectPath) && cfg.knowledge.enabled && agentsCfg.enabled) {
+          if (isValidProjectPath(projectPath) && cfg.knowledge.enabled) {
             const entries = ltm.forProject(projectPath, false);
             if (entries.length === 0) {
-              log.info("agents-file export: 0 knowledge entries for project, skipping write");
-            } else {
-              const filePath = join(projectPath, agentsCfg.path);
+              log.info("knowledge export: 0 entries for project, skipping write");
+            } else if (cfg.agentsFile.enabled) {
+              // Writes both .lore.md (entries) and agents file (pointer).
+              const filePath = join(projectPath, cfg.agentsFile.path);
               exportToFile({ projectPath, filePath });
+            } else {
+              // Only write .lore.md (no agents file pointer).
+              exportLoreFile(projectPath);
             }
           }
         } catch (e) {
-          log.error("agents-file export error:", e);
+          log.error("knowledge export error:", e);
         }
 
         // Clean dead knowledge cross-references (entries deleted by curation/consolidation).
@@ -1243,14 +1258,16 @@ export const LorePlugin: Plugin = async (ctx) => {
         if (input.sessionID) consumeCameOutOfIdle(input.sessionID);
       }
 
-      // Remind the agent to include the agents file in commits.
-      // It is always modified after the lore export runs (post-session) so it
-      // appears as unstaged when the agent goes to commit — the agent must not
-      // skip it just because it looks auto-generated.
-      if (cfg.knowledge.enabled && cfg.agentsFile.enabled) {
+      // Remind the agent to include lore-managed files in commits.
+      // They are modified after the lore export runs (post-session) so they
+      // appear as unstaged when the agent goes to commit — the agent must not
+      // skip them just because they look auto-generated.
+      if (cfg.knowledge.enabled) {
+        const filesToTrack = [".lore.md"];
+        if (cfg.agentsFile.enabled) filesToTrack.push(cfg.agentsFile.path);
         output.system.push(
-          `When making git commits, always check if ${cfg.agentsFile.path} has ` +
-          `unstaged changes and include it in the commit. This file contains ` +
+          `When making git commits, always check if ${filesToTrack.join(" and ")} ` +
+          `have unstaged changes and include them in the commit. These files contain ` +
           `shared project knowledge managed by lore and must be version-controlled.`,
         );
       }

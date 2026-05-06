@@ -65,6 +65,22 @@ export function createGatewayLLMClient(
       activeWorkerCalls.add(callID);
 
       try {
+        // System prompt caching for workers: send as block array with 1h TTL.
+        // Worker calls come in bursts (distillation, curation) separated by
+        // minutes of user thinking — 5m TTL expires between bursts, but 1h
+        // survives. The system prompt (DISTILLATION_SYSTEM, etc.) is static
+        // across all calls → near-100% cache hit rate after the first write.
+        // Cost: 1.25× base for the initial write, 0.1× for subsequent reads.
+        const systemPayload = system
+          ? [
+              {
+                type: "text",
+                text: system,
+                cache_control: { type: "ephemeral", ttl: "3600" },
+              },
+            ]
+          : undefined;
+
         const response = await fetch(url, {
           method: "POST",
           headers: {
@@ -78,7 +94,7 @@ export function createGatewayLLMClient(
           body: JSON.stringify({
             model: model.modelID,
             max_tokens: 8192,
-            system,
+            system: systemPayload ?? system,
             messages: [{ role: "user", content: user }],
           }),
         });

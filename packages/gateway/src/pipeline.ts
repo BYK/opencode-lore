@@ -60,6 +60,7 @@ import {
 import {
   buildAnthropicRequest,
   buildAnthropicNonStreamResponse,
+  type AnthropicCacheOptions,
 } from "./translate/anthropic";
 import {
   buildOpenAIUpstreamRequest,
@@ -290,6 +291,7 @@ async function forwardToUpstream(
   req: GatewayRequest,
   config: GatewayConfig,
   interceptor?: UpstreamInterceptor,
+  cache?: AnthropicCacheOptions,
 ): Promise<Response> {
   let url: string;
   let headers: Record<string, string>;
@@ -306,7 +308,7 @@ async function forwardToUpstream(
     headers = result.headers;
     body = result.body;
   } else {
-    const result = buildAnthropicRequest(req);
+    const result = buildAnthropicRequest(req, cache);
     url = `${effectiveUpstreamBase}${result.url}`;
     headers = result.headers;
     body = result.body;
@@ -846,11 +848,13 @@ async function handleConversationTurn(
       "over time as knowledge accumulates across sessions.";
   }
 
-  // AGENTS.md commit reminder
-  if (cfg.knowledge.enabled && cfg.agentsFile.enabled) {
+  // Lore knowledge file commit reminder
+  if (cfg.knowledge.enabled) {
+    const filesToTrack = [".lore.md"];
+    if (cfg.agentsFile.enabled) filesToTrack.push(cfg.agentsFile.path);
     modifiedSystem +=
-      `\n\nWhen making git commits, always check if ${cfg.agentsFile.path} has ` +
-      `unstaged changes and include it in the commit. This file contains ` +
+      `\n\nWhen making git commits, always check if ${filesToTrack.join(" and ")} ` +
+      `have unstaged changes and include them in the commit. These files contain ` +
       `shared project knowledge managed by lore and must be version-controlled.`;
   }
 
@@ -890,7 +894,21 @@ async function handleConversationTurn(
   };
 
   // --- 9. Forward to upstream ---
-  const upstreamResponse = await forwardToUpstream(modifiedReq, config);
+  // Enable prompt caching for conversation turns:
+  //  - System prompt: explicit breakpoint with 5m TTL (frequent turns)
+  //  - Conversation: breakpoint on last block so Anthropic caches the prefix
+  // Title/summary passthrough (handlePassthrough) never reaches here — it
+  // forwards the raw request without buildAnthropicRequest, so no caching.
+  const cacheOptions: AnthropicCacheOptions = {
+    systemTTL: "5m",
+    cacheConversation: true,
+  };
+  const upstreamResponse = await forwardToUpstream(
+    modifiedReq,
+    config,
+    undefined,
+    cacheOptions,
+  );
 
   if (!upstreamResponse.ok) {
     const errorBody = await upstreamResponse.text();
