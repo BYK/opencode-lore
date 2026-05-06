@@ -12,9 +12,14 @@ import * as ltm from "../src/ltm";
 import {
   LORE_SECTION_START,
   LORE_SECTION_END,
+  LORE_FILE,
   exportToFile,
+  exportLoreFile,
   importFromFile,
+  importLoreFile,
   shouldImport,
+  shouldImportLoreFile,
+  loreFileExists,
   parseEntriesFromSection,
   type ParsedFileEntry,
 } from "../src/agents-file";
@@ -23,9 +28,11 @@ import {
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-const PROJECT = "/test/agents-file/project";
 const TMP_DIR = join(import.meta.dir, "__tmp_agents_file__");
+/** Project path doubles as the filesystem directory for .lore.md functions. */
+const PROJECT = TMP_DIR;
 const AGENTS_FILE = join(TMP_DIR, "AGENTS.md");
+const LORE_FILE_PATH = join(TMP_DIR, LORE_FILE);
 
 function agentsPath(name = "AGENTS.md") {
   return join(TMP_DIR, name);
@@ -99,8 +106,9 @@ beforeEach(() => {
   for (const id of TEST_UUIDS) {
     db().query("DELETE FROM knowledge WHERE id = ?").run(id);
   }
-  // Reset the agents file
+  // Reset the agents file and .lore.md
   if (existsSync(AGENTS_FILE)) rmSync(AGENTS_FILE);
+  if (existsSync(LORE_FILE_PATH)) rmSync(LORE_FILE_PATH);
 });
 
 afterAll(() => {
@@ -230,7 +238,7 @@ describe("parseEntriesFromSection", () => {
 // ---------------------------------------------------------------------------
 
 describe("exportToFile", () => {
-  test("creates AGENTS.md from scratch when file does not exist", () => {
+  test("creates AGENTS.md with pointer and .lore.md with entries", () => {
     ltm.create({
       projectPath: PROJECT,
       category: "decision",
@@ -241,15 +249,22 @@ describe("exportToFile", () => {
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
+    // AGENTS.md gets a pointer, not entries
     expect(existsSync(AGENTS_FILE)).toBe(true);
-    const content = readFile();
-    expect(content).toContain(LORE_SECTION_START);
-    expect(content).toContain(LORE_SECTION_END);
-    expect(content).toContain("Auth strategy");
-    expect(content).toContain("OAuth2 with PKCE");
+    const agentsContent = readFile();
+    expect(agentsContent).toContain(LORE_SECTION_START);
+    expect(agentsContent).toContain(LORE_SECTION_END);
+    expect(agentsContent).toContain(".lore.md");
+    expect(agentsContent).not.toContain("Auth strategy");
+
+    // .lore.md gets the actual entries
+    expect(existsSync(LORE_FILE_PATH)).toBe(true);
+    const loreContent = readFile(LORE_FILE_PATH);
+    expect(loreContent).toContain("Auth strategy");
+    expect(loreContent).toContain("Using OAuth2 with PKCE");
   });
 
-  test("includes <!-- lore:UUID --> marker before each entry", () => {
+  test(".lore.md includes <!-- lore:UUID --> marker before each entry", () => {
     const id = ltm.create({
       projectPath: PROJECT,
       category: "pattern",
@@ -260,8 +275,11 @@ describe("exportToFile", () => {
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const content = readFile();
-    expect(content).toContain(`<!-- lore:${id} -->`);
+    const loreContent = readFile(LORE_FILE_PATH);
+    expect(loreContent).toContain(`<!-- lore:${id} -->`);
+    // AGENTS.md should NOT have the entry marker
+    const agentsContent = readFile();
+    expect(agentsContent).not.toContain(`<!-- lore:${id} -->`);
   });
 
   test("replaces lore section on subsequent export, preserves non-lore content", () => {
@@ -277,15 +295,19 @@ describe("exportToFile", () => {
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const content = readFile();
-    expect(content).toContain("# My Project");
-    expect(content).toContain("Some hand-written docs.");
-    expect(content).toContain("## Workflow");
-    expect(content).toContain("Do this stuff.");
-    expect(content).toContain("Test gotcha");
+    const agentsContent = readFile();
+    expect(agentsContent).toContain("# My Project");
+    expect(agentsContent).toContain("Some hand-written docs.");
+    expect(agentsContent).toContain("## Workflow");
+    expect(agentsContent).toContain("Do this stuff.");
+    expect(agentsContent).toContain(".lore.md");
     // Should only have one lore section
-    const startCount = (content.match(new RegExp(escapeRegex(LORE_SECTION_START), "g")) ?? []).length;
+    const startCount = (agentsContent.match(new RegExp(escapeRegex(LORE_SECTION_START), "g")) ?? []).length;
     expect(startCount).toBe(1);
+
+    // Entries go to .lore.md
+    const loreContent = readFile(LORE_FILE_PATH);
+    expect(loreContent).toContain("Test gotcha");
   });
 
   test("appends lore section when file exists without markers", () => {
@@ -301,23 +323,27 @@ describe("exportToFile", () => {
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const content = readFile();
-    expect(content).toContain("# Existing project docs");
-    expect(content).toContain(LORE_SECTION_START);
-    expect(content).toContain("Stack");
+    const agentsContent = readFile();
+    expect(agentsContent).toContain("# Existing project docs");
+    expect(agentsContent).toContain(LORE_SECTION_START);
+    expect(agentsContent).toContain(".lore.md");
+
+    const loreContent = readFile(LORE_FILE_PATH);
+    expect(loreContent).toContain("Stack");
   });
 
-  test("writes empty lore section when there are no knowledge entries", () => {
+  test("writes pointer in agents file even when there are no knowledge entries", () => {
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const content = readFile();
-    expect(content).toContain(LORE_SECTION_START);
-    expect(content).toContain(LORE_SECTION_END);
-    // No knowledge entries means no bullet points
-    expect(content).not.toContain("* **");
+    const agentsContent = readFile();
+    expect(agentsContent).toContain(LORE_SECTION_START);
+    expect(agentsContent).toContain(LORE_SECTION_END);
+    expect(agentsContent).toContain(".lore.md");
+    // No knowledge entries means no bullet points in either file
+    expect(agentsContent).not.toContain("* **");
   });
 
-  test("writes entries sorted by category then title", () => {
+  test(".lore.md writes entries sorted by category then title", () => {
     ltm.create({
       projectPath: PROJECT,
       category: "gotcha",
@@ -335,17 +361,15 @@ describe("exportToFile", () => {
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const content = readFile();
-    const decisionPos = content.indexOf("### Decision");
-    const gotchaPos = content.indexOf("### Gotcha");
+    const loreContent = readFile(LORE_FILE_PATH);
+    const decisionPos = loreContent.indexOf("### Decision");
+    const gotchaPos = loreContent.indexOf("### Gotcha");
     expect(decisionPos).toBeGreaterThan(-1);
     expect(gotchaPos).toBeGreaterThan(-1);
     expect(decisionPos).toBeLessThan(gotchaPos);
   });
 
-  test("sorts entries alphabetically by title within a category", () => {
-    // Create entries in reverse-alpha and reverse-creation order to ensure
-    // the export sorts by title, not by DB insertion order or updated_at.
+  test(".lore.md sorts entries alphabetically by title within a category", () => {
     ltm.create({
       projectPath: PROJECT,
       category: "gotcha",
@@ -370,10 +394,10 @@ describe("exportToFile", () => {
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const content = readFile();
-    const alphaPos = content.indexOf("Alpha gotcha");
-    const middlePos = content.indexOf("Middle gotcha");
-    const zebraPos = content.indexOf("Zebra gotcha");
+    const loreContent = readFile(LORE_FILE_PATH);
+    const alphaPos = loreContent.indexOf("Alpha gotcha");
+    const middlePos = loreContent.indexOf("Middle gotcha");
+    const zebraPos = loreContent.indexOf("Zebra gotcha");
     expect(alphaPos).toBeGreaterThan(-1);
     expect(middlePos).toBeGreaterThan(-1);
     expect(zebraPos).toBeGreaterThan(-1);
@@ -381,7 +405,7 @@ describe("exportToFile", () => {
     expect(middlePos).toBeLessThan(zebraPos);
   });
 
-  test("separates entries with blank lines for merge-friendliness", () => {
+  test(".lore.md separates entries with blank lines for merge-friendliness", () => {
     const id1 = ltm.create({
       projectPath: PROJECT,
       category: "decision",
@@ -399,13 +423,13 @@ describe("exportToFile", () => {
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const content = readFile();
+    const loreContent = readFile(LORE_FILE_PATH);
     // Between the first bullet and the second marker there should be a blank line
     const pattern = new RegExp("\\* \\*\\*Alpha decision\\*\\*.*\n\n<!-- lore:");
-    expect(content).toMatch(pattern);
+    expect(loreContent).toMatch(pattern);
     // First entry after heading should NOT have a leading blank line
     const headingPattern = new RegExp("### Decision\n\n<!-- lore:");
-    expect(content).toMatch(headingPattern);
+    expect(loreContent).toMatch(headingPattern);
   });
 });
 
@@ -423,29 +447,13 @@ describe("shouldImport", () => {
     expect(shouldImport({ projectPath: PROJECT, filePath: AGENTS_FILE })).toBe(true);
   });
 
-  test("returns false after export (lore section matches DB state)", () => {
-    ltm.create({
-      projectPath: PROJECT,
-      category: "decision",
-      title: "Auth strategy",
-      content: "OAuth2 with PKCE",
-      scope: "project",
-    });
-    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
-
-    // After export, the file matches what lore would produce → no import needed
-    expect(shouldImport({ projectPath: PROJECT, filePath: AGENTS_FILE })).toBe(false);
-  });
-
   test("returns true when lore section content differs from DB state (external edit)", () => {
-    ltm.create({
-      projectPath: PROJECT,
-      category: "decision",
-      title: "Auth strategy",
-      content: "OAuth2 with PKCE",
-      scope: "project",
-    });
-    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    // Write an old-format agents file with entries directly in AGENTS.md
+    const section = loreSectionWithEntries([
+      { id: TEST_UUIDS[0], category: "decision", title: "Auth strategy", content: "OAuth2 with PKCE" },
+    ]);
+    writeFile(section);
+    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
     // Simulate external edit: someone manually tweaked the lore section
     const content = readFile();
@@ -464,10 +472,24 @@ describe("shouldImport", () => {
     expect(shouldImport({ projectPath: PROJECT, filePath: AGENTS_FILE })).toBe(true);
   });
 
-  test("returns false when file only has empty lore section and no DB entries", () => {
-    // Export produced an empty section, nothing to import
+  test("after export, agents file has pointer — importFromFile is safe (no entries parsed)", () => {
+    // After exportToFile, AGENTS.md has a pointer (not entries).
+    // shouldImport returns true (pointer differs from buildSection), but
+    // importFromFile finds no bullet entries in the pointer text — safe no-op.
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
-    expect(shouldImport({ projectPath: PROJECT, filePath: AGENTS_FILE })).toBe(false);
+
+    // Import from the pointer file — should not create duplicates
+    const before = ltm.forProject(PROJECT);
+    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    const after = ltm.forProject(PROJECT);
+    expect(after.length).toBe(before.length);
   });
 });
 
@@ -518,12 +540,12 @@ describe("importFromFile — known ID tracking", () => {
       content: "OAuth2 with PKCE",
       scope: "project",
     });
-    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    // Simulate manual edit
-    const content = readFile();
-    const edited = content.replace("OAuth2 with PKCE", "OAuth2 with PKCE — also supports API keys");
-    writeFile(edited);
+    // Write old-format AGENTS.md with entries directly, then simulate manual edit
+    const section = loreSectionWithEntries([
+      { id, category: "decision", title: "Auth strategy", content: "OAuth2 with PKCE — also supports API keys" },
+    ]);
+    writeFile(section);
 
     importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
@@ -646,7 +668,7 @@ ${LORE_SECTION_END}`;
     expect(ltm.get(bobId)).not.toBeNull();
   });
 
-  test("re-export after import of merged file produces a clean single-occurrence file", () => {
+  test("re-export after import of merged file produces a clean single-occurrence .lore.md", () => {
     const id1 = ltm.create({
       projectPath: PROJECT,
       category: "decision",
@@ -663,13 +685,13 @@ ${LORE_SECTION_END}`;
     });
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
-    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    importLoreFile(PROJECT);
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const content = readFile();
-    // Each ID should appear exactly once
-    const id1Count = (content.match(new RegExp(`lore:${id1}`, "g")) ?? []).length;
-    const id2Count = (content.match(new RegExp(`lore:${id2}`, "g")) ?? []).length;
+    const loreContent = readFile(LORE_FILE_PATH);
+    // Each ID should appear exactly once in .lore.md
+    const id1Count = (loreContent.match(new RegExp(`lore:${id1}`, "g")) ?? []).length;
+    const id2Count = (loreContent.match(new RegExp(`lore:${id2}`, "g")) ?? []).length;
     expect(id1Count).toBe(1);
     expect(id2Count).toBe(1);
   });
@@ -703,7 +725,7 @@ ${LORE_SECTION_END}`;
 // ---------------------------------------------------------------------------
 
 describe("round-trip stability", () => {
-  test("export → import → export produces identical file", () => {
+  test("export → import → export produces identical .lore.md", () => {
     ltm.create({
       projectPath: PROJECT,
       category: "decision",
@@ -720,16 +742,19 @@ describe("round-trip stability", () => {
     });
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
-    const firstExport = readFile();
+    const firstLore = readFile(LORE_FILE_PATH);
+    const firstAgents = readFile();
 
-    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    importLoreFile(PROJECT);
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
-    const secondExport = readFile();
+    const secondLore = readFile(LORE_FILE_PATH);
+    const secondAgents = readFile();
 
-    expect(secondExport).toBe(firstExport);
+    expect(secondLore).toBe(firstLore);
+    expect(secondAgents).toBe(firstAgents);
   });
 
-  test("export → edit non-lore section → import → export preserves edit and lore section", () => {
+  test("export → edit non-lore section → import → export preserves edit and pointer", () => {
     ltm.create({
       projectPath: PROJECT,
       category: "pattern",
@@ -743,15 +768,18 @@ describe("round-trip stability", () => {
     const exported = readFile();
     writeFile(`# My Project\n\nSome docs.\n\n${exported}`);
 
-    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    importLoreFile(PROJECT);
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const final = readFile();
-    expect(final).toContain("# My Project");
-    expect(final).toContain("Some docs.");
-    expect(final).toContain("Middleware");
-    expect(final).toContain(LORE_SECTION_START);
-    expect(final).toContain(LORE_SECTION_END);
+    const agentsContent = readFile();
+    expect(agentsContent).toContain("# My Project");
+    expect(agentsContent).toContain("Some docs.");
+    expect(agentsContent).toContain(".lore.md");
+    expect(agentsContent).toContain(LORE_SECTION_START);
+    expect(agentsContent).toContain(LORE_SECTION_END);
+
+    const loreContent = readFile(LORE_FILE_PATH);
+    expect(loreContent).toContain("Middleware");
   });
 });
 
@@ -787,12 +815,12 @@ describe("cross-project isolation", () => {
     expect(match!.cross_project).toBe(0);
   });
 
-  test("cross-project entries from another project do not appear in exportToFile", () => {
+  test("cross-project entries from another project do not appear in .lore.md", () => {
     // Create a cross-project entry scoped to a different project
     ltm.create({
       category: "gotcha",
       title: "Unrelated gotcha from other project",
-      content: "This should not leak into PROJECT's AGENTS.md",
+      content: "This should not leak into PROJECT's .lore.md",
       scope: "global",
       crossProject: true,
     });
@@ -809,9 +837,9 @@ describe("cross-project isolation", () => {
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const content = readFile();
-    expect(content).toContain("Project-specific decision");
-    expect(content).not.toContain("Unrelated gotcha from other project");
+    const loreContent = readFile(LORE_FILE_PATH);
+    expect(loreContent).toContain("Project-specific decision");
+    expect(loreContent).not.toContain("Unrelated gotcha from other project");
   });
 
   test("cross-project entries from another project do not inflate forProject(path, false) count", () => {
@@ -859,8 +887,6 @@ describe("exportToFile — self-healing duplicate sections", () => {
     });
 
     // Simulate a file that somehow got two lore sections (the duplication bug).
-    // Non-lore content before the first and after the last section is preserved;
-    // anything sandwiched between dup sections is consumed (unavoidable).
     const dupSection = `${LORE_SECTION_START}\n\n## Long-term Knowledge\n\n### Decision\n\n<!-- lore:${id} -->\n* **Auth strategy**: OAuth2 with PKCE\n\n${LORE_SECTION_END}\n`;
     const content = `# My Project\n\n${dupSection}\n${dupSection}\n\n## Conventions\n\nSome text.\n`;
     writeFile(content);
@@ -876,6 +902,8 @@ describe("exportToFile — self-healing duplicate sections", () => {
     expect(result).toContain("# My Project");
     expect(result).toContain("## Conventions");
     expect(result).toContain("Some text.");
+    // Pointer, not entries in AGENTS.md
+    expect(result).toContain(".lore.md");
   });
 
   test("collapses old-marker section into one new-marker section on export", () => {
@@ -887,24 +915,23 @@ describe("exportToFile — self-healing duplicate sections", () => {
       scope: "project",
     });
 
-    // File with old marker text (before the rename)
     const oldSection = `${OLD_LORE_SECTION_START}\n\n## Long-term Knowledge\n\n${LORE_SECTION_END}\n`;
     writeFile(`# My Project\n\n${oldSection}\n## Extra\n\nStuff.\n`);
 
     exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
     const result = readFile();
-    // Old marker must be gone, new marker must appear exactly once
     expect(result).not.toContain(OLD_LORE_SECTION_START);
     const startCount = (result.match(new RegExp(escapeRegex(LORE_SECTION_START), "g")) ?? []).length;
     expect(startCount).toBe(1);
     expect(result).toContain(LORE_SECTION_END);
-    // Non-lore content preserved
     expect(result).toContain("# My Project");
     expect(result).toContain("## Extra");
     expect(result).toContain("Stuff.");
-    // Entry present
-    expect(result).toContain("Auth strategy");
+    // Entry in .lore.md, pointer in AGENTS.md
+    expect(result).toContain(".lore.md");
+    const loreContent = readFile(LORE_FILE_PATH);
+    expect(loreContent).toContain("Auth strategy");
   });
 
   test("collapses mixed old+new marker sections (the real-world bug) into one", () => {
@@ -916,8 +943,6 @@ describe("exportToFile — self-healing duplicate sections", () => {
       scope: "project",
     });
 
-    // Replicate the actual AGENTS.md state: old marker section first,
-    // then several new marker sections appended after.
     const oldSection = `${OLD_LORE_SECTION_START}\n\n## Long-term Knowledge\n\n${LORE_SECTION_END}\n`;
     const newSection = `${LORE_SECTION_START}\n\n## Long-term Knowledge\n\n${LORE_SECTION_END}\n`;
     const badFile = [
@@ -946,12 +971,12 @@ describe("exportToFile — self-healing duplicate sections", () => {
     expect(endCount).toBe(1);
     expect(result).toContain(LORE_SECTION_START);
     expect(result).not.toContain(OLD_LORE_SECTION_START);
-    expect(result).toContain("Watch this");
+    // Entry in .lore.md
+    const loreContent = readFile(LORE_FILE_PATH);
+    expect(loreContent).toContain("Watch this");
   });
 
   test("non-lore content between duplicate sections is also removed", () => {
-    // If there's random text between two lore sections (shouldn't happen but
-    // good to verify what 'after last section' means).
     ltm.create({
       projectPath: PROJECT,
       category: "pattern",
@@ -995,6 +1020,325 @@ describe("shouldImport — old marker variant", () => {
     const entry = ltm.get(remoteId);
     expect(entry).not.toBeNull();
     expect(entry!.title).toBe("Auth strategy");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// exportLoreFile
+// ---------------------------------------------------------------------------
+
+describe("exportLoreFile", () => {
+  test("creates .lore.md with header and entries", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+
+    exportLoreFile(PROJECT);
+
+    expect(existsSync(LORE_FILE_PATH)).toBe(true);
+    const content = readFile(LORE_FILE_PATH);
+    expect(content).toContain("<!-- Managed by lore");
+    expect(content).toContain("Auth strategy");
+    expect(content).toContain("OAuth2 with PKCE");
+  });
+
+  test(".lore.md has no section markers", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "pattern",
+      title: "Test pattern",
+      content: "Pattern content",
+      scope: "project",
+    });
+
+    exportLoreFile(PROJECT);
+
+    const content = readFile(LORE_FILE_PATH);
+    expect(content).not.toContain(LORE_SECTION_START);
+    expect(content).not.toContain(LORE_SECTION_END);
+  });
+
+  test("includes <!-- lore:UUID --> markers for entries", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Watch this",
+      content: "Something tricky",
+      scope: "project",
+    });
+
+    exportLoreFile(PROJECT);
+
+    const content = readFile(LORE_FILE_PATH);
+    expect(content).toContain(`<!-- lore:${id} -->`);
+  });
+
+  test("writes only a header when there are no entries", () => {
+    exportLoreFile(PROJECT);
+
+    const content = readFile(LORE_FILE_PATH);
+    expect(content).toContain("<!-- Managed by lore");
+    expect(content).not.toContain("* **");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// loreFileExists
+// ---------------------------------------------------------------------------
+
+describe("loreFileExists", () => {
+  test("returns false when .lore.md does not exist", () => {
+    expect(loreFileExists(PROJECT)).toBe(false);
+  });
+
+  test("returns true after exportLoreFile", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Test",
+      content: "Content",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+    expect(loreFileExists(PROJECT)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shouldImportLoreFile
+// ---------------------------------------------------------------------------
+
+describe("shouldImportLoreFile", () => {
+  test("returns false when .lore.md does not exist", () => {
+    expect(shouldImportLoreFile(PROJECT)).toBe(false);
+  });
+
+  test("returns false after export (file matches DB state)", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    expect(shouldImportLoreFile(PROJECT)).toBe(false);
+  });
+
+  test("returns true when .lore.md content differs from DB (external edit)", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    // Simulate external edit
+    const content = readFile(LORE_FILE_PATH);
+    writeFile(content.replace("OAuth2 with PKCE", "OAuth2 with PKCE — updated"), LORE_FILE_PATH);
+
+    expect(shouldImportLoreFile(PROJECT)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// importLoreFile
+// ---------------------------------------------------------------------------
+
+describe("importLoreFile", () => {
+  test("imports entries from .lore.md preserving UUIDs", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    // Delete from DB, then re-import
+    db().query("DELETE FROM knowledge WHERE id = ?").run(id);
+
+    importLoreFile(PROJECT);
+
+    const entry = ltm.get(id);
+    expect(entry).not.toBeNull();
+    expect(entry!.title).toBe("Auth strategy");
+    expect(entry!.content).toBe("OAuth2 with PKCE");
+  });
+
+  test("updates content when .lore.md has been edited", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    // Edit .lore.md
+    const content = readFile(LORE_FILE_PATH);
+    writeFile(content.replace("OAuth2 with PKCE", "OAuth2 with PKCE — also supports API keys"), LORE_FILE_PATH);
+
+    importLoreFile(PROJECT);
+
+    const entry = ltm.get(id);
+    expect(entry!.content).toContain("API keys");
+  });
+
+  test("handles hand-written entries (no UUID markers) in .lore.md", () => {
+    writeFile(
+      "<!-- Managed by lore -->\n\n## Long-term Knowledge\n\n### Pattern\n\n* **Hand-written pattern**: Using middleware\n",
+      LORE_FILE_PATH,
+    );
+
+    importLoreFile(PROJECT);
+
+    const entries = ltm.forProject(PROJECT);
+    const match = entries.find((e) => e.title === "Hand-written pattern");
+    expect(match).toBeDefined();
+    expect(match!.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  });
+
+  test("does nothing when .lore.md does not exist", () => {
+    const before = ltm.forProject(PROJECT);
+    importLoreFile(PROJECT);
+    const after = ltm.forProject(PROJECT);
+    expect(after.length).toBe(before.length);
+  });
+
+  test("round-trip: exportLoreFile → importLoreFile → exportLoreFile produces identical file", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE flow",
+      scope: "project",
+    });
+    ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Rebuild server",
+      content: "Run pnpm build:bin after src change",
+      scope: "project",
+    });
+
+    exportLoreFile(PROJECT);
+    const first = readFile(LORE_FILE_PATH);
+
+    importLoreFile(PROJECT);
+    exportLoreFile(PROJECT);
+    const second = readFile(LORE_FILE_PATH);
+
+    expect(second).toBe(first);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration: old AGENTS.md → .lore.md
+// ---------------------------------------------------------------------------
+
+describe("migration from AGENTS.md to .lore.md", () => {
+  test("entries in old-format AGENTS.md are importable via importFromFile", () => {
+    const remoteId = TEST_UUIDS[0];
+    const section = loreSectionWithEntries([
+      { id: remoteId, category: "decision", title: "Auth strategy", content: "OAuth2 with PKCE" },
+    ]);
+    writeFile(section);
+
+    // No .lore.md exists — backward compat path
+    expect(loreFileExists(PROJECT)).toBe(false);
+    expect(shouldImport({ projectPath: PROJECT, filePath: AGENTS_FILE })).toBe(true);
+
+    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    expect(ltm.get(remoteId)).not.toBeNull();
+  });
+
+  test("exportToFile migrates: writes .lore.md (entries) + AGENTS.md (pointer)", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+
+    // Start with old-format AGENTS.md (entries inside)
+    const oldSection = loreSectionWithEntries([
+      { id, category: "decision", title: "Auth strategy", content: "OAuth2 with PKCE" },
+    ]);
+    writeFile(oldSection);
+
+    // Export triggers migration
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    // AGENTS.md now has pointer
+    const agentsContent = readFile();
+    expect(agentsContent).toContain(".lore.md");
+    expect(agentsContent).not.toContain("OAuth2 with PKCE");
+
+    // .lore.md has entries
+    expect(loreFileExists(PROJECT)).toBe(true);
+    const loreContent = readFile(LORE_FILE_PATH);
+    expect(loreContent).toContain("Auth strategy");
+    expect(loreContent).toContain("OAuth2 with PKCE");
+    expect(loreContent).toContain(`<!-- lore:${id} -->`);
+  });
+
+  test("full migration cycle: import from old AGENTS.md → export → next import reads .lore.md", () => {
+    // Step 1: Old-format AGENTS.md with entries
+    const remoteId = TEST_UUIDS[0];
+    const section = loreSectionWithEntries([
+      { id: remoteId, category: "decision", title: "Auth strategy", content: "OAuth2 with PKCE" },
+    ]);
+    writeFile(section);
+
+    // Step 2: Import from old AGENTS.md (backward compat)
+    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    expect(ltm.get(remoteId)).not.toBeNull();
+
+    // Step 3: Export — writes .lore.md + pointer in AGENTS.md
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    expect(loreFileExists(PROJECT)).toBe(true);
+
+    // Step 4: Next startup — .lore.md exists, use it
+    expect(shouldImportLoreFile(PROJECT)).toBe(false); // just exported, matches DB
+
+    // Step 5: Simulate edit in .lore.md
+    const loreContent = readFile(LORE_FILE_PATH);
+    writeFile(loreContent.replace("OAuth2 with PKCE", "OAuth2 with PKCE — updated"), LORE_FILE_PATH);
+    expect(shouldImportLoreFile(PROJECT)).toBe(true);
+
+    importLoreFile(PROJECT);
+    const entry = ltm.get(remoteId);
+    expect(entry!.content).toContain("updated");
+  });
+
+  test("pointer in AGENTS.md is safe for importFromFile (no entries parsed)", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportToFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+
+    // A teammate with old Lore imports the pointer-only AGENTS.md
+    const before = ltm.forProject(PROJECT).length;
+    importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    const after = ltm.forProject(PROJECT).length;
+
+    // No new entries created — pointer text has no bullet entries
+    expect(after).toBe(before);
   });
 });
 

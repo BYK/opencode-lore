@@ -34,18 +34,22 @@ import {
   distillation,
   ensureProject,
   exportToFile,
+  exportLoreFile,
   formatKnowledge,
   getLtmBudget,
   importFromFile,
+  importLoreFile,
   isFirstRun,
   load,
   log,
+  loreFileExists,
   ltm,
   latReader,
   onIdleResume,
   setLtmTokens,
   setModelLimits,
   shouldImport,
+  shouldImportLoreFile,
   temporal,
   transform,
   workerSessionIDs,
@@ -151,18 +155,27 @@ export default function lorePiExtension(pi: ExtensionAPI): void {
       return;
     }
 
-    // Startup AGENTS.md import — same logic as OpenCode adapter.
+    // Import knowledge at startup — .lore.md takes precedence, falls back
+    // to agents file (AGENTS.md/CLAUDE.md) for backward compat / migration.
     const cfg = config();
-    if (cfg.knowledge.enabled && cfg.agentsFile.enabled) {
-      const filePath = join(projectPath, cfg.agentsFile.path);
+    if (cfg.knowledge.enabled) {
       try {
-        if (shouldImport({ projectPath, filePath })) {
-          importFromFile({ projectPath, filePath });
-          log.info("pi: imported knowledge from", cfg.agentsFile.path);
-          invalidateLtmCache();
+        if (loreFileExists(projectPath)) {
+          if (shouldImportLoreFile(projectPath)) {
+            importLoreFile(projectPath);
+            log.info("pi: imported knowledge from .lore.md");
+            invalidateLtmCache();
+          }
+        } else if (cfg.agentsFile.enabled) {
+          const filePath = join(projectPath, cfg.agentsFile.path);
+          if (shouldImport({ projectPath, filePath })) {
+            importFromFile({ projectPath, filePath });
+            log.info("pi: imported knowledge from", cfg.agentsFile.path, "(migrating to .lore.md)");
+            invalidateLtmCache();
+          }
         }
       } catch (err) {
-        log.error("pi: agents-file import error:", err);
+        log.error("pi: knowledge import error:", err);
       }
     }
 
@@ -421,13 +434,17 @@ export default function lorePiExtension(pi: ExtensionAPI): void {
       log.error("pi: temporal.prune failed:", err);
     }
 
-    // AGENTS.md export.
-    if (cfg.knowledge.enabled && cfg.agentsFile.enabled) {
+    // Knowledge export (.lore.md + optional agents file pointer).
+    if (cfg.knowledge.enabled) {
       try {
-        const filePath = join(projectPath, cfg.agentsFile.path);
-        exportToFile({ projectPath, filePath });
+        if (cfg.agentsFile.enabled) {
+          const filePath = join(projectPath, cfg.agentsFile.path);
+          exportToFile({ projectPath, filePath });
+        } else {
+          exportLoreFile(projectPath);
+        }
       } catch (err) {
-        log.error("pi: agents-file export error:", err);
+        log.error("pi: knowledge export error:", err);
       }
     }
   });

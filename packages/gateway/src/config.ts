@@ -118,8 +118,8 @@ const PROJECT_PATH_PATTERNS: RegExp[] = [
   /["']?cwd["']?\s*[:=]\s*["']?(\/(?:home|Users)\/[^\s"',}]+)/,
   // Working directory: /home/user/project
   /[Ww]orking\s+directory[:=]\s*(\/(?:home|Users)\/[^\s"',]+)/,
-  // CLAUDE.md / AGENTS.md file path → take the directory
-  /(\/(?:home|Users)\/[^\s"',]+)\/(?:CLAUDE|AGENTS)\.md/,
+  // CLAUDE.md / AGENTS.md / .lore.md file path → take the directory
+  /(\/(?:home|Users)\/[^\s"',]+)\/(?:CLAUDE|AGENTS|\.lore)\.md/,
   // Generic absolute path starting with /home/ or /Users/ — first occurrence
   // Captures until whitespace, quote, comma, or bracket.
   /(\/(?:home|Users)\/[\w./-]+)/,

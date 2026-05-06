@@ -17,6 +17,7 @@ import {
   log,
   config as loreConfig,
   exportToFile,
+  exportLoreFile,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
@@ -172,16 +173,20 @@ export function buildIdleWorkHandler(
       log.error("idle pruning error:", e);
     }
 
-    // 5. AGENTS.md export
-    if (cfg.knowledge.enabled && cfg.agentsFile.enabled) {
+    // 5. Knowledge export (.lore.md + optional agents file pointer)
+    if (cfg.knowledge.enabled) {
       try {
         const entries = ltm.forProject(projectPath, false);
         if (entries.length > 0) {
-          const filePath = join(projectPath, cfg.agentsFile.path);
-          exportToFile({ projectPath, filePath });
+          if (cfg.agentsFile.enabled) {
+            const filePath = join(projectPath, cfg.agentsFile.path);
+            exportToFile({ projectPath, filePath });
+          } else {
+            exportLoreFile(projectPath);
+          }
         }
       } catch (e) {
-        log.error("idle agents-file export error:", e);
+        log.error("idle knowledge export error:", e);
       }
     }
 

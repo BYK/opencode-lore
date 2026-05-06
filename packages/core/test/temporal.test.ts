@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 import { db, ensureProject } from "../src/db";
 import * as temporal from "../src/temporal";
 import { ftsQuery } from "../src/search";
@@ -55,6 +55,12 @@ function makeParts(messageID: string, text: string): LorePart[] {
 }
 
 describe("temporal", () => {
+  beforeAll(() => {
+    // Clean stale data from prior test runs — tests are cumulative within a run
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+  });
+
   test("store and retrieve messages", () => {
     const info = makeMessage("msg-1", "user");
     const parts = makeParts("msg-1", "How do I set up authentication?");
