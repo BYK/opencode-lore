@@ -9,7 +9,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { dirname } from "path";
+import { dirname, join } from "path";
 import * as ltm from "./ltm";
 import { serialize, inline, h, ul, liph, strong, t, root, unescapeMarkdown } from "./markdown";
 
@@ -33,6 +33,16 @@ const ALL_START_MARKERS = [
   "<!-- This section is maintained by the coding agent via lore (https://github.com/BYK/opencode-lore) -->",
   "<!-- This section is auto-maintained by lore (https://github.com/BYK/opencode-lore) -->",
 ] as const;
+
+/**
+ * Filename for the dedicated lore knowledge file. Always at the project root.
+ * Unlike the agents file (AGENTS.md / CLAUDE.md), this file is entirely owned
+ * by lore — no section markers needed, no non-lore content to preserve.
+ */
+export const LORE_FILE = ".lore.md";
+
+const LORE_FILE_HEADER =
+  "<!-- Managed by lore (https://github.com/BYK/loreai) — manual edits are imported on next session. -->";
 
 /** Regex matching a valid UUID (v4 or v7) — 8-4-4-4-12 hex groups. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -270,16 +280,25 @@ function buildSection(projectPath: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Write current knowledge entries into the AGENTS.md file, preserving all
- * non-lore content. Creates the file if it doesn't exist.
+ * Write a pointer to `.lore.md` inside the agents file (AGENTS.md / CLAUDE.md),
+ * preserving all non-lore content. Also writes `.lore.md` with the actual
+ * knowledge entries as a side effect.
  */
 export function exportToFile(input: {
   projectPath: string;
   filePath: string;
 }): void {
-  const sectionBody = buildSection(input.projectPath);
+  // Write the actual entries to .lore.md first.
+  exportLoreFile(input.projectPath);
+
+  // Build a pointer section for the agents file instead of full entries.
+  const pointerBody =
+    "\n## Long-term Knowledge\n\n" +
+    "For long-term knowledge entries managed by [lore](https://github.com/BYK/loreai) " +
+    "(gotchas, patterns, decisions, architecture), see [`.lore.md`](.lore.md) " +
+    "in the project root.\n";
   const newSection =
-    LORE_SECTION_START + sectionBody + LORE_SECTION_END + "\n";
+    LORE_SECTION_START + pointerBody + LORE_SECTION_END + "\n";
 
   let fileContent = "";
   if (existsSync(input.filePath)) {
@@ -329,11 +348,11 @@ export function shouldImport(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Import
+// Import helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Import knowledge entries from the agents file into the local DB.
+ * Upsert parsed entries into the local DB.
  *
  * Behaviour per entry:
  * - Known UUID (already in DB)  → update content if it changed (manual edit)
@@ -341,26 +360,13 @@ export function shouldImport(input: {
  * - No UUID (hand-written)      → create with a new UUIDv7
  * - Duplicate UUID in same file → first occurrence wins, rest ignored
  */
-export function importFromFile(input: {
-  projectPath: string;
-  filePath: string;
-}): void {
-  if (!existsSync(input.filePath)) return;
-
-  const fileContent = readFileSync(input.filePath, "utf8");
-  const { section, before } = splitFile(fileContent);
-
-  // Determine what to parse:
-  // - If lore markers exist: parse ONLY the lore section body (avoid re-importing our own output)
-  // - If no markers: parse the full file (first-time hand-written AGENTS.md import)
-  const textToParse = section ?? fileContent;
-
-  const fileEntries = parseEntriesFromSection(textToParse);
-  if (!fileEntries.length) return;
-
+function _importEntries(
+  entries: ParsedFileEntry[],
+  projectPath: string,
+): void {
   const seenIds = new Set<string>();
 
-  for (const entry of fileEntries) {
+  for (const entry of entries) {
     if (entry.id !== null) {
       // Deduplicate: if same UUID appears twice in file, first wins
       if (seenIds.has(entry.id)) continue;
@@ -375,7 +381,7 @@ export function importFromFile(input: {
       } else {
         // Unknown UUID — entry came from another machine, preserve its ID
         ltm.create({
-          projectPath: input.projectPath,
+          projectPath,
           category: entry.category,
           title: entry.title,
           content: entry.content,
@@ -387,13 +393,13 @@ export function importFromFile(input: {
     } else {
       // Hand-written entry — create with a new UUIDv7
       // Check for a near-duplicate by title to avoid double-import on re-runs
-      const existing = ltm.forProject(input.projectPath, true);
+      const existing = ltm.forProject(projectPath, true);
       const titleMatch = existing.find(
         (e) => e.title.toLowerCase() === entry.title.toLowerCase(),
       );
       if (!titleMatch) {
         ltm.create({
-          projectPath: input.projectPath,
+          projectPath,
           category: entry.category,
           title: entry.title,
           content: entry.content,
@@ -403,4 +409,81 @@ export function importFromFile(input: {
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Import from agents file (AGENTS.md / CLAUDE.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * Import knowledge entries from the agents file into the local DB.
+ * Used for backward compatibility when `.lore.md` doesn't exist yet.
+ */
+export function importFromFile(input: {
+  projectPath: string;
+  filePath: string;
+}): void {
+  if (!existsSync(input.filePath)) return;
+
+  const fileContent = readFileSync(input.filePath, "utf8");
+  const { section } = splitFile(fileContent);
+
+  // Determine what to parse:
+  // - If lore markers exist: parse ONLY the lore section body (avoid re-importing our own output)
+  // - If no markers: parse the full file (first-time hand-written AGENTS.md import)
+  const textToParse = section ?? fileContent;
+
+  const fileEntries = parseEntriesFromSection(textToParse);
+  if (!fileEntries.length) return;
+
+  _importEntries(fileEntries, input.projectPath);
+}
+
+// ---------------------------------------------------------------------------
+// .lore.md — dedicated knowledge file
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if a `.lore.md` file exists in the project root.
+ */
+export function loreFileExists(projectPath: string): boolean {
+  return existsSync(join(projectPath, LORE_FILE));
+}
+
+/**
+ * Export current knowledge entries to `.lore.md` in the project root.
+ * The entire file is lore-owned — no section markers, no content to preserve.
+ */
+export function exportLoreFile(projectPath: string): void {
+  const sectionBody = buildSection(projectPath);
+  const content = LORE_FILE_HEADER + "\n" + sectionBody;
+  writeFileSync(join(projectPath, LORE_FILE), content, "utf8");
+}
+
+/**
+ * Returns true if `.lore.md` needs to be imported:
+ * - File exists and its content differs from what lore would currently produce
+ */
+export function shouldImportLoreFile(projectPath: string): boolean {
+  const fp = join(projectPath, LORE_FILE);
+  if (!existsSync(fp)) return false;
+
+  const fileContent = readFileSync(fp, "utf8");
+  const expected = LORE_FILE_HEADER + "\n" + buildSection(projectPath);
+  return hashSection(fileContent) !== hashSection(expected);
+}
+
+/**
+ * Import knowledge entries from `.lore.md` into the local DB.
+ * Parses the full file content (no section markers to split on).
+ */
+export function importLoreFile(projectPath: string): void {
+  const fp = join(projectPath, LORE_FILE);
+  if (!existsSync(fp)) return;
+
+  const fileContent = readFileSync(fp, "utf8");
+  const fileEntries = parseEntriesFromSection(fileContent);
+  if (!fileEntries.length) return;
+
+  _importEntries(fileEntries, projectPath);
 }

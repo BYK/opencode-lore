@@ -848,11 +848,13 @@ async function handleConversationTurn(
       "over time as knowledge accumulates across sessions.";
   }
 
-  // AGENTS.md commit reminder
-  if (cfg.knowledge.enabled && cfg.agentsFile.enabled) {
+  // Lore knowledge file commit reminder
+  if (cfg.knowledge.enabled) {
+    const filesToTrack = [".lore.md"];
+    if (cfg.agentsFile.enabled) filesToTrack.push(cfg.agentsFile.path);
     modifiedSystem +=
-      `\n\nWhen making git commits, always check if ${cfg.agentsFile.path} has ` +
-      `unstaged changes and include it in the commit. This file contains ` +
+      `\n\nWhen making git commits, always check if ${filesToTrack.join(" and ")} ` +
+      `have unstaged changes and include them in the commit. These files contain ` +
       `shared project knowledge managed by lore and must be version-controlled.`;
   }
 
