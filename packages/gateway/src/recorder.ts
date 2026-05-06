@@ -8,7 +8,7 @@
  * Replay mode: replays stored fixtures in sequence, never touching
  * the upstream API.  Useful for deterministic integration tests.
  */
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { log } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
@@ -71,38 +71,6 @@ export function startRecording(fixturePath: string): void {
 /** Disable recording mode. */
 export function stopRecording(): void {
   recordingPath = null;
-}
-
-/** Returns true when recording mode is active. */
-export function isRecording(): boolean {
-  return recordingPath !== null;
-}
-
-// ---------------------------------------------------------------------------
-// Fixture I/O
-// ---------------------------------------------------------------------------
-
-/**
- * Read a `.ndjson` file and parse each non-blank line as a `FixtureEntry`.
- * Malformed JSON lines are skipped with a warning.
- */
-export function loadFixtures(fixturePath: string): FixtureEntry[] {
-  const raw = readFileSync(fixturePath, "utf8");
-  const entries: FixtureEntry[] = [];
-
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    try {
-      const entry = JSON.parse(trimmed) as FixtureEntry;
-      entries.push(entry);
-    } catch {
-      log.warn(`[recorder] skipping malformed fixture line: ${trimmed.slice(0, 120)}`);
-    }
-  }
-
-  return entries;
 }
 
 // ---------------------------------------------------------------------------

@@ -456,18 +456,6 @@ async function spawnGateway(gatewayBase: string): Promise<boolean> {
   }
 }
 
-/** Config hook returned when the gateway is active. */
-function makeGatewayConfigHook(gatewayBase: string) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return async (cfg: any) => {
-    cfg.provider ??= {};
-    for (const providerID of GATEWAY_PROVIDERS) {
-      cfg.provider[providerID] ??= {};
-      cfg.provider[providerID].options ??= {};
-      cfg.provider[providerID].options!.baseURL = `${gatewayBase}/v1`;
-    }
-  };
-}
 
 export const LorePlugin: Plugin = async (ctx) => {
   // Resolve the gateway base URL — explicit env var or default.
@@ -796,7 +784,8 @@ export const LorePlugin: Plugin = async (ctx) => {
   }
 
   const hooks: Hooks = {
-    // Disable built-in compaction and register hidden worker agents
+    // Disable built-in compaction and register hidden worker agents.
+    // When the gateway is active, also redirect all provider baseURLs through it.
     config: async (input) => {
       const cfg = input as Record<string, unknown>;
       cfg.compaction = { auto: false, prune: false };
@@ -815,6 +804,17 @@ export const LorePlugin: Plugin = async (ctx) => {
           description: "Lore query expansion worker",
         },
       };
+
+      if (gatewayActive) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = cfg.provider as Record<string, any> ?? {};
+        cfg.provider = p;
+        for (const providerID of GATEWAY_PROVIDERS) {
+          p[providerID] ??= {};
+          p[providerID].options ??= {};
+          p[providerID].options!.baseURL = `${gatewayBase}/v1`;
+        }
+      }
     },
 
     // Store all messages in temporal DB for full-text search and distillation.
@@ -1475,71 +1475,8 @@ export const LorePlugin: Plugin = async (ctx) => {
     });
   }
 
-  // In gateway mode: return observer hooks instead of the full transform hooks.
-  // The gateway already applied gradient + LTM; the plugin runs the same logic
-  // in read-only mode and logs any divergence as [lore:verify] warnings.
   if (gatewayActive) {
-    process.stderr.write(`[lore] observer mode active — watching gateway at ${gatewayBase}\n`);
-
-    return {
-      config: makeGatewayConfigHook(gatewayBase),
-
-      "experimental.chat.system.transform": async (input, _output) => {
-        // Update model limits so gradient estimates are accurate.
-        if (input.model?.limit) setModelLimits(input.model.limit);
-        if (input.model) {
-          const m = input.model as { id: string; providerID: string; cost?: { input: number; cache?: { read: number } } };
-          if (m.cost?.cache?.read) {
-            activeSessionModel = {
-              id: m.id,
-              providerID: m.providerID,
-              cost: { input: m.cost.input, cache: { read: m.cost.cache.read } },
-            };
-          }
-        }
-
-        // Observe LTM selection — log what the plugin would inject.
-        if (config().knowledge.enabled && input.sessionID) {
-          try {
-            const ltmBudget = getLtmBudget(config().budget.ltm);
-            const entries = ltm.forSession(projectPath, input.sessionID, ltmBudget);
-            log.info(
-              `[verify] ltm: session=${input.sessionID} entries=${entries.length}` +
-              (entries.length ? ` titles=${entries.map((e) => e.title).join(", ")}` : ""),
-            );
-          } catch (e) {
-            log.warn("[verify] ltm selection failed:", e instanceof Error ? e.message : String(e));
-          }
-        }
-      },
-
-      "experimental.chat.messages.transform": async (_input, output) => {
-        if (!output.messages.length) return;
-
-        const sessionID = output.messages[0]?.info.sessionID;
-        if (sessionID && await shouldSkip(sessionID)) return;
-
-        // Gateway uses fingerprint-based session tracking (no content markers).
-        // Observer logs the plugin session ID for correlation with gateway logs.
-        log.info(`[verify] session: plugin=${sessionID}`);
-
-        // Run gradient in read-only mode — compute what we would have done.
-        try {
-          const result = transform({
-            messages: output.messages as unknown as LoreMessageWithParts[],
-            projectPath,
-            sessionID,
-          });
-          log.info(
-            `[verify] gradient: session=${sessionID} layer=${result.layer}` +
-            ` tokens=${result.totalTokens} (raw=${result.rawTokens} distilled=${result.distilledTokens})`,
-          );
-        } catch (e) {
-          log.warn("[verify] gradient failed:", e instanceof Error ? e.message : String(e));
-        }
-        // output.messages intentionally NOT mutated — gateway already did the work.
-      },
-    };
+    process.stderr.write(`[lore] gateway mode active — routing through ${gatewayBase}\n`);
   }
 
   return hooks;
