@@ -2,7 +2,7 @@
   "name": "@loreai/opencode",
   "version": "0.12.0",
   "type": "module",
-  "license": "MIT",
+  "license": "FSL-1.1-Apache-2.0",
   "description": "Three-tier memory architecture for OpenCode — distillation, not summarization",
   "main": "./src/index.ts",
   "types": "./src/index.ts",

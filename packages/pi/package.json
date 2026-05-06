@@ -2,7 +2,7 @@
   "name": "@loreai/pi",
   "version": "0.12.0",
   "type": "module",
-  "license": "MIT",
+  "license": "FSL-1.1-Apache-2.0",
   "description": "Lore memory engine as a Pi (@mariozechner/pi-coding-agent) extension",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
