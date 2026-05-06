@@ -22,6 +22,7 @@ import {
   getLastTransformedCount,
   getLastTransformEstimate,
   onIdleResume,
+  getLastTurnAt,
   consumeCameOutOfIdle,
   formatKnowledge,
   formatDistillations,
@@ -750,12 +751,19 @@ export const LorePlugin: Plugin = async (ctx) => {
         pending >= cfg.distillation.minMessages ||
         needsUrgentDistillation()
       ) {
+        // Skip meta-distillation when the prompt cache is likely still warm.
+        // Meta-distill rewrites row IDs → invalidates distilled prefix cache →
+        // cache bust on the next turn. Defer until the cache is cold anyway.
+        const cacheTTLMs = cfg.idleResumeMinutes * 60_000;
+        const lastTurn = getLastTurnAt(sessionID);
+        const cacheWarm = lastTurn > 0 && (Date.now() - lastTurn) < cacheTTLMs;
         await distillation.run({
           llm: createOpenCodeLLMClient(ctx.client, sessionID),
           projectPath,
           sessionID,
           model: getWorkerModel(),
           force,
+          skipMeta: cacheWarm && !force,
         });
       }
     } catch (e) {

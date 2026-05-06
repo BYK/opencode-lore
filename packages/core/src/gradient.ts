@@ -123,6 +123,10 @@ type SessionState = {
   consecutiveHighLayer: number;
   /** Hash of the first message IDs in the last transform output — for cache-bust diagnostics. */
   lastPrefixHash: string;
+  /** Cumulative cache-bust count for this session (prefix hash changed between turns). */
+  bustCount: number;
+  /** Total transform() calls for this session — used with bustCount for rate calculation. */
+  transformCount: number;
   /**
    * Distillation row snapshot — cached to avoid hitting the DB on every
    * transform() call. Refreshed only at turn boundaries (when a new user
@@ -154,6 +158,8 @@ function makeSessionState(): SessionState {
     cameOutOfIdle: false,
     consecutiveHighLayer: 0,
     lastPrefixHash: "",
+    bustCount: 0,
+    transformCount: 0,
     distillationSnapshot: null,
   };
 }
@@ -220,6 +226,16 @@ export function onIdleResume(
   state.distillationSnapshot = null;
   state.cameOutOfIdle = true;
   return { triggered: true, idleMs };
+}
+
+/**
+ * Return the wall-clock timestamp (epoch ms) of the most recent transform()
+ * call for this session. Returns 0 if the session has never been transformed.
+ * Used by callers (e.g. meta-distillation gating) to check whether the
+ * upstream prompt cache is likely still warm.
+ */
+export function getLastTurnAt(sessionID: string): number {
+  return sessionStates.get(sessionID)?.lastTurnAt ?? 0;
 }
 
 /**
@@ -1277,17 +1293,19 @@ function transformInner(input: {
   }
 
   // --- Sticky layer guard (Option C) ---
-  // After a compressed turn (layer >= 1), don't allow layer 0 re-entry until
+  // After a compressed turn (layer >= N), don't allow re-entry below N until
   // the session genuinely shrinks (e.g. after compaction deletes messages).
-  // Prevents the calibration oscillation: a compressed turn stores
-  // lastKnownInput=100K for a 50-message window, but the next turn's
-  // input.messages has 300 raw messages. The delta estimation treats the 250
-  // evicted messages as "new" and undercounts their tokens, producing an
-  // expectedInput that fits in layer 0 — but the actual tokens are ~190K.
+  // Prevents calibration oscillation AND layer-transition cache busts:
+  //   - 0→1→0: compressed turn stores lastKnownInput=100K for a 50-message
+  //     window, next turn's 300 raw messages produce an undercounted
+  //     expectedInput that "fits" in layer 0 but actually overflows.
+  //   - 1→2→1: layer 2 strips tool outputs (different bytes), bouncing back
+  //     to layer 1 restores them (different bytes again) → two busts.
+  // Pinning to the *actual* last layer prevents all downward oscillation.
   // Only applied when calibrated (same session, per-session state) to avoid
   // affecting other sessions including worker sessions.
   if (calibrated && sessState.lastLayer >= 1 && input.messages.length >= sessState.lastKnownMessageCount) {
-    effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
+    effectiveMinLayer = Math.max(effectiveMinLayer, sessState.lastLayer) as SafetyLayer;
   }
 
   let expectedInput: number;
@@ -1536,19 +1554,29 @@ export function transform(input: {
     // result fields above so a thrown transformInner doesn't update it.
     state.lastTurnAt = Date.now();
 
-    // --- Cache-bust diagnostics (LORE_DEBUG only) ---
+    // --- Cache-bust diagnostics ---
     // Track byte-identity of the message prefix. When the prefix hash changes
     // between consecutive turns, it means Anthropic's prompt cache is invalidated
     // and the entire context is re-written (12.5× cache-read price). This helps
     // identify which code paths are breaking byte-identity.
     const prefixIds = result.messages.slice(0, 5).map((m) => m.info.id).join(",");
     const prefixHash = `${result.layer}:${prefixIds}`;
+    state.transformCount++;
     if (state.lastPrefixHash && state.lastPrefixHash !== prefixHash) {
+      state.bustCount++;
+      const rate = state.bustCount / state.transformCount;
       log.info(
-        `cache-bust detected: session=${sid} layer=${state.lastLayer}→${result.layer}` +
+        `cache-bust #${state.bustCount} (${(rate * 100).toFixed(0)}%): session=${sid}` +
+        ` layer=${state.lastLayer}→${result.layer}` +
         ` msgs=${state.lastTransformedCount}→${result.messages.length}` +
         ` prefix=${state.lastPrefixHash.slice(0, 30)}→${prefixHash.slice(0, 30)}`,
       );
+      if (state.transformCount >= 20 && rate > 0.5) {
+        log.warn(
+          `HIGH BUST RATE: session ${sid} has ${(rate * 100).toFixed(0)}% bust rate` +
+          ` (${state.bustCount}/${state.transformCount} transforms)`,
+        );
+      }
     }
     state.lastPrefixHash = prefixHash;
 
