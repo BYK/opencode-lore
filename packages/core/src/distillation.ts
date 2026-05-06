@@ -532,6 +532,11 @@ export async function run(input: {
    *  and causes a cache bust on the next turn. Callers should set this to true
    *  when `Date.now() - getLastTurnAt(sessionID) < cacheTTL`. */
   skipMeta?: boolean;
+  /** When true, all LLM calls in this run are marked urgent and bypass the
+   *  batch queue (if one is active). Use for compaction and overflow recovery
+   *  where the caller is blocking on the result. Background/idle distillation
+   *  should leave this false to benefit from batch API 50% cost savings. */
+  urgent?: boolean;
 }): Promise<{ rounds: number; distilled: number }> {
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
@@ -565,6 +570,7 @@ export async function run(input: {
           sessionID: input.sessionID,
           messages: segment,
           model: input.model,
+          urgent: input.urgent,
         });
         if (result) {
           distilled += segment.length;
@@ -586,6 +592,7 @@ export async function run(input: {
         projectPath: input.projectPath,
         sessionID: input.sessionID,
         model: input.model,
+        urgent: input.urgent,
       });
       rounds++;
     }
@@ -603,6 +610,7 @@ async function distillSegment(input: {
   sessionID: string;
   messages: TemporalMessage[];
   model?: { providerID: string; modelID: string };
+  urgent?: boolean;
 }): Promise<DistillationResult | null> {
   const prior = latestObservations(input.projectPath, input.sessionID);
   const text = messagesToText(input.messages);
@@ -625,7 +633,7 @@ async function distillSegment(input: {
   const responseText = await input.llm.prompt(
     DISTILLATION_SYSTEM,
     userContent,
-    { model, workerID: "lore-distill", thinking: false },
+    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent },
   );
   if (!responseText) return null;
 
@@ -676,6 +684,7 @@ export async function metaDistill(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
+  urgent?: boolean;
 }): Promise<DistillationResult | null> {
   const existing = loadGen0(input.projectPath, input.sessionID);
 
@@ -703,7 +712,7 @@ export async function metaDistill(input: {
   const responseText = await input.llm.prompt(
     RECURSIVE_SYSTEM,
     userContent,
-    { model, workerID: "lore-distill", thinking: false },
+    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent },
   );
   if (!responseText) return null;
 
