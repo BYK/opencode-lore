@@ -1,6 +1,7 @@
 import { Database } from "#db/driver";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
+import { homedir } from "os";
 
 const SCHEMA_VERSION = 12;
 
@@ -353,7 +354,7 @@ const MIGRATIONS: string[] = [
 
 function dataDir() {
   const xdg = process.env.XDG_DATA_HOME;
-  const base = xdg || join(process.env.HOME || "~", ".local", "share");
+  const base = xdg || join(homedir(), ".local", "share");
   return join(base, "opencode-lore");
 }
 
