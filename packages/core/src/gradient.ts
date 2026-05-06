@@ -119,6 +119,15 @@ type SessionState = {
    * the post-idle turn regardless of conversation size.
    */
   cameOutOfIdle: boolean;
+  /**
+   * Set true by onIdleResume() alongside cameOutOfIdle; consumed (and cleared)
+   * by transformInner() to activate the post-idle compact layer. When true AND
+   * distillations exist, transform skips layer 0 (full-raw passthrough) and
+   * uses a tighter raw budget for layer 1. Rationale: on a cold cache the
+   * entire context is a cache WRITE — a smaller total means lower write cost,
+   * and aggressive idle distillation already captured the older history.
+   */
+  postIdleCompact: boolean;
   /** Consecutive turns at layer >= 2. When >= 3, log a compaction hint. */
   consecutiveHighLayer: number;
   /** Hash of the first message IDs in the last transform output — for cache-bust diagnostics. */
@@ -156,6 +165,7 @@ function makeSessionState(): SessionState {
     rawWindowCache: null,
     lastTurnAt: 0,
     cameOutOfIdle: false,
+    postIdleCompact: false,
     consecutiveHighLayer: 0,
     lastPrefixHash: "",
     bustCount: 0,
@@ -225,6 +235,7 @@ export function onIdleResume(
   state.rawWindowCache = null;
   state.distillationSnapshot = null;
   state.cameOutOfIdle = true;
+  state.postIdleCompact = true;
   return { triggered: true, idleMs };
 }
 
@@ -416,6 +427,7 @@ export function inspectSessionState(sessionID: string): {
   hasPrefixCache: boolean;
   hasRawWindowCache: boolean;
   cameOutOfIdle: boolean;
+  postIdleCompact: boolean;
   lastTurnAt: number;
   distillationSnapshot: DistillationSnapshot | null;
 } | null {
@@ -425,6 +437,7 @@ export function inspectSessionState(sessionID: string): {
     hasPrefixCache: state.prefixCache !== null,
     hasRawWindowCache: state.rawWindowCache !== null,
     cameOutOfIdle: state.cameOutOfIdle,
+    postIdleCompact: state.postIdleCompact,
     lastTurnAt: state.lastTurnAt,
     distillationSnapshot: state.distillationSnapshot,
   };
@@ -1254,7 +1267,8 @@ function transformInner(input: {
     contextLimit - outputReserved - overhead - ltmTokens,
   );
   const distilledBudget = Math.floor(usable * cfg.budget.distilled);
-  const rawBudget = Math.floor(usable * cfg.budget.raw);
+  // Base raw budget. May be overridden below for post-idle compact mode.
+  let rawBudget = Math.floor(usable * cfg.budget.raw);
 
   // --- Force escalation (reactive error recovery) ---
   // When the API previously rejected with "prompt is too long", skip layers
@@ -1306,6 +1320,30 @@ function transformInner(input: {
   // affecting other sessions including worker sessions.
   if (calibrated && sessState.lastLayer >= 1 && input.messages.length >= sessState.lastKnownMessageCount) {
     effectiveMinLayer = Math.max(effectiveMinLayer, sessState.lastLayer) as SafetyLayer;
+  }
+
+  // --- Post-idle compact layer ---
+  // When the cache just went cold (onIdleResume fired), skip layer 0 full-raw
+  // passthrough and use a tighter raw budget. Rationale: the entire context is
+  // a cache WRITE regardless — a smaller total costs less to write, and
+  // aggressive idle distillation already captured older history in the prefix.
+  // The flag is one-shot: consumed here and reset so subsequent turns use
+  // normal budgets once the cache is warm.
+  const postIdleCompact = sessState.postIdleCompact;
+  if (postIdleCompact) {
+    sessState.postIdleCompact = false;
+    // Skip layer 0 — don't pass through all raw messages on a cold cache.
+    effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
+    // Use a tighter raw budget: 20% of usable instead of the normal 40%.
+    // The distilled prefix covers the older history; the raw window only
+    // needs the current turn + minimal recent context. This reduces the
+    // total cold-cache write cost by up to 20% of usable (~29K tokens on
+    // a 200K context model).
+    rawBudget = Math.floor(usable * 0.20);
+    log.info(
+      `post-idle compact: session=${sid} rawBudget=${rawBudget}` +
+      ` (${Math.floor(usable * cfg.budget.raw)}→${rawBudget})`,
+    );
   }
 
   let expectedInput: number;
