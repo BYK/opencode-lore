@@ -234,6 +234,49 @@ export function parseAnthropicRequest(
 }
 
 // ---------------------------------------------------------------------------
+// Caching options
+// ---------------------------------------------------------------------------
+
+/**
+ * Options controlling Anthropic prompt caching behavior.
+ *
+ * Two independent mechanisms:
+ *  1. **System prompt caching**: sends `system` as a block array with an
+ *     explicit `cache_control` breakpoint. This is the highest-stability
+ *     cache slot — the system prompt rarely changes within a session.
+ *  2. **Conversation caching**: places an explicit `cache_control` breakpoint
+ *     on the last message block, enabling Anthropic to cache the conversation
+ *     prefix up to that point. Between consecutive stable turns (same gradient
+ *     layer, no distillation arrival, no window eviction), the prefix is
+ *     byte-identical → cache reads at 0.1× base cost vs 1× uncached.
+ *
+ * Title/summary passthrough requests should NEVER enable caching — their
+ * content varies every call, producing 1.25× write cost with zero reads.
+ */
+export type AnthropicCacheOptions = {
+  /**
+   * Cache the system prompt with an explicit breakpoint.
+   * - `"5m"` — default 5-minute TTL (conversation turns, frequent enough
+   *   for 5m refresh)
+   * - `"1h"` — extended 1-hour TTL (worker calls that come in bursts
+   *   separated by minutes of user thinking)
+   * - `false` — no system caching
+   */
+  systemTTL?: "5m" | "1h" | false;
+
+  /**
+   * Place an explicit `cache_control` breakpoint on the last block of the
+   * last message, enabling Anthropic to cache the conversation prefix.
+   *
+   * When `true`, the gateway adds `cache_control: { type: "ephemeral" }`
+   * to the final content block. On the next turn, Anthropic's lookback
+   * window finds the prior breakpoint, reads the cached prefix (0.1×
+   * cost), and writes only the new tail (1.25×).
+   */
+  cacheConversation?: boolean;
+};
+
+// ---------------------------------------------------------------------------
 // buildAnthropicRequest
 // ---------------------------------------------------------------------------
 
@@ -243,8 +286,15 @@ export function parseAnthropicRequest(
  *
  * Returns the relative path, headers, and JSON body. The caller prepends
  * the upstream base URL.
+ *
+ * @param req   The normalized gateway request
+ * @param cache Optional caching configuration. When omitted, no
+ *              `cache_control` annotations are added (passthrough behavior).
  */
-export function buildAnthropicRequest(req: GatewayRequest): {
+export function buildAnthropicRequest(
+  req: GatewayRequest,
+  cache?: AnthropicCacheOptions,
+): {
   url: string;
   headers: Record<string, string>;
   body: unknown;
@@ -278,14 +328,43 @@ export function buildAnthropicRequest(req: GatewayRequest): {
 
   // System — only include if non-empty
   if (req.system) {
-    body.system = req.system;
+    const systemTTL = cache?.systemTTL;
+    if (systemTTL) {
+      // Send as block array with explicit cache_control breakpoint.
+      // This creates a stable cache slot for the system prompt — it changes
+      // only when LTM entries are added/removed or AGENTS.md is updated.
+      const cacheControl: Record<string, string> =
+        systemTTL === "1h"
+          ? { type: "ephemeral", ttl: "3600" }
+          : { type: "ephemeral" };
+      body.system = [
+        { type: "text", text: req.system, cache_control: cacheControl },
+      ];
+    } else {
+      body.system = req.system;
+    }
   }
 
   // Messages
-  body.messages = req.messages.map((msg) => ({
+  const messages = req.messages.map((msg) => ({
     role: msg.role,
     content: msg.content.map(toAnthropicBlock),
   }));
+
+  // Conversation caching: place a breakpoint on the final content block of
+  // the last message. Anthropic's 20-block lookback finds the prior turn's
+  // breakpoint, reads the cached prefix, and writes only the new tail.
+  if (cache?.cacheConversation && messages.length > 0) {
+    const lastMsg = messages[messages.length - 1]!;
+    if (lastMsg.content.length > 0) {
+      const lastBlock = lastMsg.content[lastMsg.content.length - 1]!;
+      (lastBlock as Record<string, unknown>).cache_control = {
+        type: "ephemeral",
+      };
+    }
+  }
+
+  body.messages = messages;
 
   // Tools — only include if present
   if (req.tools.length > 0) {

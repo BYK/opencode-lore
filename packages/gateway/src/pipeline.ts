@@ -60,6 +60,7 @@ import {
 import {
   buildAnthropicRequest,
   buildAnthropicNonStreamResponse,
+  type AnthropicCacheOptions,
 } from "./translate/anthropic";
 import {
   buildOpenAIUpstreamRequest,
@@ -290,6 +291,7 @@ async function forwardToUpstream(
   req: GatewayRequest,
   config: GatewayConfig,
   interceptor?: UpstreamInterceptor,
+  cache?: AnthropicCacheOptions,
 ): Promise<Response> {
   let url: string;
   let headers: Record<string, string>;
@@ -306,7 +308,7 @@ async function forwardToUpstream(
     headers = result.headers;
     body = result.body;
   } else {
-    const result = buildAnthropicRequest(req);
+    const result = buildAnthropicRequest(req, cache);
     url = `${effectiveUpstreamBase}${result.url}`;
     headers = result.headers;
     body = result.body;
@@ -890,7 +892,21 @@ async function handleConversationTurn(
   };
 
   // --- 9. Forward to upstream ---
-  const upstreamResponse = await forwardToUpstream(modifiedReq, config);
+  // Enable prompt caching for conversation turns:
+  //  - System prompt: explicit breakpoint with 5m TTL (frequent turns)
+  //  - Conversation: breakpoint on last block so Anthropic caches the prefix
+  // Title/summary passthrough (handlePassthrough) never reaches here — it
+  // forwards the raw request without buildAnthropicRequest, so no caching.
+  const cacheOptions: AnthropicCacheOptions = {
+    systemTTL: "5m",
+    cacheConversation: true,
+  };
+  const upstreamResponse = await forwardToUpstream(
+    modifiedReq,
+    config,
+    undefined,
+    cacheOptions,
+  );
 
   if (!upstreamResponse.ok) {
     const errorBody = await upstreamResponse.text();
