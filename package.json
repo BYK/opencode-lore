@@ -2,7 +2,7 @@
   "name": "lore-monorepo",
   "private": true,
   "type": "module",
-  "license": "MIT",
+  "license": "FSL-1.1-Apache-2.0",
   "description": "Monorepo root for Lore — three-tier memory architecture",
   "main": "./packages/opencode/src/index.ts",
   "exports": {

@@ -2,7 +2,7 @@
   "name": "@loreai/core",
   "version": "0.12.0",
   "type": "module",
-  "license": "MIT",
+  "license": "FSL-1.1-Apache-2.0",
   "description": "Shared memory engine for Lore — three-tier storage, distillation, gradient context management",
   "main": "./dist/node/index.js",
   "types": "./dist/node/index.d.ts",
