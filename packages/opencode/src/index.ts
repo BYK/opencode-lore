@@ -459,35 +459,43 @@ async function spawnGateway(gatewayBase: string): Promise<boolean> {
 }
 
 
+// Process-wide initialization state — shared across all sessions.
+// The plugin function is called once per OpenCode session/project, but
+// gateway detection, embedding backfill, and verbose startup logs only
+// need to run once per process.
+let processInitDone = false;
+let processGatewayActive = false;
+let processGatewayBase = "";
+
 export const LorePlugin: Plugin = async (ctx) => {
   // Resolve the gateway base URL — explicit env var or default.
   const gatewayBase =
     (process.env.LORE_GATEWAY_URL ?? "http://127.0.0.1:6969").replace(/\/$/, "");
 
-  // Determine if the gateway is active (probe first, then try to spawn).
-  // Skip in test environments to avoid probing a live gateway during unit tests.
-  // Detect bun test runner: bun test sets NODE_ENV=test in the test file scope
-  // but this may not propagate into imported modules. Use a belt-and-suspenders
-  // approach: check both NODE_ENV and whether we're running inside a .test. file.
-  const inTestEnv =
-    process.env.NODE_ENV === "test" ||
-    process.env.LORE_GATEWAY_MODE === "test" ||
-    process.argv.some((a) => a.includes(".test."));
+  // Determine if the gateway is active — only probe once per process.
+  let gatewayActive = processGatewayActive;
+  if (!processInitDone) {
+    const inTestEnv =
+      process.env.NODE_ENV === "test" ||
+      process.env.LORE_GATEWAY_MODE === "test" ||
+      process.argv.some((a) => a.includes(".test."));
 
-  let gatewayActive = false;
-  if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
-    if (await probeGateway(gatewayBase)) {
-      log.info(`gateway detected at ${gatewayBase}`);
-      gatewayActive = true;
-    } else {
-      log.info(`starting gateway at ${gatewayBase}…`);
-      if (await spawnGateway(gatewayBase)) {
-        log.info(`gateway started at ${gatewayBase}`);
+    if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
+      if (await probeGateway(gatewayBase)) {
+        log.info(`gateway detected at ${gatewayBase}`);
         gatewayActive = true;
       } else {
-        log.info("gateway unavailable, running in plugin mode");
+        log.info(`starting gateway at ${gatewayBase}…`);
+        if (await spawnGateway(gatewayBase)) {
+          log.info(`gateway started at ${gatewayBase}`);
+          gatewayActive = true;
+        } else {
+          log.info("gateway unavailable, running in plugin mode");
+        }
       }
     }
+    processGatewayActive = gatewayActive;
+    processGatewayBase = gatewayBase;
   }
 
   const projectPath = ctx.worktree || ctx.directory;
@@ -1413,28 +1421,29 @@ export const LorePlugin: Plugin = async (ctx) => {
   // Always-on startup confirmation — not gated by LORE_DEBUG — so silent
   // plugin loading failures are immediately visible. If this line never
   // appears for a project, the init failed (see catch block below).
-  process.stderr.write(`[lore] active: ${projectPath}\n`);
+  // Only show the full startup banner on the first session; subsequent
+  // sessions just log the project path at debug level to reduce noise.
+  if (!processInitDone) {
+    process.stderr.write(`[lore] active: ${projectPath}\n`);
 
-  // Startup backfills — run once, idempotent.
+    // Startup backfills — run once per process, idempotent.
+    try {
+      distillation.backfillMetrics();
+    } catch (err) {
+      log.info("metric backfill failed:", err);
+    }
 
-  // Retroactive metric backfill: compute r_compression and c_norm for
-  // distillations created before these diagnostics were added (pre-v12).
-  // Synchronous, DB-only — no API calls.
-  try {
-    distillation.backfillMetrics();
-  } catch (err) {
-    log.info("metric backfill failed:", err);
-  }
+    embedding.runStartupBackfill().catch((err) => {
+      log.info("embedding backfill failed:", err);
+    });
 
-  // Background: backfill embeddings for entries that don't have one yet.
-  // Fires once when embeddings are first enabled — subsequent entries
-  // get embedded on create/update via ltm.ts and distillation.ts hooks.
-  embedding.runStartupBackfill().catch((err) => {
-    log.info("embedding backfill failed:", err);
-  });
+    if (gatewayActive) {
+      process.stderr.write(`[lore] gateway mode active — routing through ${gatewayBase}\n`);
+    }
 
-  if (gatewayActive) {
-    process.stderr.write(`[lore] gateway mode active — routing through ${gatewayBase}\n`);
+    processInitDone = true;
+  } else {
+    log.info(`active: ${projectPath}`);
   }
 
   return hooks;

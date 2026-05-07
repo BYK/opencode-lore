@@ -1147,8 +1147,11 @@ export function resetDistillationSnapshot(sessionID?: string) {
 
 type RawWindowCache = {
   sessionID: string;
-  /** ID of the first message in the pinned raw window */
-  firstMessageID: string;
+  /** Number of raw messages (excluding prefix) in the pinned window at creation. */
+  pinnedRawCount: number;
+  /** Total number of messages in the input array when the pin was created.
+   *  Used to compute how many new messages were appended since. */
+  pinnedTotalCount: number;
   /** rawBudget that was in effect when the pin was created — used for the
    *  pin-validity check so that global budget fluctuations don't evict the pin. */
   pinnedBudget: number;
@@ -1192,41 +1195,60 @@ function tryFitStable(input: {
     rawWindowCache !== null && rawWindowCache.sessionID === input.sessionID;
 
   if (cacheValid) {
-    const pinnedIdx = input.messages.findIndex(
-      (m) => m.info.id === rawWindowCache!.firstMessageID,
+    // Compute the pinned index from the stored raw count + new message growth.
+    // newMessages = messages appended since pin creation (typically 2 per turn).
+    // The pinned window grows to include them: pinnedRawCount + newMessages.
+    // This is resilient to front-trimming by the host (e.g. OpenCode evicting
+    // old messages) because the offset is relative to the tail.
+    const newMessages = Math.max(0, input.messages.length - rawWindowCache!.pinnedTotalCount);
+    const windowSize = rawWindowCache!.pinnedRawCount + newMessages;
+    const pinnedIdx = Math.max(0, input.messages.length - windowSize);
+
+    // Measure the token cost of the pinned window.
+    const pinnedWindow = input.messages.slice(pinnedIdx);
+    const pinnedTokens = pinnedWindow.reduce(
+      (sum, m) => sum + estimateMessage(m),
+      0,
     );
 
-    if (pinnedIdx !== -1) {
-      // Measure the token cost of the pinned window.
-      const pinnedWindow = input.messages.slice(pinnedIdx);
-      const pinnedTokens = pinnedWindow.reduce(
-        (sum, m) => sum + estimateMessage(m),
-        0,
-      );
-
-      // Use the budget that was in effect when the pin was created (Option 1:
-      // snapshot isolation) with a 10% hysteresis margin (Option 2) so that
-      // small budget fluctuations from overhead drift and
-      // deduplicateToolOutputs() token-estimate changes don't evict the pin.
-      const effectiveBudget = rawWindowCache!.pinnedBudget * 1.10;
-      if (pinnedTokens <= effectiveBudget) {
-        // Pinned window still fits — keep it. Apply system-reminder cleanup
-        // only (strip:"none" is the layer-1 mode), returning the same message
-        // object references wherever nothing changed.
-        const processed = pinnedWindow.map((msg) => {
-          const parts = cleanParts(msg.parts);
-          return parts !== msg.parts ? { info: msg.info, parts } : msg;
-        });
-        const total = input.prefixTokens + pinnedTokens;
-        return {
-          messages: [...input.prefix, ...processed],
-          distilledTokens: input.prefixTokens,
-          rawTokens: pinnedTokens,
-          totalTokens: total,
+    // Use the budget that was in effect when the pin was created (Option 1:
+    // snapshot isolation) with a 10% hysteresis margin (Option 2) so that
+    // small budget fluctuations from overhead drift and
+    // deduplicateToolOutputs() token-estimate changes don't evict the pin.
+    const effectiveBudget = rawWindowCache!.pinnedBudget * 1.10;
+    if (pinnedTokens <= effectiveBudget || pinnedTokens <= input.rawBudget) {
+      // Pinned window still fits — either within the hysteresis margin of the
+      // original budget, or within the current budget (which may be larger due
+      // to overhead drift). Re-pin at the current budget when we exceed the
+      // old hysteresis so that next turn's check uses a fresh baseline.
+      if (pinnedTokens > effectiveBudget) {
+        input.sessState.rawWindowCache = {
+          ...rawWindowCache!,
+          pinnedRawCount: pinnedWindow.length,
+          pinnedTotalCount: input.messages.length,
+          pinnedBudget: input.rawBudget,
         };
       }
-      // Pinned window is too large — fall through to the normal scan below.
+      // Apply system-reminder cleanup only (strip:"none" is the layer-1 mode),
+      // returning the same message object references wherever nothing changed.
+      const processed = pinnedWindow.map((msg) => {
+        const parts = cleanParts(msg.parts);
+        return parts !== msg.parts ? { info: msg.info, parts } : msg;
+      });
+      const total = input.prefixTokens + pinnedTokens;
+      return {
+        messages: [...input.prefix, ...processed],
+        distilledTokens: input.prefixTokens,
+        rawTokens: pinnedTokens,
+        totalTokens: total,
+      };
     }
+    // Pinned window is too large for both budgets — fall through to rescan.
+    log.info(
+      `pin-overflow: session=${input.sessionID} pinnedTokens=${pinnedTokens} ` +
+      `pinnedBudget=${rawWindowCache!.pinnedBudget} effectiveBudget=${Math.round(effectiveBudget)} ` +
+      `currentRawBudget=${input.rawBudget} windowSize=${pinnedWindow.length}`,
+    );
   }
 
   // Normal backward scan to find the tightest fitting cutoff.
@@ -1240,15 +1262,17 @@ function tryFitStable(input: {
   });
 
   if (result) {
-    // Update the raw window cache: the first non-prefix message is the oldest
-    // raw message in the new window. Pin to its ID for the next turn.
+    // Update the raw window cache: store the raw message count and total message
+    // count so we can reconstruct the window position on the next turn even after
+    // front-trimming by the host (e.g. OpenCode evicting old messages).
     // Snapshot the current rawBudget so future pin checks use the budget that
     // was in effect when this window was chosen (Option 1: snapshot isolation).
-    const rawStart = result.messages[input.prefix.length];
-    if (rawStart) {
+    const rawMessageCount = result.messages.length - input.prefix.length;
+    if (rawMessageCount > 0) {
       input.sessState.rawWindowCache = {
         sessionID: input.sessionID,
-        firstMessageID: rawStart.info.id,
+        pinnedRawCount: rawMessageCount,
+        pinnedTotalCount: input.messages.length,
         pinnedBudget: input.rawBudget,
       };
     }
@@ -1628,8 +1652,18 @@ export function transform(input: {
     // between consecutive turns, it means Anthropic's prompt cache is invalidated
     // and the entire context is re-written (12.5× cache-read price). This helps
     // identify which code paths are breaking byte-identity.
-    const prefixIds = result.messages.slice(0, 5).map((m) => m.info.id).join(",");
-    const prefixHash = `${result.layer}:${prefixIds}`;
+    //
+    // Use a content-based fingerprint (role + text snippet) rather than message
+    // IDs, since IDs can be unstable (gateway generates fresh UUIDs, OpenCode
+    // may regenerate messages in-place). Content hashes are a better proxy for
+    // Anthropic's actual byte-identity cache.
+    const prefixFingerprint = result.messages.slice(0, 5).map((m) => {
+      const text = m.parts
+        .map((p) => ("text" in p ? p.text?.slice(0, 40) : p.type))
+        .join("|");
+      return `${m.info.role}:${text.slice(0, 60)}`;
+    }).join(",");
+    const prefixHash = `${result.layer}:${prefixFingerprint}`;
     state.transformCount++;
     if (state.lastPrefixHash && state.lastPrefixHash !== prefixHash) {
       state.bustCount++;

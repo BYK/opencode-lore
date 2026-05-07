@@ -27,6 +27,7 @@ import {
   setLtmTokens,
   getLtmBudget,
   setMaxLayer0Tokens,
+  computeLayer0Cap,
   calibrate,
   getLastTransformedCount,
   onIdleResume,
@@ -187,13 +188,20 @@ let lastSeenSessionModel: string | null = null;
 // Model limits — hardcoded for known models, fallback for unknown
 // ---------------------------------------------------------------------------
 
-type ModelSpec = { context: number; output: number };
+type ModelSpec = {
+  context: number;
+  output: number;
+  /** Cache-read cost per token in USD (Anthropic: 10% of input price). */
+  cacheReadCost?: number;
+};
 
 const MODEL_SPECS: Record<string, ModelSpec> = {
-  "claude-opus-4": { context: 200_000, output: 32_000 },
-  "claude-sonnet-4": { context: 200_000, output: 16_000 },
-  "claude-sonnet-3-5": { context: 200_000, output: 8_192 },
-  "claude-haiku-3-5": { context: 200_000, output: 8_192 },
+  // Pricing: https://docs.anthropic.com/en/docs/about-claude/models
+  // Cache-read = input_price / 1_000_000 * 0.1 (10% of input for Anthropic)
+  "claude-opus-4":     { context: 200_000, output: 32_000, cacheReadCost: 15 / 1_000_000 * 0.1 },
+  "claude-sonnet-4":   { context: 200_000, output: 16_000, cacheReadCost: 3 / 1_000_000 * 0.1 },
+  "claude-sonnet-3-5": { context: 200_000, output: 8_192,  cacheReadCost: 3 / 1_000_000 * 0.1 },
+  "claude-haiku-3-5":  { context: 200_000, output: 8_192,  cacheReadCost: 0.80 / 1_000_000 * 0.1 },
 };
 
 const DEFAULT_MODEL_SPEC: ModelSpec = { context: 200_000, output: 8_192 };
@@ -1101,10 +1109,15 @@ async function handleConversationTurn(
   const modelSpec = getModelSpec(req.model);
   setModelLimits({ context: modelSpec.context, output: modelSpec.output });
 
-  // Cost-aware layer-0 cap
+  // Cost-aware layer-0 cap: explicit config wins > cost formula > disabled.
   const cfg = loreConfig();
   if (cfg.budget.maxLayer0Tokens !== undefined) {
     setMaxLayer0Tokens(cfg.budget.maxLayer0Tokens);
+  } else if (modelSpec.cacheReadCost && cfg.budget.targetCacheReadCostPerTurn > 0) {
+    setMaxLayer0Tokens(computeLayer0Cap(
+      cfg.budget.targetCacheReadCostPerTurn,
+      modelSpec.cacheReadCost,
+    ));
   }
 
   // --- 5. Cold-cache idle-resume ---

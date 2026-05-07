@@ -9,7 +9,7 @@
  * conversation to merge matching tool_result blocks from subsequent user
  * messages into "completed" state.
  */
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { isToolPart } from "@loreai/core";
 import type {
   LoreAssistantMessage,
@@ -27,6 +27,47 @@ import type {
 } from "./translate/types";
 
 // ---------------------------------------------------------------------------
+// Deterministic ID generation
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a deterministic UUID-like ID from message content.
+ * Same message at the same position produces the same ID across requests,
+ * which is critical for gradient prefix fingerprinting and cache-bust detection.
+ */
+function deterministicID(role: string, index: number, content: GatewayContentBlock[]): string {
+  const h = createHash("sha256");
+  h.update(`${role}:${index}:`);
+  for (const block of content) {
+    switch (block.type) {
+      case "text":
+        h.update(`text:${block.text}`);
+        break;
+      case "thinking":
+        h.update(`thinking:${block.thinking}`);
+        break;
+      case "tool_use":
+        h.update(`tool_use:${block.id}:${block.name}:${JSON.stringify(block.input)}`);
+        break;
+      case "tool_result":
+        h.update(`tool_result:${block.toolUseId}:${block.content}`);
+        break;
+    }
+  }
+  return h.digest("hex").slice(0, 32);
+}
+
+/**
+ * Generate a deterministic ID for a part within a message.
+ * Uses the message ID + part index for stability.
+ */
+function deterministicPartID(messageID: string, partIndex: number): string {
+  const h = createHash("sha256");
+  h.update(`${messageID}:part:${partIndex}`);
+  return h.digest("hex").slice(0, 32);
+}
+
+// ---------------------------------------------------------------------------
 // Part conversion helpers
 // ---------------------------------------------------------------------------
 
@@ -34,12 +75,14 @@ function contentBlockToPart(
   block: GatewayContentBlock,
   sessionID: string,
   messageID: string,
+  partIndex: number,
 ): LorePart {
   const now = Date.now();
+  const id = deterministicPartID(messageID, partIndex);
   switch (block.type) {
     case "text":
       return {
-        id: randomUUID(),
+        id,
         sessionID,
         messageID,
         type: "text",
@@ -49,7 +92,7 @@ function contentBlockToPart(
 
     case "thinking":
       return {
-        id: randomUUID(),
+        id,
         sessionID,
         messageID,
         type: "reasoning",
@@ -58,7 +101,7 @@ function contentBlockToPart(
 
     case "tool_use":
       return {
-        id: randomUUID(),
+        id,
         sessionID,
         messageID,
         type: "tool",
@@ -69,7 +112,7 @@ function contentBlockToPart(
 
     case "tool_result":
       return {
-        id: randomUUID(),
+        id,
         sessionID,
         messageID,
         type: "tool",
@@ -104,10 +147,11 @@ export function gatewayMessagesToLore(
   const out: LoreMessageWithParts[] = [];
   const now = Date.now();
 
-  for (const m of messages) {
-    const id = randomUUID();
-    const parts: LorePart[] = m.content.map((block) =>
-      contentBlockToPart(block, sessionID, id),
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    const id = deterministicID(m.role, i, m.content);
+    const parts: LorePart[] = m.content.map((block, pi) =>
+      contentBlockToPart(block, sessionID, id, pi),
     );
 
     if (m.role === "user") {
