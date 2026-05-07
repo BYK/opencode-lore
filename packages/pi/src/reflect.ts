@@ -5,7 +5,7 @@
  * for the parameter schema. The actual search/fusion/formatting logic lives
  * in `@loreai/core`'s `runRecall()`.
  */
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import {

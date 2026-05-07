@@ -28,7 +28,7 @@
     "@mariozechner/pi-agent-core": "*",
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
-    "@sinclair/typebox": "*"
+    "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@mariozechner/pi-agent-core": {
@@ -40,15 +40,15 @@
     "@mariozechner/pi-coding-agent": {
       "optional": true
     },
-    "@sinclair/typebox": {
+    "typebox": {
       "optional": true
     }
   },
   "devDependencies": {
-    "@mariozechner/pi-agent-core": "^0.68.0",
-    "@mariozechner/pi-ai": "^0.68.0",
-    "@mariozechner/pi-coding-agent": "^0.68.0",
-    "@sinclair/typebox": "^0.34.41"
+    "@mariozechner/pi-agent-core": "^0.73.1",
+    "@mariozechner/pi-ai": "^0.73.1",
+    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "typebox": "^1.1.24"
   },
   "files": [
     "src/",

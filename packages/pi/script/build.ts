@@ -14,10 +14,10 @@
  *   inline a copy in our bundle, code that depends on module identity
  *   (extension type checks, event bus registrations) sees two different
  *   instances and silently fails to register.
- * - `@sinclair/typebox` — Pi bundles this via the same virtualModules
- *   mechanism. Pi's docs explicitly require pi-package authors to mark
- *   it as a peerDependency. We inlined it previously, which is why our
- *   v0.10.1 extension silently didn't register in real Pi installs.
+ * - `typebox` — Pi bundles this via the same virtualModules mechanism.
+ *   Pi's docs explicitly require pi-package authors to mark it as a
+ *   peerDependency. We inlined it previously, which is why our v0.10.1
+ *   extension silently didn't register in real Pi installs.
  */
 import * as esbuild from "esbuild";
 import { rmSync, mkdirSync, cpSync, existsSync } from "node:fs";
@@ -39,7 +39,7 @@ const external = [
   "@mariozechner/pi-ai",
   "@mariozechner/pi-agent-core",
   "@mariozechner/pi-tui",
-  "@sinclair/typebox",
+  "typebox",
 ];
 
 await esbuild.build({

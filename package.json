@@ -26,5 +26,10 @@
     "type": "git",
     "url": "git+https://github.com/BYK/loreai.git"
   },
-  "author": "BYK"
+  "author": "BYK",
+  "overrides": {
+    "basic-ftp": "5.3.1",
+    "ip-address": "10.2.0",
+    "fast-xml-parser": "5.7.3"
+  }
 }
