@@ -1,6 +1,6 @@
 {
   "name": "@loreai/core",
-  "version": "0.13.3",
+  "version": "0.13.4",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "description": "Shared memory engine for Lore — three-tier storage, distillation, gradient context management",
