@@ -96,6 +96,8 @@ type SessionState = {
   forceMinLayer: SafetyLayer;
   /** Token estimate from the most recent transform() output (compressed window) */
   lastTransformEstimate: number;
+  /** LTM tokens injected for this session's current turn (per-session isolation) */
+  ltmTokens: number;
   /** Distilled prefix cache (Approach C) */
   prefixCache: PrefixCache | null;
   /** Raw window pin cache (Approach B) */
@@ -161,6 +163,7 @@ function makeSessionState(): SessionState {
     lastWindowMessageIDs: new Set(),
     forceMinLayer: 0,
     lastTransformEstimate: 0,
+    ltmTokens: 0,
     prefixCache: null,
     rawWindowCache: null,
     lastTurnAt: 0,
@@ -262,8 +265,9 @@ export function consumeCameOutOfIdle(sessionID: string): boolean {
 }
 
 // LTM tokens injected via system transform hook this turn.
-// Set by setLtmTokens() after the system hook runs; consumed by transform().
-let ltmTokens = 0;
+// Per-session when a sessionID is provided (preferred), with a module-level
+// fallback for callers that don't have a session ID.
+let ltmTokensFallback = 0;
 
 export function setModelLimits(limits: { context: number; output: number }) {
   contextLimit = limits.context || 200_000;
@@ -297,14 +301,25 @@ export function computeLayer0Cap(
   return Math.max(rawCap, MIN_LAYER0_FLOOR);
 }
 
-/** Called by the system transform hook after formatting LTM knowledge. */
-export function setLtmTokens(tokens: number) {
-  ltmTokens = tokens;
+/** Called by the system transform hook after formatting LTM knowledge.
+ *  When sessionID is provided, stores on per-session state to prevent
+ *  cross-session budget contamination. Falls back to module-level global
+ *  for callers without a session ID. */
+export function setLtmTokens(tokens: number, sessionID?: string) {
+  if (sessionID) {
+    getSessionState(sessionID).ltmTokens = tokens;
+  }
+  ltmTokensFallback = tokens;
 }
 
-/** Returns the current LTM token count (for tests and diagnostics). */
-export function getLtmTokens(): number {
-  return ltmTokens;
+/** Returns the LTM token count for the given session, falling back to
+ *  the module-level global when no session ID is provided. */
+export function getLtmTokens(sessionID?: string): number {
+  if (sessionID) {
+    const state = sessionStates.get(sessionID);
+    if (state) return state.ltmTokens;
+  }
+  return ltmTokensFallback;
 }
 
 /**
@@ -355,7 +370,7 @@ export function calibrate(
   if (sessionID !== undefined) {
     const state = getSessionState(sessionID);
     state.lastKnownInput = actualInput;
-    state.lastKnownLtm = ltmTokens;
+    state.lastKnownLtm = state.ltmTokens;
     if (messageCount !== undefined) state.lastKnownMessageCount = messageCount;
   }
 }
@@ -1134,6 +1149,9 @@ type RawWindowCache = {
   sessionID: string;
   /** ID of the first message in the pinned raw window */
   firstMessageID: string;
+  /** rawBudget that was in effect when the pin was created — used for the
+   *  pin-validity check so that global budget fluctuations don't evict the pin. */
+  pinnedBudget: number;
 };
 
 // For testing only — reset raw window cache state for a specific session (or all)
@@ -1186,7 +1204,12 @@ function tryFitStable(input: {
         0,
       );
 
-      if (pinnedTokens <= input.rawBudget) {
+      // Use the budget that was in effect when the pin was created (Option 1:
+      // snapshot isolation) with a 10% hysteresis margin (Option 2) so that
+      // small budget fluctuations from overhead drift and
+      // deduplicateToolOutputs() token-estimate changes don't evict the pin.
+      const effectiveBudget = rawWindowCache!.pinnedBudget * 1.10;
+      if (pinnedTokens <= effectiveBudget) {
         // Pinned window still fits — keep it. Apply system-reminder cleanup
         // only (strip:"none" is the layer-1 mode), returning the same message
         // object references wherever nothing changed.
@@ -1219,11 +1242,14 @@ function tryFitStable(input: {
   if (result) {
     // Update the raw window cache: the first non-prefix message is the oldest
     // raw message in the new window. Pin to its ID for the next turn.
+    // Snapshot the current rawBudget so future pin checks use the budget that
+    // was in effect when this window was chosen (Option 1: snapshot isolation).
     const rawStart = result.messages[input.prefix.length];
     if (rawStart) {
       input.sessState.rawWindowCache = {
         sessionID: input.sessionID,
         firstMessageID: rawStart.info.id,
+        pinnedBudget: input.rawBudget,
       };
     }
   }
@@ -1260,11 +1286,18 @@ function transformInner(input: {
 }): TransformResult {
   const cfg = config();
   const overhead = getOverhead();
+
+  // --- Session state (must precede budget computation) ---
+  const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
+  const sessState = sid ? getSessionState(sid) : makeSessionState();
+
   // Usable = full context minus output reservation minus fixed overhead (system + tools)
   // minus LTM tokens already injected into the system prompt this turn.
+  // Read LTM tokens from per-session state to avoid cross-session contamination.
+  const sessLtmTokens = sid ? sessState.ltmTokens : ltmTokensFallback;
   const usable = Math.max(
     0,
-    contextLimit - outputReserved - overhead - ltmTokens,
+    contextLimit - outputReserved - overhead - sessLtmTokens,
   );
   const distilledBudget = Math.floor(usable * cfg.budget.distilled);
   // Base raw budget. May be overridden below for post-idle compact mode.
@@ -1274,8 +1307,6 @@ function transformInner(input: {
   // When the API previously rejected with "prompt is too long", skip layers
   // below the forced minimum to ensure enough trimming on the next attempt.
   // One-shot: consumed here and reset to 0 (both in-memory and on disk).
-  const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
-  const sessState = sid ? getSessionState(sid) : makeSessionState();
   let effectiveMinLayer = sessState.forceMinLayer;
   sessState.forceMinLayer = 0;
   if (sid && effectiveMinLayer > 0) saveForceMinLayer(sid, 0);
@@ -1356,12 +1387,12 @@ function transformInner(input: {
       ? input.messages.filter((m) => !sessState.lastWindowMessageIDs.has(m.info.id))
       : input.messages.slice(-Math.max(0, input.messages.length - sessState.lastKnownMessageCount));
     const newMsgTokens = newMessages.reduce((s, m) => s + estimateMessage(m), 0);
-    const ltmDelta = ltmTokens - sessState.lastKnownLtm;
+    const ltmDelta = sessLtmTokens - sessState.lastKnownLtm;
     expectedInput = sessState.lastKnownInput + newMsgTokens + ltmDelta;
   } else {
     // First turn or session change: fall back to chars/3 estimate + overhead.
     const messageTokens = input.messages.reduce((s, m) => s + estimateMessage(m), 0);
-    expectedInput = messageTokens + overhead + ltmTokens;
+    expectedInput = messageTokens + overhead + sessLtmTokens;
   }
 
   // When uncalibrated, apply safety multiplier to the layer-0 decision too.
@@ -1386,8 +1417,8 @@ function transformInner(input: {
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
     const messageTokens = calibrated
-      ? expectedInput - (ltmTokens - sessState.lastKnownLtm)  // approximate raw portion
-      : expectedInput - overhead - ltmTokens;
+      ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm)  // approximate raw portion
+      : expectedInput - overhead - sessLtmTokens;
     return {
       messages: input.messages,
       layer: 0,

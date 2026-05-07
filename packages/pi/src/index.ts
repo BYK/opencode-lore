@@ -271,7 +271,7 @@ export default function lorePiExtension(pi: ExtensionAPI): void {
         if (!formatted) {
           const entries = ltm.forSession(projectPath, currentSessionID, budget);
           if (!entries.length) {
-            setLtmTokens(0);
+            setLtmTokens(0, currentSessionID);
             return undefined;
           }
           formatted = formatKnowledge(
@@ -286,7 +286,7 @@ export default function lorePiExtension(pi: ExtensionAPI): void {
         }
 
         // Account for LTM tokens in the gradient budget.
-        setLtmTokens(Math.ceil(formatted.length / 3));
+        setLtmTokens(Math.ceil(formatted.length / 3), currentSessionID);
 
         return {
           systemPrompt: `${event.systemPrompt}\n\n${formatted}`,
