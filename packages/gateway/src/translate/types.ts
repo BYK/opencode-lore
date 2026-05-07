@@ -139,6 +139,24 @@ export type GatewayResponse = {
 };
 
 // ---------------------------------------------------------------------------
+// Pending recall state (cross-request, gateway recall interception)
+// ---------------------------------------------------------------------------
+
+/** Pending recall result stored between requests (Case 2: mixed tools). */
+export type PendingRecall = {
+  /** tool_use ID from the suppressed block. */
+  toolUseId: string;
+  /** The original recall input (for conversation history reconstruction). */
+  input: { query: string; scope?: string };
+  /** Position (content block index) in the original assistant message. */
+  position: number;
+  /** Executed recall result (formatted markdown). */
+  result: string;
+  /** Timestamp for TTL-based cleanup. */
+  timestamp: number;
+};
+
+// ---------------------------------------------------------------------------
 // Session state — per-session tracking for Lore pipeline integration
 // ---------------------------------------------------------------------------
 
@@ -154,4 +172,6 @@ export type SessionState = {
   messageCount: number;
   /** Turns since last curation run — triggers background curation. */
   turnsSinceCuration: number;
+  /** Pending recall result from previous turn (Case 2: mixed tool interception). */
+  pendingRecall?: PendingRecall;
 };

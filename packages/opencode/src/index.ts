@@ -40,7 +40,8 @@ import {
   isWorkerSession,
   workerModel,
 } from "@loreai/core";
-import { createRecallTool } from "./reflect";
+// Recall tool registration moved to gateway layer — see packages/gateway/src/recall.ts
+// import { createRecallTool } from "./reflect";
 import { createOpenCodeLLMClient } from "./llm-adapter";
 
 // Mirrors upstream OpenCode's OVERFLOW_PATTERNS at
@@ -1505,15 +1506,11 @@ export const LorePlugin: Plugin = async (ctx) => {
       });
     },
 
-    // Register the recall tool
-    tool: {
-      recall: createRecallTool(
-        projectPath,
-        config().knowledge.enabled,
-        (sessionID) => createOpenCodeLLMClient(ctx.client, sessionID),
-        config().search,
-      ),
-    },
+    // Recall tool is now handled transparently at the gateway layer
+    // (packages/gateway/src/recall.ts) — no need to register via plugin.
+    // The gateway injects the recall tool into upstream requests and
+    // intercepts the response, so it works for ALL clients, not just OpenCode.
+    tool: {},
   };
 
   // Always-on startup confirmation — not gated by LORE_DEBUG — so silent

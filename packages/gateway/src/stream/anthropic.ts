@@ -528,6 +528,155 @@ export function buildSSETextResponse(
   return events.join("");
 }
 
+// ---------------------------------------------------------------------------
+// Recall-aware stream accumulator
+// ---------------------------------------------------------------------------
+
+/**
+ * Extended accumulator interface with recall-aware filtering.
+ *
+ * Wraps the standard `StreamAccumulator` and adds:
+ *  - Suppression of recall tool_use blocks (not forwarded to client)
+ *  - Re-indexing of subsequent blocks to maintain contiguity
+ *  - Detection of which recall case (only vs mixed) applies
+ *  - Access to the suppressed recall block data
+ *
+ * For events targeting a suppressed (recall) block, `processEvent` returns
+ * an empty string (nothing to forward). For all other events, it returns
+ * the SSE text to forward — with adjusted block indices if needed.
+ *
+ * Also holds back `message_delta` and `message_stop` events when recall is
+ * detected, so the caller can decide whether to forward them (Case 2) or
+ * replace them with the continuation stream (Case 1).
+ */
+export interface RecallAwareAccumulator extends StreamAccumulator {
+  /** Whether a recall tool_use block was detected in the stream. */
+  hasRecall(): boolean;
+  /** Whether non-recall tool_use blocks exist in the stream. */
+  hasOtherTools(): boolean;
+  /** The upstream block index at which recall was first detected. */
+  recallBlockIndex(): number;
+  /** Number of non-suppressed content blocks forwarded to the client. */
+  clientBlockCount(): number;
+  /** The held-back message_delta + message_stop events (SSE text). */
+  heldBackEvents(): string;
+}
+
+/**
+ * Create a recall-aware stream accumulator.
+ *
+ * @param recallToolName - The name of the recall tool to intercept (default: "recall")
+ */
+export function createRecallAwareAccumulator(
+  recallToolName = "recall",
+): RecallAwareAccumulator {
+  // Delegate to the standard accumulator for actual accumulation
+  const inner = createStreamAccumulator();
+
+  /** Set of upstream block indices that are suppressed (recall). */
+  const suppressedIndices = new Set<number>();
+  /** Tracks other tool_use block indices (non-recall). */
+  const otherToolIndices = new Set<number>();
+  /** Number of suppressed blocks seen so far (for re-indexing). */
+  let suppressedCount = 0;
+  /** First suppressed block index (for continuation re-indexing). */
+  let firstSuppressedIndex = -1;
+  /** Total client-visible blocks forwarded. */
+  let clientBlocks = 0;
+  /** Held-back message_delta + message_stop SSE text. */
+  let heldBack = "";
+  /** Whether we've detected recall in this stream. */
+  let recallDetected = false;
+
+  function processEvent(eventType: string, data: string): string {
+    // Always feed the inner accumulator (it tracks full state)
+    inner.processEvent(eventType, data);
+
+    // Parse the data payload
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      // Non-JSON events (pings, etc.) — forward as-is
+      return formatSSEEvent(eventType, data);
+    }
+
+    switch (eventType) {
+      case "content_block_start": {
+        const index = parsed.index as number;
+        if (typeof index !== "number") break;
+
+        const block = parsed.content_block as Record<string, unknown> | undefined;
+        if (
+          block?.type === "tool_use" &&
+          block.name === recallToolName
+        ) {
+          // Suppress this block
+          suppressedIndices.add(index);
+          suppressedCount++;
+          recallDetected = true;
+          if (firstSuppressedIndex < 0) firstSuppressedIndex = index;
+          return ""; // Don't forward
+        }
+
+        if (block?.type === "tool_use") {
+          otherToolIndices.add(index);
+        }
+
+        clientBlocks++;
+        // Re-index if needed
+        if (suppressedCount > 0) {
+          const adjusted = { ...parsed, index: index - suppressedCount };
+          return formatSSEEvent(eventType, JSON.stringify(adjusted));
+        }
+        break;
+      }
+
+      case "content_block_delta":
+      case "content_block_stop": {
+        const index = parsed.index as number;
+        if (typeof index === "number" && suppressedIndices.has(index)) {
+          return ""; // Don't forward recall block events
+        }
+        // Re-index if needed
+        if (suppressedCount > 0 && typeof (parsed.index) === "number") {
+          const adjusted = {
+            ...parsed,
+            index: (parsed.index as number) - suppressedCount,
+          };
+          return formatSSEEvent(eventType, JSON.stringify(adjusted));
+        }
+        break;
+      }
+
+      case "message_delta":
+      case "message_stop": {
+        if (recallDetected) {
+          // Hold back — caller decides whether to forward or replace
+          heldBack += formatSSEEvent(eventType, data);
+          return "";
+        }
+        break;
+      }
+
+      // message_start, ping, etc. — forward unchanged
+    }
+
+    return formatSSEEvent(eventType, data);
+  }
+
+  return {
+    processEvent,
+    getResponse: () => inner.getResponse(),
+    isDone: () => inner.isDone(),
+    hasRecall: () => recallDetected,
+    hasOtherTools: () => otherToolIndices.size > 0,
+    recallBlockIndex: () => firstSuppressedIndex,
+    clientBlockCount: () => clientBlocks,
+    heldBackEvents: () => heldBack,
+  };
+}
+
 /**
  * Consume an Anthropic SSE streaming Response and return the accumulated
  * GatewayResponse. Useful when the response needs to be translated to another
