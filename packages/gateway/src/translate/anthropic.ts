@@ -335,7 +335,7 @@ export function buildAnthropicRequest(
       // only when LTM entries are added/removed or AGENTS.md is updated.
       const cacheControl: Record<string, string> =
         systemTTL === "1h"
-          ? { type: "ephemeral", ttl: "3600" }
+          ? { type: "ephemeral", ttl: "1h" }
           : { type: "ephemeral" };
       body.system = [
         { type: "text", text: req.system, cache_control: cacheControl },

@@ -152,6 +152,11 @@ export function storeValidatedWorkerModel(result: WorkerModelResult): void {
     .run(key, value, value);
 }
 
+/** Clear a stored worker model validation (e.g. when the model is deprecated). */
+export function clearValidatedWorkerModel(providerID: string): void {
+  db().query("DELETE FROM kv_meta WHERE key = ?").run(`${KV_PREFIX}${providerID}`);
+}
+
 /**
  * Check whether the stored validation is stale (fingerprint mismatch).
  */
@@ -357,6 +362,12 @@ export async function runValidation(
     return result;
   }
 
+  // No candidate passed — clear any stale stored result so we don't keep
+  // routing worker calls to a potentially-deprecated model.
+  clearValidatedWorkerModel(input.providerID);
+  log.info(
+    `worker model validation: no candidate passed for ${input.providerID} — cleared stale entry`,
+  );
   return null;
 }
 
@@ -376,9 +387,12 @@ export function resolveWorkerModel(
   // Explicit override wins
   if (configWorkerModel) return configWorkerModel;
 
-  // Check for validated auto-selection
+  // Check for validated auto-selection.
+  // Don't trust entries older than 24h — model may have been deprecated.
+  // Validation will re-run on next idle cycle and either re-confirm or clear.
   const validated = getValidatedWorkerModel(providerID);
-  if (validated) {
+  const MAX_AGE_MS = 24 * 60 * 60 * 1000;
+  if (validated && Date.now() - validated.validatedAt <= MAX_AGE_MS) {
     return { providerID: validated.providerID, modelID: validated.modelID };
   }
 
