@@ -13,6 +13,12 @@ import {
   createRecallAwareAccumulator,
   formatSSEEvent,
 } from "../src/stream/anthropic";
+import {
+  findRecallToolUse,
+  injectPendingRecall,
+  stripRecallFromResponse,
+} from "../src/recall";
+import type { GatewayRequest, GatewayToolUseBlock } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // Helpers: build SSE events matching Anthropic's streaming format
@@ -579,5 +585,254 @@ describe("RecallAwareAccumulator — edge cases", () => {
     ]);
 
     expect(accum.isDone()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: Case 2 end-to-end flow
+//
+// Simulates the full pipeline path for mixed tools:
+//   1. Stream arrives with text + recall + Read tool_use
+//   2. Accumulator suppresses recall, re-indexes Read
+//   3. Pipeline extracts recall block from accumulated response
+//   4. Pipeline strips recall from response for post-processing
+//   5. Pipeline stores pending recall result
+//   6. Next request injects pending recall into conversation history
+// ---------------------------------------------------------------------------
+
+describe("Case 2 integration — mixed tools end-to-end", () => {
+  test("full flow: suppress → extract → store → inject on next request", () => {
+    // --- Step 1: Stream with text + recall + Read ---
+    const accum = createRecallAwareAccumulator();
+    const events = [
+      messageStart(),
+      textBlockStart(0),
+      textDelta(0, "Let me search memory and read the file."),
+      contentBlockStop(0),
+      // recall at index 1 — will be suppressed
+      toolUseBlockStart(1, "recall", "toolu_recall_1"),
+      inputJsonDelta(1, '{"query":"gateway architecture"}'),
+      contentBlockStop(1),
+      // Read at index 2 — will be re-indexed to 1 for client
+      toolUseBlockStart(2, "Read", "toolu_read_1"),
+      inputJsonDelta(2, '{"path":"/src/index.ts"}'),
+      contentBlockStop(2),
+      messageDelta("tool_use"),
+      messageStop(),
+    ];
+
+    const output = processAll(accum, events);
+
+    // --- Step 2: Verify accumulator state ---
+    expect(accum.hasRecall()).toBe(true);
+    expect(accum.hasOtherTools()).toBe(true);
+    expect(accum.clientBlockCount()).toBe(2); // text + Read (re-indexed)
+    expect(accum.recallBlockIndex()).toBe(1);
+
+    // Client sees text at 0 and Read at 1 (no recall)
+    const parsed = parseForwardedEvents(output);
+    const blockStarts = parsed.filter((e) => e.event === "content_block_start");
+    expect(blockStarts).toHaveLength(2);
+    expect(
+      (blockStarts[0].data.content_block as Record<string, unknown>).type,
+    ).toBe("text");
+    expect(
+      (blockStarts[1].data.content_block as Record<string, unknown>).name,
+    ).toBe("Read");
+    expect(blockStarts[1].data.index).toBe(1); // Re-indexed from 2
+
+    // No recall events leaked
+    const recallEvents = parsed.filter(
+      (e) =>
+        e.event === "content_block_start" &&
+        (e.data.content_block as Record<string, unknown>)?.name === "recall",
+    );
+    expect(recallEvents).toHaveLength(0);
+
+    // Held-back events contain message_delta + message_stop
+    const heldBack = accum.heldBackEvents();
+    expect(heldBack).toContain("message_delta");
+    expect(heldBack).toContain("message_stop");
+
+    // --- Step 3: Extract recall block from accumulated response ---
+    const resp = accum.getResponse();
+    const recallBlock = findRecallToolUse(resp, "recall");
+    expect(recallBlock).toBeDefined();
+    expect(recallBlock!.id).toBe("toolu_recall_1");
+    expect(recallBlock!.name).toBe("recall");
+
+    // --- Step 4: Strip recall from response for post-processing ---
+    const cleanResp = stripRecallFromResponse(resp);
+    expect(cleanResp.content).toHaveLength(2); // text + Read only
+    expect(cleanResp.content.every((b) => {
+      if (b.type === "tool_use") return (b as GatewayToolUseBlock).name !== "recall";
+      return true;
+    })).toBe(true);
+
+    // --- Step 5: Simulate pending recall storage ---
+    const pendingRecall = {
+      toolUseId: recallBlock!.id,
+      position: accum.recallBlockIndex(),
+      result: "Found: gateway uses Anthropic protocol, recall interception is transparent",
+      timestamp: Date.now(),
+    };
+
+    // --- Step 6: Inject into next request ---
+    // Simulate the next request: client sends tool_result for Read
+    const nextReq: GatewayRequest = {
+      model: "claude-sonnet-4-20250514",
+      system: "You are helpful.",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Search memory and read file" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me search memory and read the file." },
+            // Client only saw Read at index 1 (recall was suppressed)
+            { type: "tool_use", id: "toolu_read_1", name: "Read", input: { path: "/src/index.ts" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", toolUseId: "toolu_read_1", content: "// index.ts content" },
+          ],
+        },
+      ],
+      tools: [
+        { name: "Read", description: "Read a file", inputSchema: {} },
+        { name: "recall", description: "Search memory", inputSchema: {} },
+      ],
+      stream: true,
+      maxTokens: 4096,
+      metadata: {},
+      rawHeaders: {},
+    };
+
+    const injected = injectPendingRecall(nextReq, pendingRecall);
+    expect(injected).toBe(true);
+
+    // Assistant message should now have recall tool_use at position 1
+    const assistantMsg = nextReq.messages[1];
+    expect(assistantMsg.content).toHaveLength(3); // text + recall + Read
+    expect(assistantMsg.content[0].type).toBe("text");
+    expect(assistantMsg.content[1].type).toBe("tool_use");
+    expect((assistantMsg.content[1] as GatewayToolUseBlock).name).toBe("recall");
+    expect((assistantMsg.content[1] as GatewayToolUseBlock).id).toBe("toolu_recall_1");
+    expect(assistantMsg.content[2].type).toBe("tool_use");
+    expect((assistantMsg.content[2] as GatewayToolUseBlock).name).toBe("Read");
+
+    // User message should have recall tool_result prepended before Read tool_result
+    const userMsg = nextReq.messages[2];
+    expect(userMsg.content).toHaveLength(2);
+    expect(userMsg.content[0].type).toBe("tool_result");
+    expect((userMsg.content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_1");
+    expect(userMsg.content[1].type).toBe("tool_result");
+    expect((userMsg.content[1] as { toolUseId: string }).toolUseId).toBe("toolu_read_1");
+
+    // Recall tool should be stripped from tools list
+    expect(nextReq.tools).toHaveLength(1);
+    expect(nextReq.tools[0].name).toBe("Read");
+  });
+
+  test("pending recall with multiple other tools — correct injection order", () => {
+    // Stream: text + recall + Read + Bash
+    const accum = createRecallAwareAccumulator();
+    const events = [
+      messageStart(),
+      textBlockStart(0),
+      textDelta(0, "I'll search, read, and run."),
+      contentBlockStop(0),
+      toolUseBlockStart(1, "recall", "toolu_recall_2"),
+      inputJsonDelta(1, '{"query":"patterns"}'),
+      contentBlockStop(1),
+      toolUseBlockStart(2, "Read", "toolu_read_2"),
+      inputJsonDelta(2, '{}'),
+      contentBlockStop(2),
+      toolUseBlockStart(3, "Bash", "toolu_bash_1"),
+      inputJsonDelta(3, '{"command":"ls"}'),
+      contentBlockStop(3),
+      messageDelta("tool_use"),
+      messageStop(),
+    ];
+
+    const output = processAll(accum, events);
+
+    expect(accum.hasRecall()).toBe(true);
+    expect(accum.hasOtherTools()).toBe(true);
+    expect(accum.clientBlockCount()).toBe(3); // text + Read + Bash
+
+    // Client sees: text(0), Read(1), Bash(2)
+    const parsed = parseForwardedEvents(output);
+    const blockStarts = parsed.filter((e) => e.event === "content_block_start");
+    expect(blockStarts).toHaveLength(3);
+    expect(blockStarts[1].data.index).toBe(1); // Read re-indexed from 2
+    expect(blockStarts[2].data.index).toBe(2); // Bash re-indexed from 3
+
+    // Extract and build pending
+    const resp = accum.getResponse();
+    const recallBlock = findRecallToolUse(resp, "recall");
+    expect(recallBlock).toBeDefined();
+
+    const pendingRecall = {
+      toolUseId: recallBlock!.id,
+      position: accum.recallBlockIndex(),
+      result: "Found patterns info",
+      timestamp: Date.now(),
+    };
+
+    // Next request: client provides tool_results for Read and Bash
+    const nextReq: GatewayRequest = {
+      model: "claude-sonnet-4-20250514",
+      system: "",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "do stuff" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "I'll search, read, and run." },
+            { type: "tool_use", id: "toolu_read_2", name: "Read", input: {} },
+            { type: "tool_use", id: "toolu_bash_1", name: "Bash", input: { command: "ls" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", toolUseId: "toolu_read_2", content: "file" },
+            { type: "tool_result", toolUseId: "toolu_bash_1", content: "dir listing" },
+          ],
+        },
+      ],
+      tools: [
+        { name: "Read", description: "", inputSchema: {} },
+        { name: "Bash", description: "", inputSchema: {} },
+        { name: "recall", description: "", inputSchema: {} },
+      ],
+      stream: true,
+      maxTokens: 4096,
+      metadata: {},
+      rawHeaders: {},
+    };
+
+    const injected = injectPendingRecall(nextReq, pendingRecall);
+    expect(injected).toBe(true);
+
+    // Assistant: text + recall(inserted at position 1) + Read + Bash
+    const assistantMsg = nextReq.messages[1];
+    expect(assistantMsg.content).toHaveLength(4);
+    expect((assistantMsg.content[1] as GatewayToolUseBlock).name).toBe("recall");
+    expect((assistantMsg.content[2] as GatewayToolUseBlock).name).toBe("Read");
+    expect((assistantMsg.content[3] as GatewayToolUseBlock).name).toBe("Bash");
+
+    // User: recall_result + Read_result + Bash_result
+    const userMsg = nextReq.messages[2];
+    expect(userMsg.content).toHaveLength(3);
+    expect((userMsg.content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_2");
+    expect((userMsg.content[1] as { toolUseId: string }).toolUseId).toBe("toolu_read_2");
+    expect((userMsg.content[2] as { toolUseId: string }).toolUseId).toBe("toolu_bash_1");
+
+    // recall stripped from tools
+    expect(nextReq.tools).toHaveLength(2);
+    expect(nextReq.tools.every((t) => t.name !== "recall")).toBe(true);
   });
 });
