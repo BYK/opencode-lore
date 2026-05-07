@@ -27,18 +27,22 @@ import { authHeaders } from "./auth";
 // ---------------------------------------------------------------------------
 
 /**
- * Base URL for fetching model pricing data from models.dev (open-source).
+ * models.dev JSON API endpoint — returns all providers/models with pricing.
  *
- * TOML files live at:
- *   {MODELS_DEV_BASE}/{model-id}.toml
- * and contain `[cost] input = X.XX` (per-million-token USD).
+ * Single request replaces N individual TOML fetches. Response shape:
+ *   { anthropic: { models: { "claude-sonnet-4-20250514": { cost: { input: 3 }, ... }, ... } } }
+ * Cost values are per-million-token USD.
  */
-const MODELS_DEV_BASE =
-  "https://raw.githubusercontent.com/sst/models.dev/dev/providers/anthropic/models";
+const MODELS_DEV_API = "https://models.dev/api.json";
+
+/** Cached models.dev cost data: modelID → per-million-token input cost. */
+let cachedCostMap: Map<string, number> | null = null;
+let cachedCostMapAt = 0;
+const COST_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /**
  * Hardcoded fallback costs (per-input-token, USD) used when models.dev
- * fetch fails. Prefix-matched against model IDs.
+ * API is unreachable. Prefix-matched against model IDs.
  *
  * These only serve as a safety net — runtime pricing from models.dev is
  * preferred and fetched on every discovery cycle (cached 1h).
@@ -62,68 +66,95 @@ function fallbackCost(modelID: string): number {
   return 100 / 1_000_000;
 }
 
+/** Shape of a model entry in the models.dev JSON API. */
+type ModelsDevEntry = {
+  id: string;
+  cost?: { input?: number };
+};
+
+/** Shape of the models.dev JSON API response (subset we care about). */
+type ModelsDevResponse = {
+  [provider: string]: {
+    models?: { [modelId: string]: ModelsDevEntry };
+  };
+};
+
 /**
- * Parse the `[cost] input = X.XX` field from a models.dev TOML string.
+ * Fetch the models.dev cost map for Anthropic models.
  *
- * Minimal parser — we only need the input cost, not a full TOML library.
- * Returns per-million-token USD cost, or null if not found.
+ * Single HTTP request to the JSON API, cached for 1 hour.
+ * Returns a map of modelID → per-million-token input cost.
  */
-export function parseCostFromTOML(toml: string): number | null {
-  // Match `input = <number>` inside a [cost] section
-  const costSection = toml.indexOf("[cost]");
-  if (costSection === -1) return null;
+export async function fetchCostMap(): Promise<Map<string, number>> {
+  // Return cache if fresh
+  if (cachedCostMap && Date.now() - cachedCostMapAt < COST_CACHE_TTL_MS) {
+    return cachedCostMap;
+  }
 
-  // Find the next section header or end of string
-  const nextSection = toml.indexOf("\n[", costSection + 1);
-  const section = nextSection === -1
-    ? toml.slice(costSection)
-    : toml.slice(costSection, nextSection);
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
 
-  const match = /^\s*input\s*=\s*([0-9]+(?:\.[0-9]+)?)/m.exec(section);
-  if (!match) return null;
+    const response = await fetch(MODELS_DEV_API, { signal: controller.signal });
+    clearTimeout(timeout);
 
-  return parseFloat(match[1]);
+    if (!response.ok) {
+      log.warn(`models.dev API failed: ${response.status} ${response.statusText}`);
+      return cachedCostMap ?? new Map();
+    }
+
+    const data = (await response.json()) as ModelsDevResponse;
+    const anthropic = data.anthropic?.models;
+    if (!anthropic) {
+      log.warn("models.dev API: no anthropic provider found");
+      return cachedCostMap ?? new Map();
+    }
+
+    const costMap = new Map<string, number>();
+    for (const [modelId, entry] of Object.entries(anthropic)) {
+      if (entry.cost?.input != null) {
+        costMap.set(modelId, entry.cost.input);
+      }
+    }
+
+    cachedCostMap = costMap;
+    cachedCostMapAt = Date.now();
+
+    log.info(`models.dev: loaded costs for ${costMap.size} anthropic models`);
+    return costMap;
+  } catch (e) {
+    log.warn("models.dev API error:", e);
+    return cachedCostMap ?? new Map();
+  }
+}
+
+/** Clear the cached cost map (for testing). */
+export function clearCostCache(): void {
+  cachedCostMap = null;
+  cachedCostMapAt = 0;
 }
 
 /**
- * Fetch per-model input cost from models.dev TOML files.
+ * Fetch per-model input cost from models.dev JSON API.
  *
- * Fetches in parallel with a 5s timeout per model. Returns a map of
- * modelID → per-token cost. Models that fail to fetch get fallback costs.
+ * Single HTTP request fetches all Anthropic model costs. Returns a map of
+ * modelID → per-token cost. Models not found in models.dev get fallback costs.
  */
 export async function fetchModelCosts(
   modelIDs: string[],
 ): Promise<Map<string, number>> {
+  const costMap = await fetchCostMap();
   const costs = new Map<string, number>();
 
-  const fetches = modelIDs.map(async (id) => {
-    try {
-      const url = `${MODELS_DEV_BASE}/${id}.toml`;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        costs.set(id, fallbackCost(id));
-        return;
-      }
-
-      const toml = await response.text();
-      const inputCostPerMillion = parseCostFromTOML(toml);
-
-      if (inputCostPerMillion != null) {
-        costs.set(id, inputCostPerMillion / 1_000_000);
-      } else {
-        costs.set(id, fallbackCost(id));
-      }
-    } catch {
+  for (const id of modelIDs) {
+    const costPerMillion = costMap.get(id);
+    if (costPerMillion != null) {
+      costs.set(id, costPerMillion / 1_000_000);
+    } else {
       costs.set(id, fallbackCost(id));
     }
-  });
+  }
 
-  await Promise.all(fetches);
   return costs;
 }
 
@@ -372,5 +403,6 @@ export function getWorkerModel(): { providerID: string; modelID: string } | unde
 /** Reset module state (for testing). */
 export function resetWorkerModelState(): void {
   clearModelCache();
+  clearCostCache();
   validating = false;
 }

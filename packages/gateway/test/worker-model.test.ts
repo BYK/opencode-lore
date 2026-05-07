@@ -2,10 +2,11 @@ import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import {
   discoverModels,
   clearModelCache,
+  clearCostCache,
   getWorkerModel,
   resetWorkerModelState,
-  parseCostFromTOML,
   fetchModelCosts,
+  fetchCostMap,
 } from "../src/worker-model";
 import type { AuthCredential } from "../src/auth";
 
@@ -15,8 +16,7 @@ import type { AuthCredential } from "../src/auth";
 
 const TEST_CRED: AuthCredential = { scheme: "api-key", value: "sk-test-key" };
 const UPSTREAM = "https://api.anthropic.com";
-const MODELS_DEV_BASE =
-  "https://raw.githubusercontent.com/sst/models.dev/dev/providers/anthropic/models";
+const MODELS_DEV_API = "https://models.dev/api.json";
 
 /** Build a mock Anthropic /v1/models response. */
 function buildModelsResponse(
@@ -44,25 +44,19 @@ function buildModelsResponse(
   };
 }
 
-/** Build a models.dev TOML string for a model. */
-function buildTOML(inputCost: number): string {
-  return `name = "Test Model"
-family = "claude-test"
-
-[cost]
-input = ${inputCost.toFixed(2)}
-output = ${(inputCost * 5).toFixed(2)}
-cache_read = ${(inputCost * 0.1).toFixed(2)}
-cache_write = ${(inputCost * 1.25).toFixed(2)}
-
-[limit]
-context = 200_000
-output = 64_000
-`;
+/** Build a mock models.dev api.json response. */
+function buildModelsDevResponse(
+  models: Record<string, number>,
+): { anthropic: { models: Record<string, { id: string; cost: { input: number } }> } } {
+  const entries: Record<string, { id: string; cost: { input: number } }> = {};
+  for (const [id, inputCost] of Object.entries(models)) {
+    entries[id] = { id, cost: { input: inputCost } };
+  }
+  return { anthropic: { models: entries } };
 }
 
-/** Cost data for mock models.dev responses. */
-const MOCK_COSTS: Record<string, number> = {
+/** Default models.dev cost data for tests. */
+const DEFAULT_COSTS: Record<string, number> = {
   "claude-opus-4-20250514": 15.0,
   "claude-sonnet-4-20250514": 3.0,
   "claude-haiku-3-5-20241022": 0.8,
@@ -71,11 +65,12 @@ const MOCK_COSTS: Record<string, number> = {
 
 /**
  * Create a URL-aware fetch mock that handles both Anthropic API and
- * models.dev TOML requests.
+ * models.dev JSON API requests.
  */
 function createRoutedFetch(
   anthropicResponse: unknown,
   options?: {
+    modelsDevCosts?: Record<string, number>;
     modelsDevOverride?: (url: string) => Response;
     onAnthropicCall?: (url: string, init?: RequestInit) => void;
   },
@@ -83,18 +78,15 @@ function createRoutedFetch(
   return mock((url: string | URL | Request, init?: RequestInit) => {
     const urlStr = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
 
-    // models.dev TOML requests
-    if (urlStr.startsWith(MODELS_DEV_BASE)) {
+    // models.dev API request
+    if (urlStr === MODELS_DEV_API) {
       if (options?.modelsDevOverride) {
         return Promise.resolve(options.modelsDevOverride(urlStr));
       }
-      // Extract model ID from URL
-      const modelId = urlStr.replace(`${MODELS_DEV_BASE}/`, "").replace(".toml", "");
-      const cost = MOCK_COSTS[modelId];
-      if (cost !== undefined) {
-        return Promise.resolve(new Response(buildTOML(cost), { status: 200 }));
-      }
-      return Promise.resolve(new Response("Not Found", { status: 404 }));
+      const costs = options?.modelsDevCosts ?? DEFAULT_COSTS;
+      return Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(costs)), { status: 200 }),
+      );
     }
 
     // Anthropic API requests
@@ -106,44 +98,101 @@ function createRoutedFetch(
 }
 
 // ---------------------------------------------------------------------------
-// parseCostFromTOML
+// fetchCostMap
 // ---------------------------------------------------------------------------
 
-describe("parseCostFromTOML", () => {
-  test("parses input cost from standard TOML", () => {
-    const toml = buildTOML(3.0);
-    expect(parseCostFromTOML(toml)).toBe(3.0);
+describe("fetchCostMap", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    clearCostCache();
   });
 
-  test("parses fractional costs", () => {
-    expect(parseCostFromTOML(buildTOML(0.8))).toBe(0.8);
-    expect(parseCostFromTOML(buildTOML(15.0))).toBe(15.0);
-    expect(parseCostFromTOML(buildTOML(0.25))).toBe(0.25);
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
   });
 
-  test("returns null when no [cost] section", () => {
-    const toml = `name = "Test"\n[limit]\ncontext = 200000`;
-    expect(parseCostFromTOML(toml)).toBeNull();
+  test("fetches and parses costs from models.dev JSON API", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_COSTS)), { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const costMap = await fetchCostMap();
+
+    expect(costMap.get("claude-opus-4-20250514")).toBe(15.0);
+    expect(costMap.get("claude-sonnet-4-20250514")).toBe(3.0);
+    expect(costMap.get("claude-haiku-3-5-20241022")).toBe(0.8);
+    expect(costMap.size).toBe(4);
   });
 
-  test("returns null when no input field in [cost] section", () => {
-    const toml = `[cost]\noutput = 5.00\ncache_read = 0.10`;
-    expect(parseCostFromTOML(toml)).toBeNull();
+  test("caches results and returns cache on subsequent calls", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(() => {
+      callCount++;
+      return Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_COSTS)), { status: 200 }),
+      );
+    }) as unknown as typeof fetch;
+
+    const first = await fetchCostMap();
+    const second = await fetchCostMap();
+
+    expect(callCount).toBe(1);
+    expect(first).toBe(second); // Same reference — cached
   });
 
-  test("handles integer costs", () => {
-    const toml = `[cost]\ninput = 15\noutput = 75`;
-    expect(parseCostFromTOML(toml)).toBe(15);
+  test("returns empty map on API error with no cache", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response("Server Error", { status: 500 })),
+    ) as unknown as typeof fetch;
+
+    const costMap = await fetchCostMap();
+    expect(costMap.size).toBe(0);
   });
 
-  test("does not match input outside [cost] section", () => {
-    const toml = `input = 999\n\n[cost]\noutput = 5.00`;
-    expect(parseCostFromTOML(toml)).toBeNull();
+  test("returns stale cache on API error when cache exists", async () => {
+    // First call succeeds
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_COSTS)), { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
+    const cached = await fetchCostMap();
+    expect(cached.size).toBe(4);
+
+    // Expire cache
+    clearCostCache();
+
+    // Second call fails — but stale cache was cleared
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response("Server Error", { status: 500 })),
+    ) as unknown as typeof fetch;
+    const fallback = await fetchCostMap();
+    expect(fallback.size).toBe(0);
   });
 
-  test("handles multiple sections correctly", () => {
-    const toml = `[metadata]\nname = "test"\n\n[cost]\ninput = 3.00\noutput = 15.00\n\n[limit]\ncontext = 200000`;
-    expect(parseCostFromTOML(toml)).toBe(3.0);
+  test("returns stale cache on network error", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.reject(new Error("Network error")),
+    ) as unknown as typeof fetch;
+
+    const costMap = await fetchCostMap();
+    expect(costMap.size).toBe(0);
+  });
+
+  test("handles missing anthropic provider gracefully", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ openai: { models: {} } }), { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const costMap = await fetchCostMap();
+    expect(costMap.size).toBe(0);
   });
 });
 
@@ -156,21 +205,20 @@ describe("fetchModelCosts", () => {
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
+    clearCostCache();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    resetWorkerModelState();
   });
 
-  test("fetches costs for multiple models in parallel", async () => {
-    globalThis.fetch = mock((url: string) => {
-      const modelId = url.replace(`${MODELS_DEV_BASE}/`, "").replace(".toml", "");
-      const cost = MOCK_COSTS[modelId];
-      if (cost !== undefined) {
-        return Promise.resolve(new Response(buildTOML(cost), { status: 200 }));
-      }
-      return Promise.resolve(new Response("Not Found", { status: 404 }));
-    }) as unknown as typeof fetch;
+  test("maps model IDs to per-token costs from models.dev", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_COSTS)), { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
 
     const costs = await fetchModelCosts([
       "claude-opus-4-20250514",
@@ -183,33 +231,26 @@ describe("fetchModelCosts", () => {
     expect(costs.get("claude-haiku-3-5-20241022")).toBe(0.8 / 1_000_000);
   });
 
-  test("falls back to hardcoded cost on 404", async () => {
+  test("falls back to hardcoded cost for unknown models", async () => {
     globalThis.fetch = mock(() =>
-      Promise.resolve(new Response("Not Found", { status: 404 })),
+      Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_COSTS)), { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const costs = await fetchModelCosts(["claude-future-model-2026"]);
+    // Unknown model — not in models.dev, fallback to high cost
+    expect(costs.get("claude-future-model-2026")).toBe(100 / 1_000_000);
+  });
+
+  test("falls back to hardcoded cost when API fails", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.reject(new Error("Network error")),
     ) as unknown as typeof fetch;
 
     const costs = await fetchModelCosts(["claude-sonnet-4-20250514"]);
     // Fallback cost for claude-sonnet-4 prefix
     expect(costs.get("claude-sonnet-4-20250514")).toBe(3 / 1_000_000);
-  });
-
-  test("falls back to hardcoded cost on network error", async () => {
-    globalThis.fetch = mock(() =>
-      Promise.reject(new Error("Network error")),
-    ) as unknown as typeof fetch;
-
-    const costs = await fetchModelCosts(["claude-opus-4-20250514"]);
-    // Fallback cost for claude-opus-4 prefix
-    expect(costs.get("claude-opus-4-20250514")).toBe(15 / 1_000_000);
-  });
-
-  test("unknown model gets high fallback cost", async () => {
-    globalThis.fetch = mock(() =>
-      Promise.resolve(new Response("Not Found", { status: 404 })),
-    ) as unknown as typeof fetch;
-
-    const costs = await fetchModelCosts(["claude-future-model-2026"]);
-    expect(costs.get("claude-future-model-2026")).toBe(100 / 1_000_000);
   });
 });
 
@@ -223,6 +264,7 @@ describe("discoverModels", () => {
   beforeEach(() => {
     originalFetch = globalThis.fetch;
     clearModelCache();
+    clearCostCache();
   });
 
   afterEach(() => {
@@ -416,7 +458,6 @@ describe("discoverModels", () => {
     const response = buildModelsResponse([
       { id: "claude-sonnet-4-20250514" },
       { id: "claude-haiku-3-5-20241022" },
-      // claude-3-haiku-20240307 is NOT listed — it's deprecated
     ]);
 
     globalThis.fetch = createRoutedFetch(response);
@@ -427,7 +468,7 @@ describe("discoverModels", () => {
     expect(models).toHaveLength(2);
   });
 
-  test("unknown model gets high cost when models.dev has no data", async () => {
+  test("unknown model gets high cost when not in models.dev", async () => {
     const response = buildModelsResponse([
       { id: "claude-future-model-2026" },
     ]);
@@ -437,7 +478,7 @@ describe("discoverModels", () => {
     const models = await discoverModels(UPSTREAM, TEST_CRED);
     const unknown = models[0];
 
-    // Unknown model — models.dev 404 → fallback to high cost
+    // Not in models.dev → fallback to high cost
     expect(unknown.cost.input).toBe(100 / 1_000_000);
   });
 
@@ -497,17 +538,14 @@ describe("discoverModels", () => {
     };
 
     let anthropicCallIndex = 0;
-    globalThis.fetch = mock((url: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = mock((url: string | URL | Request, _init?: RequestInit) => {
       const urlStr = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
 
-      // models.dev TOML requests
-      if (urlStr.startsWith(MODELS_DEV_BASE)) {
-        const modelId = urlStr.replace(`${MODELS_DEV_BASE}/`, "").replace(".toml", "");
-        const cost = MOCK_COSTS[modelId];
-        if (cost !== undefined) {
-          return Promise.resolve(new Response(buildTOML(cost), { status: 200 }));
-        }
-        return Promise.resolve(new Response("Not Found", { status: 404 }));
+      // models.dev API request
+      if (urlStr === MODELS_DEV_API) {
+        return Promise.resolve(
+          new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_COSTS)), { status: 200 }),
+        );
       }
 
       // Anthropic API — paginated
