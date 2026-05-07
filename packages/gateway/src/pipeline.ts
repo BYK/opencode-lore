@@ -89,6 +89,8 @@ import {
   resolveAuth,
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
+import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
+import { getWorkerModel, resetWorkerModelState } from "./worker-model";
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
@@ -146,6 +148,12 @@ export async function resetPipelineState(): Promise<void> {
   }
   llmClient = null;
   activeInterceptor = undefined;
+  if (stopIdleScheduler) {
+    stopIdleScheduler();
+    stopIdleScheduler = null;
+  }
+  lastSeenSessionModel = null;
+  resetWorkerModelState();
 }
 
 /** Cached project path from the first request that carried a system prompt. */
@@ -168,6 +176,12 @@ const ltmSessionCache = new Map<
 
 /** Cached LLM client for background workers. */
 let llmClient: LLMClient | null = null;
+
+/** Cleanup function for the idle scheduler timer. */
+let stopIdleScheduler: (() => void) | null = null;
+
+/** Last seen session model ID — used for worker model discovery context. */
+let lastSeenSessionModel: string | null = null;
 
 // ---------------------------------------------------------------------------
 // Model limits — hardcoded for known models, fallback for unknown
@@ -197,16 +211,34 @@ function getModelSpec(model: string): ModelSpec {
 // ---------------------------------------------------------------------------
 
 /**
- * One-time init: load Lore config, ensure project exists in DB.
+ * One-time init: load Lore config, ensure project exists in DB, start idle scheduler.
  * Safe to call multiple times — only the first call does work.
  */
-async function initIfNeeded(projectPath: string): Promise<void> {
+async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promise<void> {
   if (initialized) return;
 
   await load(projectPath);
   ensureProject(projectPath);
   initialized = true;
   cachedProjectPath = projectPath;
+
+  // Start the idle scheduler for background work (distillation, curation,
+  // pruning, AGENTS.md export). Uses a 30s poll interval and fires for any
+  // session whose lastRequestTime exceeds the idle timeout.
+  if (config && !stopIdleScheduler) {
+    const llm = getLLMClient(config);
+    const sessionModelID = lastSeenSessionModel ?? (loreConfig().model?.modelID ?? "claude-sonnet-4-20250514");
+    const idleHandler = buildIdleWorkHandler(
+      projectPath,
+      llm,
+      config.upstreamAnthropic,
+      () => resolveAuth(),
+      sessionModelID,
+      // onLtmInvalidated: clear the LTM session cache
+      () => ltmSessionCache.clear(),
+    );
+    stopIdleScheduler = startIdleScheduler(config, sessions, idleHandler);
+  }
 
   log.info(`gateway pipeline initialized: ${projectPath}`);
 }
@@ -821,6 +853,7 @@ function scheduleBackgroundWork(
   const { sessionID, projectPath } = sessionState;
   const llm = getLLMClient(config);
   const cfg = loreConfig();
+  const model = getWorkerModel();
 
   // Check if urgent distillation is needed (gradient flagged it).
   // Mark urgent: true so these bypass the batch queue — the gradient is
@@ -831,6 +864,7 @@ function scheduleBackgroundWork(
         llm,
         projectPath,
         sessionID,
+        model,
         force: true,
         urgent: true,
       })
@@ -844,7 +878,7 @@ function scheduleBackgroundWork(
       `incremental distillation: ${pending} undistilled messages in ${sessionID.slice(0, 16)}`,
     );
     distillation
-      .run({ llm, projectPath, sessionID })
+      .run({ llm, projectPath, sessionID, model })
       .catch((e) => log.error("background distillation failed:", e));
   }
 
@@ -855,7 +889,7 @@ function scheduleBackgroundWork(
     sessionState.turnsSinceCuration >= cfg.curator.afterTurns
   ) {
     curator
-      .run({ llm, projectPath, sessionID })
+      .run({ llm, projectPath, sessionID, model })
       .then(() => {
         sessionState.turnsSinceCuration = 0;
         // Invalidate LTM cache after curation changes knowledge entries
@@ -875,7 +909,7 @@ async function handleCompaction(
 ): Promise<Response> {
   // Identify session
   const projectPath = cachedProjectPath ?? getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(projectPath);
+  await initIfNeeded(projectPath, config);
 
   const { sessionID } = await identifySession(req, projectPath);
   const sessionState = getOrCreateSession(sessionID, projectPath);
@@ -885,10 +919,12 @@ async function handleCompaction(
 
   // 1. Force-distill all undistilled messages.
   // Mark urgent: true — client is blocking on the compaction response.
+  const model = getWorkerModel();
   await distillation.run({
     llm,
     projectPath,
     sessionID,
+    model,
     force: true,
     urgent: true,
   });
@@ -1000,7 +1036,7 @@ async function handleConversationTurn(
 ): Promise<Response> {
   // --- 1. Project path & init ---
   const projectPath = getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(projectPath);
+  await initIfNeeded(projectPath, config);
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
@@ -1031,6 +1067,9 @@ async function handleConversationTurn(
 
   // Always update message count for proximity matching
   sessionState.messageCount = req.messages.length;
+
+  // Track session model for worker model discovery
+  lastSeenSessionModel = req.model;
 
   // --- Inject pending recall from previous turn (Case 2: mixed tools) ---
   if (sessionState.pendingRecall) {

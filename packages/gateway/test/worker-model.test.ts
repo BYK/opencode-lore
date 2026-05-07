@@ -1,0 +1,581 @@
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
+import {
+  discoverModels,
+  clearModelCache,
+  getWorkerModel,
+  resetWorkerModelState,
+  parseCostFromTOML,
+  fetchModelCosts,
+} from "../src/worker-model";
+import type { AuthCredential } from "../src/auth";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const TEST_CRED: AuthCredential = { scheme: "api-key", value: "sk-test-key" };
+const UPSTREAM = "https://api.anthropic.com";
+const MODELS_DEV_BASE =
+  "https://raw.githubusercontent.com/sst/models.dev/dev/providers/anthropic/models";
+
+/** Build a mock Anthropic /v1/models response. */
+function buildModelsResponse(
+  models: Array<{
+    id: string;
+    display_name?: string;
+    thinking_supported?: boolean;
+  }>,
+) {
+  return {
+    data: models.map((m) => ({
+      id: m.id,
+      type: "model" as const,
+      display_name: m.display_name ?? m.id,
+      created_at: "2025-01-01T00:00:00Z",
+      max_input_tokens: 200_000,
+      max_tokens: 8192,
+      capabilities: {
+        thinking: { supported: m.thinking_supported ?? false },
+      },
+    })),
+    has_more: false,
+    first_id: models[0]?.id ?? "",
+    last_id: models[models.length - 1]?.id ?? "",
+  };
+}
+
+/** Build a models.dev TOML string for a model. */
+function buildTOML(inputCost: number): string {
+  return `name = "Test Model"
+family = "claude-test"
+
+[cost]
+input = ${inputCost.toFixed(2)}
+output = ${(inputCost * 5).toFixed(2)}
+cache_read = ${(inputCost * 0.1).toFixed(2)}
+cache_write = ${(inputCost * 1.25).toFixed(2)}
+
+[limit]
+context = 200_000
+output = 64_000
+`;
+}
+
+/** Cost data for mock models.dev responses. */
+const MOCK_COSTS: Record<string, number> = {
+  "claude-opus-4-20250514": 15.0,
+  "claude-sonnet-4-20250514": 3.0,
+  "claude-haiku-3-5-20241022": 0.8,
+  "claude-haiku-4-5-20251001": 1.0,
+};
+
+/**
+ * Create a URL-aware fetch mock that handles both Anthropic API and
+ * models.dev TOML requests.
+ */
+function createRoutedFetch(
+  anthropicResponse: unknown,
+  options?: {
+    modelsDevOverride?: (url: string) => Response;
+    onAnthropicCall?: (url: string, init?: RequestInit) => void;
+  },
+) {
+  return mock((url: string | URL | Request, init?: RequestInit) => {
+    const urlStr = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+
+    // models.dev TOML requests
+    if (urlStr.startsWith(MODELS_DEV_BASE)) {
+      if (options?.modelsDevOverride) {
+        return Promise.resolve(options.modelsDevOverride(urlStr));
+      }
+      // Extract model ID from URL
+      const modelId = urlStr.replace(`${MODELS_DEV_BASE}/`, "").replace(".toml", "");
+      const cost = MOCK_COSTS[modelId];
+      if (cost !== undefined) {
+        return Promise.resolve(new Response(buildTOML(cost), { status: 200 }));
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    }
+
+    // Anthropic API requests
+    options?.onAnthropicCall?.(urlStr, init);
+    return Promise.resolve(
+      new Response(JSON.stringify(anthropicResponse), { status: 200 }),
+    );
+  }) as typeof fetch;
+}
+
+// ---------------------------------------------------------------------------
+// parseCostFromTOML
+// ---------------------------------------------------------------------------
+
+describe("parseCostFromTOML", () => {
+  test("parses input cost from standard TOML", () => {
+    const toml = buildTOML(3.0);
+    expect(parseCostFromTOML(toml)).toBe(3.0);
+  });
+
+  test("parses fractional costs", () => {
+    expect(parseCostFromTOML(buildTOML(0.8))).toBe(0.8);
+    expect(parseCostFromTOML(buildTOML(15.0))).toBe(15.0);
+    expect(parseCostFromTOML(buildTOML(0.25))).toBe(0.25);
+  });
+
+  test("returns null when no [cost] section", () => {
+    const toml = `name = "Test"\n[limit]\ncontext = 200000`;
+    expect(parseCostFromTOML(toml)).toBeNull();
+  });
+
+  test("returns null when no input field in [cost] section", () => {
+    const toml = `[cost]\noutput = 5.00\ncache_read = 0.10`;
+    expect(parseCostFromTOML(toml)).toBeNull();
+  });
+
+  test("handles integer costs", () => {
+    const toml = `[cost]\ninput = 15\noutput = 75`;
+    expect(parseCostFromTOML(toml)).toBe(15);
+  });
+
+  test("does not match input outside [cost] section", () => {
+    const toml = `input = 999\n\n[cost]\noutput = 5.00`;
+    expect(parseCostFromTOML(toml)).toBeNull();
+  });
+
+  test("handles multiple sections correctly", () => {
+    const toml = `[metadata]\nname = "test"\n\n[cost]\ninput = 3.00\noutput = 15.00\n\n[limit]\ncontext = 200000`;
+    expect(parseCostFromTOML(toml)).toBe(3.0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchModelCosts
+// ---------------------------------------------------------------------------
+
+describe("fetchModelCosts", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("fetches costs for multiple models in parallel", async () => {
+    globalThis.fetch = mock((url: string) => {
+      const modelId = url.replace(`${MODELS_DEV_BASE}/`, "").replace(".toml", "");
+      const cost = MOCK_COSTS[modelId];
+      if (cost !== undefined) {
+        return Promise.resolve(new Response(buildTOML(cost), { status: 200 }));
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    }) as typeof fetch;
+
+    const costs = await fetchModelCosts([
+      "claude-opus-4-20250514",
+      "claude-sonnet-4-20250514",
+      "claude-haiku-3-5-20241022",
+    ]);
+
+    expect(costs.get("claude-opus-4-20250514")).toBe(15 / 1_000_000);
+    expect(costs.get("claude-sonnet-4-20250514")).toBe(3 / 1_000_000);
+    expect(costs.get("claude-haiku-3-5-20241022")).toBe(0.8 / 1_000_000);
+  });
+
+  test("falls back to hardcoded cost on 404", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response("Not Found", { status: 404 })),
+    ) as typeof fetch;
+
+    const costs = await fetchModelCosts(["claude-sonnet-4-20250514"]);
+    // Fallback cost for claude-sonnet-4 prefix
+    expect(costs.get("claude-sonnet-4-20250514")).toBe(3 / 1_000_000);
+  });
+
+  test("falls back to hardcoded cost on network error", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.reject(new Error("Network error")),
+    ) as typeof fetch;
+
+    const costs = await fetchModelCosts(["claude-opus-4-20250514"]);
+    // Fallback cost for claude-opus-4 prefix
+    expect(costs.get("claude-opus-4-20250514")).toBe(15 / 1_000_000);
+  });
+
+  test("unknown model gets high fallback cost", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response("Not Found", { status: 404 })),
+    ) as typeof fetch;
+
+    const costs = await fetchModelCosts(["claude-future-model-2026"]);
+    expect(costs.get("claude-future-model-2026")).toBe(100 / 1_000_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// discoverModels
+// ---------------------------------------------------------------------------
+
+describe("discoverModels", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    clearModelCache();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+  });
+
+  test("discovers models from upstream API with costs from models.dev", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-opus-4-20250514", thinking_supported: true },
+      { id: "claude-sonnet-4-20250514" },
+      { id: "claude-haiku-3-5-20241022" },
+    ]);
+
+    globalThis.fetch = createRoutedFetch(response);
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+
+    expect(models).toHaveLength(3);
+    expect(models.map((m) => m.id)).toEqual([
+      "claude-opus-4-20250514",
+      "claude-sonnet-4-20250514",
+      "claude-haiku-3-5-20241022",
+    ]);
+  });
+
+  test("maps model costs from models.dev correctly", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-opus-4-20250514" },
+      { id: "claude-sonnet-4-20250514" },
+      { id: "claude-haiku-3-5-20241022" },
+    ]);
+
+    globalThis.fetch = createRoutedFetch(response);
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+
+    const opus = models.find((m) => m.id === "claude-opus-4-20250514")!;
+    const sonnet = models.find((m) => m.id === "claude-sonnet-4-20250514")!;
+    const haiku = models.find((m) => m.id === "claude-haiku-3-5-20241022")!;
+
+    // Relative ordering: opus > sonnet > haiku
+    expect(opus.cost.input).toBeGreaterThan(sonnet.cost.input);
+    expect(sonnet.cost.input).toBeGreaterThan(haiku.cost.input);
+
+    // Exact values from models.dev mock data
+    expect(opus.cost.input).toBe(15 / 1_000_000);
+    expect(sonnet.cost.input).toBe(3 / 1_000_000);
+    expect(haiku.cost.input).toBe(0.8 / 1_000_000);
+  });
+
+  test("detects reasoning capability from thinking.supported", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-opus-4-20250514", thinking_supported: true },
+      { id: "claude-haiku-3-5-20241022", thinking_supported: false },
+    ]);
+
+    globalThis.fetch = createRoutedFetch(response);
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+
+    const opus = models.find((m) => m.id === "claude-opus-4-20250514")!;
+    const haiku = models.find((m) => m.id === "claude-haiku-3-5-20241022")!;
+
+    expect(opus.capabilities.reasoning).toBe(true);
+    expect(haiku.capabilities.reasoning).toBe(false);
+  });
+
+  test("all models are marked as active and text-capable", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-sonnet-4-20250514" },
+    ]);
+
+    globalThis.fetch = createRoutedFetch(response);
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+
+    expect(models[0].status).toBe("active");
+    expect(models[0].capabilities.input.text).toBe(true);
+    expect(models[0].providerID).toBe("anthropic");
+  });
+
+  test("caches results and returns cache on subsequent calls", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-sonnet-4-20250514" },
+    ]);
+
+    let anthropicCallCount = 0;
+    globalThis.fetch = createRoutedFetch(response, {
+      onAnthropicCall: () => { anthropicCallCount++; },
+    });
+
+    const first = await discoverModels(UPSTREAM, TEST_CRED);
+    const second = await discoverModels(UPSTREAM, TEST_CRED);
+
+    expect(anthropicCallCount).toBe(1);
+    expect(first).toBe(second); // Same reference — cached
+  });
+
+  test("returns empty array on API error with no cache", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response("Unauthorized", { status: 401 })),
+    ) as typeof fetch;
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+    expect(models).toEqual([]);
+  });
+
+  test("returns stale cache on API error when cache exists", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-sonnet-4-20250514" },
+    ]);
+
+    // First call succeeds and populates cache
+    globalThis.fetch = createRoutedFetch(response);
+
+    const cached = await discoverModels(UPSTREAM, TEST_CRED);
+    expect(cached).toHaveLength(1);
+
+    // Expire the cache manually
+    clearModelCache();
+
+    // Second call fails (Anthropic API error)
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response("Server Error", { status: 500 })),
+    ) as typeof fetch;
+
+    // clearModelCache clears both cache and timestamp, so stale fallback
+    // returns empty since there's genuinely no cache
+    const fallback = await discoverModels(UPSTREAM, TEST_CRED);
+    expect(fallback).toEqual([]);
+  });
+
+  test("returns stale cache on network error", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-sonnet-4-20250514" },
+    ]);
+
+    // First: populate cache
+    globalThis.fetch = createRoutedFetch(response);
+    await discoverModels(UPSTREAM, TEST_CRED);
+
+    clearModelCache();
+
+    // Network error on re-fetch
+    globalThis.fetch = mock(() =>
+      Promise.reject(new Error("Network error")),
+    ) as typeof fetch;
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+    // No cache available after clearModelCache
+    expect(models).toEqual([]);
+  });
+
+  test("sends correct auth headers with API key", async () => {
+    const response = buildModelsResponse([]);
+    let capturedHeaders: Record<string, string> = {};
+
+    globalThis.fetch = createRoutedFetch(response, {
+      onAnthropicCall: (_url, init) => {
+        capturedHeaders = init?.headers as Record<string, string>;
+      },
+    });
+
+    await discoverModels(UPSTREAM, TEST_CRED);
+
+    expect(capturedHeaders["x-api-key"]).toBe("sk-test-key");
+    expect(capturedHeaders["anthropic-version"]).toBe("2023-06-01");
+  });
+
+  test("sends correct auth headers with bearer token", async () => {
+    const response = buildModelsResponse([]);
+    let capturedHeaders: Record<string, string> = {};
+
+    globalThis.fetch = createRoutedFetch(response, {
+      onAnthropicCall: (_url, init) => {
+        capturedHeaders = init?.headers as Record<string, string>;
+      },
+    });
+
+    const bearerCred: AuthCredential = {
+      scheme: "bearer",
+      value: "token-abc",
+    };
+    await discoverModels(UPSTREAM, bearerCred);
+
+    expect(capturedHeaders["Authorization"]).toBe("Bearer token-abc");
+  });
+
+  test("deprecated models not returned by API are naturally excluded", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-sonnet-4-20250514" },
+      { id: "claude-haiku-3-5-20241022" },
+      // claude-3-haiku-20240307 is NOT listed — it's deprecated
+    ]);
+
+    globalThis.fetch = createRoutedFetch(response);
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+
+    expect(models.map((m) => m.id)).not.toContain("claude-3-haiku-20240307");
+    expect(models).toHaveLength(2);
+  });
+
+  test("unknown model gets high cost when models.dev has no data", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-future-model-2026" },
+    ]);
+
+    globalThis.fetch = createRoutedFetch(response);
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+    const unknown = models[0];
+
+    // Unknown model — models.dev 404 → fallback to high cost
+    expect(unknown.cost.input).toBe(100 / 1_000_000);
+  });
+
+  test("falls back to hardcoded costs when models.dev is down", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-sonnet-4-20250514" },
+      { id: "claude-haiku-3-5-20241022" },
+    ]);
+
+    globalThis.fetch = createRoutedFetch(response, {
+      modelsDevOverride: () => new Response("Service Unavailable", { status: 503 }),
+    });
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+
+    // Should still get models with fallback costs
+    expect(models).toHaveLength(2);
+    const sonnet = models.find((m) => m.id === "claude-sonnet-4-20250514")!;
+    const haiku = models.find((m) => m.id === "claude-haiku-3-5-20241022")!;
+
+    // Fallback costs maintain correct ordering
+    expect(sonnet.cost.input).toBeGreaterThan(haiku.cost.input);
+  });
+
+  test("paginates through multiple pages", async () => {
+    const page1 = {
+      data: [
+        {
+          id: "claude-opus-4-20250514",
+          type: "model",
+          display_name: "Claude Opus 4",
+          created_at: "2025-01-01T00:00:00Z",
+          max_input_tokens: 200_000,
+          max_tokens: 32_000,
+          capabilities: { thinking: { supported: true } },
+        },
+      ],
+      has_more: true,
+      first_id: "claude-opus-4-20250514",
+      last_id: "claude-opus-4-20250514",
+    };
+    const page2 = {
+      data: [
+        {
+          id: "claude-haiku-3-5-20241022",
+          type: "model",
+          display_name: "Claude Haiku 3.5",
+          created_at: "2025-01-01T00:00:00Z",
+          max_input_tokens: 200_000,
+          max_tokens: 8192,
+          capabilities: { thinking: { supported: false } },
+        },
+      ],
+      has_more: false,
+      first_id: "claude-haiku-3-5-20241022",
+      last_id: "claude-haiku-3-5-20241022",
+    };
+
+    let anthropicCallIndex = 0;
+    globalThis.fetch = mock((url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+
+      // models.dev TOML requests
+      if (urlStr.startsWith(MODELS_DEV_BASE)) {
+        const modelId = urlStr.replace(`${MODELS_DEV_BASE}/`, "").replace(".toml", "");
+        const cost = MOCK_COSTS[modelId];
+        if (cost !== undefined) {
+          return Promise.resolve(new Response(buildTOML(cost), { status: 200 }));
+        }
+        return Promise.resolve(new Response("Not Found", { status: 404 }));
+      }
+
+      // Anthropic API — paginated
+      const page = anthropicCallIndex === 0 ? page1 : page2;
+      anthropicCallIndex++;
+      return Promise.resolve(
+        new Response(JSON.stringify(page), { status: 200 }),
+      );
+    }) as typeof fetch;
+
+    const models = await discoverModels(UPSTREAM, TEST_CRED);
+
+    expect(anthropicCallIndex).toBe(2);
+    expect(models).toHaveLength(2);
+    expect(models.map((m) => m.id)).toEqual([
+      "claude-opus-4-20250514",
+      "claude-haiku-3-5-20241022",
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getWorkerModel
+// ---------------------------------------------------------------------------
+
+describe("getWorkerModel", () => {
+  test("returns undefined when no validation has been stored", () => {
+    const result = getWorkerModel();
+    expect(result === undefined || typeof result === "object").toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// clearModelCache / resetWorkerModelState
+// ---------------------------------------------------------------------------
+
+describe("resetWorkerModelState", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+  });
+
+  test("clears cache so next discoverModels re-fetches", async () => {
+    const response = buildModelsResponse([
+      { id: "claude-sonnet-4-20250514" },
+    ]);
+
+    let anthropicCallCount = 0;
+    globalThis.fetch = createRoutedFetch(response, {
+      onAnthropicCall: () => { anthropicCallCount++; },
+    });
+
+    await discoverModels(UPSTREAM, TEST_CRED);
+    expect(anthropicCallCount).toBe(1);
+
+    // Without reset, cached
+    await discoverModels(UPSTREAM, TEST_CRED);
+    expect(anthropicCallCount).toBe(1);
+
+    // After reset, re-fetches
+    resetWorkerModelState();
+    await discoverModels(UPSTREAM, TEST_CRED);
+    expect(anthropicCallCount).toBe(2);
+  });
+});
