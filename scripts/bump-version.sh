@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pre-release version bump for all three Lore workspace packages.
+# Pre-release version bump for all four Lore workspace packages.
 #
 # Why this exists instead of letting craft auto-bump:
 #
@@ -49,6 +49,7 @@ echo "Bumping Lore workspace packages to ${NEW_VERSION}"
 
 for f in \
   packages/core/package.json \
+  packages/gateway/package.json \
   packages/opencode/package.json \
   packages/pi/package.json; do
   # Preserve trailing newline by piping through jq then appending.
@@ -79,7 +80,7 @@ if [ -f bun.lock ]; then
   echo "Patching bun.lock workspace versions..."
   tmp="$(mktemp)"
   awk -v new_ver="$NEW_VERSION" '
-    /^    "packages\/(core|opencode|pi)": \{$/ { in_ws = 1 }
+    /^    "packages\/(core|gateway|opencode|pi)": \{$/ { in_ws = 1 }
     in_ws && /^      "version": "[0-9]+\.[0-9]+\.[0-9]+",$/ {
       sub(/"[0-9]+\.[0-9]+\.[0-9]+"/, "\"" new_ver "\"")
       in_ws = 0
