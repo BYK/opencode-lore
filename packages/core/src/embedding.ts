@@ -166,9 +166,12 @@ class LocalProvider implements EmbeddingProvider {
         // If the configured model matches an enum key, use it; otherwise try
         // the raw string as a model name (CUSTOM model support in fastembed).
         const enumValue = (EmbeddingModel as Record<string, string>)[this.modelName];
+        // fastembed's init() has overloaded signatures expecting specific enum
+        // members, but we resolve the model dynamically from config. The enum
+        // lookup guarantees a valid value at runtime; cast to satisfy the type.
         const m = await FlagEmbedding.init({
           model: enumValue ?? this.modelName,
-        });
+        } as { model: typeof EmbeddingModel.BGESmallENV15 });
         this.model = m;
         return m;
       })();
