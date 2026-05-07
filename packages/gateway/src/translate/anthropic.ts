@@ -12,6 +12,7 @@ import type {
   GatewayResponse,
   GatewayTool,
 } from "./types";
+import { extractAuth, authHeaders } from "../auth";
 
 // ---------------------------------------------------------------------------
 // Anthropic API version — used in all outgoing requests
@@ -305,11 +306,10 @@ export function buildAnthropicRequest(
     "anthropic-version": ANTHROPIC_VERSION,
   };
 
-  // Forward auth key from the original request
-  const apiKey =
-    req.rawHeaders["x-api-key"] || req.rawHeaders["X-Api-Key"] || "";
-  if (apiKey) {
-    headers["x-api-key"] = apiKey;
+  // Forward auth from the original request (API key or OAuth Bearer)
+  const cred = extractAuth(req.rawHeaders);
+  if (cred) {
+    Object.assign(headers, authHeaders(cred));
   }
 
   // Forward anthropic-beta if present (enables features like extended thinking)

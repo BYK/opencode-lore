@@ -232,6 +232,17 @@ export interface LLMClient {
        * (OpenCode, Pi) ignore it and always process immediately.
        */
       urgent?: boolean;
+      /**
+       * Session identifier for per-session auth credential lookup.
+       *
+       * The gateway uses this to resolve the correct API key or OAuth
+       * token for the session that triggered the work, preventing
+       * cross-session key mixups when multiple clients are connected.
+       *
+       * Other adapters (OpenCode, Pi) ignore this field — they resolve
+       * auth through their own mechanisms.
+       */
+      sessionID?: string;
     },
   ): Promise<string | null>;
 }

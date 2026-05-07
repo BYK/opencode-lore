@@ -11,6 +11,10 @@
 import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
 import { createBatchLLMClient, type BatchStats } from "../src/batch-queue";
 import type { LLMClient } from "@loreai/core";
+import type { AuthCredential } from "../src/auth";
+
+const TEST_AUTH: AuthCredential = { scheme: "api-key", value: "test-key" };
+const getTestAuth = () => TEST_AUTH;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -89,7 +93,7 @@ const UPSTREAM = "https://api.anthropic.com";
 describe("BatchLLMClient", () => {
   test("urgent calls bypass the queue and delegate to inner client", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAM, () => "test-key", DEFAULT_MODEL, {
+    const client = createBatchLLMClient(inner, UPSTREAM, getTestAuth, DEFAULT_MODEL, {
       flushIntervalMs: 60_000, // Long interval so flush doesn't auto-trigger
     });
 
@@ -112,7 +116,7 @@ describe("BatchLLMClient", () => {
 
   test("non-urgent calls are queued (not immediately sent to inner)", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAM, () => "test-key", DEFAULT_MODEL, {
+    const client = createBatchLLMClient(inner, UPSTREAM, getTestAuth, DEFAULT_MODEL, {
       flushIntervalMs: 60_000,
       maxQueueSize: 100,
     });
@@ -147,7 +151,7 @@ describe("BatchLLMClient", () => {
       processing_status: "in_progress",
     });
 
-    const client = createBatchLLMClient(inner, UPSTREAM, () => "test-key", DEFAULT_MODEL, {
+    const client = createBatchLLMClient(inner, UPSTREAM, getTestAuth, DEFAULT_MODEL, {
       flushIntervalMs: 60_000,
       maxQueueSize: 3,
       pollIntervalMs: 60_000,
@@ -181,7 +185,7 @@ describe("BatchLLMClient", () => {
     // Set up batch create to fail
     pushFetchResponse(false, 500, { error: "internal server error" });
 
-    const client = createBatchLLMClient(inner, UPSTREAM, () => "test-key", DEFAULT_MODEL, {
+    const client = createBatchLLMClient(inner, UPSTREAM, getTestAuth, DEFAULT_MODEL, {
       flushIntervalMs: 60_000,
       maxQueueSize: 2,
     });
@@ -229,7 +233,7 @@ describe("BatchLLMClient", () => {
 
   test("shutdown drains queue synchronously via inner client", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAM, () => "test-key", DEFAULT_MODEL, {
+    const client = createBatchLLMClient(inner, UPSTREAM, getTestAuth, DEFAULT_MODEL, {
       flushIntervalMs: 60_000,
       maxQueueSize: 100,
     });
@@ -250,7 +254,7 @@ describe("BatchLLMClient", () => {
 
   test("after shutdown, new calls go directly to inner client", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAM, () => "test-key", DEFAULT_MODEL, {
+    const client = createBatchLLMClient(inner, UPSTREAM, getTestAuth, DEFAULT_MODEL, {
       flushIntervalMs: 60_000,
     });
 
@@ -267,7 +271,7 @@ describe("BatchLLMClient", () => {
 
   test("stats reflect accurate counts", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAM, () => "test-key", DEFAULT_MODEL, {
+    const client = createBatchLLMClient(inner, UPSTREAM, getTestAuth, DEFAULT_MODEL, {
       flushIntervalMs: 60_000,
       maxQueueSize: 100,
     });
@@ -301,7 +305,7 @@ describe("BatchLLMClient", () => {
       processing_status: "in_progress",
     });
 
-    const client = createBatchLLMClient(inner, UPSTREAM, () => "test-key", DEFAULT_MODEL, {
+    const client = createBatchLLMClient(inner, UPSTREAM, getTestAuth, DEFAULT_MODEL, {
       flushIntervalMs: 60_000,
       maxQueueSize: 1,
     });
@@ -331,7 +335,7 @@ describe("BatchLLMClient", () => {
       processing_status: "in_progress",
     });
 
-    const client = createBatchLLMClient(inner, UPSTREAM, () => "test-key", DEFAULT_MODEL, {
+    const client = createBatchLLMClient(inner, UPSTREAM, getTestAuth, DEFAULT_MODEL, {
       flushIntervalMs: 60_000,
       maxQueueSize: 1,
     });

@@ -6,25 +6,8 @@
 
 import type { LLMClient } from "@loreai/core";
 import { log } from "@loreai/core";
-
-// ---------------------------------------------------------------------------
-// API key tracking
-// ---------------------------------------------------------------------------
-
-/**
- * The most recently seen API key from incoming client requests.
- * Workers use this to authenticate upstream — they piggyback on the key
- * the main session is using rather than requiring a separate key.
- */
-let lastSeenApiKey: string | null = null;
-
-export function setLastSeenApiKey(key: string): void {
-  lastSeenApiKey = key;
-}
-
-export function getLastSeenApiKey(): string | null {
-  return lastSeenApiKey;
-}
+import type { AuthCredential } from "./auth";
+import { authHeaders } from "./auth";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -41,19 +24,19 @@ export const activeWorkerCalls = new Set<string>();
  * Create an LLMClient that sends single-turn prompts directly to Anthropic.
  *
  * @param upstreamUrl     Base URL of the upstream Anthropic endpoint
- * @param getApiKey       Callback to retrieve the current API key
+ * @param getAuth         Callback to resolve auth credentials (per-session → global fallback)
  * @param defaultModel    Default model to use when no override is specified
  */
 export function createGatewayLLMClient(
   upstreamUrl: string,
-  getApiKey: () => string | null,
+  getAuth: (sessionID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
 ): LLMClient {
   return {
     async prompt(system, user, opts) {
-      const apiKey = getApiKey();
-      if (!apiKey) {
-        log.warn("no API key available for worker call");
+      const cred = getAuth(opts?.sessionID);
+      if (!cred) {
+        log.warn("no auth credentials available for worker call");
         return null;
       }
 
@@ -86,7 +69,7 @@ export function createGatewayLLMClient(
           headers: {
             "Content-Type": "application/json",
             "anthropic-version": "2023-06-01",
-            "x-api-key": apiKey,
+            ...authHeaders(cred),
           },
           // opts.thinking is intentionally not forwarded — this bare API
           // call never includes the `thinking` parameter so Anthropic

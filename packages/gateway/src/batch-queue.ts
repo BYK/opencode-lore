@@ -9,12 +9,18 @@
  * Urgent calls (compaction, overflow recovery, query expansion) bypass
  * the queue entirely and delegate to the inner synchronous client.
  *
+ * Auth credentials are snapshotted per-item at enqueue time and grouped
+ * by credential at flush time — this ensures multi-session isolation when
+ * multiple clients with different API keys are connected simultaneously.
+ *
  * This is a gateway-only enhancement — the OpenCode and Pi adapters
  * always process immediately regardless of the `urgent` flag.
  */
 
 import type { LLMClient } from "@loreai/core";
 import { log } from "@loreai/core";
+import type { AuthCredential } from "./auth";
+import { authHeaders } from "./auth";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,6 +45,8 @@ interface PendingRequest {
   reject: (error: Error) => void;
   /** Timestamp when the request was enqueued. */
   enqueuedAt: number;
+  /** Auth credential snapshotted at enqueue time for per-session isolation. */
+  auth: AuthCredential;
 }
 
 /** A batch that has been submitted and is being polled for results. */
@@ -51,6 +59,8 @@ interface InflightBatch {
   submittedAt: number;
   /** Poll timer handle. */
   pollTimer: ReturnType<typeof setInterval>;
+  /** Auth credential for this batch (used for poll/retrieve calls). */
+  auth: AuthCredential;
 }
 
 export interface BatchQueueConfig {
@@ -83,6 +93,11 @@ function generateCustomId(): string {
   return `lore-${ts}-${seq}-${rand}`;
 }
 
+/** Produce a grouping key for an auth credential. */
+function authKey(cred: AuthCredential): string {
+  return `${cred.scheme}:${cred.value}`;
+}
+
 // ---------------------------------------------------------------------------
 // BatchLLMClient
 // ---------------------------------------------------------------------------
@@ -98,14 +113,14 @@ function generateCustomId(): string {
  *
  * @param inner       The synchronous LLMClient (gateway's direct adapter)
  * @param upstreamUrl Base Anthropic API URL (e.g. "https://api.anthropic.com")
- * @param getApiKey   Callback to get the current API key
+ * @param getAuth     Callback to resolve auth credentials (per-session → global fallback)
  * @param defaultModel Default model for requests without explicit model
  * @param batchConfig Optional tuning parameters
  */
 export function createBatchLLMClient(
   inner: LLMClient,
   upstreamUrl: string,
-  getApiKey: () => string | null,
+  getAuth: (sessionID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
   batchConfig?: BatchQueueConfig,
 ): LLMClient & { shutdown: () => Promise<void>; stats: () => BatchStats } {
@@ -129,28 +144,16 @@ export function createBatchLLMClient(
   let totalFailed = 0;
 
   // -------------------------------------------------------------------------
-  // Flush: send queued items as a batch
+  // Submit a single batch for one credential group
   // -------------------------------------------------------------------------
 
-  async function flush(): Promise<void> {
-    if (queue.length === 0) return;
-
-    const apiKey = getApiKey();
-    if (!apiKey) {
-      // No API key — fall back to synchronous for all queued items
-      log.warn("batch flush: no API key, falling back to synchronous");
-      await fallbackAll(queue.splice(0));
-      return;
-    }
-
-    // Take all items from the queue
-    const batch = queue.splice(0);
-    const requests = batch.map((item) => ({
+  async function submitBatch(auth: AuthCredential, items: PendingRequest[]): Promise<void> {
+    const requests = items.map((item) => ({
       custom_id: item.customId,
       params: item.params,
     }));
 
-    log.info(`batch flush: submitting ${batch.length} requests`);
+    log.info(`batch flush: submitting ${items.length} requests`);
 
     try {
       const url = `${upstreamUrl.replace(/\/$/, "")}/v1/messages/batches`;
@@ -159,7 +162,7 @@ export function createBatchLLMClient(
         headers: {
           "Content-Type": "application/json",
           "anthropic-version": "2023-06-01",
-          "x-api-key": apiKey,
+          ...authHeaders(auth),
         },
         body: JSON.stringify({ requests }),
       });
@@ -168,7 +171,7 @@ export function createBatchLLMClient(
         const text = await response.text().catch(() => "(no body)");
         log.error(`batch create failed: ${response.status} ${response.statusText} — ${text}`);
         // Fall back to synchronous for all items
-        await fallbackAll(batch);
+        await fallbackAll(items);
         return;
       }
 
@@ -177,11 +180,11 @@ export function createBatchLLMClient(
         processing_status: string;
       };
 
-      totalBatched += batch.length;
+      totalBatched += items.length;
 
       // Track inflight batch
       const requestMap = new Map<string, PendingRequest>();
-      for (const item of batch) {
+      for (const item of items) {
         requestMap.set(item.customId, item);
       }
 
@@ -195,12 +198,40 @@ export function createBatchLLMClient(
         requests: requestMap,
         submittedAt: Date.now(),
         pollTimer,
+        auth,
       });
 
-      log.info(`batch created: ${data.id} with ${batch.length} requests`);
+      log.info(`batch created: ${data.id} with ${items.length} requests`);
     } catch (e) {
       log.error("batch create error:", e);
-      await fallbackAll(batch);
+      await fallbackAll(items);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Flush: group queued items by credential, submit one batch per group
+  // -------------------------------------------------------------------------
+
+  async function flush(): Promise<void> {
+    if (queue.length === 0) return;
+
+    // Take all items from the queue
+    const batch = queue.splice(0);
+
+    // Group by auth credential — each credential gets its own batch
+    const byAuth = new Map<string, { auth: AuthCredential; items: PendingRequest[] }>();
+    for (const item of batch) {
+      const key = authKey(item.auth);
+      let group = byAuth.get(key);
+      if (!group) {
+        group = { auth: item.auth, items: [] };
+        byAuth.set(key, group);
+      }
+      group.items.push(item);
+    }
+
+    for (const { auth, items } of byAuth.values()) {
+      await submitBatch(auth, items);
     }
   }
 
@@ -211,12 +242,6 @@ export function createBatchLLMClient(
   async function pollBatch(batchId: string): Promise<void> {
     const batch = inflight.get(batchId);
     if (!batch) return;
-
-    const apiKey = getApiKey();
-    if (!apiKey) {
-      log.warn(`batch poll: no API key for ${batchId}`);
-      return;
-    }
 
     // Check max age — give up and fallback if too old
     if (Date.now() - batch.submittedAt > maxBatchAgeMs) {
@@ -232,7 +257,7 @@ export function createBatchLLMClient(
       const response = await fetch(url, {
         headers: {
           "anthropic-version": "2023-06-01",
-          "x-api-key": apiKey,
+          ...authHeaders(batch.auth),
         },
       });
 
@@ -269,14 +294,11 @@ export function createBatchLLMClient(
     const batch = inflight.get(batchId);
     if (!batch) return;
 
-    const apiKey = getApiKey();
-    if (!apiKey) return;
-
     try {
       const response = await fetch(resultsUrl, {
         headers: {
           "anthropic-version": "2023-06-01",
-          "x-api-key": apiKey,
+          ...authHeaders(batch.auth),
         },
       });
 
@@ -405,6 +427,15 @@ export function createBatchLLMClient(
         return inner.prompt(system, user, opts);
       }
 
+      // Snapshot auth credential at enqueue time for session isolation.
+      // If no credential is available, fall back to synchronous processing
+      // (which will also attempt to resolve auth — matches prior behavior).
+      const cred = getAuth(opts?.sessionID);
+      if (!cred) {
+        totalUrgent++;
+        return inner.prompt(system, user, opts);
+      }
+
       totalQueued++;
 
       const model = opts?.model ?? defaultModel;
@@ -434,6 +465,7 @@ export function createBatchLLMClient(
           resolve,
           reject,
           enqueuedAt: Date.now(),
+          auth: cred,
         });
       });
 

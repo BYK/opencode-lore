@@ -241,7 +241,7 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
   let queries = [query];
   if (searchConfig?.queryExpansion && llm) {
     try {
-      queries = await expandQuery(llm, query);
+      queries = await expandQuery(llm, query, undefined, sessionID);
     } catch (err) {
       log.info("recall: query expansion failed, using original:", err);
     }
