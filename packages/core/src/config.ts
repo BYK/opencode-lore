@@ -120,37 +120,40 @@ export const LoreConfig = z.object({
        *  before search, improving recall for ambiguous queries. */
       queryExpansion: z.boolean().default(false),
       /** Vector embedding search.
-       *  Supports multiple providers: "voyage" (Voyage AI, VOYAGE_API_KEY),
-       *  "openai" (OpenAI, OPENAI_API_KEY).
-       *  Automatically enabled when the configured provider's API key env var is set.
-       *  Set enabled: false to explicitly disable even with the key present. */
+       *  Supports multiple providers:
+       *  - "local" (default): fastembed + ONNX Runtime, no API key needed.
+       *    Uses bge-small-en-v1.5 (384 dims). Model downloaded on first use (~33MB),
+       *    cached in ~/.cache/fastembed. ~150ms per query embed.
+       *  - "voyage": Voyage AI (VOYAGE_API_KEY, voyage-code-3, 1024 dims)
+       *  - "openai": OpenAI (OPENAI_API_KEY, text-embedding-3-small, 1536 dims)
+       *  Set enabled: false to explicitly disable even with a provider available. */
       embeddings: z
         .object({
           /** Enable/disable vector embedding search. Default: true.
-           *  Set to false to explicitly disable even when the API key is set. */
+           *  Set to false to explicitly disable. */
           enabled: z.boolean().default(true),
-          /** Embedding provider. Default: "voyage".
-           *  Each provider reads its own env var for the API key:
+          /** Embedding provider. Default: "local".
+           *  - "local": fastembed + ONNX Runtime, no API key (default model: bge-small-en-v1.5, 384 dims)
            *  - "voyage": VOYAGE_API_KEY (default model: voyage-code-3, 1024 dims)
            *  - "openai": OPENAI_API_KEY (default model: text-embedding-3-small, 1536 dims) */
-          provider: z.enum(["voyage", "openai"]).default("voyage"),
+          provider: z.enum(["local", "voyage", "openai"]).default("local"),
           /** Model ID for the embedding provider. Default depends on provider. */
-          model: z.string().default("voyage-code-3"),
-          /** Embedding dimensions. Default: 1024. */
-          dimensions: z.number().min(256).max(2048).default(1024),
+          model: z.string().default("BGESmallENV15"),
+          /** Embedding dimensions. Default: 384 (local) / 1024 (voyage) / 1536 (openai). */
+          dimensions: z.number().min(64).max(2048).default(384),
         })
         .default({
           enabled: true,
-          provider: "voyage",
-          model: "voyage-code-3",
-          dimensions: 1024,
+          provider: "local",
+          model: "BGESmallENV15",
+          dimensions: 384,
         }),
     })
     .default({
       ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
       recallLimit: 10,
       queryExpansion: false,
-      embeddings: { enabled: true, provider: "voyage" as const, model: "voyage-code-3", dimensions: 1024 },
+      embeddings: { enabled: true, provider: "local" as const, model: "BGESmallENV15", dimensions: 384 },
     }),
   crossProject: z.boolean().default(false),
   agentsFile: z

@@ -19,7 +19,9 @@ import type { LoreConfig } from "./config";
 import type { LLMClient } from "./types";
 import {
   EMPTY_QUERY,
+  exactTermMatchRank,
   expandQuery,
+  filterTerms,
   ftsQuery,
   ftsQueryOr,
   reciprocalRankFusion,
@@ -71,6 +73,41 @@ type TaggedResult =
   | { source: "distillation"; item: ScoredDistillation }
   | { source: "temporal"; item: temporal.ScoredTemporalMessage }
   | { source: "lat-section"; item: latReader.ScoredLatSection };
+
+// ---------------------------------------------------------------------------
+// Tagged result helpers (used by exact-match boost + formatting)
+// ---------------------------------------------------------------------------
+
+/** Extract searchable text from any TaggedResult variant. */
+function getTaggedText(tagged: TaggedResult): string {
+  switch (tagged.source) {
+    case "knowledge":
+    case "cross-knowledge":
+      return `${tagged.item.title} ${tagged.item.content}`;
+    case "distillation":
+      return tagged.item.observations;
+    case "temporal":
+      return tagged.item.content;
+    case "lat-section":
+      return `${tagged.item.heading} ${tagged.item.content}`;
+  }
+}
+
+/** Unified key function for TaggedResult — source-prefixed ID for RRF dedup. */
+function taggedResultKey(r: TaggedResult): string {
+  switch (r.source) {
+    case "knowledge":
+      return `k:${r.item.id}`;
+    case "cross-knowledge":
+      return `xk:${r.item.id}`;
+    case "distillation":
+      return `d:${r.item.id}`;
+    case "temporal":
+      return `t:${r.item.id}`;
+    case "lat-section":
+      return `lat:${r.item.id}`;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Distillation search
@@ -445,6 +482,35 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
       }
     } catch (err) {
       log.info("recall: cross-project knowledge search failed:", err);
+    }
+  }
+
+  // Exact-match boost: add an additional RRF list that ranks candidates by
+  // the number of exact query term matches. This boosts proper nouns, file
+  // names, and technical terms that BM25's prefix/stem matching may dilute.
+  // Only runs when there are meaningful terms and existing candidates.
+  if (filterTerms(query).length > 0 && allRrfLists.length > 0) {
+    // Collect unique candidates across all lists
+    const allCandidates = new Map<string, TaggedResult>();
+    for (const list of allRrfLists) {
+      for (const item of list.items) {
+        const key = list.key(item);
+        if (!allCandidates.has(key)) allCandidates.set(key, item);
+      }
+    }
+
+    const candidateEntries = [...allCandidates.entries()];
+    const exactRanked = exactTermMatchRank(
+      candidateEntries,
+      ([, tagged]) => getTaggedText(tagged),
+      query,
+    );
+
+    if (exactRanked.length) {
+      allRrfLists.push({
+        items: exactRanked.map(([, item]) => item),
+        key: taggedResultKey,
+      });
     }
   }
 

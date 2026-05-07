@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-tarballs/
+local_cache/
 *.tgz
 *.db
 *.db-journal

@@ -3,7 +3,9 @@ import { config } from "./config";
 import * as temporal from "./temporal";
 import { CHUNK_TERMINATOR } from "./temporal";
 import * as embedding from "./embedding";
+import * as ltm from "./ltm";
 import * as log from "./log";
+import { extractPatterns } from "./pattern-extract";
 import {
   DISTILLATION_SYSTEM,
   distillationUser,
@@ -668,6 +670,24 @@ async function distillSegment(input: {
     embedding.embedDistillation(distillId, result.observations);
   }
 
+  // Fire-and-forget: extract decision/preference patterns → knowledge entries
+  if (config().knowledge.enabled) {
+    for (const pat of extractPatterns(result.observations)) {
+      try {
+        ltm.create({
+          projectPath: input.projectPath,
+          category: pat.category,
+          title: pat.title,
+          content: pat.content,
+          session: input.sessionID,
+          scope: "project",
+        });
+      } catch {
+        // Dedup guard in ltm.create() handles duplicates — swallow errors
+      }
+    }
+  }
+
   return result;
 }
 
@@ -761,6 +781,24 @@ export async function metaDistill(input: {
   // Fire-and-forget OUTSIDE the transaction (async, no rollback needed).
   if (embedding.isAvailable()) {
     embedding.embedDistillation(metaId, result.observations);
+  }
+
+  // Fire-and-forget: extract decision/preference patterns → knowledge entries
+  if (config().knowledge.enabled) {
+    for (const pat of extractPatterns(result.observations)) {
+      try {
+        ltm.create({
+          projectPath: input.projectPath,
+          category: pat.category,
+          title: pat.title,
+          content: pat.content,
+          session: input.sessionID,
+          scope: "project",
+        });
+      } catch {
+        // Dedup guard in ltm.create() handles duplicates — swallow errors
+      }
+    }
   }
 
   return result;
