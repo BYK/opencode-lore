@@ -1,4 +1,52 @@
 # Changelog
+## 0.13.3
+
+### New Features ✨
+
+#### Gateway
+
+- Worker model discovery via /v1/models API + models.dev pricing by @BYK in [#142](https://github.com/BYK/loreai/pull/142)
+- Transparent recall tool interception by @BYK in [#139](https://github.com/BYK/loreai/pull/139)
+- Per-session auth isolation + OAuth Bearer support by @BYK in [#135](https://github.com/BYK/loreai/pull/135)
+- Replace content markers with fingerprint-based session tracking by @BYK in [#125](https://github.com/BYK/loreai/pull/125)
+
+#### Worker Model
+
+- Prefer non-reasoning models and disable thinking on worker calls by @BYK in [#122](https://github.com/BYK/loreai/pull/122)
+- Wire up dynamic model selection on session idle by @BYK in [#118](https://github.com/BYK/loreai/pull/118)
+
+#### Other
+
+- (db) Persist r_compression and c_norm on distillations (schema v12) by @BYK in [#116](https://github.com/BYK/loreai/pull/116)
+- (gradient) Range-aware file read deduplication by @BYK in [#120](https://github.com/BYK/loreai/pull/120)
+- Emit '[Searching memory...]' indicator for Case 2 (mixed tools) by @BYK in [a5a8e215](https://github.com/BYK/loreai/commit/a5a8e2151d3a25757b6b9ebd65b0fbbb08f78ce6)
+- Local embeddings, exact keyword boost, and pattern extraction by @BYK in [#136](https://github.com/BYK/loreai/pull/136)
+- Batch queue for Anthropic Message Batches API (50% worker cost savings) by @BYK in [#134](https://github.com/BYK/loreai/pull/134)
+
+### Bug Fixes 🐛
+
+- (ci) Include @loreai/gateway in pack and publish targets by @BYK in [a5c6bc0c](https://github.com/BYK/loreai/commit/a5c6bc0c02c8c94466f8f84afa453c5dce2c5d17)
+- (db) Use os.homedir() for cross-platform data directory resolution by @BYK in [#131](https://github.com/BYK/loreai/pull/131)
+- (gradient) Deterministic timestamps in sanitizeToolParts by @BYK in [#124](https://github.com/BYK/loreai/pull/124)
+- (release) Include gateway in bump-version.sh for Craft publish by @BYK in [eefdb53f](https://github.com/BYK/loreai/commit/eefdb53f9fcd18b6a3c623f61b863b38078e3146)
+- Resolve typecheck error in content-based fingerprint and increase hysteresis to 15% with high-water mark budget by @BYK in [c8dcf035](https://github.com/BYK/loreai/commit/c8dcf0354fee7bd052c1e9776a7fac0af5b8501a)
+- Eliminate gradient cache busts with deterministic IDs, offset-from-end pins, and cost-aware cap by @BYK in [321accc3](https://github.com/BYK/loreai/commit/321accc32dfdb54a654fe52923fbda2e613d90a0)
+- Stabilize gradient cache with budget snapshot, hysteresis, and per-session LTM by @BYK in [#144](https://github.com/BYK/loreai/pull/144)
+- Type errors in Case 2 integration tests by @BYK in [4e2282d8](https://github.com/BYK/loreai/commit/4e2282d8c3df5e44a69e97fa870f5bd6b30d18a6)
+- Deprecated worker models, invalid cache TTL format, and batch error logging by @BYK in [#140](https://github.com/BYK/loreai/pull/140)
+- Prevent re-entrant deadlock in event hook (MaxListenersExceeded hang) by @BYK in [#138](https://github.com/BYK/loreai/pull/138)
+- Reduce cache-bust cost with idle threshold, sticky layers, bust tracking, and meta-distill gating by @BYK in [#132](https://github.com/BYK/loreai/pull/132)
+
+### Internal Changes 🔧
+
+- (gradient) Batch distillation consumption at turn boundaries by @BYK in [#123](https://github.com/BYK/loreai/pull/123)
+- Use models.dev unified JSON API for cost data by @BYK in [#143](https://github.com/BYK/loreai/pull/143)
+- Case 2 (mixed tools) integration tests for recall interception by @BYK in [#141](https://github.com/BYK/loreai/pull/141)
+- Migrate knowledge entries from AGENTS.md to .lore.md by @BYK in [107346f1](https://github.com/BYK/loreai/commit/107346f1415bea442f636bb85da84e94c014b37b)
+- Remove gateway observer hooks and dead recorder exports by @BYK in [#130](https://github.com/BYK/loreai/pull/130)
+- Remove read-time temporal enrichment from distillation prefix by @BYK in [#129](https://github.com/BYK/loreai/pull/129)
+- Update license to FSL-1.1-Apache-2.0 by @BYK in [#126](https://github.com/BYK/loreai/pull/126)
+
 ## 0.12.0
 
 ### New Features ✨
