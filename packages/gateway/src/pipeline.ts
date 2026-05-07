@@ -458,6 +458,28 @@ function buildStreamingResponse(
                   `${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
 
+              // Emit a synthetic "[Searching memory...]" text block after all
+              // other tool blocks. The accumulator already re-indexed other
+              // tools to fill the gap, so this goes at clientBlockCount.
+              const searchingIdx = recallAccum.clientBlockCount();
+              const syntheticCase2 = [
+                formatSSEEvent("content_block_start", JSON.stringify({
+                  type: "content_block_start",
+                  index: searchingIdx,
+                  content_block: { type: "text", text: "" },
+                })),
+                formatSSEEvent("content_block_delta", JSON.stringify({
+                  type: "content_block_delta",
+                  index: searchingIdx,
+                  delta: { type: "text_delta", text: "\n\n[Searching memory...]" },
+                })),
+                formatSSEEvent("content_block_stop", JSON.stringify({
+                  type: "content_block_stop",
+                  index: searchingIdx,
+                })),
+              ].join("");
+              controller.enqueue(encoder.encode(syntheticCase2));
+
               // Forward the held-back message_delta + message_stop
               const heldBack = recallAccum.heldBackEvents();
               if (heldBack) {
