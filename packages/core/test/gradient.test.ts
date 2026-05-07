@@ -361,6 +361,11 @@ describe("gradient — LTM budget coordination", () => {
   });
 
   test("setLtmTokens / getLtmTokens round-trip", () => {
+    setLtmTokens(1_500, "ltm-rt-sess");
+    expect(getLtmTokens("ltm-rt-sess")).toBe(1_500);
+    setLtmTokens(0, "ltm-rt-sess");
+    expect(getLtmTokens("ltm-rt-sess")).toBe(0);
+    // Fallback (no session ID) still works
     setLtmTokens(1_500);
     expect(getLtmTokens()).toBe(1_500);
     setLtmTokens(0);
@@ -368,7 +373,7 @@ describe("gradient — LTM budget coordination", () => {
   });
 
   test("LTM tokens are deducted from usable context in transform()", () => {
-    setLtmTokens(2_000); // inject 2K LTM tokens
+    setLtmTokens(2_000, "ltm-sess"); // inject 2K LTM tokens (per-session)
     // usable before LTM = 8_000; after = 6_000
     // rawBudget = floor(6_000 * 0.4) = 2_400
     const messages = [
@@ -381,12 +386,12 @@ describe("gradient — LTM budget coordination", () => {
       sessionID: "ltm-sess",
     });
     expect(result.usable).toBe(6_000);
-    setLtmTokens(0); // reset
+    setLtmTokens(0, "ltm-sess"); // reset
   });
 
   test("LTM token deduction triggers lower layers when budget is tight", () => {
     // Inject enough LTM tokens to leave almost no room for messages
-    setLtmTokens(7_500); // usable after LTM = 500 tokens — very tight
+    setLtmTokens(7_500, "tight-sess"); // usable after LTM = 500 tokens — very tight
     const messages = Array.from({ length: 6 }, (_, i) =>
       makeMsg(`tight-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(300)),
     );
@@ -398,7 +403,7 @@ describe("gradient — LTM budget coordination", () => {
     // Should escalate beyond layer 0 due to budget pressure
     expect(result.layer).toBeGreaterThanOrEqual(1);
     expect(result.messages.length).toBeGreaterThan(0);
-    setLtmTokens(0); // reset
+    setLtmTokens(0, "tight-sess"); // reset
   });
 });
 

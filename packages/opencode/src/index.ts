@@ -1168,7 +1168,7 @@ export const LorePlugin: Plugin = async (ctx) => {
                     if (conversationTokens > tokenCount) {
                       // Conversation is larger than LTM — cache bust costs more than
                       // LTM is worth. Keep the fallback note for this session.
-                      setLtmTokens(0);
+                      setLtmTokens(0, sessionID);
                       output.system.push(
                         "[Lore plugin] Long-term memory is temporarily unavailable. " +
                           "Use the recall tool to search for project knowledge, " +
@@ -1188,14 +1188,14 @@ export const LorePlugin: Plugin = async (ctx) => {
           }
 
           if (cached) {
-            setLtmTokens(cached.tokenCount);
+            setLtmTokens(cached.tokenCount, sessionID);
             output.system.push(cached.formatted);
           } else {
-            setLtmTokens(0);
+            setLtmTokens(0, sessionID);
           }
         } catch (e) {
           log.error("system transform: knowledge injection failed:", e);
-          setLtmTokens(0);
+          setLtmTokens(0, sessionID);
           if (sessionID) ltmDegradedSessions.add(sessionID);
           output.system.push(
             "[Lore plugin] Long-term memory is temporarily unavailable. " +
@@ -1210,7 +1210,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           if (sessionID) consumeCameOutOfIdle(sessionID);
         }
       } else {
-        setLtmTokens(0);
+        setLtmTokens(0, input.sessionID);
         if (input.sessionID) consumeCameOutOfIdle(input.sessionID);
       }
 

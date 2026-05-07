@@ -1146,19 +1146,19 @@ async function handleConversationTurn(
       }
 
       if (cached) {
-        setLtmTokens(cached.tokenCount);
+        setLtmTokens(cached.tokenCount, sessionID);
         modifiedSystem = `${req.system}\n\n${cached.formatted}`;
       } else {
-        setLtmTokens(0);
+        setLtmTokens(0, sessionID);
       }
     } catch (e) {
       log.error("LTM injection failed:", e);
-      setLtmTokens(0);
+      setLtmTokens(0, sessionID);
     } finally {
       consumeCameOutOfIdle(sessionID);
     }
   } else {
-    setLtmTokens(0);
+    setLtmTokens(0, sessionID);
     consumeCameOutOfIdle(sessionID);
   }
 
