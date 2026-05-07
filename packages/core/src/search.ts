@@ -290,6 +290,7 @@ export async function expandQuery(
   llm: LLMClient,
   query: string,
   model?: { providerID: string; modelID: string },
+  sessionID?: string,
 ): Promise<string[]> {
   const TIMEOUT_MS = 3000;
 
@@ -299,7 +300,7 @@ export async function expandQuery(
       llm.prompt(
         QUERY_EXPANSION_SYSTEM,
         `Input: "${query}"`,
-        { model, workerID: "lore-query-expand", thinking: false, urgent: true },
+        { model, workerID: "lore-query-expand", thinking: false, urgent: true, sessionID },
       ),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), TIMEOUT_MS)),
     ]);

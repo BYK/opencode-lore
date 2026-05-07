@@ -11,6 +11,7 @@ import type {
   GatewayResponse,
   GatewayTool,
 } from "./types";
+import { extractAuth } from "../auth";
 
 // ---------------------------------------------------------------------------
 // OpenAI → GatewayRequest
@@ -420,9 +421,11 @@ export function buildOpenAIUpstreamRequest(
     "content-type": "application/json",
   };
 
-  const apiKey = req.rawHeaders["x-api-key"];
-  if (apiKey) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
+  // Forward auth from the original request — OpenAI-protocol upstreams
+  // always use Bearer regardless of the incoming auth scheme.
+  const cred = extractAuth(req.rawHeaders);
+  if (cred) {
+    headers["Authorization"] = `Bearer ${cred.value}`;
   }
 
   const body: Record<string, unknown> = {

@@ -76,12 +76,15 @@ import {
   updateAssistantMessageTokens,
   resolveToolResults,
 } from "./temporal-adapter";
-import {
-  setLastSeenApiKey,
-  getLastSeenApiKey,
-  createGatewayLLMClient,
-} from "./llm-adapter";
+import { createGatewayLLMClient } from "./llm-adapter";
 import { createBatchLLMClient } from "./batch-queue";
+import {
+  extractAuth,
+  authFingerprint,
+  setLastSeenAuth,
+  setSessionAuth,
+  resolveAuth,
+} from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 
 // ---------------------------------------------------------------------------
@@ -201,7 +204,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     };
     const inner = createGatewayLLMClient(
       config.upstreamAnthropic,
-      getLastSeenApiKey,
+      resolveAuth,
       defaultModel,
     );
 
@@ -214,7 +217,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       llmClient = createBatchLLMClient(
         inner,
         config.upstreamAnthropic,
-        getLastSeenApiKey,
+        resolveAuth,
         defaultModel,
       );
     }
@@ -262,7 +265,11 @@ async function identifySession(
     role: m.role,
     content: m.content,
   }));
-  const fingerprint = await fingerprintMessages(rawMessages);
+  const cred = extractAuth(req.rawHeaders);
+  const fingerprint = await fingerprintMessages(rawMessages, {
+    model: req.model,
+    authSuffix: cred ? authFingerprint(cred) : "",
+  });
   const msgCount = req.messages.length;
 
   // Find the best matching session: same fingerprint + closest message count
@@ -772,21 +779,29 @@ async function handleConversationTurn(
   const projectPath = getProjectPath(req.system, req.rawHeaders);
   await initIfNeeded(projectPath);
 
-  // --- 2. Capture API key for background workers ---
-  const apiKey =
-    req.rawHeaders["x-api-key"] || req.rawHeaders["X-Api-Key"] || "";
-  if (apiKey) {
-    setLastSeenApiKey(apiKey);
+  // --- 2. Capture auth credentials for background workers ---
+  const cred = extractAuth(req.rawHeaders);
+  if (cred) {
+    setLastSeenAuth(cred);
   }
 
   // --- 3. Session identification ---
   const { sessionID, isNew } = await identifySession(req, projectPath);
   const sessionState = getOrCreateSession(sessionID, projectPath);
 
+  // Bind auth credential to this session for background workers
+  if (cred) {
+    setSessionAuth(sessionID, cred);
+  }
+
   // Track fingerprint for future correlation
   if (isNew) {
     const fingerprint = await fingerprintMessages(
       req.messages.map((m) => ({ role: m.role, content: m.content })),
+      {
+        model: req.model,
+        authSuffix: cred ? authFingerprint(cred) : "",
+      },
     );
     sessionState.fingerprint = fingerprint;
   }
@@ -1179,11 +1194,10 @@ export async function handleRequest(
   config: GatewayConfig,
 ): Promise<Response> {
   try {
-    // Capture API key early for background workers
-    const apiKey =
-      req.rawHeaders["x-api-key"] || req.rawHeaders["X-Api-Key"] || "";
-    if (apiKey) {
-      setLastSeenApiKey(apiKey);
+    // Capture auth credentials early for background workers
+    const earlyAuth = extractAuth(req.rawHeaders);
+    if (earlyAuth) {
+      setLastSeenAuth(earlyAuth);
     }
 
     // --- Case 1: Compaction request → intercept ---

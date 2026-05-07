@@ -156,14 +156,19 @@ export function scanForMarker(
 // ---------------------------------------------------------------------------
 
 /**
- * Compute a SHA-256 fingerprint from the first user message's content.
+ * Compute a SHA-256 fingerprint from the first user message's content,
+ * optionally incorporating the model name and an auth credential suffix.
  *
  * Returns the first 16 hex characters of the hash. Used as the primary
  * session correlator — combined with message-count proximity to
  * disambiguate forked sessions that share the same first message.
+ *
+ * Including `model` and `authSuffix` ensures that a key change or model
+ * switch creates a new session rather than reusing an existing one.
  */
 export async function fingerprintMessages(
   messages: Array<{ role: string; content: unknown }>,
+  extras?: { model?: string; authSuffix?: string },
 ): Promise<string> {
   let firstUserContent = "";
   for (const msg of messages) {
@@ -174,7 +179,9 @@ export async function fingerprintMessages(
     }
   }
 
-  const encoded = new TextEncoder().encode(firstUserContent);
+  const material =
+    firstUserContent + (extras?.model ?? "") + (extras?.authSuffix ?? "");
+  const encoded = new TextEncoder().encode(material);
   const hash = await crypto.subtle.digest("SHA-256", encoded);
   const bytes = new Uint8Array(hash);
 
