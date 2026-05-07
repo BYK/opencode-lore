@@ -340,7 +340,7 @@ export function createBatchLLMClient(
               pending.resolve(null); // Match inner client behavior (null on error)
               totalFailed++;
               log.error(
-                `batch item ${result.custom_id} errored: ${result.result.error?.type} — ${result.result.error?.message}`,
+                `batch item ${result.custom_id} errored: ${result.result.error?.type ?? "unknown"} — ${result.result.error?.message ?? JSON.stringify(result.result.error)}`,
               );
               break;
             case "canceled":
@@ -446,7 +446,7 @@ export function createBatchLLMClient(
             {
               type: "text" as const,
               text: system,
-              cache_control: { type: "ephemeral" as const, ttl: "3600" },
+              cache_control: { type: "ephemeral" as const, ttl: "1h" },
             },
           ]
         : system;

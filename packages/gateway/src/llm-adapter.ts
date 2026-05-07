@@ -59,7 +59,7 @@ export function createGatewayLLMClient(
               {
                 type: "text",
                 text: system,
-                cache_control: { type: "ephemeral", ttl: "3600" },
+                cache_control: { type: "ephemeral", ttl: "1h" },
               },
             ]
           : undefined;

@@ -129,7 +129,7 @@ describe("buildAnthropicRequest — system prompt caching (1h)", () => {
     expect(blocks[0].text).toBe("You are a helpful assistant.");
     expect(blocks[0].cache_control).toEqual({
       type: "ephemeral",
-      ttl: "3600",
+      ttl: "1h",
     });
   });
 });
