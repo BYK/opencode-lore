@@ -20,6 +20,9 @@ type Client = ReturnType<typeof createOpencodeClient>;
 // Re-export workerSessionIDs from core for session tracking
 import { workerSessionIDs } from "@loreai/core";
 
+/** Maximum time to wait for a single worker prompt before giving up. */
+const WORKER_TIMEOUT_MS = 120_000;
+
 /**
  * Create an LLMClient backed by the OpenCode SDK.
  *
@@ -65,17 +68,20 @@ export function createOpenCodeLLMClient(
       const agent = opts?.workerID;
       const model = opts?.model;
 
-      // First attempt — with agent
+      // First attempt — with agent (timeout-guarded to prevent indefinite hang)
       let result: { data?: unknown; error?: unknown };
       try {
-        result = await client.session.prompt({
-          path: { id: workerID },
-          body: {
-            parts,
-            ...(agent ? { agent } : {}),
-            ...(model ? { model } : {}),
-          },
-        });
+        result = await promiseWithTimeout(
+          client.session.prompt({
+            path: { id: workerID },
+            body: {
+              parts,
+              ...(agent ? { agent } : {}),
+              ...(model ? { model } : {}),
+            },
+          }),
+          WORKER_TIMEOUT_MS,
+        );
       } catch (e) {
         result = { error: e };
       }
@@ -107,14 +113,17 @@ export function createOpenCodeLLMClient(
 
         let retry: { data?: unknown; error?: unknown };
         try {
-          retry = await client.session.prompt({
-            path: { id: retryWorkerID },
-            body: {
-              parts,
-              // No agent parameter — use session defaults
-              ...(model ? { model } : {}),
-            },
-          });
+          retry = await promiseWithTimeout(
+            client.session.prompt({
+              path: { id: retryWorkerID },
+              body: {
+                parts,
+                // No agent parameter — use session defaults
+                ...(model ? { model } : {}),
+              },
+            }),
+            WORKER_TIMEOUT_MS,
+          );
         } catch (e) {
           retry = { error: e };
         }
@@ -157,4 +166,25 @@ function stringifyError(error: unknown): string {
   } catch {
     return String(error);
   }
+}
+
+/**
+ * Race a promise against a timeout. Resolves with `{ error }` if the timeout
+ * fires first, otherwise returns the promise result. The underlying promise
+ * continues running in the background (there's no way to cancel an SDK call)
+ * but the caller is unblocked.
+ */
+function promiseWithTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+): Promise<T | { error: string }> {
+  return Promise.race([
+    promise,
+    new Promise<{ error: string }>((resolve) =>
+      setTimeout(
+        () => resolve({ error: `worker prompt timed out after ${ms}ms` }),
+        ms,
+      ),
+    ),
+  ]);
 }

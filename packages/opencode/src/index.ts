@@ -578,6 +578,10 @@ export const LorePlugin: Plugin = async (ctx) => {
   // Track active sessions for distillation
   const activeSessions = new Set<string>();
 
+  // Per-session idle handler mutex — prevents overlapping idle work when
+  // multiple session.idle events fire before the first one completes.
+  const idleRunning = new Set<string>();
+
   // System prompt hash per session — for cache-bust diagnostics (LORE_DEBUG)
   const systemPromptHashes = new Map<string, string>();
 
@@ -791,6 +795,224 @@ export const LorePlugin: Plugin = async (ctx) => {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Detached idle handler — runs outside the event hook to prevent re-entrant
+  // deadlock. Worker child sessions created by backgroundDistill/backgroundCurate
+  // generate events that OpenCode delivers through the same plugin event hook;
+  // if the hook is blocked awaiting the worker, events pile up on the internal
+  // GlobalBus EventEmitter and the process eventually hangs.
+  // ---------------------------------------------------------------------------
+
+  async function handleIdle(sessionID: string) {
+    if (idleRunning.has(sessionID)) {
+      log.info(`idle handler already running for ${sessionID.substring(0, 16)} — skipping`);
+      return;
+    }
+    idleRunning.add(sessionID);
+    try {
+      // Force-distill ALL pending messages on idle — even below the normal
+      // minMessages threshold. The cache is about to go cold (or already is),
+      // so aggressive distillation now means a smaller, cheaper context on the
+      // next turn via the post-idle compact layer in gradient.ts.
+      await backgroundDistill(sessionID, true);
+
+      // Run curator periodically (only when knowledge system is enabled).
+      // onIdle gates whether idle events trigger curation at all; afterTurns
+      // is the minimum turn count before curation fires. The previous `||`
+      // caused onIdle=true (default) to short-circuit, running the curator
+      // on EVERY session.idle — an LLM worker call after every agent turn.
+      const cfg = config();
+      if (cfg.knowledge.enabled && cfg.curator.onIdle) {
+        if (turnsSinceCuration >= cfg.curator.afterTurns) {
+          await backgroundCurate(sessionID);
+          turnsSinceCuration = 0;
+        } else {
+          log.info(
+            `curation skipped: ${turnsSinceCuration}/${cfg.curator.afterTurns} user turns since last curation`,
+          );
+        }
+      }
+
+      // Consolidate entries if count exceeds cfg.curator.maxEntries.
+      // Runs after normal curation so newly created entries are counted.
+      // Only triggers when truly over the limit to avoid redundant LLM calls.
+      if (cfg.knowledge.enabled) try {
+        const allEntries = ltm.forProject(projectPath, false);
+        if (allEntries.length > cfg.curator.maxEntries) {
+          log.info(
+            `entry count ${allEntries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
+          );
+          const { updated, deleted } = await curator.consolidate({
+            llm: createOpenCodeLLMClient(ctx.client, sessionID),
+            projectPath,
+            sessionID,
+            model: getWorkerModel(),
+          });
+          if (updated > 0 || deleted > 0) {
+            log.info(`consolidation: ${updated} updated, ${deleted} deleted`);
+            invalidateLtmCache();
+          }
+        }
+      } catch (e) {
+        log.error("consolidation error:", e);
+      }
+
+      // Worker model auto-selection: run validation if stale.
+      // Non-blocking — only fires when fingerprint mismatch detected.
+      maybeValidateWorkerModel(sessionID).catch((e) =>
+        log.error("worker model validation error:", e),
+      );
+
+      // Prune temporal messages after distillation and curation have run.
+      // Pass 1: TTL — remove distilled messages older than retention period.
+      // Pass 2: Size cap — evict oldest distilled messages if over the limit.
+      // Undistilled messages are never touched.
+      try {
+        const { ttlDeleted, capDeleted } = temporal.prune({
+          projectPath,
+          retentionDays: cfg.pruning.retention,
+          maxStorageMB: cfg.pruning.maxStorage,
+        });
+        if (ttlDeleted > 0 || capDeleted > 0) {
+          log.info(
+            `pruned temporal messages: ${ttlDeleted} by TTL, ${capDeleted} by size cap`,
+          );
+        }
+      } catch (e) {
+        log.error("pruning error:", e);
+      }
+
+      // Export curated knowledge to .lore.md (+ pointer in agents file).
+      try {
+        if (isValidProjectPath(projectPath) && cfg.knowledge.enabled) {
+          const entries = ltm.forProject(projectPath, false);
+          if (entries.length === 0) {
+            log.info("knowledge export: 0 entries for project, skipping write");
+          } else if (cfg.agentsFile.enabled) {
+            // Writes both .lore.md (entries) and agents file (pointer).
+            const filePath = join(projectPath, cfg.agentsFile.path);
+            exportToFile({ projectPath, filePath });
+          } else {
+            // Only write .lore.md (no agents file pointer).
+            exportLoreFile(projectPath);
+          }
+        }
+      } catch (e) {
+        log.error("knowledge export error:", e);
+      }
+
+      // Clean dead knowledge cross-references (entries deleted by curation/consolidation).
+      if (cfg.knowledge.enabled) {
+        try {
+          const cleaned = ltm.cleanDeadRefs();
+          if (cleaned > 0) {
+            log.info(`cleaned ${cleaned} dead knowledge cross-references`);
+            invalidateLtmCache();
+          }
+        } catch (e) {
+          log.error("dead-ref cleanup error:", e);
+        }
+      }
+
+      // Re-scan lat.md/ directory to pick up changes made by the agent.
+      if (isValidProjectPath(projectPath)) {
+        try {
+          latReader.refresh(projectPath);
+        } catch (e) {
+          log.error("lat-reader idle refresh error:", e);
+        }
+      }
+    } finally {
+      idleRunning.delete(sessionID);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Detached overflow recovery — same fire-and-forget pattern as handleIdle.
+  // The recovery path creates child sessions (backgroundDistill, session.prompt)
+  // that generate events, causing the same re-entrant deadlock risk.
+  // ---------------------------------------------------------------------------
+
+  async function handleOverflowRecovery(errorSessionID: string) {
+    log.info(
+      `detected context overflow — auto-recovering (session: ${errorSessionID.substring(0, 16)})`,
+    );
+
+    // 1. Force layer 2 on next transform (persisted to DB — survives restarts).
+    setForceMinLayer(2, errorSessionID);
+
+    // 2. Distill all undistilled messages so nothing is lost.
+    await backgroundDistill(errorSessionID, true);
+
+    // 3. Auto-recover: inject a synthetic message that goes through the normal
+    //    chat path. The gradient transform fires with forceMinLayer=2, compressing
+    //    the context to fit. The model receives the distilled summaries and
+    //    continues where it left off — no user intervention needed.
+    recoveringSessions.add(errorSessionID);
+    try {
+      const summaries = distillation
+        .loadForSession(projectPath, errorSessionID)
+        .map((s) => ({
+          observations: s.observations,
+          generation: s.generation,
+        }));
+
+      // Walk back to the last real user message and check whether it
+      // carried media attachments. If yes, route through the
+      // media-aware recovery path so the user's text question + a
+      // list of dropped attachments survive into the synthetic
+      // recovery prompt. Failure of session.messages falls through
+      // to plain recovery.
+      const lastUser = await getLastRealUserMessage(
+        ctx.client,
+        errorSessionID,
+      );
+      const strippedAttachments: string[] = [];
+      const userText: string[] = [];
+      if (lastUser) {
+        for (const part of lastUser.parts) {
+          if (part.type === "text" && typeof part.text === "string") {
+            userText.push(part.text);
+          } else {
+            const stub = stripMediaPart(part);
+            if (stub) strippedAttachments.push(stub);
+          }
+        }
+      }
+
+      const recoveryText =
+        strippedAttachments.length > 0
+          ? buildMediaAwareRecoveryMessage({
+              summaries,
+              strippedAttachments,
+              userText,
+            })
+          : buildRecoveryMessage(summaries);
+
+      log.info(
+        `sending auto-recovery message to session ${errorSessionID.substring(0, 16)}${strippedAttachments.length > 0 ? ` (media-aware: ${strippedAttachments.length} attachment(s) stripped)` : ""}`,
+      );
+      await ctx.client.session.prompt({
+        path: { id: errorSessionID },
+        body: {
+          parts: [{ type: "text", text: recoveryText, synthetic: true }],
+        },
+      });
+      log.info(
+        `auto-recovery message sent successfully`,
+      );
+    } catch (recoveryError) {
+      // Recovery is best-effort — don't let it crash the event handler.
+      // The persisted forceMinLayer will still help on the user's next message.
+      log.error(
+        `auto-recovery failed (forceMinLayer still persisted):`,
+        recoveryError,
+      );
+    } finally {
+      recoveringSessions.delete(errorSessionID);
+    }
+  }
+
   const hooks: Hooks = {
     // Disable built-in compaction and register hidden worker agents.
     // When the gateway is active, also redirect all provider baseURLs through it.
@@ -911,83 +1133,13 @@ export const LorePlugin: Plugin = async (ctx) => {
             return;
           }
 
-          log.info(
-            `detected context overflow — auto-recovering (session: ${errorSessionID.substring(0, 16)})`,
+          // Fire-and-forget: recovery runs detached so the event hook returns
+          // immediately. Same re-entrant deadlock prevention as handleIdle —
+          // backgroundDistill and session.prompt create child sessions whose
+          // events must flow through this same hook.
+          handleOverflowRecovery(errorSessionID).catch((e) =>
+            log.error("overflow recovery error:", e),
           );
-
-          // 1. Force layer 2 on next transform (persisted to DB — survives restarts).
-          setForceMinLayer(2, errorSessionID);
-
-          // 2. Distill all undistilled messages so nothing is lost.
-          await backgroundDistill(errorSessionID, true);
-
-          // 3. Auto-recover: inject a synthetic message that goes through the normal
-          //    chat path. The gradient transform fires with forceMinLayer=2, compressing
-          //    the context to fit. The model receives the distilled summaries and
-          //    continues where it left off — no user intervention needed.
-          recoveringSessions.add(errorSessionID);
-          try {
-            const summaries = distillation
-              .loadForSession(projectPath, errorSessionID)
-              .map((s) => ({
-                observations: s.observations,
-                generation: s.generation,
-              }));
-
-            // Walk back to the last real user message and check whether it
-            // carried media attachments. If yes, route through the
-            // media-aware recovery path so the user's text question + a
-            // list of dropped attachments survive into the synthetic
-            // recovery prompt. Failure of session.messages falls through
-            // to plain recovery.
-            const lastUser = await getLastRealUserMessage(
-              ctx.client,
-              errorSessionID,
-            );
-            const strippedAttachments: string[] = [];
-            const userText: string[] = [];
-            if (lastUser) {
-              for (const part of lastUser.parts) {
-                if (part.type === "text" && typeof part.text === "string") {
-                  userText.push(part.text);
-                } else {
-                  const stub = stripMediaPart(part);
-                  if (stub) strippedAttachments.push(stub);
-                }
-              }
-            }
-
-            const recoveryText =
-              strippedAttachments.length > 0
-                ? buildMediaAwareRecoveryMessage({
-                    summaries,
-                    strippedAttachments,
-                    userText,
-                  })
-                : buildRecoveryMessage(summaries);
-
-            log.info(
-              `sending auto-recovery message to session ${errorSessionID.substring(0, 16)}${strippedAttachments.length > 0 ? ` (media-aware: ${strippedAttachments.length} attachment(s) stripped)` : ""}`,
-            );
-            await ctx.client.session.prompt({
-              path: { id: errorSessionID },
-              body: {
-                parts: [{ type: "text", text: recoveryText, synthetic: true }],
-              },
-            });
-            log.info(
-              `auto-recovery message sent successfully`,
-            );
-          } catch (recoveryError) {
-            // Recovery is best-effort — don't let it crash the event handler.
-            // The persisted forceMinLayer will still help on the user's next message.
-            log.error(
-              `auto-recovery failed (forceMinLayer still persisted):`,
-              recoveryError,
-            );
-          } finally {
-            recoveringSessions.delete(errorSessionID);
-          }
         }
       }
 
@@ -999,118 +1151,13 @@ export const LorePlugin: Plugin = async (ctx) => {
           return;
         }
 
-        // Force-distill ALL pending messages on idle — even below the normal
-        // minMessages threshold. The cache is about to go cold (or already is),
-        // so aggressive distillation now means a smaller, cheaper context on the
-        // next turn via the post-idle compact layer in gradient.ts.
-        await backgroundDistill(sessionID, true);
-
-        // Run curator periodically (only when knowledge system is enabled).
-        // onIdle gates whether idle events trigger curation at all; afterTurns
-        // is the minimum turn count before curation fires. The previous `||`
-        // caused onIdle=true (default) to short-circuit, running the curator
-        // on EVERY session.idle — an LLM worker call after every agent turn.
-        const cfg = config();
-        if (cfg.knowledge.enabled && cfg.curator.onIdle) {
-          if (turnsSinceCuration >= cfg.curator.afterTurns) {
-            await backgroundCurate(sessionID);
-            turnsSinceCuration = 0;
-          } else {
-            log.info(
-              `curation skipped: ${turnsSinceCuration}/${cfg.curator.afterTurns} user turns since last curation`,
-            );
-          }
-        }
-
-        // Consolidate entries if count exceeds cfg.curator.maxEntries.
-        // Runs after normal curation so newly created entries are counted.
-        // Only triggers when truly over the limit to avoid redundant LLM calls.
-        if (cfg.knowledge.enabled) try {
-          const allEntries = ltm.forProject(projectPath, false);
-          if (allEntries.length > cfg.curator.maxEntries) {
-            log.info(
-              `entry count ${allEntries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
-            );
-            const { updated, deleted } = await curator.consolidate({
-              llm: createOpenCodeLLMClient(ctx.client, sessionID),
-              projectPath,
-              sessionID,
-              model: getWorkerModel(),
-            });
-            if (updated > 0 || deleted > 0) {
-              log.info(`consolidation: ${updated} updated, ${deleted} deleted`);
-              invalidateLtmCache();
-            }
-          }
-        } catch (e) {
-          log.error("consolidation error:", e);
-        }
-
-        // Worker model auto-selection: run validation if stale.
-        // Non-blocking — only fires when fingerprint mismatch detected.
-        maybeValidateWorkerModel(sessionID).catch((e) =>
-          log.error("worker model validation error:", e),
+        // Fire-and-forget: idle work runs detached so the event hook returns
+        // immediately. This prevents re-entrant deadlock — worker child sessions
+        // created by backgroundDistill/backgroundCurate generate events that
+        // OpenCode can't deliver until this hook returns.
+        handleIdle(sessionID).catch((e) =>
+          log.error("idle handler error:", e),
         );
-
-        // Prune temporal messages after distillation and curation have run.
-        // Pass 1: TTL — remove distilled messages older than retention period.
-        // Pass 2: Size cap — evict oldest distilled messages if over the limit.
-        // Undistilled messages are never touched.
-        try {
-          const { ttlDeleted, capDeleted } = temporal.prune({
-            projectPath,
-            retentionDays: cfg.pruning.retention,
-            maxStorageMB: cfg.pruning.maxStorage,
-          });
-          if (ttlDeleted > 0 || capDeleted > 0) {
-            log.info(
-              `pruned temporal messages: ${ttlDeleted} by TTL, ${capDeleted} by size cap`,
-            );
-          }
-        } catch (e) {
-          log.error("pruning error:", e);
-        }
-
-        // Export curated knowledge to .lore.md (+ pointer in agents file).
-        try {
-          if (isValidProjectPath(projectPath) && cfg.knowledge.enabled) {
-            const entries = ltm.forProject(projectPath, false);
-            if (entries.length === 0) {
-              log.info("knowledge export: 0 entries for project, skipping write");
-            } else if (cfg.agentsFile.enabled) {
-              // Writes both .lore.md (entries) and agents file (pointer).
-              const filePath = join(projectPath, cfg.agentsFile.path);
-              exportToFile({ projectPath, filePath });
-            } else {
-              // Only write .lore.md (no agents file pointer).
-              exportLoreFile(projectPath);
-            }
-          }
-        } catch (e) {
-          log.error("knowledge export error:", e);
-        }
-
-        // Clean dead knowledge cross-references (entries deleted by curation/consolidation).
-        if (cfg.knowledge.enabled) {
-          try {
-            const cleaned = ltm.cleanDeadRefs();
-            if (cleaned > 0) {
-              log.info(`cleaned ${cleaned} dead knowledge cross-references`);
-              invalidateLtmCache();
-            }
-          } catch (e) {
-            log.error("dead-ref cleanup error:", e);
-          }
-        }
-
-        // Re-scan lat.md/ directory to pick up changes made by the agent.
-        if (isValidProjectPath(projectPath)) {
-          try {
-            latReader.refresh(projectPath);
-          } catch (e) {
-            log.error("lat-reader idle refresh error:", e);
-          }
-        }
       }
     },
 

@@ -22,6 +22,16 @@ import {
 import type { Plugin } from "@opencode-ai/plugin";
 import type { Message, Part } from "@opencode-ai/sdk";
 
+/**
+ * Flush the microtask queue so fire-and-forget async handlers (e.g.
+ * handleOverflowRecovery, handleIdle) that were dispatched from the
+ * event hook have time to settle before assertions run.
+ *
+ * The mock client's methods resolve immediately (Promise.resolve), so
+ * a single timer tick is enough to drain the microtask chain.
+ */
+const flushAsync = () => new Promise<void>((r) => setTimeout(r, 50));
+
 // ── Pure function tests ──────────────────────────────────────────────
 
 describe("isContextOverflow", () => {
@@ -533,6 +543,9 @@ describe("auto-recovery re-entrancy guard", () => {
         } as any,
       });
 
+      // Recovery runs fire-and-forget — flush the microtask queue.
+      await flushAsync();
+
       // Should have called session.prompt for recovery
       expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
     } finally {
@@ -572,6 +585,9 @@ describe("auto-recovery re-entrancy guard", () => {
           },
         } as any,
       });
+
+      // Recovery runs fire-and-forget — flush the microtask queue.
+      await flushAsync();
 
       const promptCountAfterFirst = calls["session.prompt"]?.length ?? 0;
       expect(promptCountAfterFirst).toBeGreaterThanOrEqual(1);
@@ -1041,6 +1057,8 @@ describe("auto-recovery — media-aware path (F9)", () => {
           },
         } as any,
       });
+      // Recovery runs fire-and-forget — flush the microtask queue.
+      await flushAsync();
       // Recovery prompt was sent.
       expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
       // Inspect the body.
@@ -1081,6 +1099,8 @@ describe("auto-recovery — media-aware path (F9)", () => {
           },
         } as any,
       });
+      // Recovery runs fire-and-forget — flush the microtask queue.
+      await flushAsync();
       expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
       const promptArgs = calls["session.prompt"]![0]![0] as {
         body: { parts: Array<{ text: string }> };
@@ -1114,6 +1134,8 @@ describe("auto-recovery — media-aware path (F9)", () => {
           },
         } as any,
       });
+      // Recovery runs fire-and-forget — flush the microtask queue.
+      await flushAsync();
       // Recovery still happens — falls back to plain message.
       expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
       const promptArgs = calls["session.prompt"]![0]![0] as {
@@ -1170,6 +1192,8 @@ describe("auto-recovery — media-aware path (F9)", () => {
           },
         } as any,
       });
+      // Recovery runs fire-and-forget — flush the microtask queue.
+      await flushAsync();
       const promptArgs = calls["session.prompt"]![0]![0] as {
         body: { parts: Array<{ text: string }> };
       };
