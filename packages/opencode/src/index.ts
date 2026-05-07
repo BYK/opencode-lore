@@ -1521,17 +1521,23 @@ export const LorePlugin: Plugin = async (ctx) => {
   // appears for a project, the init failed (see catch block below).
   process.stderr.write(`[lore] active: ${projectPath}\n`);
 
+  // Startup backfills — run once, idempotent.
+
+  // Retroactive metric backfill: compute r_compression and c_norm for
+  // distillations created before these diagnostics were added (pre-v12).
+  // Synchronous, DB-only — no API calls.
+  try {
+    distillation.backfillMetrics();
+  } catch (err) {
+    log.info("metric backfill failed:", err);
+  }
+
   // Background: backfill embeddings for entries that don't have one yet.
   // Fires once when embeddings are first enabled — subsequent entries
   // get embedded on create/update via ltm.ts and distillation.ts hooks.
-  if (embedding.isAvailable()) {
-    Promise.all([
-      embedding.backfillEmbeddings(),
-      embedding.backfillDistillationEmbeddings(),
-    ]).catch((err) => {
-      log.info("embedding backfill failed:", err);
-    });
-  }
+  embedding.runStartupBackfill().catch((err) => {
+    log.info("embedding backfill failed:", err);
+  });
 
   if (gatewayActive) {
     process.stderr.write(`[lore] gateway mode active — routing through ${gatewayBase}\n`);

@@ -19,7 +19,9 @@ import type { LoreConfig } from "./config";
 import type { LLMClient } from "./types";
 import {
   EMPTY_QUERY,
+  exactTermMatchRank,
   expandQuery,
+  filterTerms,
   ftsQuery,
   ftsQueryOr,
   reciprocalRankFusion,
@@ -36,6 +38,7 @@ type Distillation = {
   generation: number;
   created_at: number;
   session_id: string;
+  c_norm: number | null;
 };
 
 export type ScoredDistillation = Distillation & { rank: number };
@@ -73,6 +76,41 @@ type TaggedResult =
   | { source: "lat-section"; item: latReader.ScoredLatSection };
 
 // ---------------------------------------------------------------------------
+// Tagged result helpers (used by exact-match boost + formatting)
+// ---------------------------------------------------------------------------
+
+/** Extract searchable text from any TaggedResult variant. */
+function getTaggedText(tagged: TaggedResult): string {
+  switch (tagged.source) {
+    case "knowledge":
+    case "cross-knowledge":
+      return `${tagged.item.title} ${tagged.item.content}`;
+    case "distillation":
+      return tagged.item.observations;
+    case "temporal":
+      return tagged.item.content;
+    case "lat-section":
+      return `${tagged.item.heading} ${tagged.item.content}`;
+  }
+}
+
+/** Unified key function for TaggedResult — source-prefixed ID for RRF dedup. */
+function taggedResultKey(r: TaggedResult): string {
+  switch (r.source) {
+    case "knowledge":
+      return `k:${r.item.id}`;
+    case "cross-knowledge":
+      return `xk:${r.item.id}`;
+    case "distillation":
+      return `d:${r.item.id}`;
+    case "temporal":
+      return `t:${r.item.id}`;
+    case "lat-section":
+      return `lat:${r.item.id}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Distillation search
 // ---------------------------------------------------------------------------
 
@@ -93,8 +131,8 @@ function searchDistillationsLike(input: {
     .join(" AND ");
   const likeParams = terms.map((term) => `%${term}%`);
   const sql = input.sessionID
-    ? `SELECT id, observations, generation, created_at, session_id FROM distillations WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
-    : `SELECT id, observations, generation, created_at, session_id FROM distillations WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
+    ? `SELECT id, observations, generation, created_at, session_id, c_norm FROM distillations WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
+    : `SELECT id, observations, generation, created_at, session_id, c_norm FROM distillations WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
   const allParams = input.sessionID
     ? [input.pid, input.sessionID, ...likeParams, input.limit]
     : [input.pid, ...likeParams, input.limit];
@@ -115,13 +153,13 @@ function searchDistillationsScored(input: {
   if (q === EMPTY_QUERY) return [];
 
   const ftsSQL = input.sessionID
-    ? `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, rank
+    ? `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, d.c_norm, rank
        FROM distillation_fts f
        CROSS JOIN distillations d ON d.rowid = f.rowid
        WHERE distillation_fts MATCH ?
        AND d.project_id = ? AND d.session_id = ?
        ORDER BY rank LIMIT ?`
-    : `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, rank
+    : `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, d.c_norm, rank
        FROM distillation_fts f
        CROSS JOIN distillations d ON d.rowid = f.rowid
        WHERE distillation_fts MATCH ?
@@ -376,7 +414,7 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
           .map((hit): TaggedResult | null => {
             const row = db()
               .query(
-                "SELECT id, observations, generation, created_at, session_id FROM distillations WHERE id = ?",
+                "SELECT id, observations, generation, created_at, session_id, c_norm FROM distillations WHERE id = ?",
               )
               .get(hit.id) as Distillation | null;
             if (!row) return null;
@@ -445,6 +483,86 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
       }
     } catch (err) {
       log.info("recall: cross-project knowledge search failed:", err);
+    }
+  }
+
+  // Distillation quality list: rank distillation candidates by a quality score
+  // that combines temporal clustering (c_norm) and age. Segments with low c_norm
+  // (uniformly distributed timestamps) are considered higher quality than bursty
+  // segments (high c_norm). Among high-c_norm segments, recent ones are more
+  // likely relevant. This adds a mild signal — RRF naturally blends it with the
+  // BM25 and vector signals without overriding them.
+  {
+    const distillationCandidates: Array<{
+      tagged: TaggedResult;
+      key: string;
+      qualityScore: number;
+    }> = [];
+
+    for (const list of allRrfLists) {
+      for (const item of list.items) {
+        if (item.source !== "distillation") continue;
+        const key = `d:${item.item.id}`;
+        const d = item.item as ScoredDistillation;
+        const cNorm = d.c_norm ?? 0; // NULL → treat as uniform (best case)
+        // Quality score: lower c_norm is better. For high c_norm, recency
+        // partially compensates. Age is normalized to days (capped at 90).
+        const ageDays = Math.min(
+          (Date.now() - d.created_at) / 86_400_000,
+          90,
+        );
+        // score ∈ [0, ~1]: 0 = best quality (uniform + recent)
+        // c_norm dominates (0–1), age adds a mild 0–0.1 penalty
+        const score = cNorm + (ageDays / 90) * 0.1;
+        distillationCandidates.push({ tagged: item, key, qualityScore: score });
+      }
+    }
+
+    if (distillationCandidates.length > 1) {
+      // De-duplicate by key (same distillation may appear in BM25 + vector lists)
+      const seen = new Set<string>();
+      const unique = distillationCandidates.filter((c) => {
+        if (seen.has(c.key)) return false;
+        seen.add(c.key);
+        return true;
+      });
+
+      // Sort by quality: lowest score first (best quality)
+      unique.sort((a, b) => a.qualityScore - b.qualityScore);
+
+      allRrfLists.push({
+        items: unique.map((c) => c.tagged),
+        key: (r) => `d:${r.item.id}`,
+      });
+    }
+  }
+
+  // Exact-match boost: add an additional RRF list that ranks candidates by
+  // the number of exact query term matches. This boosts proper nouns, file
+  // names, and technical terms that BM25's prefix/stem matching may dilute.
+  // Only runs when there are meaningful terms and existing candidates.
+  if (filterTerms(query).length > 0 && allRrfLists.length > 0) {
+    // Collect unique candidates across all lists
+    const allCandidates = new Map<string, TaggedResult>();
+    for (const list of allRrfLists) {
+      for (const item of list.items) {
+        const key = list.key(item);
+        if (!allCandidates.has(key)) allCandidates.set(key, item);
+      }
+    }
+
+    const candidateEntries = [...allCandidates.entries()];
+    const exactRanked = exactTermMatchRank(
+      candidateEntries,
+      ([, tagged]) => getTaggedText(tagged),
+      query,
+    );
+
+    if (exactRanked.length) {
+      allRrfLists.push({
+        items: exactRanked.map(([, item]) => item),
+        key: taggedResultKey,
+      });
     }
   }
 

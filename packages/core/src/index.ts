@@ -15,6 +15,7 @@ export * as distillation from "./distillation";
 export * as curator from "./curator";
 export * as embedding from "./embedding";
 export * as latReader from "./lat-reader";
+export * as patternExtract from "./pattern-extract";
 export * as log from "./log";
 
 export {
@@ -113,6 +114,7 @@ export {
   reciprocalRankFusion,
   expandQuery,
   extractTopTerms,
+  exactTermMatchRank,
 } from "./search";
 export {
   serialize,

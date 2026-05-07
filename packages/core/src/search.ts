@@ -268,6 +268,41 @@ export function reciprocalRankFusion<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Exact term match ranking (Phase 5 — MemPalace-inspired keyword boost)
+// ---------------------------------------------------------------------------
+
+/**
+ * Score candidates by exact query term overlap.
+ *
+ * Returns items sorted by number of exact term matches (descending).
+ * Used as an additional RRF list to boost results that contain query terms
+ * verbatim — important for proper nouns, file names, and technical terms
+ * that BM25's prefix matching + Porter stemming can miss or dilute.
+ *
+ * Terms are filtered through the standard stopword + single-char filter
+ * (same as `ftsQuery`), then matched case-insensitively via `includes()`.
+ */
+export function exactTermMatchRank<T>(
+  items: T[],
+  getText: (item: T) => string,
+  query: string,
+): T[] {
+  const terms = filterTerms(query).map((t) => t.toLowerCase());
+  if (!terms.length) return [];
+
+  const scored = items
+    .map((item) => {
+      const text = getText(item).toLowerCase();
+      const matches = terms.filter((t) => text.includes(t)).length;
+      return { item, matches };
+    })
+    .filter((s) => s.matches > 0)
+    .sort((a, b) => b.matches - a.matches);
+
+  return scored.map((s) => s.item);
+}
+
+// ---------------------------------------------------------------------------
 // LLM query expansion (Phase 4)
 // ---------------------------------------------------------------------------
 

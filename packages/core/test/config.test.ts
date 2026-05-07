@@ -85,8 +85,9 @@ describe("LoreConfig — search schema", () => {
     expect(cfg.search.recallLimit).toBe(10);
     expect(cfg.search.queryExpansion).toBe(false);
     expect(cfg.search.embeddings.enabled).toBe(true);
-    expect(cfg.search.embeddings.model).toBe("voyage-code-3");
-    expect(cfg.search.embeddings.dimensions).toBe(1024);
+    expect(cfg.search.embeddings.provider).toBe("local");
+    expect(cfg.search.embeddings.model).toBe("BGESmallENV15");
+    expect(cfg.search.embeddings.dimensions).toBe(384);
   });
 
   test("search.ftsWeights can be customised", () => {
@@ -133,8 +134,8 @@ describe("LoreConfig — search schema", () => {
       search: { embeddings: { enabled: false } },
     });
     expect(cfg.search.embeddings.enabled).toBe(false);
-    expect(cfg.search.embeddings.model).toBe("voyage-code-3");
-    expect(cfg.search.embeddings.dimensions).toBe(1024);
+    expect(cfg.search.embeddings.model).toBe("BGESmallENV15");
+    expect(cfg.search.embeddings.dimensions).toBe(384);
   });
 
   test("search.embeddings model and dimensions can be customised", () => {
@@ -148,8 +149,9 @@ describe("LoreConfig — search schema", () => {
   });
 
   test("search.embeddings.dimensions rejects out-of-range values", () => {
+    // Min is 64, max is 2048
     expect(() =>
-      LoreConfig.parse({ search: { embeddings: { dimensions: 128 } } }),
+      LoreConfig.parse({ search: { embeddings: { dimensions: 32 } } }),
     ).toThrow();
     expect(() =>
       LoreConfig.parse({ search: { embeddings: { dimensions: 4096 } } }),

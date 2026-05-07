@@ -133,11 +133,81 @@ class OpenAIProvider implements EmbeddingProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Local provider (fastembed + ONNX Runtime)
+// ---------------------------------------------------------------------------
+
+/**
+ * Local embedding provider using fastembed (bge-small-en-v1.5 by default).
+ *
+ * No API key required — runs entirely on-device via ONNX Runtime.
+ * Model files are downloaded on first use (~33MB) and cached in
+ * `~/.cache/fastembed`. Subsequent inits load from disk in ~350ms.
+ *
+ * Uses dynamic import so the module is only loaded when the "local"
+ * provider is actually selected — avoids startup cost and allows
+ * graceful fallback if fastembed is not installed.
+ */
+class LocalProvider implements EmbeddingProvider {
+  readonly maxBatchSize = 256;
+  private model: unknown | null = null;
+  private initPromise: Promise<unknown> | null = null;
+  private modelName: string;
+
+  constructor(modelName: string) {
+    this.modelName = modelName;
+  }
+
+  private async getModel(): Promise<unknown> {
+    if (this.model) return this.model;
+    if (!this.initPromise) {
+      this.initPromise = (async () => {
+        const { EmbeddingModel, FlagEmbedding } = await import("fastembed");
+        // Map config model string to EmbeddingModel enum value.
+        // If the configured model matches an enum key, use it; otherwise try
+        // the raw string as a model name (CUSTOM model support in fastembed).
+        const enumValue = (EmbeddingModel as Record<string, string>)[this.modelName];
+        // fastembed's init() has overloaded signatures expecting specific enum
+        // members, but we resolve the model dynamically from config. The enum
+        // lookup guarantees a valid value at runtime; cast to satisfy the type.
+        const m = await FlagEmbedding.init({
+          model: enumValue ?? this.modelName,
+        } as { model: typeof EmbeddingModel.BGESmallENV15 });
+        this.model = m;
+        return m;
+      })();
+    }
+    return this.initPromise;
+  }
+
+  async embed(texts: string[], inputType: "document" | "query"): Promise<Float32Array[]> {
+    const model = (await this.getModel()) as {
+      queryEmbed(text: string): Promise<number[]>;
+      passageEmbed(texts: string[], batchSize?: number): AsyncGenerator<number[][]>;
+    };
+
+    if (inputType === "query" && texts.length === 1) {
+      const vec = await model.queryEmbed(texts[0]);
+      return [new Float32Array(vec)];
+    }
+
+    // passageEmbed returns an async generator of batches
+    const results: Float32Array[] = [];
+    for await (const batch of model.passageEmbed(texts)) {
+      for (const vec of batch) {
+        results.push(new Float32Array(vec));
+      }
+    }
+    return results;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Provider resolution
 // ---------------------------------------------------------------------------
 
 /** Default models per provider — used when config doesn't override. */
 const PROVIDER_DEFAULTS: Record<string, { model: string; dimensions: number }> = {
+  local: { model: "BGESmallENV15", dimensions: 384 },
   voyage: { model: "voyage-code-3", dimensions: 1024 },
   openai: { model: "text-embedding-3-small", dimensions: 1536 },
 };
@@ -165,23 +235,36 @@ function getProvider(): EmbeddingProvider | null {
   }
 
   const providerName = cfg.provider;
-  const apiKey = getProviderApiKey(providerName);
-  if (!apiKey) {
-    cachedProvider = null;
-    return null;
-  }
-
-  const defaults = PROVIDER_DEFAULTS[providerName];
-  const model = cfg.model === defaults?.model ? cfg.model : cfg.model;
-  const dimensions = cfg.dimensions;
+  const model = cfg.model;
 
   switch (providerName) {
-    case "voyage":
-      cachedProvider = new VoyageProvider(apiKey, model, dimensions);
+    case "local": {
+      try {
+        cachedProvider = new LocalProvider(model);
+      } catch {
+        log.info("local embedding provider unavailable (fastembed not installed)");
+        cachedProvider = null;
+      }
       break;
-    case "openai":
-      cachedProvider = new OpenAIProvider(apiKey, model, dimensions);
+    }
+    case "voyage": {
+      const apiKey = getProviderApiKey(providerName);
+      if (!apiKey) {
+        cachedProvider = null;
+        return null;
+      }
+      cachedProvider = new VoyageProvider(apiKey, model, cfg.dimensions);
       break;
+    }
+    case "openai": {
+      const apiKey = getProviderApiKey(providerName);
+      if (!apiKey) {
+        cachedProvider = null;
+        return null;
+      }
+      cachedProvider = new OpenAIProvider(apiKey, model, cfg.dimensions);
+      break;
+    }
     default:
       log.info(`unknown embedding provider: ${providerName}`);
       cachedProvider = null;
@@ -434,12 +517,73 @@ export function checkConfigChange(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Startup backfill — single entry point for all hosts
+// ---------------------------------------------------------------------------
+
+/**
+ * Run all embedding backfills and log coverage stats.
+ *
+ * This is the canonical entry point that every host adapter (OpenCode, Pi,
+ * future ACP) should call once during init. It:
+ *   1. Detects config changes (provider swap) and clears stale embeddings
+ *   2. Backfills knowledge entries missing embeddings
+ *   3. Backfills non-archived distillations missing embeddings
+ *   4. Logs a one-line coverage summary to stderr (always visible, not gated)
+ *
+ * Fire-and-forget: callers should `.catch()` — embedding failures must not
+ * block plugin initialization.
+ */
+export async function runStartupBackfill(): Promise<void> {
+  if (!isAvailable()) return;
+
+  const knowledgeEmbedded = await backfillEmbeddings();
+  const distillationEmbedded = await backfillDistillationEmbeddings();
+
+  // Coverage stats — always log to stderr so the problem is visible.
+  const kTotal = (
+    db()
+      .query("SELECT COUNT(*) as n FROM knowledge WHERE confidence > 0.2")
+      .get() as { n: number }
+  ).n;
+  const kWithEmb = (
+    db()
+      .query(
+        "SELECT COUNT(*) as n FROM knowledge WHERE embedding IS NOT NULL AND confidence > 0.2",
+      )
+      .get() as { n: number }
+  ).n;
+  const dTotal = (
+    db()
+      .query(
+        "SELECT COUNT(*) as n FROM distillations WHERE archived = 0 AND observations != ''",
+      )
+      .get() as { n: number }
+  ).n;
+  const dWithEmb = (
+    db()
+      .query(
+        "SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL AND archived = 0",
+      )
+      .get() as { n: number }
+  ).n;
+
+  const parts: string[] = [];
+  if (knowledgeEmbedded > 0 || distillationEmbedded > 0) {
+    parts.push(`backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations`);
+  }
+  parts.push(
+    `coverage: knowledge ${kWithEmb}/${kTotal}, distillations ${dWithEmb}/${dTotal}`,
+  );
+  log.info(`embedding startup: ${parts.join("; ")}`);
+}
+
+// ---------------------------------------------------------------------------
 // Backfill — knowledge
 // ---------------------------------------------------------------------------
 
 /**
  * Embed all knowledge entries that are missing embeddings.
- * Called on startup when embeddings are first enabled.
+ * Called by `runStartupBackfill()`.
  * Also handles config changes: if provider/model/dimensions changed, clears
  * stale embeddings first, then re-embeds all entries.
  * Returns the number of entries embedded.

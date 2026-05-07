@@ -7,6 +7,7 @@ import {
   normalizeRank,
   reciprocalRankFusion,
   extractTopTerms,
+  exactTermMatchRank,
 } from "../src/search";
 
 describe("search", () => {
@@ -257,6 +258,81 @@ describe("search", () => {
 
       // With k=10, rank 0 → 1/(10+0) = 0.1
       expect(fused[0].score).toBeCloseTo(0.1, 4);
+    });
+  });
+
+  describe("exactTermMatchRank", () => {
+    const items = [
+      { id: "a", text: "Decided to use PostgreSQL for the main database" },
+      { id: "b", text: "CI pipeline runs on GitHub Actions with matrix builds" },
+      { id: "c", text: "PostgreSQL JSONB support enables flexible schema design" },
+      { id: "d", text: "React frontend uses server components" },
+    ];
+    const getText = (item: (typeof items)[number]) => item.text;
+
+    test("ranks items by number of exact term matches descending", () => {
+      const ranked = exactTermMatchRank(items, getText, "PostgreSQL database");
+      // "a" has both "PostgreSQL" and "database" → 2 matches
+      // "c" has "PostgreSQL" but not "database" → 1 match
+      expect(ranked.length).toBe(2);
+      expect(ranked[0].id).toBe("a");
+      expect(ranked[1].id).toBe("c");
+    });
+
+    test("excludes items with zero matches", () => {
+      const ranked = exactTermMatchRank(items, getText, "Kubernetes deployment");
+      expect(ranked.length).toBe(0);
+    });
+
+    test("case-insensitive matching", () => {
+      const ranked = exactTermMatchRank(items, getText, "postgresql jsonb");
+      expect(ranked.length).toBe(2);
+      // "c" has both "PostgreSQL" and "JSONB" → 2 matches
+      // "a" has "PostgreSQL" only → 1 match
+      expect(ranked[0].id).toBe("c");
+      expect(ranked[1].id).toBe("a");
+    });
+
+    test("filters stopwords from query", () => {
+      // "the" and "with" are stopwords — only "React" should match
+      const ranked = exactTermMatchRank(items, getText, "the React with components");
+      expect(ranked.length).toBe(1);
+      expect(ranked[0].id).toBe("d");
+    });
+
+    test("returns empty for all-stopword query", () => {
+      const ranked = exactTermMatchRank(items, getText, "the with from");
+      expect(ranked.length).toBe(0);
+    });
+
+    test("returns empty for empty items array", () => {
+      const ranked = exactTermMatchRank([], getText, "PostgreSQL");
+      expect(ranked.length).toBe(0);
+    });
+
+    test("preserves original item references", () => {
+      const ranked = exactTermMatchRank(items, getText, "React");
+      expect(ranked[0]).toBe(items[3]); // same object reference
+    });
+
+    test("handles single-item match", () => {
+      const ranked = exactTermMatchRank(items, getText, "GitHub Actions");
+      expect(ranked.length).toBe(1);
+      expect(ranked[0].id).toBe("b");
+    });
+
+    test("works with generic types", () => {
+      const tuples: Array<[string, string]> = [
+        ["k:1", "PostgreSQL migration script"],
+        ["k:2", "Redis cache layer"],
+      ];
+      const ranked = exactTermMatchRank(
+        tuples,
+        ([, text]) => text,
+        "PostgreSQL migration",
+      );
+      expect(ranked.length).toBe(1);
+      expect(ranked[0][0]).toBe("k:1");
     });
   });
 

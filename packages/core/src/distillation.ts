@@ -3,7 +3,9 @@ import { config } from "./config";
 import * as temporal from "./temporal";
 import { CHUNK_TERMINATOR } from "./temporal";
 import * as embedding from "./embedding";
+import * as ltm from "./ltm";
 import * as log from "./log";
+import { extractPatterns } from "./pattern-extract";
 import {
   DISTILLATION_SYSTEM,
   distillationUser,
@@ -668,6 +670,24 @@ async function distillSegment(input: {
     embedding.embedDistillation(distillId, result.observations);
   }
 
+  // Fire-and-forget: extract decision/preference patterns → knowledge entries
+  if (config().knowledge.enabled) {
+    for (const pat of extractPatterns(result.observations)) {
+      try {
+        ltm.create({
+          projectPath: input.projectPath,
+          category: pat.category,
+          title: pat.title,
+          content: pat.content,
+          session: input.sessionID,
+          scope: "project",
+        });
+      } catch {
+        // Dedup guard in ltm.create() handles duplicates — swallow errors
+      }
+    }
+  }
+
   return result;
 }
 
@@ -763,5 +783,91 @@ export async function metaDistill(input: {
     embedding.embedDistillation(metaId, result.observations);
   }
 
+  // Fire-and-forget: extract decision/preference patterns → knowledge entries
+  if (config().knowledge.enabled) {
+    for (const pat of extractPatterns(result.observations)) {
+      try {
+        ltm.create({
+          projectPath: input.projectPath,
+          category: pat.category,
+          title: pat.title,
+          content: pat.content,
+          session: input.sessionID,
+          scope: "project",
+        });
+      } catch {
+        // Dedup guard in ltm.create() handles duplicates — swallow errors
+      }
+    }
+  }
+
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Retroactive metric backfill
+// ---------------------------------------------------------------------------
+
+/**
+ * Backfill `r_compression` and `c_norm` for distillations that were created
+ * before schema v12 (or before PR #113 added the computation).
+ *
+ * For each distillation with NULL metrics, loads source temporal messages via
+ * `source_ids`, computes `compressionRatio()` and `temporalCnorm()`, and
+ * writes the values back. Skips rows where source messages have been pruned
+ * or source_ids is empty.
+ *
+ * Designed to run once at startup — idempotent (only touches NULL rows).
+ * Returns the number of rows updated.
+ */
+export function backfillMetrics(): number {
+  const rows = db()
+    .query(
+      "SELECT id, source_ids, token_count FROM distillations WHERE r_compression IS NULL",
+    )
+    .all() as Array<{
+    id: string;
+    source_ids: string;
+    token_count: number;
+  }>;
+
+  if (!rows.length) return 0;
+
+  const update = db().prepare(
+    "UPDATE distillations SET r_compression = ?, c_norm = ? WHERE id = ?",
+  );
+
+  let updated = 0;
+
+  for (const row of rows) {
+    const sourceIds = parseSourceIds(row.source_ids);
+    if (!sourceIds.length) continue;
+
+    // Load source temporal messages — they may have been pruned.
+    const placeholders = sourceIds.map(() => "?").join(",");
+    const sources = db()
+      .query(
+        `SELECT tokens, created_at FROM temporal_messages WHERE id IN (${placeholders})`,
+      )
+      .all(...sourceIds) as Array<{ tokens: number; created_at: number }>;
+
+    if (!sources.length) continue;
+
+    const sourceTokens = sources.reduce((sum, s) => sum + s.tokens, 0);
+    const timestamps = sources.map((s) => s.created_at);
+
+    const rComp = compressionRatio(row.token_count, sourceTokens);
+    const cNorm = temporal.temporalCnorm(timestamps);
+
+    update.run(rComp, cNorm, row.id);
+    updated++;
+  }
+
+  if (updated > 0) {
+    log.info(
+      `backfilled metrics for ${updated} distillations (${rows.length - updated} skipped — missing sources)`,
+    );
+  }
+
+  return updated;
 }
