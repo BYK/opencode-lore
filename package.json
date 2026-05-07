@@ -30,6 +30,7 @@
   "overrides": {
     "basic-ftp": "5.3.1",
     "ip-address": "10.2.0",
-    "fast-xml-parser": "5.7.3"
+    "fast-xml-parser": "5.7.3",
+    "@huggingface/hub": "2.11.0"
   }
 }
