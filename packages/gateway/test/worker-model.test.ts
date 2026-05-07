@@ -102,7 +102,7 @@ function createRoutedFetch(
     return Promise.resolve(
       new Response(JSON.stringify(anthropicResponse), { status: 200 }),
     );
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ describe("fetchModelCosts", () => {
         return Promise.resolve(new Response(buildTOML(cost), { status: 200 }));
       }
       return Promise.resolve(new Response("Not Found", { status: 404 }));
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     const costs = await fetchModelCosts([
       "claude-opus-4-20250514",
@@ -186,7 +186,7 @@ describe("fetchModelCosts", () => {
   test("falls back to hardcoded cost on 404", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(new Response("Not Found", { status: 404 })),
-    ) as typeof fetch;
+    ) as unknown as typeof fetch;
 
     const costs = await fetchModelCosts(["claude-sonnet-4-20250514"]);
     // Fallback cost for claude-sonnet-4 prefix
@@ -196,7 +196,7 @@ describe("fetchModelCosts", () => {
   test("falls back to hardcoded cost on network error", async () => {
     globalThis.fetch = mock(() =>
       Promise.reject(new Error("Network error")),
-    ) as typeof fetch;
+    ) as unknown as typeof fetch;
 
     const costs = await fetchModelCosts(["claude-opus-4-20250514"]);
     // Fallback cost for claude-opus-4 prefix
@@ -206,7 +206,7 @@ describe("fetchModelCosts", () => {
   test("unknown model gets high fallback cost", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(new Response("Not Found", { status: 404 })),
-    ) as typeof fetch;
+    ) as unknown as typeof fetch;
 
     const costs = await fetchModelCosts(["claude-future-model-2026"]);
     expect(costs.get("claude-future-model-2026")).toBe(100 / 1_000_000);
@@ -325,7 +325,7 @@ describe("discoverModels", () => {
   test("returns empty array on API error with no cache", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(new Response("Unauthorized", { status: 401 })),
-    ) as typeof fetch;
+    ) as unknown as typeof fetch;
 
     const models = await discoverModels(UPSTREAM, TEST_CRED);
     expect(models).toEqual([]);
@@ -348,7 +348,7 @@ describe("discoverModels", () => {
     // Second call fails (Anthropic API error)
     globalThis.fetch = mock(() =>
       Promise.resolve(new Response("Server Error", { status: 500 })),
-    ) as typeof fetch;
+    ) as unknown as typeof fetch;
 
     // clearModelCache clears both cache and timestamp, so stale fallback
     // returns empty since there's genuinely no cache
@@ -370,7 +370,7 @@ describe("discoverModels", () => {
     // Network error on re-fetch
     globalThis.fetch = mock(() =>
       Promise.reject(new Error("Network error")),
-    ) as typeof fetch;
+    ) as unknown as typeof fetch;
 
     const models = await discoverModels(UPSTREAM, TEST_CRED);
     // No cache available after clearModelCache
@@ -516,7 +516,7 @@ describe("discoverModels", () => {
       return Promise.resolve(
         new Response(JSON.stringify(page), { status: 200 }),
       );
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     const models = await discoverModels(UPSTREAM, TEST_CRED);
 
