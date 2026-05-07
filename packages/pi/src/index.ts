@@ -32,6 +32,7 @@ import {
   consumeCameOutOfIdle,
   curator,
   distillation,
+  embedding,
   ensureProject,
   exportToFile,
   exportLoreFile,
@@ -200,6 +201,22 @@ export default function lorePiExtension(pi: ExtensionAPI): void {
     } catch (err) {
       log.error("pi: lat-reader refresh error:", err);
     }
+
+    // Startup backfills — run once, idempotent.
+
+    // Retroactive metric backfill: compute r_compression and c_norm for
+    // distillations created before these diagnostics were added (pre-v12).
+    // Synchronous, DB-only — no API calls.
+    try {
+      distillation.backfillMetrics();
+    } catch (err) {
+      log.error("pi: metric backfill failed:", err);
+    }
+
+    // Background: backfill embeddings for entries that don't have one yet.
+    embedding.runStartupBackfill().catch((err) => {
+      log.error("pi: embedding backfill failed:", err);
+    });
 
     // Register the recall tool.
     registerRecallTool(pi, {

@@ -514,12 +514,73 @@ export function checkConfigChange(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Startup backfill — single entry point for all hosts
+// ---------------------------------------------------------------------------
+
+/**
+ * Run all embedding backfills and log coverage stats.
+ *
+ * This is the canonical entry point that every host adapter (OpenCode, Pi,
+ * future ACP) should call once during init. It:
+ *   1. Detects config changes (provider swap) and clears stale embeddings
+ *   2. Backfills knowledge entries missing embeddings
+ *   3. Backfills non-archived distillations missing embeddings
+ *   4. Logs a one-line coverage summary to stderr (always visible, not gated)
+ *
+ * Fire-and-forget: callers should `.catch()` — embedding failures must not
+ * block plugin initialization.
+ */
+export async function runStartupBackfill(): Promise<void> {
+  if (!isAvailable()) return;
+
+  const knowledgeEmbedded = await backfillEmbeddings();
+  const distillationEmbedded = await backfillDistillationEmbeddings();
+
+  // Coverage stats — always log to stderr so the problem is visible.
+  const kTotal = (
+    db()
+      .query("SELECT COUNT(*) as n FROM knowledge WHERE confidence > 0.2")
+      .get() as { n: number }
+  ).n;
+  const kWithEmb = (
+    db()
+      .query(
+        "SELECT COUNT(*) as n FROM knowledge WHERE embedding IS NOT NULL AND confidence > 0.2",
+      )
+      .get() as { n: number }
+  ).n;
+  const dTotal = (
+    db()
+      .query(
+        "SELECT COUNT(*) as n FROM distillations WHERE archived = 0 AND observations != ''",
+      )
+      .get() as { n: number }
+  ).n;
+  const dWithEmb = (
+    db()
+      .query(
+        "SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL AND archived = 0",
+      )
+      .get() as { n: number }
+  ).n;
+
+  const parts: string[] = [];
+  if (knowledgeEmbedded > 0 || distillationEmbedded > 0) {
+    parts.push(`backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations`);
+  }
+  parts.push(
+    `coverage: knowledge ${kWithEmb}/${kTotal}, distillations ${dWithEmb}/${dTotal}`,
+  );
+  log.info(`embedding startup: ${parts.join("; ")}`);
+}
+
+// ---------------------------------------------------------------------------
 // Backfill — knowledge
 // ---------------------------------------------------------------------------
 
 /**
  * Embed all knowledge entries that are missing embeddings.
- * Called on startup when embeddings are first enabled.
+ * Called by `runStartupBackfill()`.
  * Also handles config changes: if provider/model/dimensions changed, clears
  * stale embeddings first, then re-embeds all entries.
  * Returns the number of entries embedded.
