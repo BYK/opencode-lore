@@ -656,7 +656,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
 
     // --- Step 3: Extract recall block from accumulated response ---
     const resp = accum.getResponse();
-    const recallBlock = findRecallToolUse(resp, "recall");
+    const recallBlock = findRecallToolUse(resp);
     expect(recallBlock).toBeDefined();
     expect(recallBlock!.id).toBe("toolu_recall_1");
     expect(recallBlock!.name).toBe("recall");
@@ -672,6 +672,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     // --- Step 5: Simulate pending recall storage ---
     const pendingRecall = {
       toolUseId: recallBlock!.id,
+      input: { query: "gateway architecture" },
       position: accum.recallBlockIndex(),
       result: "Found: gateway uses Anthropic protocol, recall interception is transparent",
       timestamp: Date.now(),
@@ -681,6 +682,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     // Simulate the next request: client sends tool_result for Read
     const nextReq: GatewayRequest = {
       model: "claude-sonnet-4-20250514",
+      protocol: "anthropic",
       system: "You are helpful.",
       messages: [
         { role: "user", content: [{ type: "text", text: "Search memory and read file" }] },
@@ -771,11 +773,12 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
 
     // Extract and build pending
     const resp = accum.getResponse();
-    const recallBlock = findRecallToolUse(resp, "recall");
+    const recallBlock = findRecallToolUse(resp);
     expect(recallBlock).toBeDefined();
 
     const pendingRecall = {
       toolUseId: recallBlock!.id,
+      input: { query: "patterns" },
       position: accum.recallBlockIndex(),
       result: "Found patterns info",
       timestamp: Date.now(),
@@ -784,6 +787,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     // Next request: client provides tool_results for Read and Bash
     const nextReq: GatewayRequest = {
       model: "claude-sonnet-4-20250514",
+      protocol: "anthropic",
       system: "",
       messages: [
         { role: "user", content: [{ type: "text", text: "do stuff" }] },
