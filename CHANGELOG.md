@@ -1,4 +1,11 @@
 # Changelog
+## 0.13.4
+
+### Bug Fixes 🐛
+
+- Pin @huggingface/hub@2.11.0 to avoid broken xetchunk-wasm workspace refs by @BYK in [#150](https://github.com/BYK/loreai/pull/150)
+- Resolve all 11 audit vulnerabilities (7 high, 4 moderate) by @BYK in [#149](https://github.com/BYK/loreai/pull/149)
+
 ## 0.13.3
 
 ### New Features ✨
