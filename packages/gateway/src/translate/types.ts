@@ -139,22 +139,23 @@ export type GatewayResponse = {
 };
 
 // ---------------------------------------------------------------------------
-// Pending recall state (cross-request, gateway recall interception)
+// Recall store (cross-request, gateway recall interception)
 // ---------------------------------------------------------------------------
 
-/** Pending recall result stored between requests (Case 2: mixed tools). */
-export type PendingRecall = {
-  /** tool_use ID from the suppressed block. */
+/** Stored recall result for marker-based round-trip expansion. */
+export type StoredRecall = {
+  /** The tool_use ID to reconstruct in the upstream request. */
   toolUseId: string;
-  /** The original recall input (for conversation history reconstruction). */
+  /** Original recall input (query + scope). */
   input: { query: string; scope?: string };
   /** Position (content block index) in the original assistant message. */
   position: number;
   /** Executed recall result (formatted markdown). */
   result: string;
-  /** Timestamp for TTL-based cleanup. */
-  timestamp: number;
 };
+
+/** Map from marker key (`${scope}:${query}`) → stored recall data. */
+export type RecallStore = Map<string, StoredRecall>;
 
 // ---------------------------------------------------------------------------
 // Session state — per-session tracking for Lore pipeline integration
@@ -172,6 +173,6 @@ export type SessionState = {
   messageCount: number;
   /** Turns since last curation run — triggers background curation. */
   turnsSinceCuration: number;
-  /** Pending recall result from previous turn (Case 2: mixed tool interception). */
-  pendingRecall?: PendingRecall;
+  /** Stored recall results for marker-based round-trip expansion. */
+  recallStore: RecallStore;
 };

@@ -1,15 +1,19 @@
 /**
  * Gateway recall interception — transparent memory search for any client.
  *
- * Injects a `recall` tool into upstream requests and handles the response
- * transparently. Two strategies based on whether recall is the only tool:
+ * Uses a unified "Marker and Expand" strategy:
  *
- *  - **Case 1 (recall-only)**: "Pause and Continue" — pause client stream,
- *    execute recall, send follow-up request, resume streaming in the same
- *    HTTP response.
- *  - **Case 2 (mixed tools)**: "Strip and Inject" — suppress recall blocks
- *    from the client stream, execute recall in background, inject the result
- *    into the next request from the client.
+ *  1. **On response (to client):** The recall `tool_use` block is replaced
+ *     with a human-readable marker text block
+ *     (`📚 Searching <scope> for "<query>"…`). The recall is executed
+ *     internally and the result is stored in session state.
+ *
+ *  2. **On request (from client):** Marker text blocks in the conversation
+ *     are expanded back into the original `tool_use` + `tool_result` pairs
+ *     before forwarding upstream.
+ *
+ *  For recall-only responses, a follow-up call is still made internally
+ *  so the model can continue in the same HTTP response (seamless UX).
  *
  * All recall execution delegates to `runRecall()` from `@loreai/core`.
  */
@@ -28,7 +32,7 @@ import type {
   GatewayResponse,
   GatewayToolUseBlock,
   GatewayMessage,
-  PendingRecall,
+  RecallStore,
 } from "./translate/types";
 
 // ---------------------------------------------------------------------------
@@ -59,15 +63,205 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
 export const RECALL_TOOL_NAME = "recall";
 
 // ---------------------------------------------------------------------------
-// Pending recall state (cross-request, Case 2)
+// Marker utilities — human-readable text ↔ recall tool round-trip
 // ---------------------------------------------------------------------------
 
-/** TTL for pending recall results — discard after 60 seconds. */
-const PENDING_RECALL_TTL_MS = 60_000;
+/** Scope → human-readable label for marker text. */
+const SCOPE_LABELS: Record<string, string> = {
+  all: "all archives",
+  session: "session history",
+  project: "project archives",
+  knowledge: "knowledge base",
+};
 
-/** Check whether a pending recall is still valid (within TTL). */
-export function isPendingRecallValid(pending: PendingRecall): boolean {
-  return Date.now() - pending.timestamp < PENDING_RECALL_TTL_MS;
+/** Reverse: label → scope enum. */
+const LABEL_TO_SCOPE: Record<string, RecallScope> = Object.fromEntries(
+  Object.entries(SCOPE_LABELS).map(([k, v]) => [v, k as RecallScope]),
+);
+
+/** Map a recall scope to a human-readable label. */
+export function scopeToLabel(scope: string = "all"): string {
+  return SCOPE_LABELS[scope] ?? SCOPE_LABELS.all;
+}
+
+/** Map a human-readable label back to a scope enum value. */
+export function labelToScope(label: string): RecallScope {
+  return LABEL_TO_SCOPE[label] ?? "all";
+}
+
+/**
+ * Build a marker text string for a recall tool call.
+ *
+ * Format: `📚 Searching <scope-label> for "<query>"…`
+ */
+export function buildRecallMarker(query: string, scope: string = "all"): string {
+  return `📚 Searching ${scopeToLabel(scope)} for "${query}"…`;
+}
+
+/** Regex to parse a recall marker back into query + scope. */
+const MARKER_REGEX = /📚 Searching (.+?) for "(.+?)"…/;
+
+/**
+ * Parse a recall marker text block, returning query and scope if valid.
+ * Returns null if the text doesn't match the marker format.
+ */
+export function parseRecallMarker(
+  text: string,
+): { query: string; scope: RecallScope } | null {
+  const match = MARKER_REGEX.exec(text);
+  if (!match) return null;
+  return {
+    query: match[2],
+    scope: labelToScope(match[1]),
+  };
+}
+
+/** Derive a store key from query + scope. */
+export function recallStoreKey(query: string, scope: string = "all"): string {
+  return `${scope}:${query}`;
+}
+
+// ---------------------------------------------------------------------------
+// Marker expansion — restore tool_use + tool_result from markers on inbound
+// ---------------------------------------------------------------------------
+
+/**
+ * Find recall marker text blocks in the conversation and expand them
+ * back into tool_use + tool_result pairs for the upstream API.
+ *
+ * Scans ALL assistant messages (not just the last one) since markers
+ * persist across turns until gradient evicts the message.
+ *
+ * Mutates the request in-place. Returns true if any expansion was performed.
+ */
+export function expandRecallMarkers(
+  req: GatewayRequest,
+  store: RecallStore,
+): boolean {
+  let expanded = false;
+
+  // Iterate forward; when we splice messages the index is adjusted.
+  for (let i = 0; i < req.messages.length; i++) {
+    const msg = req.messages[i];
+    if (msg.role !== "assistant") continue;
+
+    // Find the first (should be only) recall marker in this message.
+    // We process one marker per assistant message per pass; the outer
+    // loop will revisit if there's more than one (rare).
+    let markerIdx = -1;
+    let parsed: { query: string; scope: RecallScope } | null = null;
+    for (let j = 0; j < msg.content.length; j++) {
+      const block = msg.content[j];
+      if (block.type !== "text") continue;
+      parsed = parseRecallMarker(block.text);
+      if (parsed) {
+        markerIdx = j;
+        break;
+      }
+    }
+
+    if (markerIdx < 0 || !parsed) continue;
+
+    const key = recallStoreKey(parsed.query, parsed.scope);
+    const stored = store.get(key);
+    if (!stored) continue; // No stored result — leave marker as-is
+
+    // Check if there's non-tool content AFTER the marker in this message.
+    // This happens when recall-only follow-up piped continuation content
+    // (text blocks) into the same assistant message. Tool_use blocks after
+    // the marker are from the same turn (mixed tools) and stay together.
+    const afterMarker = msg.content.slice(markerIdx + 1);
+    const hasContinuationAfter = afterMarker.length > 0 &&
+      afterMarker.some((b) => b.type !== "tool_use");
+
+    // Replace marker with tool_use
+    msg.content[markerIdx] = {
+      type: "tool_use",
+      id: stored.toolUseId,
+      name: RECALL_TOOL_NAME,
+      input: stored.input,
+    };
+
+    // Truncate assistant message at the tool_use (remove continuation)
+    if (hasContinuationAfter) {
+      msg.content.length = markerIdx + 1;
+    }
+
+    // Build synthetic tool_result user message
+    const toolResultMsg: GatewayMessage = {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          toolUseId: stored.toolUseId,
+          content: stored.result,
+        },
+      ],
+    };
+
+    if (hasContinuationAfter) {
+      // Split: insert tool_result user message + continuation assistant
+      // message after the current assistant message.
+      const continuationMsg: GatewayMessage = {
+        role: "assistant",
+        content: afterMarker,
+      };
+      req.messages.splice(i + 1, 0, toolResultMsg, continuationMsg);
+      // Skip past the two newly inserted messages
+      i += 2;
+    } else {
+      // No split needed — insert tool_result into the following user message.
+      // Prepend (unshift) so the recall result appears before existing
+      // tool_results — matching the tool_use order in the assistant message.
+      const nextMsg = req.messages[i + 1];
+      if (nextMsg?.role === "user") {
+        nextMsg.content.unshift({
+          type: "tool_result",
+          toolUseId: stored.toolUseId,
+          content: stored.result,
+        });
+      } else {
+        // No following user message — insert a synthetic one
+        req.messages.splice(i + 1, 0, toolResultMsg);
+        i += 1;
+      }
+    }
+
+    expanded = true;
+  }
+
+  return expanded;
+}
+
+/**
+ * Clean up orphaned recall store entries whose markers no longer
+ * appear in the conversation (e.g. gradient evicted the turn).
+ */
+export function cleanupRecallStore(
+  req: GatewayRequest,
+  store: RecallStore,
+): void {
+  if (store.size === 0) return;
+
+  // Collect all marker keys still present in assistant messages
+  const activeKeys = new Set<string>();
+  for (const msg of req.messages) {
+    if (msg.role !== "assistant") continue;
+    for (const block of msg.content) {
+      if (block.type !== "text") continue;
+      const parsed = parseRecallMarker(block.text);
+      if (parsed) {
+        activeKeys.add(recallStoreKey(parsed.query, parsed.scope));
+      }
+    }
+  }
+
+  // Remove entries not referenced by any current marker
+  for (const key of store.keys()) {
+    if (!activeKeys.has(key)) {
+      store.delete(key);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,90 +406,28 @@ export function buildRecallFollowUp(
 }
 
 // ---------------------------------------------------------------------------
-// Pending recall injection (Case 2: next request enrichment)
+// Response content rewriting — replace recall tool_use with marker text
 // ---------------------------------------------------------------------------
 
 /**
- * Inject a pending recall result into the current request.
+ * Build a GatewayResponse with recall tool_use blocks replaced by marker text.
  *
- * Finds the last assistant message in `req.messages`, inserts the recall
- * tool_use block at the recorded position, and inserts a tool_result block
- * into the following user message.
- *
- * Mutates the request in-place for efficiency. Returns true if injection
- * was performed, false if the conversation structure didn't match
- * (e.g., no trailing assistant→user pair).
+ * Used for both recall-only and mixed-tools cases to produce a response
+ * where the client sees human-readable markers instead of tool call mechanics.
  */
-export function injectPendingRecall(
-  req: GatewayRequest,
-  pending: PendingRecall,
-): boolean {
-  const messages = req.messages;
-  if (messages.length < 2) return false;
-
-  // Find the last assistant message followed by a user message.
-  // The pending recall was from the previous turn's assistant response.
-  let assistantIdx = -1;
-  for (let i = messages.length - 2; i >= 0; i--) {
-    if (
-      messages[i].role === "assistant" &&
-      messages[i + 1]?.role === "user"
-    ) {
-      assistantIdx = i;
-      break;
-    }
-  }
-
-  if (assistantIdx < 0) {
-    log.warn("injectPendingRecall: no assistant→user pair found");
-    return false;
-  }
-
-  const assistantMsg = messages[assistantIdx];
-  const userMsg = messages[assistantIdx + 1];
-
-  // Insert recall tool_use into assistant message at the recorded position.
-  // Clamp to content length in case the message was modified by gradient.
-  const insertPos = Math.min(pending.position, assistantMsg.content.length);
-  const recallToolUse: GatewayToolUseBlock = {
-    type: "tool_use",
-    id: pending.toolUseId,
-    name: RECALL_TOOL_NAME,
-    input: pending.input,
-  };
-  assistantMsg.content.splice(insertPos, 0, recallToolUse);
-
-  // Insert recall tool_result into the user message.
-  // Add it at the beginning alongside any other tool_results.
-  userMsg.content.unshift({
-    type: "tool_result",
-    toolUseId: pending.toolUseId,
-    content: pending.result,
-  });
-
-  // Strip recall from tools list for this request
-  req.tools = req.tools.filter((t) => t.name !== RECALL_TOOL_NAME);
-
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// Response content stripping (Case 2: remove recall from response)
-// ---------------------------------------------------------------------------
-
-/**
- * Build a GatewayResponse with recall tool_use blocks removed.
- *
- * Used for Case 2 to produce a clean response for `postResponse` storage
- * that excludes the gateway-internal recall blocks.
- */
-export function stripRecallFromResponse(
+export function replaceRecallWithMarker(
   resp: GatewayResponse,
 ): GatewayResponse {
   return {
     ...resp,
-    content: resp.content.filter(
-      (b) => !(b.type === "tool_use" && b.name === RECALL_TOOL_NAME),
-    ),
+    content: resp.content.map((b) => {
+      if (b.type === "tool_use" && b.name === RECALL_TOOL_NAME) {
+        const input = b.input as Record<string, unknown>;
+        const query = typeof input.query === "string" ? input.query : "";
+        const scope = (input.scope as string) ?? "all";
+        return { type: "text" as const, text: buildRecallMarker(query, scope) };
+      }
+      return b;
+    }),
   };
 }
