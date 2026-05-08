@@ -24,7 +24,8 @@
     "start": "bun run src/index.ts"
   },
   "dependencies": {
-    "@loreai/core": "workspace:*"
+    "@loreai/core": "workspace:*",
+    "@sentry/bun": "^10.52.0"
   },
   "files": [
     "src/",

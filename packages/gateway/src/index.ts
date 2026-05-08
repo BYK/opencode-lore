@@ -10,6 +10,7 @@
  *   lore start
  *   lore run claude
  */
+import "../instrument";
 
 // ---------------------------------------------------------------------------
 // Library API
