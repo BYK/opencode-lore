@@ -285,8 +285,6 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
       config.upstreamAnthropic,
       () => resolveAuth(),
       sessionModelID,
-      // onLtmInvalidated: clear the LTM session cache
-      () => ltmSessionCache.clear(),
     );
     stopIdleScheduler = startIdleScheduler(config, sessions, idleHandler);
   }
@@ -873,7 +871,7 @@ function postResponse(
 
     // --- Cache analytics ---
     if (requestBody) {
-      analyzeCacheTurn(sessionState.cacheAnalytics, requestBody, resp.usage);
+      analyzeCacheTurn(sessionState.cacheAnalytics, requestBody, resp.usage, sessionID);
     }
 
     // --- Temporal storage ---

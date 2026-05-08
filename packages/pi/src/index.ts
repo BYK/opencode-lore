@@ -417,22 +417,15 @@ export default function lorePiExtension(pi: ExtensionAPI): void {
             sessionID: currentSessionID,
             model: cfg.model,
           });
-          if (created > 0 || updated > 0 || deleted > 0) {
-            invalidateLtmCache();
-          }
-
           // Consolidation when entry count exceeds threshold.
           const entries = ltm.forProject(projectPath, false);
           if (entries.length > cfg.curator.maxEntries) {
-            const consolidation = await curator.consolidate({
+            await curator.consolidate({
               llm,
               projectPath,
               sessionID: currentSessionID,
               model: cfg.model,
             });
-            if (consolidation.updated > 0 || consolidation.deleted > 0) {
-              invalidateLtmCache();
-            }
           }
         }
       } catch (err) {

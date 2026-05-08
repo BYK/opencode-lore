@@ -233,6 +233,7 @@ export function analyzeCacheTurn(
   analytics: CacheAnalytics,
   currentBody: string,
   usage: GatewayUsage,
+  sessionID?: string,
 ): CacheTurnAnalysis {
   analytics.turnCount++;
 
@@ -303,11 +304,11 @@ export function analyzeCacheTurn(
   };
 
   // Log structured analysis
-  const sid = "(session)"; // caller provides context
   if (analytics.turnCount > 1) {
     const bustStr = cacheRead === 0 && cacheCreation > 0 ? " [BUST]" : "";
+    const sidStr = sessionID ? ` session=${sessionID.slice(0, 16)}` : "";
     log.info(
-      `cache-analytics: turn=${result.turn}` +
+      `cache-analytics:${sidStr} turn=${result.turn}` +
         ` hit=${(result.cacheHitRate * 100).toFixed(0)}%` +
         ` read=${cacheRead} create=${cacheCreation} input=${inputTokens}` +
         ` prefixMatch=${(result.prefixMatchPercent * 100).toFixed(1)}%` +

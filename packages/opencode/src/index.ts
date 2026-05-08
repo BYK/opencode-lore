@@ -1086,6 +1086,10 @@ export const LorePlugin: Plugin = async (ctx) => {
     // handled by the gateway pipeline. The plugin only captures the model info
     // for worker agent selection.
     "experimental.chat.system.transform": async (input, output) => {
+      // When the gateway is active, it handles model limits, idle-resume,
+      // LTM injection, and gradient configuration. Skip all of that here.
+      if (gatewayActive) return;
+
       // Capture the active session model for worker model selection and cost-aware cap.
       if (input.model) {
         const m = input.model as { id: string; providerID: string; cost?: { input: number; cache?: { read: number } } };
@@ -1097,10 +1101,6 @@ export const LorePlugin: Plugin = async (ctx) => {
           };
         }
       }
-
-      // When the gateway is active, it handles model limits, idle-resume,
-      // LTM injection, and gradient configuration. Skip all of that here.
-      if (gatewayActive) return;
 
       if (input.model?.limit) {
         setModelLimits(input.model.limit);

@@ -106,8 +106,6 @@ export function touchSession(
  * @param upstreamUrl - Anthropic API base URL (for model discovery)
  * @param getAuth - Callback to resolve auth credentials
  * @param sessionModel - Model ID used for conversation (frontier model)
- * @param onLtmInvalidated - Callback to clear LTM session cache when curation
- *   creates/updates/deletes knowledge entries
  */
 export function buildIdleWorkHandler(
   projectPath: string,
@@ -115,7 +113,6 @@ export function buildIdleWorkHandler(
   upstreamUrl: string,
   getAuth: () => AuthCredential | null,
   sessionModel: string,
-  onLtmInvalidated?: () => void,
 ): (sessionID: string, state: SessionState) => Promise<void> {
   return async (sessionID: string, state: SessionState) => {
     const cfg = loreConfig();
@@ -159,7 +156,6 @@ export function buildIdleWorkHandler(
         if (state.turnsSinceCuration >= cfg.curator.afterTurns) {
           await curator.run({ llm, projectPath, sessionID, model });
           state.turnsSinceCuration = 0;
-          onLtmInvalidated?.();
         }
       } catch (e) {
         log.error("idle curation error:", e);
@@ -182,7 +178,6 @@ export function buildIdleWorkHandler(
           });
           if (updated > 0 || deleted > 0) {
             log.info(`consolidation: ${updated} updated, ${deleted} deleted`);
-            onLtmInvalidated?.();
           }
         }
       } catch (e) {
@@ -229,7 +224,6 @@ export function buildIdleWorkHandler(
         const cleaned = ltm.cleanDeadRefs();
         if (cleaned > 0) {
           log.info(`cleaned ${cleaned} dead knowledge cross-references`);
-          onLtmInvalidated?.();
         }
       } catch (e) {
         log.error("idle dead-ref cleanup error:", e);
