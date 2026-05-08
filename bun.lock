@@ -29,10 +29,14 @@
       "name": "@loreai/gateway",
       "version": "0.13.4",
       "bin": {
-        "lore-gateway": "./dist/index.js",
+        "lore": "./dist/bin.cjs",
+        "lore-gateway": "./dist/bin.cjs",
       },
       "dependencies": {
         "@loreai/core": "workspace:*",
+      },
+      "devDependencies": {
+        "binpunch": "^1.0.0",
       },
     },
     "packages/opencode": {
@@ -427,6 +431,8 @@
     "basic-ftp": ["basic-ftp@5.3.1", "", {}, "sha512-bopVNp6ugyA150DDuZfPFdt1KZ5a94ZDiwX4hMgZDzF+GttD80lEy8kj98kbyhLXnPvhtIo93mdnLIjpCAeeOw=="],
 
     "bignumber.js": ["bignumber.js@9.3.1", "", {}, "sha512-Ko0uX15oIUS7wJ3Rb30Fs6SkVbLmPBAKdlm7q9+ak9bbIeFf0MwuBsQV6z7+X768/cHsfg+WlysDWJcmthjsjQ=="],
+
+    "binpunch": ["binpunch@1.0.0", "", { "bin": { "binpunch": "dist/cli.js" } }, "sha512-ghxdoerLN3WN64kteDJuL4d9dy7gbvcqoADNRWBk6aQ5FrYH1EmPmREAdcdIdTNAA3uW3V38Env5OqH2lj+i+g=="],
 
     "boolean": ["boolean@3.2.0", "", {}, "sha512-d0II/GO9uf9lfUHH2BQsjxzRJZBdsjgsBiW4BvhWk/3qoKwQFjIDVN19PfX8F2D/r9PCMTtLWjYVCFrpeYUzsw=="],
 

@@ -22,6 +22,7 @@ import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
+import { processBinary } from "binpunch";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
@@ -158,7 +159,15 @@ async function buildBinary() {
 
   console.log(`✓ Bun compile: ${binaryPath}`);
 
-  // Step 3: gzip (release builds only)
+  // Step 3: hole-punch unused ICU data entries so they compress to nearly nothing
+  const hpStats = processBinary(binaryPath);
+  if (hpStats && hpStats.removedEntries > 0) {
+    console.log(
+      `✓ hole-punched ${hpStats.removedEntries}/${hpStats.totalEntries} ICU entries`,
+    );
+  }
+
+  // Step 4: gzip (release builds only)
   if (flags.release) {
     const raw = readFileSync(binaryPath);
     const compressed = gzipSync(raw, { level: 6 });

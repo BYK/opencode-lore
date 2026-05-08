@@ -53,5 +53,8 @@
     "anthropic",
     "openai"
   ],
-  "author": "BYK"
+  "author": "BYK",
+  "devDependencies": {
+    "binpunch": "^1.0.0"
+  }
 }
