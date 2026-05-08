@@ -1,6 +1,6 @@
 {
   "name": "@loreai/opencode",
-  "version": "0.13.4",
+  "version": "0.14.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "description": "Three-tier memory architecture for OpenCode — distillation, not summarization",

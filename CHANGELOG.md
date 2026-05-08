@@ -1,4 +1,55 @@
 # Changelog
+## 0.14.0
+
+### New Features ✨
+
+#### Gateway
+
+- Debug ID source maps + zero runtime dependencies by @BYK in [#171](https://github.com/BYK/loreai/pull/171)
+- Background version check with upgrade nag by @BYK in [#168](https://github.com/BYK/loreai/pull/168)
+- Implement delta-based self-upgrade system by @BYK in [#166](https://github.com/BYK/loreai/pull/166)
+- Show env vars and agent integration info on lore start by @BYK in [#165](https://github.com/BYK/loreai/pull/165)
+- CLI skeleton with npm bundle, binary build, and CI smoke tests by @BYK in [#159](https://github.com/BYK/loreai/pull/159)
+- Ground-truth cache analytics with request body prefix diff by @BYK in [#155](https://github.com/BYK/loreai/pull/155)
+
+#### Other
+
+- (website) Add landing page by @sylncnr in [#152](https://github.com/BYK/loreai/pull/152)
+- Wire structured logs and error capture to Sentry in prod builds by @BYK in [#170](https://github.com/BYK/loreai/pull/170)
+- Web install script and updated landing page by @BYK in [#163](https://github.com/BYK/loreai/pull/163)
+- Layered cache breakpoints and LTM content-diff pinning by @BYK in [#157](https://github.com/BYK/loreai/pull/157)
+
+### Bug Fixes 🐛
+
+#### Gateway
+
+- Add worker retry with backoff and batch API circuit breaker by @BYK in [#164](https://github.com/BYK/loreai/pull/164)
+- Suppress agent detection noise in embedded server mode by @BYK in [#161](https://github.com/BYK/loreai/pull/161)
+- Preserve thinking block signature through Lore format round-trip by @BYK in [#162](https://github.com/BYK/loreai/pull/162)
+- Cache analytics JSON path missing array index for first element by @BYK in [#156](https://github.com/BYK/loreai/pull/156)
+
+#### Other
+
+- (cache) Remove idle-handler LTM cache invalidation to preserve warm prefix by @BYK in [#160](https://github.com/BYK/loreai/pull/160)
+- Include binary and patch artifacts in Craft release workflow by @BYK in [#172](https://github.com/BYK/loreai/pull/172)
+
+### Documentation 📚
+
+- Update landing page with gateway architecture and waitlist form by @sylncnr in [#153](https://github.com/BYK/loreai/pull/153)
+
+### Internal Changes 🔧
+
+- (gateway) Unified recall marker-and-expand strategy by @BYK in [#154](https://github.com/BYK/loreai/pull/154)
+- (opencode) Skip duplicated logic when gateway is active by @BYK in [#158](https://github.com/BYK/loreai/pull/158)
+- Add dist-bin/ to gitignore by @BYK in [#169](https://github.com/BYK/loreai/pull/169)
+- Add nightly builds with delta patches and GHCR distribution by @BYK in [#167](https://github.com/BYK/loreai/pull/167)
+
+### Other
+
+- Create CNAME by @BYK in [a653c597](https://github.com/BYK/loreai/commit/a653c597a6c460e3de59b9ee2ac17afee9d3b656)
+- Delete CNAME by @BYK in [226d17a9](https://github.com/BYK/loreai/commit/226d17a9de33cff88ad581e5e4ef3cf79aaf272b)
+- Create CNAME by @BYK in [b8384c82](https://github.com/BYK/loreai/commit/b8384c82806cf995bb5361143f0c045f5ba477ee)
+
 ## 0.13.4
 
 ### Bug Fixes 🐛
