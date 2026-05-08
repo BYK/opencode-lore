@@ -12,6 +12,12 @@
 import { parseArgs } from "node:util";
 import { printHelp, printVersion } from "./help";
 import { commandStart, type StartOptions } from "./start";
+import {
+  abortPendingVersionCheck,
+  getUpdateNotification,
+  maybeCheckForUpdateInBackground,
+  shouldSuppressNotification,
+} from "./lib/version-check";
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -91,36 +97,56 @@ export async function _cli(): Promise<void> {
     values as { port?: string; host?: string; debug?: boolean },
   );
 
-  switch (command) {
-    case "start":
-      await commandStart(startOpts);
-      break;
+  // Start background update check (non-blocking).
+  // Suppressed for commands where the banner would be confusing or redundant.
+  const suppressNotification = shouldSuppressNotification(positionals);
+  if (!suppressNotification) {
+    maybeCheckForUpdateInBackground();
+  }
 
-    case "run": {
-      // Lazy-import to avoid pulling in child_process + agent detection
-      // when only `lore start` or `lore help` is needed.
-      const { commandRun } = await import("./run");
-      await commandRun(startOpts, rest);
-      break;
-    }
+  try {
+    switch (command) {
+      case "start":
+        await commandStart(startOpts);
+        break;
 
-    case "upgrade": {
-      const { commandUpgrade } = await import("./upgrade");
-      await commandUpgrade(rest);
-      break;
-    }
-
-    case "help":
-      printHelp();
-      break;
-
-    default:
-      // Unknown first arg — treat it as `lore run <unknown> ...`
-      // This allows `lore claude` as shorthand for `lore run claude`.
-      {
+      case "run": {
+        // Lazy-import to avoid pulling in child_process + agent detection
+        // when only `lore start` or `lore help` is needed.
         const { commandRun } = await import("./run");
-        await commandRun(startOpts, [command, ...rest]);
+        await commandRun(startOpts, rest);
+        break;
       }
-      break;
+
+      case "upgrade": {
+        const { commandUpgrade } = await import("./upgrade");
+        await commandUpgrade(rest);
+        break;
+      }
+
+      case "help":
+        printHelp();
+        break;
+
+      default:
+        // Unknown first arg — treat it as `lore run <unknown> ...`
+        // This allows `lore claude` as shorthand for `lore run claude`.
+        {
+          const { commandRun } = await import("./run");
+          await commandRun(startOpts, [command, ...rest]);
+        }
+        break;
+    }
+  } finally {
+    // Abort any pending version check to allow clean exit
+    abortPendingVersionCheck();
+  }
+
+  // Show update notification after command completes
+  if (!suppressNotification) {
+    const notification = getUpdateNotification();
+    if (notification) {
+      process.stderr.write(notification);
+    }
   }
 }

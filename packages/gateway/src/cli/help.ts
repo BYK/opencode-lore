@@ -43,6 +43,7 @@ Environment variables:
   LORE_UPSTREAM_ANTHROPIC       Upstream Anthropic API URL
   LORE_UPSTREAM_OPENAI          Upstream OpenAI API URL
   LORE_DEBUG                    Enable debug logging (1 or true)
+  LORE_NO_UPDATE_CHECK          Disable background update checks (set to 1)
 `.trimStart();
 
 export function printHelp(): void {
