@@ -266,6 +266,24 @@ export type AnthropicCacheOptions = {
   systemTTL?: "5m" | "1h" | false;
 
   /**
+   * LTM knowledge text to inject as a separate system block after the host
+   * prompt. Keeping it in a separate block means the host prompt gets its
+   * own cache breakpoint (1h) and LTM changes don't bust the host prefix.
+   *
+   * When provided AND systemTTL is set, the system becomes a 2-block array:
+   *   system[0]: host prompt  — cache_control with systemTTL
+   *   system[1]: LTM content  — no cache_control (benefits from prefix)
+   */
+  ltmSystem?: string;
+
+  /**
+   * Cache the last tool definition with an explicit 1h breakpoint.
+   * Tool definitions (including our injected recall tool) are stable
+   * across turns — caching them avoids re-processing on every request.
+   */
+  cacheTools?: boolean;
+
+  /**
    * Place an explicit `cache_control` breakpoint on the last block of the
    * last message, enabling Anthropic to cache the conversation prefix.
    *
@@ -329,19 +347,33 @@ export function buildAnthropicRequest(
   // System — only include if non-empty
   if (req.system) {
     const systemTTL = cache?.systemTTL;
+    const ltmText = cache?.ltmSystem;
+
     if (systemTTL) {
-      // Send as block array with explicit cache_control breakpoint.
-      // This creates a stable cache slot for the system prompt — it changes
-      // only when LTM entries are added/removed or AGENTS.md is updated.
+      // Send as block array with explicit cache_control breakpoint on the
+      // host prompt. The host prompt is the most stable part (changes only
+      // when the host mutates AGENTS.md, memory, etc.) so it gets a 1h TTL.
       const cacheControl: Record<string, string> =
         systemTTL === "1h"
           ? { type: "ephemeral", ttl: "1h" }
           : { type: "ephemeral" };
-      body.system = [
+
+      const blocks: Record<string, unknown>[] = [
         { type: "text", text: req.system, cache_control: cacheControl },
       ];
+
+      // LTM knowledge as a separate block — no cache_control of its own,
+      // but benefits from the host prompt prefix cache. When LTM changes,
+      // only this block and everything after it is re-processed; the host
+      // prompt prefix is still a cache read.
+      if (ltmText) {
+        blocks.push({ type: "text", text: ltmText });
+      }
+
+      body.system = blocks;
     } else {
-      body.system = req.system;
+      // No caching — concatenate LTM into a single string.
+      body.system = ltmText ? `${req.system}\n\n${ltmText}` : req.system;
     }
   }
 
@@ -368,11 +400,23 @@ export function buildAnthropicRequest(
 
   // Tools — only include if present
   if (req.tools.length > 0) {
-    body.tools = req.tools.map((t) => ({
+    const tools = req.tools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.inputSchema,
     }));
+
+    // Tool caching: place a 1h breakpoint on the last tool definition.
+    // Tool definitions (including our recall tool) are stable across turns.
+    if (cache?.cacheTools && tools.length > 0) {
+      const lastTool = tools[tools.length - 1]!;
+      (lastTool as Record<string, unknown>).cache_control = {
+        type: "ephemeral",
+        ttl: "1h",
+      };
+    }
+
+    body.tools = tools;
   }
 
   // Restore all metadata params (temperature, top_p, stop_sequences, etc.)

@@ -16,7 +16,6 @@ import {
   load,
   config as loreConfig,
   ensureProject,
-  isFirstRun,
   temporal,
   ltm,
   distillation,
@@ -146,6 +145,7 @@ export async function resetPipelineState(): Promise<void> {
   cachedProjectPath = null;
   sessions.clear();
   ltmSessionCache.clear();
+  ltmPinnedText.clear();
   // Shut down batch queue gracefully before clearing the client
   if (llmClient && "shutdown" in llmClient) {
     await (llmClient as LLMClient & { shutdown: () => Promise<void> }).shutdown();
@@ -177,6 +177,46 @@ const ltmSessionCache = new Map<
   string,
   { formatted: string; tokenCount: number }
 >();
+
+/**
+ * Pinned LTM text per session — the text currently being injected into the
+ * system prompt. When ltmSessionCache is invalidated and recomputed, we
+ * compare the new text against the pin. Only update if >5% character
+ * difference to avoid cache busts from minor BM25 re-ranking changes.
+ */
+const ltmPinnedText = new Map<
+  string,
+  { formatted: string; tokenCount: number }
+>();
+
+/**
+ * Measure character-level difference between two strings as a ratio (0..1).
+ * Uses a simple length + common-prefix heuristic — not a full diff, but
+ * sufficient to detect "substantially the same" vs "meaningfully different".
+ */
+function textDiffRatio(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a || !b) return 1;
+
+  // Common prefix length
+  const minLen = Math.min(a.length, b.length);
+  const maxLen = Math.max(a.length, b.length);
+  let common = 0;
+  for (let i = 0; i < minLen; i++) {
+    if (a[i] === b[i]) common++;
+    else break;
+  }
+
+  // Common suffix length (non-overlapping with prefix)
+  let suffix = 0;
+  for (let i = 0; i < minLen - common; i++) {
+    if (a[a.length - 1 - i] === b[b.length - 1 - i]) suffix++;
+    else break;
+  }
+
+  const matched = common + suffix;
+  return 1 - matched / maxLen;
+}
 
 /** Cached LLM client for background workers. */
 let llmClient: LLMClient | null = null;
@@ -1149,8 +1189,8 @@ async function handleConversationTurn(
     );
   }
 
-  // --- 6. LTM injection into system prompt ---
-  let modifiedSystem = req.system;
+  // --- 6. LTM injection (kept separate from host system prompt for caching) ---
+  let ltmText: string | undefined;
   if (cfg.knowledge.enabled) {
     try {
       let cached = ltmSessionCache.get(sessionID);
@@ -1178,8 +1218,21 @@ async function handleConversationTurn(
       }
 
       if (cached) {
-        setLtmTokens(cached.tokenCount, sessionID);
-        modifiedSystem = `${req.system}\n\n${cached.formatted}`;
+        // Content-diff pinning: only update the injected LTM text if the
+        // new content differs by >5% from what's currently pinned. This
+        // prevents cache busts from minor BM25 re-ranking after background
+        // curation/consolidation invalidates the LTM cache.
+        const pinned = ltmPinnedText.get(sessionID);
+        if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < 0.05) {
+          // Near-identical — keep the pinned text to preserve cache prefix
+          ltmText = pinned.formatted;
+          setLtmTokens(pinned.tokenCount, sessionID);
+        } else {
+          // Substantially different or first injection — pin the new text
+          ltmPinnedText.set(sessionID, cached);
+          ltmText = cached.formatted;
+          setLtmTokens(cached.tokenCount, sessionID);
+        }
       } else {
         setLtmTokens(0, sessionID);
       }
@@ -1192,25 +1245,6 @@ async function handleConversationTurn(
   } else {
     setLtmTokens(0, sessionID);
     consumeCameOutOfIdle(sessionID);
-  }
-
-  // First-run greeting
-  if (isFirstRun()) {
-    modifiedSystem +=
-      "\n\n[Lore plugin] This is the first time Lore has been activated. " +
-      "Briefly let the user know that Lore is now active and their " +
-      "coding agent will get progressively smarter on this codebase " +
-      "over time as knowledge accumulates across sessions.";
-  }
-
-  // Lore knowledge file commit reminder
-  if (cfg.knowledge.enabled) {
-    const filesToTrack = [".lore.md"];
-    if (cfg.agentsFile.enabled) filesToTrack.push(cfg.agentsFile.path);
-    modifiedSystem +=
-      `\n\nWhen making git commits, always check if ${filesToTrack.join(" and ")} ` +
-      `have unstaged changes and include them in the commit. These files contain ` +
-      `shared project knowledge managed by lore and must be version-controlled.`;
   }
 
   // --- 7. Gradient transform on messages ---
@@ -1244,26 +1278,45 @@ async function handleConversationTurn(
 
   const modifiedReq: GatewayRequest = {
     ...req,
-    system: modifiedSystem,
+    // Host system prompt is passed through unmodified — LTM is injected
+    // as a separate system block via cache options for prefix stability.
     messages: transformedMessages,
   };
 
-  // --- 8b. Inject recall tool ---
+  // --- 8b. Inject recall tool (with git reminder appended to description) ---
   // Only inject if the client doesn't already have a recall tool (e.g. from
   // a host plugin like OpenCode) and the request has other tools (so it's a
   // coding agent, not a bare chat).
   if (modifiedReq.tools.length > 0 && !clientHasRecallTool(modifiedReq.tools)) {
-    modifiedReq.tools = [...modifiedReq.tools, RECALL_GATEWAY_TOOL];
+    // Build the recall tool with git reminder baked into its description.
+    // This keeps the reminder in the stable tools prefix (1h cache) rather
+    // than the volatile system prompt.
+    const recallTool = cfg.knowledge.enabled
+      ? {
+          ...RECALL_GATEWAY_TOOL,
+          description:
+            RECALL_GATEWAY_TOOL.description +
+            "\n\nWhen making git commits, always check if .lore.md " +
+            "has unstaged changes and include it in the commit. " +
+            "This file contains shared project knowledge managed " +
+            "by lore and must be version-controlled.",
+        }
+      : RECALL_GATEWAY_TOOL;
+    modifiedReq.tools = [...modifiedReq.tools, recallTool];
   }
 
   // --- 9. Forward to upstream ---
-  // Enable prompt caching for conversation turns:
-  //  - System prompt: explicit breakpoint with 5m TTL (frequent turns)
-  //  - Conversation: breakpoint on last block so Anthropic caches the prefix
+  // Enable prompt caching for conversation turns with layered breakpoints:
+  //  - System prompt: 1h TTL (host prompt is very stable within a session)
+  //  - LTM: separate system block (no breakpoint, benefits from prefix)
+  //  - Tools: 1h TTL on last tool (recall + git reminder are static)
+  //  - Conversation: 5m TTL on last message block
   // Title/summary passthrough (handlePassthrough) never reaches here — it
   // forwards the raw request without buildAnthropicRequest, so no caching.
   const cacheOptions: AnthropicCacheOptions = {
-    systemTTL: "5m",
+    systemTTL: "1h",
+    ltmSystem: ltmText,
+    cacheTools: true,
     cacheConversation: true,
   };
   const { response: upstreamResponse, serializedBody: requestBody } =
