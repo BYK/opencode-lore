@@ -625,7 +625,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   const idleRunning = new Set<string>();
 
   // System prompt hash per session — for cache-bust diagnostics (LORE_DEBUG)
-  const systemPromptHashes = new Map<string, string>();
+
 
   // Sessions currently in auto-recovery — prevents infinite loop when
   // the recovery prompt itself triggers another "prompt too long" error.
@@ -986,84 +986,70 @@ export const LorePlugin: Plugin = async (ctx) => {
       }
     },
 
-    // Store all messages in temporal DB for full-text search and distillation.
-    // Skips child sessions (eval, worker) to prevent pollution.
+    // Event handling — when the gateway is active, it handles message storage,
+    // calibration, incremental distillation, and idle work. The plugin only
+    // needs overflow recovery (plugin-only: uses OpenCode SDK for synthetic
+    // recovery messages) and active session tracking.
     event: async ({ event }) => {
       if (event.type === "message.updated") {
         const msg = event.properties.info;
         if (await shouldSkip(msg.sessionID)) return;
-        try {
-          const full = await ctx.client.session.message({
-            path: { id: msg.sessionID, messageID: msg.id },
-          });
-          if (full.data) {
-            temporal.store({
-              projectPath,
-              info: full.data.info,
-              parts: full.data.parts,
-            });
-            activeSessions.add(msg.sessionID);
-            if (msg.role === "user") turnsSinceCuration++;
 
-            // Incremental distillation: only fire at turn boundaries (user message)
-            // to avoid producing distillation rows mid-chain that would change the
-            // distilled prefix and bust the prompt cache. The gradient's distillation
-            // snapshot is frozen during tool-call chains, so rows produced mid-chain
-            // can't be consumed until the next turn anyway — deferring to session.idle
-            // or next user message costs nothing but avoids DB churn and cache busts.
-            if (msg.role === "user") {
-              const pending = temporal.undistilledCount(projectPath, msg.sessionID);
-              if (pending >= config().distillation.maxSegment) {
-                log.info(
-                  `incremental distillation (turn boundary): ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
-                );
-                backgroundDistill(msg.sessionID);
+        // Track active sessions — needed by compaction hook even with gateway.
+        activeSessions.add(msg.sessionID);
+
+        // When gateway is active, it handles temporal storage, calibration,
+        // and incremental distillation.
+        if (!gatewayActive) {
+          try {
+            const full = await ctx.client.session.message({
+              path: { id: msg.sessionID, messageID: msg.id },
+            });
+            if (full.data) {
+              temporal.store({
+                projectPath,
+                info: full.data.info,
+                parts: full.data.parts,
+              });
+              if (msg.role === "user") turnsSinceCuration++;
+
+              if (msg.role === "user") {
+                const pending = temporal.undistilledCount(projectPath, msg.sessionID);
+                if (pending >= config().distillation.maxSegment) {
+                  log.info(
+                    `incremental distillation (turn boundary): ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
+                  );
+                  backgroundDistill(msg.sessionID);
+                }
+              }
+
+              if (
+                msg.role === "assistant" &&
+                msg.tokens &&
+                (msg.tokens.input > 0 || msg.tokens.cache.read > 0 || msg.tokens.cache.write > 0)
+              ) {
+                const actualInput =
+                  msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write;
+                calibrate(actualInput, msg.sessionID, getLastTransformedCount(msg.sessionID));
               }
             }
-
-            if (
-              msg.role === "assistant" &&
-              msg.tokens &&
-              // Include cache.write: tokens written to cache were fully sent to the
-              // model (they were processed, just not read from a prior cache slot).
-              // Omitting cache.write causes a dramatic undercount on cold-cache turns
-              // where cache.read=0 but 150K+ tokens were written — leading the gradient
-              // to think only 3 tokens went in and passing the full session as layer 0.
-              (msg.tokens.input > 0 || msg.tokens.cache.read > 0 || msg.tokens.cache.write > 0)
-            ) {
-              // Calibrate overhead using real token counts from the API response.
-              // actualInput = all tokens the model processed (input + cache.read + cache.write).
-              // The message estimate comes from the transform's own output (stored in
-              // session state as lastTransformEstimate), NOT from re-estimating all session
-              // messages. On compressed sessions, all-message estimate >> actualInput, which
-              // previously clamped overhead to 0 and broke budget calculations.
-              const actualInput =
-                msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write;
-              calibrate(actualInput, msg.sessionID, getLastTransformedCount(msg.sessionID));
-            }
+          } catch (e) {
+            log.warn(`message.updated: failed to fetch message ${msg.id} for session ${msg.sessionID.substring(0, 16)}:`, e);
           }
-        } catch (e) {
-          // Message may not be fetchable yet during streaming
-          log.warn(`message.updated: failed to fetch message ${msg.id} for session ${msg.sessionID.substring(0, 16)}:`, e);
         }
       }
 
       if (event.type === "session.error") {
-        // Skip eval/worker child sessions — only handle errors for real user sessions.
+        // Overflow recovery is plugin-only — uses OpenCode SDK for synthetic messages.
         const errorSessionID = (event.properties as Record<string, unknown>).sessionID as
           | string
           | undefined;
         if (errorSessionID && await shouldSkip(errorSessionID)) return;
 
-        // Detect "prompt is too long" API errors and auto-recover.
         const rawError = (event.properties as Record<string, unknown>).error;
         log.info("session.error received:", JSON.stringify(rawError, null, 2));
 
         if (isContextOverflow(rawError) && errorSessionID) {
-          // Prevent infinite loop: if we're already recovering this session,
-          // the recovery prompt itself overflowed — don't try again.
-          // Without this guard: overflow → distill + prompt → overflow → distill + prompt → ...
-          // Each cycle fires 2+ LLM calls, repeating until rate-limited.
           if (recoveringSessions.has(errorSessionID)) {
             log.warn(
               `recovery for ${errorSessionID.substring(0, 16)} also overflowed — giving up (forceMinLayer still persisted)`,
@@ -1072,10 +1058,6 @@ export const LorePlugin: Plugin = async (ctx) => {
             return;
           }
 
-          // Fire-and-forget: recovery runs detached so the event hook returns
-          // immediately. Same re-entrant deadlock prevention as handleIdle —
-          // backgroundDistill and session.prompt create child sessions whose
-          // events must flow through this same hook.
           handleOverflowRecovery(errorSessionID).catch((e) =>
             log.error("overflow recovery error:", e),
           );
@@ -1083,6 +1065,9 @@ export const LorePlugin: Plugin = async (ctx) => {
       }
 
       if (event.type === "session.idle") {
+        // Gateway handles idle work via its own scheduler.
+        if (gatewayActive) return;
+
         const sessionID = event.properties.sessionID;
         if (await shouldSkip(sessionID)) return;
         if (!activeSessions.has(sessionID)) {
@@ -1090,22 +1075,17 @@ export const LorePlugin: Plugin = async (ctx) => {
           return;
         }
 
-        // Fire-and-forget: idle work runs detached so the event hook returns
-        // immediately. This prevents re-entrant deadlock — worker child sessions
-        // created by backgroundDistill/backgroundCurate generate events that
-        // OpenCode can't deliver until this hook returns.
         handleIdle(sessionID).catch((e) =>
           log.error("idle handler error:", e),
         );
       }
     },
 
-    // Inject LTM knowledge into system prompt — relevance-ranked and budget-capped.
+    // System prompt transform — when the gateway is active, ALL system prompt
+    // modifications (LTM injection, model limits, idle-resume, etc.) are
+    // handled by the gateway pipeline. The plugin only captures the model info
+    // for worker agent selection.
     "experimental.chat.system.transform": async (input, output) => {
-      if (input.model?.limit) {
-        setModelLimits(input.model.limit);
-      }
-
       // Capture the active session model for worker model selection and cost-aware cap.
       if (input.model) {
         const m = input.model as { id: string; providerID: string; cost?: { input: number; cache?: { read: number } } };
@@ -1118,14 +1098,18 @@ export const LorePlugin: Plugin = async (ctx) => {
         }
       }
 
-      // Cost-aware layer-0 cap: derive from model cache-read pricing.
-      // maxLayer0Tokens explicit config wins > cost formula > disabled (0).
+      // When the gateway is active, it handles model limits, idle-resume,
+      // LTM injection, and gradient configuration. Skip all of that here.
+      if (gatewayActive) return;
+
+      if (input.model?.limit) {
+        setModelLimits(input.model.limit);
+      }
+
       const cfg = config();
       if (cfg.budget.maxLayer0Tokens !== undefined) {
-        // Explicit override
         setMaxLayer0Tokens(cfg.budget.maxLayer0Tokens);
       } else if (activeSessionModel && cfg.budget.targetCacheReadCostPerTurn > 0) {
-        // Cost-aware auto: cap = target / cache_read_cost_per_token
         const cap = computeLayer0Cap(
           cfg.budget.targetCacheReadCostPerTurn,
           activeSessionModel.cost.cache.read,
@@ -1133,15 +1117,8 @@ export const LorePlugin: Plugin = async (ctx) => {
         setMaxLayer0Tokens(cap);
       }
 
-      // Cold-cache idle-resume: when the gap since this session's last turn
-      // exceeds the configured threshold, Anthropic's prompt cache has already
-      // evicted our prefix bytes. Refresh Lore's byte-identity caches before
-      // they're consulted on this turn. Reasoning blocks are NOT touched
-      // (Anthropic's April 23 postmortem identifies that as the root cause of
-      // forgetfulness/repetition). Wired into the system transform hook
-      // because (a) it always fires before the messages transform hook, so
-      // gradient.ts caches are reset before transform() consumes them, and
-      // (b) ltmSessionCache lives in this closure and is consulted below.
+      // Cold-cache idle-resume: refresh caches when session has been idle
+      // longer than the configured threshold.
       if (input.sessionID) {
         const thresholdMs = cfg.idleResumeMinutes * 60_000;
         const result = onIdleResume(input.sessionID, thresholdMs);
@@ -1153,14 +1130,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         }
       }
 
-      // Knowledge injection — only when the knowledge system is enabled.
-      // When disabled, LTM budget is zero and no knowledge is injected.
-      //
-      // Uses per-session caching to preserve system prompt byte-stability
-      // for Anthropic's prompt caching. Without this, forSession() re-scores
-      // entries against evolving session context every turn, producing
-      // different formatted text → system prompt changes at byte 0 → total
-      // cache invalidation on every single turn.
+      // Knowledge injection — plugin-only mode (no gateway).
       if (cfg.knowledge.enabled) {
         const sessionID = input.sessionID;
         try {
@@ -1182,21 +1152,11 @@ export const LorePlugin: Plugin = async (ctx) => {
               if (formatted) {
                 const tokenCount = Math.ceil(formatted.length / 3);
 
-                // If this session was previously degraded (fallback note instead of LTM),
-                // switching to real LTM changes the system prompt prefix → busts the
-                // provider's read-token cache for the entire conversation after this point.
-                // Only recover if the cache invalidation cost is small relative to LTM benefit.
-                //
-                // Exception (F-CACHE-TTL): if onIdleResume() just fired for this session,
-                // the provider's prompt cache is already cold from the wall-clock gap, so
-                // the "cache bust cost" is effectively zero. Recover LTM unconditionally.
                 if (sessionID && ltmDegradedSessions.has(sessionID)) {
                   const postIdle = consumeCameOutOfIdle(sessionID);
                   if (!postIdle) {
                     const conversationTokens = getLastTransformEstimate(sessionID);
                     if (conversationTokens > tokenCount) {
-                      // Conversation is larger than LTM — cache bust costs more than
-                      // LTM is worth. Keep the fallback note for this session.
                       setLtmTokens(0, sessionID);
                       output.system.push(
                         "[Lore plugin] Long-term memory is temporarily unavailable. " +
@@ -1206,7 +1166,6 @@ export const LorePlugin: Plugin = async (ctx) => {
                       return;
                     }
                   }
-                  // Conversation is small (or post-idle) — LTM benefit outweighs cache cost. Recover.
                   ltmDegradedSessions.delete(sessionID);
                 }
 
@@ -1217,17 +1176,11 @@ export const LorePlugin: Plugin = async (ctx) => {
           }
 
           if (cached) {
-            // Content-diff pinning: only update the injected LTM text if
-            // the new content differs by >5% from what's currently pinned.
-            // Prevents cache busts from minor BM25 re-ranking after
-            // background curation/consolidation.
             const pinned = sessionID ? ltmPinnedText.get(sessionID) : undefined;
             if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < 0.05) {
-              // Near-identical — keep pinned text to preserve cache prefix
               setLtmTokens(pinned.tokenCount, sessionID);
               output.system.push(pinned.formatted);
             } else {
-              // Substantially different or first injection — pin the new text
               if (sessionID) ltmPinnedText.set(sessionID, cached);
               setLtmTokens(cached.tokenCount, sessionID);
               output.system.push(cached.formatted);
@@ -1245,94 +1198,39 @@ export const LorePlugin: Plugin = async (ctx) => {
               "past decisions, and prior session context when needed.",
           );
         } finally {
-          // Hygiene: ensure cameOutOfIdle never lingers across turns. The flag
-          // is meaningful only for the post-idle turn's LTM-recovery decision;
-          // clear it unconditionally here so a healthy turn followed later by
-          // a degraded turn can't falsely bypass the cache-cost comparison.
           if (sessionID) consumeCameOutOfIdle(sessionID);
         }
       } else {
         setLtmTokens(0, input.sessionID);
         if (input.sessionID) consumeCameOutOfIdle(input.sessionID);
       }
-
-      // Git reminder moved to recall tool description for cache stability.
-      // See reflect.ts — the reminder is appended to the recall tool's
-      // description, which is in the stable tools prefix (1h cache).
-
-      // Cache-bust diagnostic: track system prompt byte-identity across turns.
-      // When the system prompt changes between turns, it invalidates the entire
-      // prompt cache. Log when this happens (LORE_DEBUG only).
-      const sessionID = input.sessionID;
-      if (sessionID) {
-        const systemHash = output.system.join("").length.toString();
-        const prev = systemPromptHashes.get(sessionID);
-        if (prev !== undefined && prev !== systemHash) {
-          log.info(
-            `system-prompt changed: session=${sessionID} len=${prev}→${systemHash}`,
-          );
-        }
-        systemPromptHashes.set(sessionID, systemHash);
-      }
     },
 
-    // Transform message history: distilled prefix + raw recent.
-    // Layer 0 = passthrough (messages fit without compression) — output.messages
-    // is left untouched to preserve the append-only pattern for prompt caching.
+    // Transform message history — gateway handles gradient transform, trailing
+    // message cleanup, and distillation triggers when active.
     "experimental.chat.messages.transform": async (_input, output) => {
+      if (gatewayActive) return;
       if (!output.messages.length) return;
 
       const sessionID = output.messages[0]?.info.sessionID;
 
       try {
-        // Skip gradient transform for lore worker sessions (lore-distill, lore-curator).
-        // Worker sessions are small (typically 5-15 messages) and don't need context
-        // management. More importantly, allowing them through would overwrite the
-        // per-session state for the MAIN session if they happen to share a session ID —
-        // and before per-session state was introduced, module-level variables were
-        // corrupted this way, causing calibration oscillation and layer 0 passthrough
-        // on the main session's next step. Belt-and-suspenders: even with per-session
-        // state, worker sessions waste CPU on transform() for no benefit.
         if (sessionID && await shouldSkip(sessionID)) return;
 
-        // OpenCode's Message/Part types are a superset of Lore's internal types.
-        // Cast at the boundary — both are structurally compatible at runtime.
         const result = transform({
           messages: output.messages as unknown as LoreMessageWithParts[],
           projectPath,
           sessionID,
         });
 
-        // The API requires the conversation to end with a user message.
-        // Drop trailing pure-text assistant messages (no tool parts), which would
-        // cause an Anthropic "does not support assistant message prefill" error.
-        // This must run at ALL layers, including layer 0 (passthrough) — the error
-        // can occur even when messages fit within the context budget.
-        //
-        // Crucially, assistant messages that contain tool parts must NOT be dropped:
-        // - Completed/error tool parts: OpenCode's SDK converts these into tool_result
-        //   blocks sent as user-role messages at the API level. The conversation already
-        //   ends with a user message — dropping would strip the entire current agentic
-        //   turn and cause an infinite tool-call loop (the model restarts from scratch).
-        // - Note: pending/running tool parts are converted to error state upstream by
-        //   sanitizeToolParts() in gradient.ts, so by this point all tool parts have a
-        //   terminal state (completed or error) and will generate tool_result blocks.
-        //
-        // Note: at layer 0, result.messages === output.messages (same reference), so
-        // mutating result.messages here also trims output.messages in place — which is
-        // safe for prompt caching since we only ever remove trailing messages, never
-        // reorder or insert.
+        // Drop trailing pure-text assistant messages to prevent prefill error.
         while (
           result.messages.length > 0 &&
           result.messages.at(-1)!.info.role !== "user"
         ) {
           const last = result.messages.at(-1)!;
           const hasToolParts = last.parts.some((p) => p.type === "tool");
-          if (hasToolParts) {
-            // Tool parts → tool_result (user-role) at the API level → no prefill error.
-            // Stop dropping; the conversation ends correctly as-is.
-            break;
-          }
+          if (hasToolParts) break;
           const dropped = result.messages.pop()!;
           log.warn(
             "dropping trailing pure-text",
@@ -1342,13 +1240,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           );
         }
 
-        // Only restructure messages when the gradient transform is active (layers 1-4).
-        // Layer 0 means all messages fit within the context budget — leave them alone
-        // so the append-only sequence stays intact for prompt caching.
         if (result.layer > 0) {
-          // Cast back to OpenCode's message type — Lore's LoreMessageWithParts
-          // is a structural subset, and the gradient transform preserves all
-          // host-specific fields via spread operators on the original objects.
           output.messages.splice(
             0,
             output.messages.length,
@@ -1361,41 +1253,21 @@ export const LorePlugin: Plugin = async (ctx) => {
         }
       } catch (e) {
         log.error("messages transform: gradient transform failed:", e);
-        // output.messages untouched — session continues without context management
       }
     },
 
-    // Replace compaction prompt with distillation-aware prompt when /compact is used.
-    // Strategy: run chunked distillation first so all messages are captured in segments
-    // that each fit within the model's context, then inject the pre-computed summaries
-    // as context so the model consolidates them rather than re-reading all raw messages.
-    // Output format is the task-oriented SUMMARY_TEMPLATE from @loreai/core's
-    // buildCompactPrompt (Goal / Progress / Next Steps / Blocked / etc.), derived from
-    // upstream OpenCode's template so the next agent starting from the compacted
-    // context has a clear "where am I, what's next" briefing.
-    //
-    // F1b: when a prior /compact summary exists in the session (assistant
-    // message with `info.summary === true`), retrieve it via
-    // `findPreviousCompactSummary` and pass as `previousSummary` so the
-    // model UPDATES the anchored summary rather than re-deriving from
-    // scratch. Mirrors upstream's `<previous-summary>` behavior.
+    // Compaction — gateway handles distillation-aware prompt building when active.
     "experimental.session.compacting": async (input, output) => {
-      // Chunked distillation: split all undistilled messages into segments that each
-      // fit within the model's context window and distill them independently.
-      // This is safe even when the full session exceeds the context limit.
+      if (gatewayActive) return;
+
       if (input.sessionID && activeSessions.has(input.sessionID)) {
         await backgroundDistill(input.sessionID, true);
       }
 
-      // Load all distillation summaries produced for this session (oldest first).
-      // These are the chunked observations — the model will consolidate them.
       const distillations = input.sessionID
         ? distillation.loadForSession(projectPath, input.sessionID)
         : [];
 
-      // F1b anchor: find the prior /compact assistant summary (if any).
-      // SDK failure / no prior summary → undefined → byte-identical to
-      // pre-F1b prompt output.
       const previousSummary = input.sessionID
         ? await findPreviousCompactSummary(ctx.client, input.sessionID)
         : undefined;
@@ -1413,9 +1285,6 @@ export const LorePlugin: Plugin = async (ctx) => {
           )
         : "";
 
-      // Inject each distillation chunk as a context string so the model has access
-      // to pre-computed summaries. Even if the raw messages overflow context, these
-      // summaries are compact and will fit.
       if (distillations.length > 0) {
         output.context.push(
           `## Lore Pre-computed Session Summaries\n\nThe following ${distillations.length} summary chunk(s) were pre-computed from the conversation history. Use these as the authoritative source — do not re-summarize the raw messages above if they conflict.\n\n` +
