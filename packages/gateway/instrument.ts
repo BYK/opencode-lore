@@ -17,6 +17,41 @@ import * as Sentry from "@sentry/bun";
 import { log } from "@loreai/core";
 import { VERSION } from "./src/cli/version";
 
+/**
+ * Build-time debug ID for sourcemap resolution, injected by esbuild.
+ *
+ * During the build, esbuild's `define` replaces this identifier with a
+ * placeholder UUID string literal. After esbuild finishes, the build
+ * script replaces the placeholder with the real debug ID (derived from
+ * the sourcemap content hash). The same-length swap keeps sourcemap
+ * character positions valid.
+ */
+declare const __SENTRY_DEBUG_ID__: string | undefined;
+
+/**
+ * Register the build-time debug ID with the Sentry SDK's native discovery.
+ *
+ * The SDK reads `globalThis._sentryDebugIds` (a map of Error.stack → debugId)
+ * during event processing to populate `debug_meta.images`, which the server
+ * uses to match uploaded sourcemaps.
+ *
+ * This is the ESM-safe alternative to prepending an IIFE snippet — placing
+ * the registration here (inside the module, after all imports) is valid ESM
+ * and feeds the SDK's existing mechanism directly.
+ */
+if (typeof __SENTRY_DEBUG_ID__ !== "undefined") {
+  try {
+    const stack = new Error().stack;
+    if (stack) {
+      const g = globalThis as any;
+      g._sentryDebugIds = g._sentryDebugIds || {};
+      g._sentryDebugIds[stack] = __SENTRY_DEBUG_ID__;
+    }
+  } catch (_) {
+    // Non-critical — sourcemap resolution degrades gracefully
+  }
+}
+
 if (VERSION !== "dev" && !Sentry.isInitialized()) {
   Sentry.init({
     dsn: "https://0282201d6a3df3bc46423e61012ae62b@o275100.ingest.us.sentry.io/4511355222622208",

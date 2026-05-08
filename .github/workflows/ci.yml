@@ -58,6 +58,8 @@ jobs:
       # -----------------------------------------------------------------
       - name: Build npm bundle (CJS)
         run: bun run --filter '@loreai/gateway' bundle
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
       - name: Smoke-test npm bundle under Node.js
         run: |
@@ -86,6 +88,8 @@ jobs:
 
       - name: Build linux-x64 binary
         run: bun run --filter '@loreai/gateway' build:binary
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
       - name: Smoke-test standalone binary
         run: |
@@ -168,6 +172,8 @@ jobs:
           done
           echo "--- Release binaries: ---"
           ls -la packages/gateway/dist-bin/
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
       - name: Upload tarballs
         if: startsWith(github.ref, 'refs/heads/release/')
@@ -228,6 +234,8 @@ jobs:
           done
           echo "--- Nightly binaries: ---"
           ls -la packages/gateway/dist-bin/
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
       - name: Upload compressed artifacts
         uses: actions/upload-artifact@v4
