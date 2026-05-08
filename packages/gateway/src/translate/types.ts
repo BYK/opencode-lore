@@ -161,6 +161,48 @@ export type RecallStore = Map<string, StoredRecall>;
 // Session state — per-session tracking for Lore pipeline integration
 // ---------------------------------------------------------------------------
 
+/** Per-turn cache analysis emitted as structured log data. */
+export type CacheTurnAnalysis = {
+  /** Turn number within this session. */
+  turn: number;
+
+  // --- Ground truth from API response ---
+  /** Tokens served from prompt cache (hit). */
+  cacheRead: number;
+  /** Tokens written to prompt cache (miss / new). */
+  cacheCreation: number;
+  /** Uncached input tokens. */
+  inputTokens: number;
+  /** cacheRead / total input — 0..1. */
+  cacheHitRate: number;
+
+  // --- Request body prefix comparison ---
+  /** Bytes matching from start of serialized request body vs previous turn. */
+  prefixMatchBytes: number;
+  /** prefixMatchBytes / min(prev, current) body length — 0..1. */
+  prefixMatchPercent: number;
+  /** Semantic location of the first divergence (e.g. "messages[3].content[1]"). */
+  divergencePoint: string;
+  /** Human-readable reason (e.g. "system prompt changed", "new message appended"). */
+  divergenceReason: string;
+};
+
+/** Per-session cache analytics state. */
+export type CacheAnalytics = {
+  /** Deflate-compressed serialized request body from the last turn. */
+  lastRequestBody: Uint8Array | null;
+  /** Uncompressed byte length of lastRequestBody (for prefix match %). */
+  lastRequestBodyLength: number;
+  /** cache_read_input_tokens from last API response. */
+  lastCacheRead: number;
+  /** cache_creation_input_tokens from last API response. */
+  lastCacheCreation: number;
+  /** Total turns observed. */
+  turnCount: number;
+  /** Confirmed busts (API returned cacheRead=0 with cacheCreation>0). */
+  bustCount: number;
+};
+
 /** Per-session state tracked by the gateway for Lore pipeline decisions. */
 export type SessionState = {
   sessionID: string;
@@ -175,4 +217,6 @@ export type SessionState = {
   turnsSinceCuration: number;
   /** Stored recall results for marker-based round-trip expansion. */
   recallStore: RecallStore;
+  /** Cache analytics — request body prefix comparison + API cache fields. */
+  cacheAnalytics: CacheAnalytics;
 };

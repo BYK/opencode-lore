@@ -132,12 +132,7 @@ type SessionState = {
   postIdleCompact: boolean;
   /** Consecutive turns at layer >= 2. When >= 3, log a compaction hint. */
   consecutiveHighLayer: number;
-  /** Hash of the first message IDs in the last transform output — for cache-bust diagnostics. */
-  lastPrefixHash: string;
-  /** Cumulative cache-bust count for this session (prefix hash changed between turns). */
-  bustCount: number;
-  /** Total transform() calls for this session — used with bustCount for rate calculation. */
-  transformCount: number;
+
   /**
    * Distillation row snapshot — cached to avoid hitting the DB on every
    * transform() call. Refreshed only at turn boundaries (when a new user
@@ -170,9 +165,7 @@ function makeSessionState(): SessionState {
     cameOutOfIdle: false,
     postIdleCompact: false,
     consecutiveHighLayer: 0,
-    lastPrefixHash: "",
-    bustCount: 0,
-    transformCount: 0,
+
     distillationSnapshot: null,
   };
 }
@@ -1649,46 +1642,6 @@ export function transform(input: {
     // so the next-turn idle check has an accurate baseline. Done after the
     // result fields above so a thrown transformInner doesn't update it.
     state.lastTurnAt = Date.now();
-
-    // --- Cache-bust diagnostics ---
-    // Track byte-identity of the message prefix. When the prefix hash changes
-    // between consecutive turns, it means Anthropic's prompt cache is invalidated
-    // and the entire context is re-written (12.5× cache-read price). This helps
-    // identify which code paths are breaking byte-identity.
-    //
-    // Use a content-based fingerprint (role + text snippet) rather than message
-    // IDs, since IDs can be unstable (gateway generates fresh UUIDs, OpenCode
-    // may regenerate messages in-place). Content hashes are a better proxy for
-    // Anthropic's actual byte-identity cache.
-    const prefixFingerprint = result.messages.slice(0, 5).map((m) => {
-      const text = m.parts
-        .map((p) => {
-          if (isTextPart(p)) return p.text?.slice(0, 40) ?? "";
-          if (isReasoningPart(p)) return p.text?.slice(0, 40) ?? "";
-          return p.type;
-        })
-        .join("|");
-      return `${m.info.role}:${text.slice(0, 60)}`;
-    }).join(",");
-    const prefixHash = `${result.layer}:${prefixFingerprint}`;
-    state.transformCount++;
-    if (state.lastPrefixHash && state.lastPrefixHash !== prefixHash) {
-      state.bustCount++;
-      const rate = state.bustCount / state.transformCount;
-      log.info(
-        `cache-bust #${state.bustCount} (${(rate * 100).toFixed(0)}%): session=${sid}` +
-        ` layer=${state.lastLayer}→${result.layer}` +
-        ` msgs=${state.lastTransformedCount}→${result.messages.length}` +
-        ` prefix=${state.lastPrefixHash.slice(0, 30)}→${prefixHash.slice(0, 30)}`,
-      );
-      if (state.transformCount >= 20 && rate > 0.5) {
-        log.warn(
-          `HIGH BUST RATE: session ${sid} has ${(rate * 100).toFixed(0)}% bust rate` +
-          ` (${state.bustCount}/${state.transformCount} transforms)`,
-        );
-      }
-    }
-    state.lastPrefixHash = prefixHash;
 
     // --- Compaction hint ---
     if (result.layer >= 2) {
