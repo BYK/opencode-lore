@@ -1491,6 +1491,9 @@ export function loreMessagesToGateway(
           content.push({
             type: "thinking",
             thinking: (part as { text: string }).text ?? "",
+            ...((part as { signature?: string }).signature != null
+              ? { signature: (part as { signature?: string }).signature }
+              : undefined),
           });
           break;
         case "tool": {
