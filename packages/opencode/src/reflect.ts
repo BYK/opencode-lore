@@ -15,6 +15,13 @@ import {
   type LoreConfig,
 } from "@loreai/core";
 
+/** Git reminder appended to recall tool description for cache stability. */
+const GIT_REMINDER =
+  "\n\nWhen making git commits, always check if .lore.md " +
+  "has unstaged changes and include it in the commit. " +
+  "This file contains shared project knowledge managed " +
+  "by lore and must be version-controlled.";
+
 export function createRecallTool(
   projectPath: string,
   knowledgeEnabled = true,
@@ -22,7 +29,9 @@ export function createRecallTool(
   searchConfig?: LoreConfig["search"],
 ): ReturnType<typeof tool> {
   return tool({
-    description: RECALL_TOOL_DESCRIPTION,
+    description: knowledgeEnabled
+      ? RECALL_TOOL_DESCRIPTION + GIT_REMINDER
+      : RECALL_TOOL_DESCRIPTION,
     args: {
       query: tool.schema.string().describe(RECALL_PARAM_DESCRIPTIONS.query),
       scope: tool.schema

@@ -332,3 +332,196 @@ describe("buildAnthropicRequest — caching doesn't affect other fields", () => 
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// LTM as separate system block
+// ---------------------------------------------------------------------------
+
+describe("buildAnthropicRequest — LTM system block", () => {
+  test("LTM creates a second system block without cache_control", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: "1h",
+      ltmSystem: "## Long-term Knowledge\n\n* entry one\n* entry two",
+    });
+    const blocks = body.system as Array<Record<string, unknown>>;
+    expect(blocks).toHaveLength(2);
+
+    // Block 0: host prompt with 1h cache
+    expect(blocks[0].type).toBe("text");
+    expect(blocks[0].text).toBe("You are a helpful assistant.");
+    expect(blocks[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+
+    // Block 1: LTM — no cache_control
+    expect(blocks[1].type).toBe("text");
+    expect(blocks[1].text).toBe("## Long-term Knowledge\n\n* entry one\n* entry two");
+    expect(blocks[1].cache_control).toBeUndefined();
+  });
+
+  test("no LTM block when ltmSystem is undefined", () => {
+    const body = getBody(makeRequest(), { systemTTL: "1h" });
+    const blocks = body.system as Array<Record<string, unknown>>;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].text).toBe("You are a helpful assistant.");
+  });
+
+  test("no LTM block when ltmSystem is empty string", () => {
+    const body = getBody(makeRequest(), { systemTTL: "1h", ltmSystem: "" });
+    const blocks = body.system as Array<Record<string, unknown>>;
+    expect(blocks).toHaveLength(1);
+  });
+
+  test("LTM with 5m TTL uses ephemeral without ttl field on host block", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: "5m",
+      ltmSystem: "some knowledge",
+    });
+    const blocks = body.system as Array<Record<string, unknown>>;
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].cache_control).toEqual({ type: "ephemeral" });
+    expect(blocks[1].cache_control).toBeUndefined();
+  });
+
+  test("LTM concatenated as string when no caching", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: false,
+      ltmSystem: "some knowledge",
+    });
+    expect(typeof body.system).toBe("string");
+    expect(body.system).toBe("You are a helpful assistant.\n\nsome knowledge");
+  });
+
+  test("no LTM concatenation when ltmSystem undefined and no caching", () => {
+    const body = getBody(makeRequest(), { systemTTL: false });
+    expect(body.system).toBe("You are a helpful assistant.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool caching
+// ---------------------------------------------------------------------------
+
+describe("buildAnthropicRequest — tool caching", () => {
+  const reqWithTools = () =>
+    makeRequest({
+      tools: [
+        {
+          name: "bash",
+          description: "Run a command",
+          inputSchema: { type: "object" },
+        },
+        {
+          name: "recall",
+          description: "Search memory",
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+
+  test("last tool gets 1h cache_control when cacheTools is true", () => {
+    const body = getBody(reqWithTools(), { cacheTools: true });
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(2);
+
+    // First tool — no cache_control
+    expect(tools[0].cache_control).toBeUndefined();
+
+    // Last tool — 1h cache
+    expect(tools[1].cache_control).toEqual({
+      type: "ephemeral",
+      ttl: "1h",
+    });
+  });
+
+  test("no cache_control on tools when cacheTools is false", () => {
+    const body = getBody(reqWithTools(), { cacheTools: false });
+    const tools = body.tools as Array<Record<string, unknown>>;
+    for (const tool of tools) {
+      expect(tool.cache_control).toBeUndefined();
+    }
+  });
+
+  test("no cache_control on tools when cacheTools is undefined", () => {
+    const body = getBody(reqWithTools(), {});
+    const tools = body.tools as Array<Record<string, unknown>>;
+    for (const tool of tools) {
+      expect(tool.cache_control).toBeUndefined();
+    }
+  });
+
+  test("single tool gets cache_control when cacheTools is true", () => {
+    const req = makeRequest({
+      tools: [
+        {
+          name: "bash",
+          description: "Run a command",
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+    const body = getBody(req, { cacheTools: true });
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(1);
+    expect(tools[0].cache_control).toEqual({
+      type: "ephemeral",
+      ttl: "1h",
+    });
+  });
+
+  test("no tools array when request has no tools", () => {
+    const body = getBody(makeRequest(), { cacheTools: true });
+    expect(body.tools).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Combined: all cache layers (system 1h + LTM + tools 1h + conversation 5m)
+// ---------------------------------------------------------------------------
+
+describe("buildAnthropicRequest — full layered caching", () => {
+  test("all breakpoints set correctly in production config", () => {
+    const req = makeRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Hello" }] },
+        { role: "assistant", content: [{ type: "text", text: "Hi!" }] },
+        { role: "user", content: [{ type: "text", text: "More" }] },
+      ],
+      tools: [
+        {
+          name: "bash",
+          description: "Run a command",
+          inputSchema: { type: "object" },
+        },
+        {
+          name: "recall",
+          description: "Search memory",
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+    const body = getBody(req, {
+      systemTTL: "1h",
+      ltmSystem: "## Knowledge\n\n* gotcha one",
+      cacheTools: true,
+      cacheConversation: true,
+    });
+
+    // System: 2 blocks — host (1h BP) + LTM (no BP)
+    const system = body.system as Array<Record<string, unknown>>;
+    expect(system).toHaveLength(2);
+    expect(system[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(system[1].cache_control).toBeUndefined();
+
+    // Tools: last tool gets 1h BP
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools[0].cache_control).toBeUndefined();
+    expect(tools[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+
+    // Messages: last block of last message gets 5m BP
+    const messages = body.messages as Array<{
+      content: Array<Record<string, unknown>>;
+    }>;
+    const lastMsg = messages[messages.length - 1]!;
+    const lastBlock = lastMsg.content[lastMsg.content.length - 1]!;
+    expect(lastBlock.cache_control).toEqual({ type: "ephemeral" });
+  });
+});

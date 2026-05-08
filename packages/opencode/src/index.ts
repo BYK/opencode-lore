@@ -511,7 +511,40 @@ export const LorePlugin: Plugin = async (ctx) => {
   // — startup AGENTS.md import, pruneOversized, etc. all fire before the
   // hooks are registered, and a TDZ reference would fail the whole plugin.
   const ltmSessionCache = new Map<string, { formatted: string; tokenCount: number }>();
+
+  /**
+   * Pinned LTM text per session — the text currently being injected.
+   * When ltmSessionCache is invalidated and recomputed, we compare
+   * the new text against the pin. Only update if >5% character
+   * difference to avoid cache busts from minor BM25 re-ranking.
+   */
+  const ltmPinnedText = new Map<string, { formatted: string; tokenCount: number }>();
+
+  /**
+   * Measure character-level difference between two strings as a ratio (0..1).
+   * Uses a simple common-prefix + common-suffix heuristic.
+   */
+  function textDiffRatio(a: string, b: string): number {
+    if (a === b) return 0;
+    if (!a || !b) return 1;
+    const minLen = Math.min(a.length, b.length);
+    const maxLen = Math.max(a.length, b.length);
+    let common = 0;
+    for (let i = 0; i < minLen; i++) {
+      if (a[i] === b[i]) common++;
+      else break;
+    }
+    let suffix = 0;
+    for (let i = 0; i < minLen - common; i++) {
+      if (a[a.length - 1 - i] === b[b.length - 1 - i]) suffix++;
+      else break;
+    }
+    return 1 - (common + suffix) / maxLen;
+  }
+
   function invalidateLtmCache() {
+    // Only clear the computed cache — pins survive to enable content-diff
+    // comparison on the next turn's recomputation.
     ltmSessionCache.clear();
   }
 
@@ -521,7 +554,7 @@ export const LorePlugin: Plugin = async (ctx) => {
 
   try {
     await load(ctx.directory);
-    let firstRun = isFirstRun();
+    const firstRun = isFirstRun();
     ensureProject(projectPath);
 
   if (firstRun) {
@@ -1069,18 +1102,6 @@ export const LorePlugin: Plugin = async (ctx) => {
 
     // Inject LTM knowledge into system prompt — relevance-ranked and budget-capped.
     "experimental.chat.system.transform": async (input, output) => {
-      // One-time first-run note so the agent acknowledges Lore is active.
-      // Cleared after first injection to avoid repeating on subsequent turns.
-      if (firstRun) {
-        output.system.push(
-          "[Lore plugin] This is the first time Lore has been activated. " +
-          "Briefly let the user know that Lore is now active and their " +
-          "coding agent will get progressively smarter on this codebase " +
-          "over time as knowledge accumulates across sessions.",
-        );
-        firstRun = false;
-      }
-
       if (input.model?.limit) {
         setModelLimits(input.model.limit);
       }
@@ -1196,8 +1217,21 @@ export const LorePlugin: Plugin = async (ctx) => {
           }
 
           if (cached) {
-            setLtmTokens(cached.tokenCount, sessionID);
-            output.system.push(cached.formatted);
+            // Content-diff pinning: only update the injected LTM text if
+            // the new content differs by >5% from what's currently pinned.
+            // Prevents cache busts from minor BM25 re-ranking after
+            // background curation/consolidation.
+            const pinned = sessionID ? ltmPinnedText.get(sessionID) : undefined;
+            if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < 0.05) {
+              // Near-identical — keep pinned text to preserve cache prefix
+              setLtmTokens(pinned.tokenCount, sessionID);
+              output.system.push(pinned.formatted);
+            } else {
+              // Substantially different or first injection — pin the new text
+              if (sessionID) ltmPinnedText.set(sessionID, cached);
+              setLtmTokens(cached.tokenCount, sessionID);
+              output.system.push(cached.formatted);
+            }
           } else {
             setLtmTokens(0, sessionID);
           }
@@ -1222,19 +1256,9 @@ export const LorePlugin: Plugin = async (ctx) => {
         if (input.sessionID) consumeCameOutOfIdle(input.sessionID);
       }
 
-      // Remind the agent to include lore-managed files in commits.
-      // They are modified after the lore export runs (post-session) so they
-      // appear as unstaged when the agent goes to commit — the agent must not
-      // skip them just because they look auto-generated.
-      if (cfg.knowledge.enabled) {
-        const filesToTrack = [".lore.md"];
-        if (cfg.agentsFile.enabled) filesToTrack.push(cfg.agentsFile.path);
-        output.system.push(
-          `When making git commits, always check if ${filesToTrack.join(" and ")} ` +
-          `have unstaged changes and include them in the commit. These files contain ` +
-          `shared project knowledge managed by lore and must be version-controlled.`,
-        );
-      }
+      // Git reminder moved to recall tool description for cache stability.
+      // See reflect.ts — the reminder is appended to the recall tool's
+      // description, which is in the stable tools prefix (1h cache).
 
       // Cache-bust diagnostic: track system prompt byte-identity across turns.
       // When the system prompt changes between turns, it invalidates the entire
