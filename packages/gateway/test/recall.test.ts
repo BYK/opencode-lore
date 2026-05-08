@@ -16,16 +16,22 @@ import {
   hasRecallToolUse,
   hasOtherToolUse,
   clientHasRecallTool,
-  isPendingRecallValid,
   buildRecallFollowUp,
-  injectPendingRecall,
-  stripRecallFromResponse,
+  buildRecallMarker,
+  parseRecallMarker,
+  scopeToLabel,
+  labelToScope,
+  recallStoreKey,
+  expandRecallMarkers,
+  cleanupRecallStore,
+  replaceRecallWithMarker,
 } from "../src/recall";
 import type {
   GatewayResponse,
   GatewayRequest,
   GatewayToolUseBlock,
-  PendingRecall,
+  RecallStore,
+  StoredRecall,
 } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
@@ -75,15 +81,14 @@ function makeRecallToolUse(
   };
 }
 
-function makePendingRecall(
-  overrides: Partial<PendingRecall> = {},
-): PendingRecall {
+function makeStoredRecall(
+  overrides: Partial<StoredRecall> = {},
+): StoredRecall {
   return {
     toolUseId: "toolu_recall_1",
     input: { query: "test query", scope: "all" },
     position: 1,
     result: "## Recall Results\n* some result",
-    timestamp: Date.now(),
     ...overrides,
   };
 }
@@ -189,27 +194,89 @@ describe("clientHasRecallTool", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Pending recall TTL
+// Marker utilities
 // ---------------------------------------------------------------------------
 
-describe("isPendingRecallValid", () => {
-  test("returns true for fresh pending recall", () => {
-    const pending = makePendingRecall({ timestamp: Date.now() });
-    expect(isPendingRecallValid(pending)).toBe(true);
+describe("scopeToLabel / labelToScope", () => {
+  test("maps all scopes to labels", () => {
+    expect(scopeToLabel("all")).toBe("all archives");
+    expect(scopeToLabel("session")).toBe("session history");
+    expect(scopeToLabel("project")).toBe("project archives");
+    expect(scopeToLabel("knowledge")).toBe("knowledge base");
   });
 
-  test("returns false for expired pending recall", () => {
-    const pending = makePendingRecall({
-      timestamp: Date.now() - 120_000, // 2 minutes ago
-    });
-    expect(isPendingRecallValid(pending)).toBe(false);
+  test("defaults unknown scope to 'all archives'", () => {
+    expect(scopeToLabel("unknown")).toBe("all archives");
+    expect(scopeToLabel()).toBe("all archives");
   });
 
-  test("returns true for recall just within TTL", () => {
-    const pending = makePendingRecall({
-      timestamp: Date.now() - 50_000, // 50 seconds ago (TTL is 60s)
-    });
-    expect(isPendingRecallValid(pending)).toBe(true);
+  test("reverse maps labels back to scopes", () => {
+    expect(labelToScope("all archives")).toBe("all");
+    expect(labelToScope("session history")).toBe("session");
+    expect(labelToScope("project archives")).toBe("project");
+    expect(labelToScope("knowledge base")).toBe("knowledge");
+  });
+
+  test("defaults unknown label to 'all'", () => {
+    expect(labelToScope("unknown label")).toBe("all");
+  });
+});
+
+describe("buildRecallMarker", () => {
+  test("builds correct marker with default scope", () => {
+    expect(buildRecallMarker("test query")).toBe(
+      '📚 Searching all archives for "test query"…',
+    );
+  });
+
+  test("builds correct marker with explicit scope", () => {
+    expect(buildRecallMarker("auth flow", "session")).toBe(
+      '📚 Searching session history for "auth flow"…',
+    );
+    expect(buildRecallMarker("config", "project")).toBe(
+      '📚 Searching project archives for "config"…',
+    );
+    expect(buildRecallMarker("patterns", "knowledge")).toBe(
+      '📚 Searching knowledge base for "patterns"…',
+    );
+  });
+});
+
+describe("parseRecallMarker", () => {
+  test("parses a valid marker", () => {
+    const result = parseRecallMarker(
+      '📚 Searching all archives for "gradient cache"…',
+    );
+    expect(result).toEqual({ query: "gradient cache", scope: "all" });
+  });
+
+  test("parses markers with different scopes", () => {
+    expect(
+      parseRecallMarker('📚 Searching session history for "auth"…'),
+    ).toEqual({ query: "auth", scope: "session" });
+    expect(
+      parseRecallMarker('📚 Searching project archives for "config"…'),
+    ).toEqual({ query: "config", scope: "project" });
+    expect(
+      parseRecallMarker('📚 Searching knowledge base for "patterns"…'),
+    ).toEqual({ query: "patterns", scope: "knowledge" });
+  });
+
+  test("returns null for non-marker text", () => {
+    expect(parseRecallMarker("hello world")).toBeNull();
+    expect(parseRecallMarker("[Searching memory...]")).toBeNull();
+    expect(parseRecallMarker("")).toBeNull();
+  });
+});
+
+describe("recallStoreKey", () => {
+  test("creates key from query and scope", () => {
+    expect(recallStoreKey("test", "all")).toBe("all:test");
+    expect(recallStoreKey("test", "session")).toBe("session:test");
+  });
+
+  test("defaults scope to all", () => {
+    expect(recallStoreKey("test")).toBe("all:test");
   });
 });
 
@@ -280,17 +347,21 @@ describe("buildRecallFollowUp", () => {
 });
 
 // ---------------------------------------------------------------------------
-// injectPendingRecall
+// expandRecallMarkers
 // ---------------------------------------------------------------------------
 
-describe("injectPendingRecall", () => {
-  test("injects recall into assistant→user pair", () => {
+describe("expandRecallMarkers", () => {
+  test("expands marker in assistant message back to tool_use + tool_result", () => {
+    const store: RecallStore = new Map();
+    store.set(recallStoreKey("test query", "all"), makeStoredRecall());
+
     const req = makeRequest([
       { role: "user", content: [{ type: "text", text: "hello" }] },
       {
         role: "assistant",
         content: [
           { type: "text", text: "I'll read the file." },
+          { type: "text", text: buildRecallMarker("test query", "all") },
           { type: "tool_use", id: "toolu_1", name: "Read", input: { path: "/a" } },
         ],
       },
@@ -302,31 +373,44 @@ describe("injectPendingRecall", () => {
       },
     ]);
 
-    const pending = makePendingRecall({ position: 1 });
-    const result = injectPendingRecall(req, pending);
+    const result = expandRecallMarkers(req, store);
 
     expect(result).toBe(true);
 
-    // Assistant message should now have recall tool_use at position 1
+    // Assistant message should now have recall tool_use replacing the marker
     const assistant = req.messages[1];
     expect(assistant.content).toHaveLength(3);
     expect(assistant.content[1].type).toBe("tool_use");
     expect((assistant.content[1] as GatewayToolUseBlock).name).toBe("recall");
 
-    // User message should have recall tool_result prepended
+    // User message should have recall tool_result inserted
     const user = req.messages[2];
     expect(user.content).toHaveLength(2);
     expect(user.content[0].type).toBe("tool_result");
     expect((user.content[0] as { toolUseId: string }).toolUseId).toBe(
-      pending.toolUseId,
+      "toolu_recall_1",
     );
   });
 
-  test("clamps position to content length", () => {
+  test("returns false when no markers found", () => {
+    const store: RecallStore = new Map();
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "just text" }],
+      },
+    ]);
+
+    expect(expandRecallMarkers(req, store)).toBe(false);
+  });
+
+  test("returns false when marker present but no store entry", () => {
+    const store: RecallStore = new Map(); // empty
     const req = makeRequest([
       {
         role: "assistant",
-        content: [{ type: "text", text: "hello" }],
+        content: [{ type: "text", text: buildRecallMarker("unknown", "all") }],
       },
       {
         role: "user",
@@ -334,73 +418,214 @@ describe("injectPendingRecall", () => {
       },
     ]);
 
-    const pending = makePendingRecall({ position: 99 }); // Way beyond content length
-    const result = injectPendingRecall(req, pending);
-
-    expect(result).toBe(true);
-    // Should be appended at the end
-    const assistant = req.messages[0];
-    expect(assistant.content).toHaveLength(2);
-    expect(assistant.content[1].type).toBe("tool_use");
+    expect(expandRecallMarkers(req, store)).toBe(false);
   });
 
-  test("returns false when no assistant→user pair", () => {
-    const req = makeRequest([
-      { role: "user", content: [{ type: "text", text: "hello" }] },
-    ]);
-    const pending = makePendingRecall();
-    expect(injectPendingRecall(req, pending)).toBe(false);
-  });
-
-  test("returns false with too few messages", () => {
+  test("returns false with empty messages", () => {
+    const store: RecallStore = new Map();
+    store.set(recallStoreKey("test", "all"), makeStoredRecall());
     const req = makeRequest([]);
-    const pending = makePendingRecall();
-    expect(injectPendingRecall(req, pending)).toBe(false);
+
+    expect(expandRecallMarkers(req, store)).toBe(false);
   });
 
-  test("strips recall from tools list", () => {
-    const req = makeRequest(
-      [
-        {
-          role: "assistant",
-          content: [{ type: "text", text: "hello" }],
-        },
-        {
-          role: "user",
-          content: [{ type: "text", text: "thanks" }],
-        },
-      ],
-      [
-        { name: "Read", description: "Read", inputSchema: {} },
-        { name: "recall", description: "Recall", inputSchema: {} },
-      ],
+  test("splits assistant message when continuation text follows marker (recall-only)", () => {
+    const store: RecallStore = new Map();
+    store.set(recallStoreKey("arch query", "all"), makeStoredRecall({
+      toolUseId: "toolu_recall_split",
+      input: { query: "arch query", scope: "all" },
+      result: "Found: architecture docs",
+    }));
+
+    // Simulate recall-only with follow-up: the client sees one assistant
+    // message with marker + continuation text from the follow-up.
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "tell me about arch" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: buildRecallMarker("arch query", "all") },
+          { type: "text", text: "Based on the architecture docs, here's what I found..." },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "thanks, tell me more" }] },
+    ]);
+
+    const result = expandRecallMarkers(req, store);
+    expect(result).toBe(true);
+
+    // Should split into: assistant[tool_use] → user[tool_result] → assistant[continuation] → user[next]
+    expect(req.messages).toHaveLength(5);
+
+    // Message 1: assistant with just the tool_use (truncated)
+    expect(req.messages[1].role).toBe("assistant");
+    expect(req.messages[1].content).toHaveLength(1);
+    expect(req.messages[1].content[0].type).toBe("tool_use");
+    expect((req.messages[1].content[0] as GatewayToolUseBlock).id).toBe("toolu_recall_split");
+
+    // Message 2: synthetic user with tool_result
+    expect(req.messages[2].role).toBe("user");
+    expect(req.messages[2].content).toHaveLength(1);
+    expect(req.messages[2].content[0].type).toBe("tool_result");
+    expect((req.messages[2].content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_split");
+    expect((req.messages[2].content[0] as { content: string }).content).toBe("Found: architecture docs");
+
+    // Message 3: continuation assistant message
+    expect(req.messages[3].role).toBe("assistant");
+    expect(req.messages[3].content).toHaveLength(1);
+    expect((req.messages[3].content[0] as { text: string }).text).toBe(
+      "Based on the architecture docs, here's what I found...",
     );
 
-    const pending = makePendingRecall();
-    injectPendingRecall(req, pending);
+    // Message 4: original next user message (unchanged)
+    expect(req.messages[4].role).toBe("user");
+    expect((req.messages[4].content[0] as { text: string }).text).toBe("thanks, tell me more");
+  });
 
-    expect(req.tools).toHaveLength(1);
-    expect(req.tools[0].name).toBe("Read");
+  test("does NOT split when content after marker is only tool_use blocks (mixed tools)", () => {
+    const store: RecallStore = new Map();
+    store.set(recallStoreKey("mixed query", "all"), makeStoredRecall({
+      toolUseId: "toolu_recall_mixed",
+      input: { query: "mixed query", scope: "all" },
+    }));
+
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "search and read" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I'll search and read." },
+          { type: "text", text: buildRecallMarker("mixed query", "all") },
+          { type: "tool_use", id: "toolu_read_1", name: "Read", input: { path: "/a" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", toolUseId: "toolu_read_1", content: "file content" },
+        ],
+      },
+    ]);
+
+    const result = expandRecallMarkers(req, store);
+    expect(result).toBe(true);
+
+    // Should NOT split — tool_use blocks stay in the same message
+    expect(req.messages).toHaveLength(3);
+
+    const assistant = req.messages[1];
+    expect(assistant.content).toHaveLength(3); // text + recall tool_use + Read tool_use
+    expect(assistant.content[1].type).toBe("tool_use");
+    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe("recall");
+    expect(assistant.content[2].type).toBe("tool_use");
+    expect((assistant.content[2] as GatewayToolUseBlock).name).toBe("Read");
+
+    // User message has recall tool_result prepended
+    const user = req.messages[2];
+    expect(user.content).toHaveLength(2);
+    expect((user.content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_mixed");
+    expect((user.content[1] as { toolUseId: string }).toolUseId).toBe("toolu_read_1");
+  });
+
+  test("expands markers across multiple assistant messages", () => {
+    const store: RecallStore = new Map();
+    store.set(recallStoreKey("query1", "all"), makeStoredRecall({
+      toolUseId: "toolu_recall_1",
+      input: { query: "query1", scope: "all" },
+    }));
+    store.set(recallStoreKey("query2", "session"), makeStoredRecall({
+      toolUseId: "toolu_recall_2",
+      input: { query: "query2", scope: "session" },
+    }));
+
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "first" }] },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: buildRecallMarker("query1", "all") }],
+      },
+      { role: "user", content: [{ type: "text", text: "second" }] },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: buildRecallMarker("query2", "session") }],
+      },
+      { role: "user", content: [{ type: "text", text: "third" }] },
+    ]);
+
+    const result = expandRecallMarkers(req, store);
+    expect(result).toBe(true);
+
+    // Both assistant messages should have tool_use blocks
+    expect(req.messages[1].content[0].type).toBe("tool_use");
+    expect((req.messages[1].content[0] as GatewayToolUseBlock).id).toBe("toolu_recall_1");
+    expect(req.messages[3].content[0].type).toBe("tool_use");
+    expect((req.messages[3].content[0] as GatewayToolUseBlock).id).toBe("toolu_recall_2");
+
+    // Both following user messages should have tool_results inserted
+    expect(req.messages[2].content[0].type).toBe("tool_result");
+    expect((req.messages[2].content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_1");
+    expect(req.messages[4].content[0].type).toBe("tool_result");
+    expect((req.messages[4].content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_2");
   });
 });
 
 // ---------------------------------------------------------------------------
-// stripRecallFromResponse
+// cleanupRecallStore
 // ---------------------------------------------------------------------------
 
-describe("stripRecallFromResponse", () => {
-  test("removes recall tool_use blocks", () => {
+describe("cleanupRecallStore", () => {
+  test("removes orphaned entries", () => {
+    const store: RecallStore = new Map();
+    store.set(recallStoreKey("active", "all"), makeStoredRecall());
+    store.set(recallStoreKey("orphaned", "all"), makeStoredRecall());
+
+    const req = makeRequest([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: buildRecallMarker("active", "all") }],
+      },
+      { role: "user", content: [{ type: "text", text: "next" }] },
+    ]);
+
+    cleanupRecallStore(req, store);
+
+    expect(store.size).toBe(1);
+    expect(store.has(recallStoreKey("active", "all"))).toBe(true);
+    expect(store.has(recallStoreKey("orphaned", "all"))).toBe(false);
+  });
+
+  test("no-op on empty store", () => {
+    const store: RecallStore = new Map();
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+    ]);
+
+    cleanupRecallStore(req, store);
+    expect(store.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// replaceRecallWithMarker
+// ---------------------------------------------------------------------------
+
+describe("replaceRecallWithMarker", () => {
+  test("replaces recall tool_use with marker text", () => {
     const resp = makeResponse([
       { type: "text", text: "hello" },
-      makeRecallToolUse(),
+      makeRecallToolUse("find config", "project"),
       { type: "tool_use", id: "toolu_1", name: "Read", input: {} },
     ]);
 
-    const stripped = stripRecallFromResponse(resp);
-    expect(stripped.content).toHaveLength(2);
-    expect(stripped.content[0].type).toBe("text");
-    expect(stripped.content[1].type).toBe("tool_use");
-    expect((stripped.content[1] as GatewayToolUseBlock).name).toBe("Read");
+    const replaced = replaceRecallWithMarker(resp);
+    expect(replaced.content).toHaveLength(3);
+    expect(replaced.content[0].type).toBe("text");
+    expect(replaced.content[1].type).toBe("text");
+    expect((replaced.content[1] as { text: string }).text).toBe(
+      buildRecallMarker("find config", "project"),
+    );
+    expect(replaced.content[2].type).toBe("tool_use");
+    expect((replaced.content[2] as GatewayToolUseBlock).name).toBe("Read");
   });
 
   test("returns same content when no recall present", () => {
@@ -409,27 +634,29 @@ describe("stripRecallFromResponse", () => {
       { type: "tool_use", id: "toolu_1", name: "Read", input: {} },
     ]);
 
-    const stripped = stripRecallFromResponse(resp);
-    expect(stripped.content).toHaveLength(2);
+    const replaced = replaceRecallWithMarker(resp);
+    expect(replaced.content).toHaveLength(2);
   });
 
   test("does not mutate original response", () => {
     const recallBlock = makeRecallToolUse();
     const resp = makeResponse([recallBlock]);
 
-    const stripped = stripRecallFromResponse(resp);
+    const replaced = replaceRecallWithMarker(resp);
     expect(resp.content).toHaveLength(1);
-    expect(stripped.content).toHaveLength(0);
+    expect(resp.content[0].type).toBe("tool_use");
+    expect(replaced.content).toHaveLength(1);
+    expect(replaced.content[0].type).toBe("text");
   });
 
   test("preserves non-content fields", () => {
     const resp = makeResponse([makeRecallToolUse()]);
     resp.usage.inputTokens = 999;
 
-    const stripped = stripRecallFromResponse(resp);
-    expect(stripped.id).toBe(resp.id);
-    expect(stripped.model).toBe(resp.model);
-    expect(stripped.stopReason).toBe(resp.stopReason);
-    expect(stripped.usage.inputTokens).toBe(999);
+    const replaced = replaceRecallWithMarker(resp);
+    expect(replaced.id).toBe(resp.id);
+    expect(replaced.model).toBe(resp.model);
+    expect(replaced.stopReason).toBe(resp.stopReason);
+    expect(replaced.usage.inputTokens).toBe(999);
   });
 });

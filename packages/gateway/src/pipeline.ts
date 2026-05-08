@@ -100,10 +100,12 @@ import {
   hasRecallToolUse,
   hasOtherToolUse,
   clientHasRecallTool,
-  isPendingRecallValid,
-  injectPendingRecall,
   buildRecallFollowUp,
-  stripRecallFromResponse,
+  buildRecallMarker,
+  recallStoreKey,
+  expandRecallMarkers,
+  cleanupRecallStore,
+  replaceRecallWithMarker,
 } from "./recall";
 
 // ---------------------------------------------------------------------------
@@ -298,17 +300,15 @@ function getOrCreateSession(
       lastRequestTime: Date.now(),
       messageCount: 0,
       turnsSinceCuration: 0,
+      recallStore: new Map(),
     };
     sessions.set(sessionID, state);
   }
   state.lastRequestTime = Date.now();
 
-  // Lazy cleanup: discard expired pending recall on access
-  if (state.pendingRecall && !isPendingRecallValid(state.pendingRecall)) {
-    log.warn(
-      `lazy cleanup: discarding expired pending recall for session ${sessionID.slice(0, 16)}`,
-    );
-    state.pendingRecall = undefined;
+  // Ensure recallStore exists (upgrade from older session state)
+  if (!state.recallStore) {
+    state.recallStore = new Map();
   }
 
   return state;
@@ -483,44 +483,46 @@ function buildStreamingResponse(
               recallContext.sessionState.sessionID,
             );
 
+            const scope = input.scope ?? "all";
+
+            // Store recall result for marker round-trip expansion
+            const storeKey = recallStoreKey(input.query, scope);
+            const position = resp.content.indexOf(recallBlock);
+            recallContext.sessionState.recallStore.set(storeKey, {
+              toolUseId: recallBlock.id,
+              input,
+              position,
+              result,
+            });
+
+            // Emit marker text block in place of the suppressed recall block
+            const markerText = buildRecallMarker(input.query, scope);
+            const markerIdx = recallAccum.clientBlockCount();
+            const syntheticMarker = [
+              formatSSEEvent("content_block_start", JSON.stringify({
+                type: "content_block_start",
+                index: markerIdx,
+                content_block: { type: "text", text: "" },
+              })),
+              formatSSEEvent("content_block_delta", JSON.stringify({
+                type: "content_block_delta",
+                index: markerIdx,
+                delta: { type: "text_delta", text: markerText },
+              })),
+              formatSSEEvent("content_block_stop", JSON.stringify({
+                type: "content_block_stop",
+                index: markerIdx,
+              })),
+            ].join("");
+            controller.enqueue(encoder.encode(syntheticMarker));
+
             if (recallAccum.hasOtherTools()) {
-              // Case 2: mixed tools — store pending, forward held-back events
-              const position = resp.content.indexOf(recallBlock);
-              recallContext.sessionState.pendingRecall = {
-                toolUseId: recallBlock.id,
-                input,
-                position,
-                result,
-                timestamp: Date.now(),
-              };
+              // Forward held-back events, close stream
               log.info(
-                `recall (stream, mixed): stored pending result for session ` +
+                `recall (stream, mixed): stored result for session ` +
                   `${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
 
-              // Emit a synthetic "[Searching memory...]" text block after all
-              // other tool blocks. The accumulator already re-indexed other
-              // tools to fill the gap, so this goes at clientBlockCount.
-              const searchingIdx = recallAccum.clientBlockCount();
-              const syntheticCase2 = [
-                formatSSEEvent("content_block_start", JSON.stringify({
-                  type: "content_block_start",
-                  index: searchingIdx,
-                  content_block: { type: "text", text: "" },
-                })),
-                formatSSEEvent("content_block_delta", JSON.stringify({
-                  type: "content_block_delta",
-                  index: searchingIdx,
-                  delta: { type: "text_delta", text: "\n\n[Searching memory...]" },
-                })),
-                formatSSEEvent("content_block_stop", JSON.stringify({
-                  type: "content_block_stop",
-                  index: searchingIdx,
-                })),
-              ].join("");
-              controller.enqueue(encoder.encode(syntheticCase2));
-
-              // Forward the held-back message_delta + message_stop
               const heldBack = recallAccum.heldBackEvents();
               if (heldBack) {
                 controller.enqueue(encoder.encode(heldBack));
@@ -528,39 +530,17 @@ function buildStreamingResponse(
 
               controller.close();
 
-              // Post-stream: use stripped response for temporal storage
-              const cleanResp = stripRecallFromResponse(resp);
-              onComplete(cleanResp);
+              // Post-stream: store response with marker text (not raw tool_use)
+              const markerResp = replaceRecallWithMarker(resp);
+              onComplete(markerResp);
               return;
             }
 
-            // Case 1: recall-only — send follow-up, pipe continuation
+            // Recall-only — send follow-up, pipe continuation
             log.info(
               `recall (stream, only): executing follow-up for session ` +
                 `${recallContext.sessionState.sessionID.slice(0, 16)}`,
             );
-
-            // Emit a synthetic "[Searching memory...]" text block at the
-            // suppressed recall index so the client sees a natural indicator
-            // during the pause while the recall executes.
-            const searchingIndex = recallAccum.clientBlockCount();
-            const syntheticBlock = [
-              formatSSEEvent("content_block_start", JSON.stringify({
-                type: "content_block_start",
-                index: searchingIndex,
-                content_block: { type: "text", text: "" },
-              })),
-              formatSSEEvent("content_block_delta", JSON.stringify({
-                type: "content_block_delta",
-                index: searchingIndex,
-                delta: { type: "text_delta", text: "\n\n[Searching memory...]" },
-              })),
-              formatSSEEvent("content_block_stop", JSON.stringify({
-                type: "content_block_stop",
-                index: searchingIndex,
-              })),
-            ].join("");
-            controller.enqueue(encoder.encode(syntheticBlock));
 
             const followUp = buildRecallFollowUp(
               recallContext.modifiedReq,
@@ -568,11 +548,32 @@ function buildStreamingResponse(
               result,
               recallBlock,
             );
-            const followUpResponse = await forwardToUpstream(
-              followUp,
-              recallContext.config,
-              undefined,
-              recallContext.cacheOptions,
+            let followUpResponse: Response;
+            try {
+              followUpResponse = await forwardToUpstream(
+                followUp,
+                recallContext.config,
+                undefined,
+                recallContext.cacheOptions,
+              );
+            } catch (fetchErr) {
+              log.error(
+                `recall follow-up fetch error for session ${recallContext.sessionState.sessionID.slice(0, 16)}:`,
+                fetchErr,
+              );
+              const heldBack = recallAccum.heldBackEvents();
+              if (heldBack) {
+                controller.enqueue(encoder.encode(heldBack));
+              }
+              controller.close();
+              const markerResp = replaceRecallWithMarker(resp);
+              onComplete(markerResp);
+              return;
+            }
+
+            log.info(
+              `recall follow-up response: status=${followUpResponse.status} ` +
+                `hasBody=${!!followUpResponse.body} session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
             );
 
             if (!followUpResponse.ok) {
@@ -586,22 +587,21 @@ function buildStreamingResponse(
                 controller.enqueue(encoder.encode(heldBack));
               }
               controller.close();
-              const cleanResp = stripRecallFromResponse(resp);
-              onComplete(cleanResp);
+              const markerResp = replaceRecallWithMarker(resp);
+              onComplete(markerResp);
               return;
             }
 
             // Pipe the continuation stream into the same HTTP response.
             // Suppress message_start (client already has one) and re-index
             // content blocks to continue from where the client left off.
-            // +1 accounts for the synthetic "[Searching memory...]" block.
-            // Use clientBlockCount (not recallBlockIndex) — this is the number
-            // of blocks the client has already seen, so continuation blocks
-            // start at clientBlockCount + 1 (for the synthetic block).
+            // +1 accounts for the synthetic marker block.
             const blockOffset = recallAccum.clientBlockCount() + 1;
             const contReader = followUpResponse.body!.getReader();
+            let contEventCount = 0;
 
             for await (const { event: contEvent, data: contData } of parseSSEStream(contReader)) {
+              contEventCount++;
               if (contEvent === "message_start") {
                 // Suppress — client already received one
                 continue;
@@ -634,19 +634,18 @@ function buildStreamingResponse(
               controller.enqueue(encoder.encode(forwarded));
             }
 
+            log.info(
+              `recall follow-up stream complete: ${contEventCount} events piped, ` +
+                `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
+            );
+
             controller.close();
 
-            // Post-stream: accumulate the continuation for temporal storage.
-            // We use resp (original) + continuation for a complete picture,
-            // but for simplicity just store the continuation response since
-            // it's what the model actually produced for the client.
-            // The continuation accumulator was not wired — use the original
-            // response's pre-recall content + continuation's content.
-            // For now, call onComplete with the original response so at least
-            // the pre-recall content is stored. The continuation's text is
-            // visible to the client but not separately stored — acceptable
-            // since temporal storage captures the full conversation on next turn.
-            onComplete(resp);
+            // Post-stream: store response with marker text for temporal storage.
+            // The marker replaces the raw tool_use, so future turns can
+            // round-trip the marker ↔ tool_use/tool_result correctly.
+            const markerResp = replaceRecallWithMarker(resp);
+            onComplete(markerResp);
             return;
           }
         }
@@ -1079,25 +1078,18 @@ async function handleConversationTurn(
   // Track session model for worker model discovery
   lastSeenSessionModel = req.model;
 
-  // --- Inject pending recall from previous turn (Case 2: mixed tools) ---
-  if (sessionState.pendingRecall) {
-    if (isPendingRecallValid(sessionState.pendingRecall)) {
-      const injected = injectPendingRecall(req, sessionState.pendingRecall);
-      if (injected) {
-        log.info(
-          `injected pending recall result into request for session ${sessionID.slice(0, 16)}`,
-        );
-      } else {
-        log.warn(
-          `failed to inject pending recall — conversation structure mismatch`,
-        );
-      }
-    } else {
-      log.warn(
-        `discarding expired pending recall for session ${sessionID.slice(0, 16)}`,
+  // --- Expand recall markers from previous turns ---
+  // Scan all assistant messages for marker text blocks and restore them
+  // to tool_use + tool_result pairs before forwarding upstream.
+  if (sessionState.recallStore.size > 0) {
+    const expanded = expandRecallMarkers(req, sessionState.recallStore);
+    if (expanded) {
+      log.info(
+        `expanded recall markers for session ${sessionID.slice(0, 16)}`,
       );
     }
-    sessionState.pendingRecall = undefined;
+    // Clean up orphaned store entries (markers evicted by gradient)
+    cleanupRecallStore(req, sessionState.recallStore);
   }
 
   log.info(
@@ -1292,30 +1284,33 @@ async function handleConversationTurn(
       sessionState.sessionID,
     );
 
+    // Store recall result for marker round-trip expansion
+    const storeKey = recallStoreKey(input.query, input.scope ?? "all");
+    const position = resp.content.indexOf(recallBlock);
+    sessionState.recallStore.set(storeKey, {
+      toolUseId: recallBlock.id,
+      input,
+      position,
+      result,
+    });
+
+    // Replace recall tool_use with marker text in the response
+    const markerResp = replaceRecallWithMarker(resp);
+
     if (hasOtherToolUse(resp)) {
-      // Case 2: recall + other tools — store pending, strip recall from response
-      const position = resp.content.indexOf(recallBlock);
-      sessionState.pendingRecall = {
-        toolUseId: recallBlock.id,
-        input,
-        position,
-        result,
-        timestamp: Date.now(),
-      };
+      // Mixed tools — return response with marker replacing recall tool_use
       log.info(
-        `recall (non-stream, mixed): stored pending result for session ${sessionState.sessionID.slice(0, 16)}`,
+        `recall (non-stream, mixed): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
       );
-      const cleanResp = stripRecallFromResponse(resp);
-      postResponse(req, cleanResp, sessionState, config);
-      return nonStreamHttpResponse(cleanResp);
+      postResponse(req, markerResp, sessionState, config);
+      return nonStreamHttpResponse(markerResp);
     }
 
-    // Case 1: recall-only — send follow-up request
+    // Recall-only — send follow-up request for seamless UX
     log.info(
       `recall (non-stream, only): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
     );
     const followUp = buildRecallFollowUp(modifiedReq, resp, result, recallBlock);
-    // Strip recall from the follow-up tools (already done by buildRecallFollowUp)
     const followUpResponse = await forwardToUpstream(
       followUp,
       config,
@@ -1328,10 +1323,9 @@ async function handleConversationTurn(
       log.error(
         `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
       );
-      // Fall back to the original response without recall
-      const cleanResp = stripRecallFromResponse(resp);
-      postResponse(req, cleanResp, sessionState, config);
-      return nonStreamHttpResponse(cleanResp);
+      // Fall back to response with marker (no continuation)
+      postResponse(req, markerResp, sessionState, config);
+      return nonStreamHttpResponse(markerResp);
     }
 
     const continuationResp = await accumulateNonStreamResponse(followUpResponse);

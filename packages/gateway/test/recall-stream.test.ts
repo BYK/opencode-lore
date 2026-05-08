@@ -15,10 +15,12 @@ import {
 } from "../src/stream/anthropic";
 import {
   findRecallToolUse,
-  injectPendingRecall,
-  stripRecallFromResponse,
+  replaceRecallWithMarker,
+  expandRecallMarkers,
+  recallStoreKey,
+  buildRecallMarker,
 } from "../src/recall";
-import type { GatewayRequest, GatewayToolUseBlock } from "../src/translate/types";
+import type { GatewayRequest, GatewayToolUseBlock, RecallStore } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // Helpers: build SSE events matching Anthropic's streaming format
@@ -661,25 +663,32 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     expect(recallBlock!.id).toBe("toolu_recall_1");
     expect(recallBlock!.name).toBe("recall");
 
-    // --- Step 4: Strip recall from response for post-processing ---
-    const cleanResp = stripRecallFromResponse(resp);
-    expect(cleanResp.content).toHaveLength(2); // text + Read only
-    expect(cleanResp.content.every((b) => {
+    // --- Step 4: Replace recall with marker in response for post-processing ---
+    const markerResp = replaceRecallWithMarker(resp);
+    expect(markerResp.content).toHaveLength(3); // text + marker text + Read
+    expect(markerResp.content[1].type).toBe("text");
+    expect((markerResp.content[1] as { text: string }).text).toBe(
+      buildRecallMarker("gateway architecture", "all"),
+    );
+    // No recall tool_use blocks remain
+    expect(markerResp.content.every((b) => {
       if (b.type === "tool_use") return (b as GatewayToolUseBlock).name !== "recall";
       return true;
     })).toBe(true);
 
-    // --- Step 5: Simulate pending recall storage ---
-    const pendingRecall = {
+    // --- Step 5: Store recall result in recallStore ---
+    const store: RecallStore = new Map();
+    const storeKey = recallStoreKey("gateway architecture", "all");
+    store.set(storeKey, {
       toolUseId: recallBlock!.id,
       input: { query: "gateway architecture" },
       position: accum.recallBlockIndex(),
       result: "Found: gateway uses Anthropic protocol, recall interception is transparent",
-      timestamp: Date.now(),
-    };
+    });
 
-    // --- Step 6: Inject into next request ---
-    // Simulate the next request: client sends tool_result for Read
+    // --- Step 6: Expand markers in next request ---
+    // Simulate the next request: client sends tool_result for Read,
+    // and the assistant message contains the marker text (not raw tool_use)
     const nextReq: GatewayRequest = {
       model: "claude-sonnet-4-20250514",
       protocol: "anthropic",
@@ -690,7 +699,8 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
           role: "assistant",
           content: [
             { type: "text", text: "Let me search memory and read the file." },
-            // Client only saw Read at index 1 (recall was suppressed)
+            { type: "text", text: buildRecallMarker("gateway architecture", "all") },
+            // Client only saw Read at index 1 (recall was suppressed, marker emitted)
             { type: "tool_use", id: "toolu_read_1", name: "Read", input: { path: "/src/index.ts" } },
           ],
         },
@@ -711,10 +721,10 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       rawHeaders: {},
     };
 
-    const injected = injectPendingRecall(nextReq, pendingRecall);
-    expect(injected).toBe(true);
+    const expanded = expandRecallMarkers(nextReq, store);
+    expect(expanded).toBe(true);
 
-    // Assistant message should now have recall tool_use at position 1
+    // Assistant message should now have recall tool_use replacing the marker
     const assistantMsg = nextReq.messages[1];
     expect(assistantMsg.content).toHaveLength(3); // text + recall + Read
     expect(assistantMsg.content[0].type).toBe("text");
@@ -724,17 +734,13 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     expect(assistantMsg.content[2].type).toBe("tool_use");
     expect((assistantMsg.content[2] as GatewayToolUseBlock).name).toBe("Read");
 
-    // User message should have recall tool_result prepended before Read tool_result
+    // User message should have recall tool_result inserted before Read tool_result
     const userMsg = nextReq.messages[2];
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[0].type).toBe("tool_result");
     expect((userMsg.content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_1");
     expect(userMsg.content[1].type).toBe("tool_result");
     expect((userMsg.content[1] as { toolUseId: string }).toolUseId).toBe("toolu_read_1");
-
-    // Recall tool should be stripped from tools list
-    expect(nextReq.tools).toHaveLength(1);
-    expect(nextReq.tools[0].name).toBe("Read");
   });
 
   test("pending recall with multiple other tools — correct injection order", () => {
@@ -771,20 +777,22 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     expect(blockStarts[1].data.index).toBe(1); // Read re-indexed from 2
     expect(blockStarts[2].data.index).toBe(2); // Bash re-indexed from 3
 
-    // Extract and build pending
+    // Extract recall and store result
     const resp = accum.getResponse();
     const recallBlock = findRecallToolUse(resp);
     expect(recallBlock).toBeDefined();
 
-    const pendingRecall = {
+    const store: RecallStore = new Map();
+    const storeKey = recallStoreKey("patterns", "all");
+    store.set(storeKey, {
       toolUseId: recallBlock!.id,
       input: { query: "patterns" },
       position: accum.recallBlockIndex(),
       result: "Found patterns info",
-      timestamp: Date.now(),
-    };
+    });
 
-    // Next request: client provides tool_results for Read and Bash
+    // Next request: client provides tool_results for Read and Bash,
+    // assistant message has marker text instead of recall tool_use
     const nextReq: GatewayRequest = {
       model: "claude-sonnet-4-20250514",
       protocol: "anthropic",
@@ -795,6 +803,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
           role: "assistant",
           content: [
             { type: "text", text: "I'll search, read, and run." },
+            { type: "text", text: buildRecallMarker("patterns", "all") },
             { type: "tool_use", id: "toolu_read_2", name: "Read", input: {} },
             { type: "tool_use", id: "toolu_bash_1", name: "Bash", input: { command: "ls" } },
           ],
@@ -818,10 +827,10 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       rawHeaders: {},
     };
 
-    const injected = injectPendingRecall(nextReq, pendingRecall);
-    expect(injected).toBe(true);
+    const expanded = expandRecallMarkers(nextReq, store);
+    expect(expanded).toBe(true);
 
-    // Assistant: text + recall(inserted at position 1) + Read + Bash
+    // Assistant: text + recall(replacing marker) + Read + Bash
     const assistantMsg = nextReq.messages[1];
     expect(assistantMsg.content).toHaveLength(4);
     expect((assistantMsg.content[1] as GatewayToolUseBlock).name).toBe("recall");
@@ -834,9 +843,5 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     expect((userMsg.content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_2");
     expect((userMsg.content[1] as { toolUseId: string }).toolUseId).toBe("toolu_read_2");
     expect((userMsg.content[2] as { toolUseId: string }).toolUseId).toBe("toolu_bash_1");
-
-    // recall stripped from tools
-    expect(nextReq.tools).toHaveLength(2);
-    expect(nextReq.tools.every((t) => t.name !== "recall")).toBe(true);
   });
 });
