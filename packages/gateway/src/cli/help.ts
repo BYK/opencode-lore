@@ -13,6 +13,7 @@ Commands:
   run [command...]    Start gateway and launch an AI agent (default)
   start               Start the gateway server only
   upgrade [version]   Update lore to the latest (or specified) version
+                      Flags: --check, --force, --offline, --channel <ch>
   help                Show this help text
 
 Options:
@@ -29,6 +30,12 @@ Examples:
   lore start                    # Start gateway only (set ANTHROPIC_BASE_URL yourself)
   lore start -p 8080            # Start gateway on a custom port
   lore upgrade                  # Upgrade to latest version
+  lore upgrade --check          # Check for updates without installing
+  lore upgrade --force          # Force re-download even if up to date
+  lore upgrade nightly          # Switch to nightly channel and update
+  lore upgrade stable           # Switch back to stable channel
+  lore upgrade 0.14.0           # Install a specific version
+  lore upgrade --offline        # Upgrade from cached patches (no network)
 
 Environment variables:
   LORE_LISTEN_PORT              Gateway port (overridden by --port)
