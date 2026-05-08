@@ -135,6 +135,9 @@ export function createBatchLLMClient(
   let flushTimer: ReturnType<typeof setInterval> | null = null;
   let shuttingDown = false;
 
+  /** Credentials whose batch API access has been permanently disabled (401/403). */
+  const disabledBatchAuth = new Set<string>();
+
   // Stats
   let totalQueued = 0;
   let totalBatched = 0;
@@ -169,7 +172,19 @@ export function createBatchLLMClient(
 
       if (!response.ok) {
         const text = await response.text().catch(() => "(no body)");
-        log.error(`batch create failed: ${response.status} ${response.statusText} — ${text}`);
+        // Permanent auth errors — disable batch API for this credential
+        if (response.status === 401 || response.status === 403) {
+          const key = authKey(auth);
+          if (!disabledBatchAuth.has(key)) {
+            disabledBatchAuth.add(key);
+            log.warn(
+              `batch API disabled for this credential (${response.status}): ${text}. ` +
+                `Future worker calls will use individual requests.`,
+            );
+          }
+        } else {
+          log.error(`batch create failed: ${response.status} ${response.statusText} — ${text}`);
+        }
         // Fall back to synchronous for all items
         await fallbackAll(items);
         return;
@@ -231,6 +246,11 @@ export function createBatchLLMClient(
     }
 
     for (const { auth, items } of byAuth.values()) {
+      // Skip batch API for credentials with permanent auth failures
+      if (disabledBatchAuth.has(authKey(auth))) {
+        await fallbackAll(items);
+        continue;
+      }
       await submitBatch(auth, items);
     }
   }
