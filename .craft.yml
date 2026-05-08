@@ -10,7 +10,14 @@ artifactProvider:
   name: github
   config:
     artifacts:
-      CI: npm-tarball
+      # CI workflow uploads three artifact groups on release branches:
+      #   npm-tarball      — workspace .tgz files for npm publish
+      #   release-binaries — gzipped standalone CLI binaries per platform
+      #   release-patches  — delta patches from previous stable release
+      CI:
+        - npm-tarball
+        - release-binaries
+        - release-patches
 targets:
   # Publish the 4 workspace packages (@loreai/core, @loreai/opencode, @loreai/pi, @loreai/gateway).
   # Craft discovers these from the root package.json `workspaces` field and
@@ -30,4 +37,9 @@ targets:
     access: public
     oidc: true
     includeNames: /^opencode-lore-\d.*\.tgz$/
+  # Create GitHub Release with binaries and delta patches attached.
+  # The includeNames filter ensures only .gz binaries and .patch deltas
+  # are uploaded as release assets — npm tarballs are published via the
+  # npm targets above, not attached to the GitHub Release.
   - name: github
+    includeNames: /\.(gz|patch)$/
