@@ -29,6 +29,47 @@ jobs:
       - name: Test
         run: bun test
 
+      # -----------------------------------------------------------------
+      # CLI: npm bundle + smoke test (every run)
+      # -----------------------------------------------------------------
+      - name: Build npm bundle (CJS)
+        run: bun run --filter '@loreai/gateway' bundle
+
+      - name: Smoke-test npm bundle under Node.js
+        run: |
+          node packages/gateway/dist/bin.cjs --version
+          node packages/gateway/dist/bin.cjs help
+
+          # Start gateway, hit health endpoint, shut down
+          node packages/gateway/dist/bin.cjs start -p 7990 &
+          SERVER_PID=$!
+          sleep 2
+          curl -sf http://127.0.0.1:7990/health | jq .
+          kill $SERVER_PID
+          wait $SERVER_PID 2>/dev/null || true
+
+      # -----------------------------------------------------------------
+      # CLI: standalone binary smoke test (every run, linux-x64)
+      # -----------------------------------------------------------------
+      - name: Build linux-x64 binary
+        run: bun run --filter '@loreai/gateway' build:binary
+
+      - name: Smoke-test standalone binary
+        run: |
+          ./packages/gateway/dist-bin/lore-linux-x64 --version
+          ./packages/gateway/dist-bin/lore-linux-x64 help
+
+          # Start gateway, hit health endpoint, shut down
+          ./packages/gateway/dist-bin/lore-linux-x64 start -p 7991 &
+          SERVER_PID=$!
+          sleep 2
+          curl -sf http://127.0.0.1:7991/health | jq .
+          kill $SERVER_PID
+          wait $SERVER_PID 2>/dev/null || true
+
+      # -----------------------------------------------------------------
+      # Release: build all packages + pack tarballs + multi-platform binaries
+      # -----------------------------------------------------------------
       - name: Build all packages
         if: startsWith(github.ref, 'refs/heads/release/')
         run: bun run build
@@ -72,9 +113,31 @@ jobs:
             echo "$(basename "$t") → $name"
           done
 
+      # Build standalone binaries for all supported platforms and gzip them.
+      # The linux-x64 binary was already built above; rebuild with --release
+      # to get the gzip artifact.
+      - name: Build release binaries (all platforms)
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: |
+          rm -rf packages/gateway/dist-bin
+          targets="darwin-arm64 darwin-x64 linux-arm64 linux-x64 windows-x64"
+          for target in $targets; do
+            echo "=== Building $target ==="
+            bun run --filter '@loreai/gateway' build:binary -- --target "$target" --release
+          done
+          echo "--- Release binaries: ---"
+          ls -la packages/gateway/dist-bin/
+
       - name: Upload tarballs
         if: startsWith(github.ref, 'refs/heads/release/')
         uses: actions/upload-artifact@v4
         with:
           name: npm-tarball
           path: dist-tarballs/*.tgz
+
+      - name: Upload binaries
+        if: startsWith(github.ref, 'refs/heads/release/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: packages/gateway/dist-bin/*.gz

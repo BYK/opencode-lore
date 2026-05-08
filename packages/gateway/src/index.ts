@@ -1,41 +1,38 @@
 /**
- * Lore Gateway — entry point.
+ * Lore Gateway — package entry point.
  *
- * Starts the HTTP proxy server that applies Lore's context management
- * pipeline to any AI coding client speaking the Anthropic or OpenAI
- * protocol.
+ * Library exports for programmatic use, plus `_cli()` for the CLI binary.
  *
- * Usage:
- *   bun run packages/gateway/src/index.ts
- *   ANTHROPIC_BASE_URL=http://127.0.0.1:6969 claude
+ * Library usage:
+ *   import { startServer, loadConfig } from "@loreai/gateway";
+ *
+ * CLI usage (via bin wrapper):
+ *   lore start
+ *   lore run claude
  */
-import { loadConfig } from "./config";
-import { startServer } from "./server";
-import { resetPipelineState } from "./pipeline";
 
 // ---------------------------------------------------------------------------
-// Boot
+// Library API
 // ---------------------------------------------------------------------------
 
-const config = loadConfig();
-const server = startServer(config);
-
-const addr = `http://${config.host}:${server.port}`;
-console.error(`[lore] Gateway listening on ${addr}`);
-console.error(`[lore] Model routing: claude-* → Anthropic, nvidia/* → Nvidia NIM, gpt-* → OpenAI, …`);
-console.error(`[lore] Plugin auto-detects gateway — just start OpenCode normally`);
+export { loadConfig } from "./config";
+export type { GatewayConfig } from "./config";
+export { startServer } from "./server";
+export { handleRequest, resetPipelineState } from "./pipeline";
 
 // ---------------------------------------------------------------------------
-// Graceful shutdown
+// CLI entry — called by dist/bin.cjs or `bun run src/index.ts`
 // ---------------------------------------------------------------------------
 
-async function shutdown() {
-  console.error("[lore] Shutting down…");
-  server.stop();
-  // Gracefully shut down the batch queue (flushes pending items synchronously)
-  await resetPipelineState();
-  process.exit(0);
+export { _cli } from "./cli/main";
+
+// ---------------------------------------------------------------------------
+// Direct execution — `bun run src/index.ts` still works as before
+// ---------------------------------------------------------------------------
+
+if (typeof Bun !== "undefined" && Bun.main === import.meta.path) {
+  // Dynamic import + top-level await wrapped in a Bun-only block.
+  // esbuild CJS output drops import.meta to `{}` so the condition is
+  // always false in the npm bundle — the await is dead-code-eliminated.
+  import("./cli/main").then(({ _cli }) => _cli());
 }
-
-process.on("SIGINT", () => shutdown());
-process.on("SIGTERM", () => shutdown());
