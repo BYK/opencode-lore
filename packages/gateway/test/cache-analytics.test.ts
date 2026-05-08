@@ -112,7 +112,7 @@ describe("mapOffsetToJsonPath", () => {
     expect(path).toBe("system");
   });
 
-  test("nested messages array", () => {
+  test("nested messages array — later element", () => {
     const json = JSON.stringify({
       model: "opus",
       messages: [
@@ -121,10 +121,47 @@ describe("mapOffsetToJsonPath", () => {
         { role: "user", content: "CHANGED" },
       ],
     });
-    // Find where "CHANGED" appears
     const offset = json.indexOf("CHANGED");
     const path = mapOffsetToJsonPath(json, offset);
     expect(path).toMatch(/messages\[2\]/);
+  });
+
+  test("nested messages array — first element (index 0)", () => {
+    const json = JSON.stringify({
+      model: "opus",
+      messages: [
+        { role: "user", content: "CHANGED" },
+        { role: "assistant", content: "second" },
+      ],
+    });
+    const offset = json.indexOf("CHANGED");
+    const path = mapOffsetToJsonPath(json, offset);
+    expect(path).toBe("messages[0].content");
+  });
+
+  test("system block array (Anthropic cache format)", () => {
+    const json = JSON.stringify({
+      model: "opus",
+      system: [{ type: "text", text: "CHANGED_HERE", cache_control: { type: "ephemeral" } }],
+      messages: [],
+    });
+    const offset = json.indexOf("CHANGED_HERE");
+    const path = mapOffsetToJsonPath(json, offset);
+    expect(path).toBe("system[0].text");
+  });
+
+  test("content block array within message", () => {
+    const json = JSON.stringify({
+      messages: [
+        { role: "user", content: [
+          { type: "text", text: "first block" },
+          { type: "text", text: "DIVERGED" },
+        ]},
+      ],
+    });
+    const offset = json.indexOf("DIVERGED");
+    const path = mapOffsetToJsonPath(json, offset);
+    expect(path).toBe("messages[0].content[1].text");
   });
 
   test("system prompt change", () => {
