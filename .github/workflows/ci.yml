@@ -600,9 +600,19 @@ jobs:
             fi
           done
 
+      - name: Ensure patches directory exists
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: mkdir -p patches && touch patches/.gitkeep
+
       - name: Upload release patches
-        if: env.HAS_PREV == 'true'
+        if: startsWith(github.ref, 'refs/heads/release/')
         uses: actions/upload-artifact@v4
         with:
           name: release-patches
-          path: patches/*.patch
+          # Always upload so Craft's artifact provider finds the artifact.
+          # When no previous release has binaries, the directory is empty;
+          # the placeholder ensures upload-artifact creates the artifact.
+          path: |
+            patches/*.patch
+            patches/.gitkeep
+          if-no-files-found: warn
