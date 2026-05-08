@@ -181,6 +181,36 @@ require("./index.cjs")._cli().catch((e) => {
 
 writeFileSync(join(distDir, "bin.cjs"), binScript, { mode: 0o755 });
 
+// ---------------------------------------------------------------------------
+// Type declarations — dist/index.d.cts
+// ---------------------------------------------------------------------------
+
+const typeDeclarations = `export type GatewayConfig = {
+  /** Port to listen on. Defaults to 4141. */
+  port?: number;
+  /** Host to bind to. Defaults to "127.0.0.1". */
+  host?: string;
+};
+
+/** Load Lore gateway configuration from the environment. */
+export declare function loadConfig(): GatewayConfig;
+
+/** Start the Lore gateway server. */
+export declare function startServer(config?: GatewayConfig): Promise<void>;
+
+/** Handle an incoming request through the Lore pipeline. */
+export declare function handleRequest(req: Request): Promise<Response>;
+
+/** Reset internal pipeline state (for testing). */
+export declare function resetPipelineState(): void;
+
+/** CLI entry point — called by dist/bin.cjs. */
+export declare function _cli(): Promise<void>;
+`;
+
+writeFileSync(join(distDir, "index.d.cts"), typeDeclarations);
+
 console.log(`\n✓ @loreai/gateway npm bundle complete (v${pkg.version})`);
-console.log(`  dist/index.cjs — CJS bundle`);
-console.log(`  dist/bin.cjs   — CLI wrapper`);
+console.log(`  dist/index.cjs  — CJS bundle`);
+console.log(`  dist/bin.cjs    — CLI wrapper`);
+console.log(`  dist/index.d.cts — type declarations`);

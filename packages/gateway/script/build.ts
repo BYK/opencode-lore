@@ -68,26 +68,10 @@ const { values: flags } = parseArgs({
 // ---------------------------------------------------------------------------
 
 async function buildLibrary() {
-  rmSync(distDir, { recursive: true, force: true });
-  mkdirSync(distDir, { recursive: true });
-
-  const external = ["node:*", "@loreai/core"];
-
-  await esbuild.build({
-    entryPoints: [join(packageDir, "src/index.ts")],
-    bundle: true,
-    format: "esm",
-    target: "node22",
-    platform: "node",
-    conditions: ["node"],
-    external,
-    outfile: join(distDir, "index.js"),
-    sourcemap: true,
-    logLevel: "info",
-    legalComments: "inline",
-  });
-
-  console.log("✓ @loreai/gateway library build complete");
+  // No-op: the npm package is built by `bun run bundle` (script/bundle.ts)
+  // which produces the self-contained CJS bundle (dist/index.cjs + dist/bin.cjs).
+  // This function exists only so `bun run build` (workspace-wide) doesn't fail.
+  console.log("⏭ @loreai/gateway: use `bun run bundle` for npm build");
 }
 
 // ---------------------------------------------------------------------------
