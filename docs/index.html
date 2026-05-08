@@ -147,6 +147,32 @@
     }
     .btn-ghost:hover { color: var(--g0); border-color: var(--g2); }
 
+    /* install block */
+    .hero-install { margin-bottom: 2rem; }
+    .install-block {
+      display: inline-flex; align-items: center; gap: 1rem;
+      background: var(--g0); border-radius: 4px; padding: .9rem 1.4rem;
+      cursor: pointer; position: relative; transition: background .2s;
+    }
+    .install-block:hover { background: var(--g1); }
+    .install-block code {
+      font-family: monospace; font-size: .88rem; color: var(--g5); letter-spacing: .02em;
+    }
+    .install-prompt { color: var(--g3); margin-right: .3rem; }
+    .install-copy { color: var(--g4); opacity: .6; transition: opacity .2s; display: flex; }
+    .install-block:hover .install-copy { opacity: 1; }
+    .install-copied {
+      position: absolute; top: -1.8rem; right: 0;
+      font-size: .7rem; color: var(--g3); opacity: 0; transition: opacity .25s;
+    }
+    .install-copied.show { opacity: 1; }
+    .install-alt {
+      margin-top: .7rem; font-size: .78rem; color: var(--mid);
+    }
+    .install-alt code {
+      font-size: .78rem; background: var(--g6); padding: .15em .45em; border-radius: 3px;
+    }
+
     /* graph visual */
     .hero-visual { display: flex; justify-content: center; align-items: center; position: relative; }
     .graph-wrap { width: min(430px, 100%); aspect-ratio: 1; position: relative; }
@@ -311,12 +337,22 @@
       <em>full project.</em>
     </h1>
     <p class="hero-desc sr">Lore is a transparent LLM proxy that adds three-tier memory to any AI coding client. Point Claude Code, Cursor, or any Anthropic/OpenAI-compatible tool at <code style="font-size:.85em;background:var(--g6);padding:.15em .4em;border-radius:3px;">localhost:6969</code> and your agent remembers everything — across sessions.</p>
+    <div class="hero-install sr">
+      <div class="install-block" onclick="navigator.clipboard.writeText('curl -fsSL https://withlore.ai/install | bash').then(()=>{this.querySelector('.install-copied').classList.add('show');setTimeout(()=>this.querySelector('.install-copied').classList.remove('show'),2000)})">
+        <code><span class="install-prompt">$</span> curl -fsSL https://withlore.ai/install | bash</code>
+        <span class="install-copy" title="Copy to clipboard">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M3 11V3a1.5 1.5 0 011.5-1.5H11"/></svg>
+        </span>
+        <span class="install-copied">Copied!</span>
+      </div>
+      <p class="install-alt">or <code>npx @loreai/gateway</code></p>
+    </div>
     <div class="hero-actions sr">
-      <a href="#waitlist" class="btn-fill">
-        Join the Waitlist
+      <a href="https://github.com/byk/loreai" target="_blank" class="btn-fill">
+        View on GitHub
         <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 7h10M7 2l5 5-5 5"/></svg>
       </a>
-      <a href="https://github.com/byk/loreai" target="_blank" class="btn-ghost">View Repository</a>
+      <a href="#how" class="btn-ghost">How It Works</a>
     </div>
   </div>
 
@@ -402,11 +438,15 @@
         <p class="bc-b">Transparent proxy on port 6969 — supports Anthropic and OpenAI protocols. Point Claude Code, Cursor, Copilot, Windsurf, or any compatible client at the gateway. Zero client changes.</p>
       </div>
       <div class="code-block">
-        <code><span class="ck"># Start the gateway</span><br>
-<span class="cv">$</span> npx @loreai/gateway<br>
+        <code><span class="ck"># Auto-detect your agent and launch</span><br>
+<span class="cv">$</span> lore<br>
 <br>
-<span class="ck"># Point your client at it</span><br>
-<span class="cv">ANTHROPIC_BASE_URL</span>=<span class="ck">http://localhost:6969</span></code>
+<span class="ck"># Or launch a specific agent</span><br>
+<span class="cv">$</span> lore run claude<br>
+<span class="cv">$</span> lore run opencode<br>
+<br>
+<span class="ck"># Or just the gateway</span><br>
+<span class="cv">$</span> lore start</code>
       </div>
     </div>
   </div>

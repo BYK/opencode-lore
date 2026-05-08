@@ -82,9 +82,7 @@ const VALID_TARGETS = [
   "darwin-arm64",
   "darwin-x64",
   "linux-arm64",
-  "linux-arm64-musl",
   "linux-x64",
-  "linux-x64-musl",
   "windows-x64",
 ] as const;
 
