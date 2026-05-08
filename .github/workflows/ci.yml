@@ -602,7 +602,7 @@ jobs:
 
       - name: Ensure patches directory exists
         if: startsWith(github.ref, 'refs/heads/release/')
-        run: mkdir -p patches && touch patches/.gitkeep
+        run: mkdir -p patches && touch patches/empty
 
       - name: Upload release patches
         if: startsWith(github.ref, 'refs/heads/release/')
@@ -612,7 +612,5 @@ jobs:
           # Always upload so Craft's artifact provider finds the artifact.
           # When no previous release has binaries, the directory is empty;
           # the placeholder ensures upload-artifact creates the artifact.
-          path: |
-            patches/*.patch
-            patches/.gitkeep
-          if-no-files-found: warn
+          # (upload-artifact ignores hidden files by default)
+          path: patches/
