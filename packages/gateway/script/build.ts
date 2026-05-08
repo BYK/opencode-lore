@@ -121,7 +121,6 @@ async function buildBinary() {
   }
 
   const distBinDir = join(packageDir, "dist-bin");
-  rmSync(distBinDir, { recursive: true, force: true });
   mkdirSync(distBinDir, { recursive: true });
 
   // Step 1: esbuild bundle — single ESM file with everything inlined
