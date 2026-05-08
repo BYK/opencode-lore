@@ -6,9 +6,21 @@ on:
   pull_request:
     branches: [main]
 
+# packages:write is needed for publish-nightly to push to GHCR
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Commit timestamp used for deterministic nightly version strings.
+  # Defined at workflow level so all jobs agree on the same value.
+  COMMIT_TIMESTAMP: ${{ github.event.head_commit.timestamp }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      nightly-version: ${{ steps.nightly.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +40,18 @@ jobs:
 
       - name: Test
         run: bun test
+
+      # Compute nightly version once, pass as job output to downstream jobs.
+      # Only on main pushes — PRs and release branches don't get nightly versions.
+      - name: Compute nightly version
+        id: nightly
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          TS=$(date -d "$COMMIT_TIMESTAMP" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$COMMIT_TIMESTAMP" +%s 2>/dev/null || date +%s)
+          CURRENT=$(jq -r .version packages/gateway/package.json)
+          VERSION="${CURRENT}-dev.${TS}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${VERSION}"
 
       # -----------------------------------------------------------------
       # CLI: npm bundle + smoke test (every run)
@@ -49,8 +73,17 @@ jobs:
           wait $SERVER_PID 2>/dev/null || true
 
       # -----------------------------------------------------------------
-      # CLI: standalone binary smoke test (every run, linux-x64)
+      # CLI: standalone binary build + smoke test
       # -----------------------------------------------------------------
+      - name: Set nightly version
+        # Inject the nightly version into package.json before building
+        # so it gets baked into the binary via esbuild define.
+        if: steps.nightly.outputs.version != ''
+        run: |
+          jq --arg v "${{ steps.nightly.outputs.version }}" '.version = $v' \
+            packages/gateway/package.json > packages/gateway/package.json.tmp
+          mv packages/gateway/package.json.tmp packages/gateway/package.json
+
       - name: Build linux-x64 binary
         run: bun run --filter '@loreai/gateway' build:binary
 
@@ -66,6 +99,14 @@ jobs:
           curl -sf http://127.0.0.1:7991/health | jq .
           kill $SERVER_PID
           wait $SERVER_PID 2>/dev/null || true
+
+      # Upload the uncompressed binary for downstream jobs (generate-patches)
+      - name: Upload binary artifact
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lore-linux-x64
+          path: packages/gateway/dist-bin/lore-linux-x64
 
       # -----------------------------------------------------------------
       # Release: build all packages + pack tarballs + multi-platform binaries
@@ -141,3 +182,419 @@ jobs:
         with:
           name: release-binaries
           path: packages/gateway/dist-bin/*.gz
+
+      # Also upload uncompressed release binaries (needed for patch generation)
+      - name: Upload uncompressed release binaries
+        if: startsWith(github.ref, 'refs/heads/release/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries-raw
+          path: |
+            packages/gateway/dist-bin/lore-*
+            !packages/gateway/dist-bin/*.gz
+
+  # ---------------------------------------------------------------------------
+  # Nightly: build all platforms, generate patches, publish to GHCR
+  # ---------------------------------------------------------------------------
+
+  build-nightly-binaries:
+    name: Build Nightly Binaries
+    needs: [test]
+    # Only on main pushes (not PRs, not release branches)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install
+
+      - name: Set nightly version
+        run: |
+          jq --arg v "${{ needs.test.outputs.nightly-version }}" '.version = $v' \
+            packages/gateway/package.json > packages/gateway/package.json.tmp
+          mv packages/gateway/package.json.tmp packages/gateway/package.json
+          echo "Building nightly version: ${{ needs.test.outputs.nightly-version }}"
+
+      - name: Build all platform binaries
+        run: |
+          targets="darwin-arm64 darwin-x64 linux-arm64 linux-x64 windows-x64"
+          for target in $targets; do
+            echo "=== Building $target ==="
+            bun run --filter '@loreai/gateway' build:binary -- --target "$target" --release
+          done
+          echo "--- Nightly binaries: ---"
+          ls -la packages/gateway/dist-bin/
+
+      - name: Upload compressed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-binaries-gz
+          path: packages/gateway/dist-bin/*.gz
+
+      - name: Upload uncompressed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-binaries-raw
+          path: |
+            packages/gateway/dist-bin/lore-*
+            !packages/gateway/dist-bin/*.gz
+
+  generate-patches:
+    name: Generate Delta Patches
+    needs: [test, build-nightly-binaries]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Install ORAS CLI
+        run: |
+          VERSION=1.3.1
+          EXPECTED_SHA256="d52c4af76ce6a3ceb8579e51fb751a43ac051cca67f965f973a0b0e897a2bb86"
+          TARBALL="oras_${VERSION}_linux_amd64.tar.gz"
+          curl --retry 3 --retry-delay 5 --retry-all-errors -sfLo "$TARBALL" \
+            "https://github.com/oras-project/oras/releases/download/v${VERSION}/${TARBALL}"
+          echo "${EXPECTED_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar -xz -C /usr/local/bin oras < "$TARBALL"
+          rm "$TARBALL"
+
+      - name: Install zig-bsdiff
+        run: |
+          VERSION=0.1.19
+          EXPECTED_SHA256="9f1ac75a133ee09883ad2096a86d57791513de5fc6f262dfadee8dcee94a71b9"
+          TARBALL="zig-bsdiff-linux-x64.tar.gz"
+          curl --retry 3 --retry-delay 5 --retry-all-errors -sfLo "$TARBALL" \
+            "https://github.com/blackboardsh/zig-bsdiff/releases/download/v${VERSION}/${TARBALL}"
+          echo "${EXPECTED_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar -xz -C /usr/local/bin < "$TARBALL"
+          rm "$TARBALL"
+
+      - name: Download current binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-binaries-raw
+          path: new-binaries
+
+      - name: Download current compressed binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-binaries-gz
+          path: new-binaries
+
+      - name: Download previous nightly binaries from GHCR
+        run: |
+          VERSION="${{ needs.test.outputs.nightly-version }}"
+          REPO="ghcr.io/byk/loreai"
+
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          # Find previous nightly tag
+          TAGS=$(oras repo tags "${REPO}" 2>/dev/null | grep '^nightly-[0-9]' | sort -V || echo "")
+          PREV_TAG=""
+          for tag in $TAGS; do
+            if [ "$tag" = "nightly-${VERSION}" ]; then
+              break
+            fi
+            PREV_TAG="$tag"
+          done
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous versioned nightly found, skipping patches"
+            exit 0
+          fi
+          echo "HAS_PREV=true" >> "$GITHUB_ENV"
+          echo "Previous nightly: ${PREV_TAG}"
+
+          # Download and decompress previous nightly binaries
+          mkdir -p old-binaries
+          PREV_MANIFEST_JSON=$(oras manifest fetch "${REPO}:${PREV_TAG}")
+          echo "$PREV_MANIFEST_JSON" | jq -r '.layers[] | select(.annotations["org.opencontainers.image.title"] | endswith(".gz")) | .annotations["org.opencontainers.image.title"] + " " + .digest' | while read -r filename digest; do
+            basename="${filename%.gz}"
+            echo "  Downloading previous ${basename}..."
+            oras blob fetch "${REPO}@${digest}" --output "old-binaries/${filename}"
+            gunzip -f "old-binaries/${filename}"
+          done
+
+      - name: Generate delta patches
+        if: env.HAS_PREV == 'true'
+        run: |
+          mkdir -p patches
+          GENERATED=0
+
+          for new_binary in new-binaries/lore-*; do
+            name=$(basename "$new_binary")
+            case "$name" in *.gz) continue ;; esac
+
+            old_binary="old-binaries/${name}"
+            [ -f "$old_binary" ] || continue
+
+            echo "Generating patch: ${name}.patch"
+            bsdiff "$old_binary" "$new_binary" "patches/${name}.patch" --use-zstd
+
+            patch_size=$(stat --printf='%s' "patches/${name}.patch")
+            new_size=$(stat --printf='%s' "$new_binary")
+            ratio=$(awk "BEGIN { printf \"%.1f\", ($patch_size / $new_size) * 100 }")
+            echo "  ${patch_size} bytes (${ratio}% of binary)"
+            GENERATED=$((GENERATED + 1))
+          done
+
+          echo "Generated ${GENERATED} patches"
+
+      - name: Validate patch sizes
+        if: env.HAS_PREV == 'true'
+        run: |
+          shopt -s nullglob
+          # Client rejects chains exceeding 60% of gzipped binary size
+          # (SIZE_THRESHOLD_RATIO in delta-upgrade.ts). Use 50% here
+          # so single-step patches are caught with margin to spare.
+          MAX_RATIO=50
+
+          for patch_file in patches/*.patch; do
+            name=$(basename "$patch_file" .patch)
+            gz_binary="new-binaries/${name}.gz"
+            [ -f "$gz_binary" ] || continue
+
+            patch_size=$(stat --printf='%s' "$patch_file")
+            gz_size=$(stat --printf='%s' "$gz_binary")
+            ratio=$(awk "BEGIN { printf \"%.0f\", ($patch_size / $gz_size) * 100 }")
+
+            if [ "$ratio" -gt "$MAX_RATIO" ]; then
+              echo "::warning::Patch ${name}.patch is ${ratio}% of gzipped binary (limit: ${MAX_RATIO}%) — removing"
+              rm "$patch_file"
+            fi
+          done
+
+      - name: Upload patch artifacts
+        if: env.HAS_PREV == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-patches
+          path: patches/*.patch
+
+  publish-nightly:
+    name: Publish Nightly to GHCR
+    needs: [test, build-nightly-binaries, generate-patches]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download compressed artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-binaries-gz
+          path: artifacts
+
+      - name: Download uncompressed artifacts (for SHA-256 computation)
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-binaries-raw
+          path: binaries
+
+      - name: Download patch artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        id: download-patches
+        with:
+          name: nightly-patches
+          path: patches
+
+      - name: Install ORAS CLI
+        run: |
+          VERSION=1.3.1
+          EXPECTED_SHA256="d52c4af76ce6a3ceb8579e51fb751a43ac051cca67f965f973a0b0e897a2bb86"
+          TARBALL="oras_${VERSION}_linux_amd64.tar.gz"
+          curl --retry 3 --retry-delay 5 --retry-all-errors -sfLo "$TARBALL" \
+            "https://github.com/oras-project/oras/releases/download/v${VERSION}/${TARBALL}"
+          echo "${EXPECTED_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar -xz -C /usr/local/bin oras < "$TARBALL"
+          rm "$TARBALL"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push binaries to GHCR
+        # Push from inside the artifacts directory so ORAS records bare
+        # filenames (e.g. "lore-linux-x64.gz") as layer titles, not
+        # "artifacts/lore-linux-x64.gz". The CLI matches layers by
+        # filename in findLayerByFilename().
+        working-directory: artifacts
+        run: |
+          VERSION="${{ needs.test.outputs.nightly-version }}"
+          oras push ghcr.io/byk/loreai:nightly \
+            --artifact-type application/vnd.lore.cli.nightly \
+            --annotation "org.opencontainers.image.source=https://github.com/BYK/loreai" \
+            --annotation "version=${VERSION}" \
+            *.gz
+
+      - name: Tag versioned nightly
+        # Create an immutable versioned tag via zero-copy oras tag.
+        # This enables patch chain resolution to find specific nightly versions.
+        run: |
+          VERSION="${{ needs.test.outputs.nightly-version }}"
+          oras tag ghcr.io/byk/loreai:nightly "nightly-${VERSION}"
+
+      - name: Push delta patches to GHCR
+        # Upload pre-generated patches from generate-patches job as a
+        # :patch-<version> manifest with SHA-256 annotations.
+        # Failure here is non-fatal — delta upgrades are optional.
+        if: steps.download-patches.outcome == 'success'
+        continue-on-error: true
+        run: |
+          VERSION="${{ needs.test.outputs.nightly-version }}"
+          REPO="ghcr.io/byk/loreai"
+
+          # Compute SHA-256 annotations from new binaries and collect patch files
+          shopt -s nullglob
+          ANNOTATIONS=""
+          PATCH_FILES=""
+          for patch_file in patches/*.patch; do
+            basename_patch=$(basename "$patch_file" .patch)
+            new_binary="binaries/${basename_patch}"
+            if [ -f "$new_binary" ]; then
+              sha256=$(sha256sum "$new_binary" | cut -d' ' -f1)
+              ANNOTATIONS="${ANNOTATIONS} --annotation sha256-${basename_patch}=${sha256}"
+            fi
+            PATCH_FILES="${PATCH_FILES} $(basename "$patch_file")"
+          done
+
+          if [ -z "$PATCH_FILES" ]; then
+            echo "No patches to push"
+            exit 0
+          fi
+
+          # Find from-version by listing GHCR nightly tags
+          TAGS=$(oras repo tags "${REPO}" 2>/dev/null | grep '^nightly-[0-9]' | sort -V || echo "")
+          PREV_TAG=""
+          for tag in $TAGS; do
+            if [ "$tag" = "nightly-${VERSION}" ]; then break; fi
+            PREV_TAG="$tag"
+          done
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous nightly tag found, skipping patch push"
+            exit 0
+          fi
+          PREV_VERSION="${PREV_TAG#nightly-}"
+
+          cd patches
+          eval oras push "${REPO}:patch-${VERSION}" \
+            --artifact-type application/vnd.lore.cli.patch \
+            --annotation "from-version=${PREV_VERSION}" \
+            ${ANNOTATIONS} \
+            ${PATCH_FILES}
+
+          echo "Pushed patch manifest: patch-${VERSION} (from ${PREV_VERSION})"
+
+  # ---------------------------------------------------------------------------
+  # Release: generate delta patches from previous stable release
+  # ---------------------------------------------------------------------------
+
+  generate-release-patches:
+    name: Generate Release Patches
+    needs: [test]
+    # Only on release branches, not PRs or main
+    if: startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Install zig-bsdiff
+        run: |
+          VERSION=0.1.19
+          EXPECTED_SHA256="9f1ac75a133ee09883ad2096a86d57791513de5fc6f262dfadee8dcee94a71b9"
+          TARBALL="zig-bsdiff-linux-x64.tar.gz"
+          curl --retry 3 --retry-delay 5 --retry-all-errors -sfLo "$TARBALL" \
+            "https://github.com/blackboardsh/zig-bsdiff/releases/download/v${VERSION}/${TARBALL}"
+          echo "${EXPECTED_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar -xz -C /usr/local/bin < "$TARBALL"
+          rm "$TARBALL"
+
+      - name: Download current binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+          path: new-binaries-gz
+
+      - name: Download current raw binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries-raw
+          path: new-binaries
+
+      - name: Download previous release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PREV_TAG=$(gh api "repos/${{ github.repository }}/releases?per_page=5" \
+            --jq '[.[] | select(.prerelease == false and .draft == false)] | .[0].tag_name // empty')
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous stable release found — skipping patch generation"
+            exit 0
+          fi
+          echo "HAS_PREV=true" >> "$GITHUB_ENV"
+          echo "Previous release: ${PREV_TAG}"
+
+          shopt -s nullglob
+          mkdir -p old-binaries
+          for gz in new-binaries-gz/*.gz; do
+            name=$(basename "${gz%.gz}")
+            echo "  Downloading ${name}.gz from ${PREV_TAG}..."
+            gh release download "${PREV_TAG}" \
+              --repo "${{ github.repository }}" \
+              --pattern "${name}.gz" \
+              --dir old-binaries || echo "  Warning: not found, skipping"
+          done
+          gunzip old-binaries/*.gz 2>/dev/null || true
+
+      - name: Generate delta patches
+        if: env.HAS_PREV == 'true'
+        run: |
+          mkdir -p patches
+          GENERATED=0
+
+          for new_binary in new-binaries/lore-*; do
+            name=$(basename "$new_binary")
+            old_binary="old-binaries/${name}"
+            [ -f "$old_binary" ] || continue
+
+            echo "Generating patch: ${name}.patch"
+            bsdiff "$old_binary" "$new_binary" "patches/${name}.patch" --use-zstd
+
+            patch_size=$(stat --printf='%s' "patches/${name}.patch")
+            new_size=$(stat --printf='%s' "$new_binary")
+            ratio=$(awk "BEGIN { printf \"%.1f\", ($patch_size / $new_size) * 100 }")
+            echo "  ${patch_size} bytes (${ratio}% of binary)"
+            GENERATED=$((GENERATED + 1))
+          done
+
+          echo "Generated ${GENERATED} patches"
+
+      - name: Validate patch sizes
+        if: env.HAS_PREV == 'true'
+        run: |
+          shopt -s nullglob
+          MAX_RATIO=50
+
+          for patch_file in patches/*.patch; do
+            name=$(basename "$patch_file" .patch)
+            gz_binary="new-binaries-gz/${name}.gz"
+            [ -f "$gz_binary" ] || continue
+
+            patch_size=$(stat --printf='%s' "$patch_file")
+            gz_size=$(stat --printf='%s' "$gz_binary")
+            ratio=$(awk "BEGIN { printf \"%.0f\", ($patch_size / $gz_size) * 100 }")
+
+            if [ "$ratio" -gt "$MAX_RATIO" ]; then
+              echo "::warning::Patch ${name}.patch is ${ratio}% of gzipped binary (limit: ${MAX_RATIO}%) — removing"
+              rm "$patch_file"
+            fi
+          done
+
+      - name: Upload release patches
+        if: env.HAS_PREV == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-patches
+          path: patches/*.patch
