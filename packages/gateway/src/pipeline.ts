@@ -92,6 +92,7 @@ import {
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { getWorkerModel, resetWorkerModelState } from "./worker-model";
+import { analyzeCacheTurn } from "./cache-analytics";
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
@@ -301,6 +302,14 @@ function getOrCreateSession(
       messageCount: 0,
       turnsSinceCuration: 0,
       recallStore: new Map(),
+      cacheAnalytics: {
+        lastRequestBody: null,
+        lastRequestBodyLength: 0,
+        lastCacheRead: 0,
+        lastCacheCreation: 0,
+        turnCount: 0,
+        bustCount: 0,
+      },
     };
     sessions.set(sessionID, state);
   }
@@ -369,6 +378,13 @@ async function identifySession(
 // Upstream forwarding
 // ---------------------------------------------------------------------------
 
+/** Result from forwardToUpstream — includes the serialized body for cache analytics. */
+type UpstreamResult = {
+  response: Response;
+  /** The serialized JSON body sent to the upstream provider. */
+  serializedBody: string;
+};
+
 /**
  * Forward a request to the upstream provider (Anthropic or OpenAI).
  *
@@ -376,14 +392,15 @@ async function identifySession(
  * interceptor is called instead of `fetch` directly.  This enables recording
  * and replay without modifying individual call sites.
  *
- * Returns the raw fetch Response (may be streaming or non-streaming).
+ * Returns the raw fetch Response alongside the serialized request body
+ * (for cache analytics prefix comparison).
  */
 async function forwardToUpstream(
   req: GatewayRequest,
   config: GatewayConfig,
   interceptor?: UpstreamInterceptor,
   cache?: AnthropicCacheOptions,
-): Promise<Response> {
+): Promise<UpstreamResult> {
   let url: string;
   let headers: Record<string, string>;
   let body: unknown;
@@ -405,10 +422,11 @@ async function forwardToUpstream(
     body = result.body;
   }
 
+  const serializedBody = JSON.stringify(body);
   const effectiveInterceptor = interceptor ?? activeInterceptor;
 
   if (effectiveInterceptor) {
-    return effectiveInterceptor(
+    const response = await effectiveInterceptor(
       body,
       req.model,
       req.stream,
@@ -416,16 +434,18 @@ async function forwardToUpstream(
         fetch(url, {
           method: "POST",
           headers,
-          body: JSON.stringify(body),
+          body: serializedBody,
         }),
     );
+    return { response, serializedBody };
   }
 
-  return fetch(url, {
+  const response = await fetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify(body),
+    body: serializedBody,
   });
+  return { response, serializedBody };
 }
 
 // ---------------------------------------------------------------------------
@@ -548,14 +568,14 @@ function buildStreamingResponse(
               result,
               recallBlock,
             );
-            let followUpResponse: Response;
+             let followUpResponse: Response;
             try {
-              followUpResponse = await forwardToUpstream(
+              ({ response: followUpResponse } = await forwardToUpstream(
                 followUp,
                 recallContext.config,
                 undefined,
                 recallContext.cacheOptions,
-              );
+              ));
             } catch (fetchErr) {
               log.error(
                 `recall follow-up fetch error for session ${recallContext.sessionState.sessionID.slice(0, 16)}:`,
@@ -794,6 +814,8 @@ function postResponse(
   resp: GatewayResponse,
   sessionState: SessionState,
   config: GatewayConfig,
+  /** Serialized JSON body sent upstream — for cache prefix comparison. */
+  requestBody?: string,
 ): void {
   const { sessionID, projectPath } = sessionState;
 
@@ -808,6 +830,11 @@ function postResponse(
       sessionID,
       getLastTransformedCount(sessionID),
     );
+
+    // --- Cache analytics ---
+    if (requestBody) {
+      analyzeCacheTurn(sessionState.cacheAnalytics, requestBody, resp.usage);
+    }
 
     // --- Temporal storage ---
     // Store all messages (user + assistant) from this turn.
@@ -1009,7 +1036,7 @@ async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
-  const upstreamResponse = await forwardToUpstream(req, config);
+  const { response: upstreamResponse } = await forwardToUpstream(req, config);
 
   // For streaming, pipe through unchanged
   if (req.stream && upstreamResponse.body) {
@@ -1239,12 +1266,13 @@ async function handleConversationTurn(
     systemTTL: "5m",
     cacheConversation: true,
   };
-  const upstreamResponse = await forwardToUpstream(
-    modifiedReq,
-    config,
-    undefined,
-    cacheOptions,
-  );
+  const { response: upstreamResponse, serializedBody: requestBody } =
+    await forwardToUpstream(
+      modifiedReq,
+      config,
+      undefined,
+      cacheOptions,
+    );
 
   if (!upstreamResponse.ok) {
     const errorBody = await upstreamResponse.text();
@@ -1265,7 +1293,7 @@ async function handleConversationTurn(
     );
     return buildStreamingResponse(
       upstreamResponse,
-      (resp) => postResponse(req, resp, sessionState, config),
+      (resp) => postResponse(req, resp, sessionState, config, requestBody),
       hasRecallTool
         ? { modifiedReq, config, sessionState, cacheOptions }
         : undefined,
@@ -1302,7 +1330,7 @@ async function handleConversationTurn(
       log.info(
         `recall (non-stream, mixed): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
       );
-      postResponse(req, markerResp, sessionState, config);
+      postResponse(req, markerResp, sessionState, config, requestBody);
       return nonStreamHttpResponse(markerResp);
     }
 
@@ -1311,12 +1339,13 @@ async function handleConversationTurn(
       `recall (non-stream, only): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
     );
     const followUp = buildRecallFollowUp(modifiedReq, resp, result, recallBlock);
-    const followUpResponse = await forwardToUpstream(
+    let followUpResponse: Response;
+    ({ response: followUpResponse } = await forwardToUpstream(
       followUp,
       config,
       undefined,
       cacheOptions,
-    );
+    ));
 
     if (!followUpResponse.ok) {
       const errorBody = await followUpResponse.text();
@@ -1324,7 +1353,7 @@ async function handleConversationTurn(
         `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
       );
       // Fall back to response with marker (no continuation)
-      postResponse(req, markerResp, sessionState, config);
+      postResponse(req, markerResp, sessionState, config, requestBody);
       return nonStreamHttpResponse(markerResp);
     }
 
@@ -1344,11 +1373,11 @@ async function handleConversationTurn(
         resp.usage.cacheCreationInputTokens;
     }
 
-    postResponse(req, continuationResp, sessionState, config);
+    postResponse(req, continuationResp, sessionState, config, requestBody);
     return nonStreamHttpResponse(continuationResp);
   }
 
-  postResponse(req, resp, sessionState, config);
+  postResponse(req, resp, sessionState, config, requestBody);
   return nonStreamHttpResponse(resp);
 }
 
