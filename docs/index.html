@@ -251,6 +251,13 @@
       padding: .85rem 2rem; background: var(--g0); color: var(--c0);
       border: none; border-radius: 2px; cursor: pointer; text-transform: uppercase; letter-spacing: .1em;
     }
+    .cta-submit:hover { background: var(--g1); }
+    .cta-note { margin-top: 1.2rem; font-size: .72rem; color: var(--mid); opacity: .7; }
+    .cta-success {
+      display: none; font-family: var(--serif); font-size: 1.3rem;
+      color: var(--g2); margin-top: 1rem;
+    }
+    .cta-success.show { display: block; }
 
     /* FOOTER */
     footer { background: var(--g0); color: var(--g5); padding: 4rem 3rem 2rem; text-align: center; }
@@ -281,7 +288,7 @@
     <li><a href="#features">Features</a></li>
     <li><a href="https://github.com/byk/loreai" target="_blank">GitHub</a></li>
   </ul>
-  <a href="#waitlist" class="nav-btn">Get Started</a>
+  <a href="#waitlist" class="nav-btn">Join Waitlist</a>
 </nav>
 
 <!-- HERO -->
@@ -295,18 +302,18 @@
 
   <div>
     <div class="hero-badge sr">
-      <span class="badge-pill">v1.0-alpha</span>
-      Persistent Memory for Coding Agents
+      <span class="badge-pill" id="version-badge">loading…</span>
+      Persistent Memory for AI Coding Agents
     </div>
     <h1 class="sr">
       Let your AI<br>
       remember your<br>
       <em>full project.</em>
     </h1>
-    <p class="hero-desc sr">LoreAI is a context layer for tools like Claude Code. It indexes your codebase, tracks operational decisions, and provides persistent memory that outlasts the session.</p>
+    <p class="hero-desc sr">Lore is a transparent LLM proxy that adds three-tier memory to any AI coding client. Point Claude Code, Cursor, or any Anthropic/OpenAI-compatible tool at <code style="font-size:.85em;background:var(--g6);padding:.15em .4em;border-radius:3px;">localhost:6969</code> and your agent remembers everything — across sessions.</p>
     <div class="hero-actions sr">
       <a href="#waitlist" class="btn-fill">
-        Join the Beta
+        Join the Waitlist
         <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 7h10M7 2l5 5-5 5"/></svg>
       </a>
       <a href="https://github.com/byk/loreai" target="_blank" class="btn-ghost">View Repository</a>
@@ -325,25 +332,25 @@
         <line x1="200" y1="200" x2="310" y2="100" stroke="#8fba96" stroke-width="1" class="mg-edge"/>
         <line x1="200" y1="200" x2="200" y2="330" stroke="#8fba96" stroke-width="1" class="mg-edge"/>
       </svg>
-      <div class="g-chip gc1">@loreai/distill</div>
-      <div class="g-chip gc2">SQLite: lore.db</div>
-      <div class="g-chip gc3">Operational Intel</div>
-      <div class="g-chip gc4">Sub-80ms Latency</div>
+      <div class="g-chip gc1">@loreai/gateway</div>
+      <div class="g-chip gc2">Anthropic + OpenAI</div>
+      <div class="g-chip gc3">Local SQLite + FTS5</div>
+      <div class="g-chip gc4">19× Compression</div>
     </div>
   </div>
 
   <div class="hero-stats sr">
     <div class="stat-cell">
-      <div class="stat-n">100%</div>
-      <div class="stat-l">Local Context Storage</div>
+      <div class="stat-n">85%</div>
+      <div class="stat-l">Coding Recall Accuracy</div>
     </div>
     <div class="stat-cell">
-      <div class="stat-n">3-Tier</div>
-      <div class="stat-l">Memory Architecture</div>
+      <div class="stat-n">7.4×</div>
+      <div class="stat-l">Cheaper per Correct Answer</div>
     </div>
     <div class="stat-cell">
-      <div class="stat-n">0ms</div>
-      <div class="stat-l">Prompt Waste</div>
+      <div class="stat-n">19×</div>
+      <div class="stat-l">Compression Ratio</div>
     </div>
   </div>
 </section>
@@ -359,18 +366,18 @@
   <div class="steps">
     <div class="step sr">
       <div class="step-n">01</div>
-      <h3 class="step-t">Distill</h3>
-      <p class="step-b">Lore captures file structures, past bugs, and architectural choices, compressing them into a high-value memory layer.</p>
+      <h3 class="step-t">Intercept</h3>
+      <p class="step-b">The gateway proxy sits between your AI client and the upstream API. It captures every message — no client changes needed, just change the base URL.</p>
     </div>
     <div class="step sr">
       <div class="step-n">02</div>
-      <h3 class="step-t">Store</h3>
-      <p class="step-b">Your data stays local in a specialized SQLite database (lore.db), ensuring privacy and lightning-fast retrieval.</p>
+      <h3 class="step-t">Context Management</h3>
+      <p class="step-b">No more compaction — a gradient context manager replaces it entirely. Distillations run as batch background requests at 50% lower cost, and an embedded vector search lets your agent recall any detail on demand.</p>
     </div>
     <div class="step sr">
       <div class="step-n">03</div>
-      <h3 class="step-t">Contextualize</h3>
-      <p class="step-b">When you ask your AI to code, Lore injects the exact project "wisdom" needed to avoid hallucinations and repeat errors.</p>
+      <h3 class="step-t">Distill</h3>
+      <p class="step-b">Messages are incrementally distilled into timestamped observation logs — preserving file paths, error messages, exact decisions, and bug fixes instead of lossy summaries.</p>
     </div>
   </div>
 </section>
@@ -381,26 +388,25 @@
     <div class="bc bc-1 sr">
       <p class="bc-tag">Core Tech</p>
       <h3 class="bc-t">Operational Intelligence</h3>
-      <p class="bc-b">Lore doesn't just see your code; it remembers your *intent*. It tracks why decisions were made, making your AI a true partner. It tracks file paths, error messages, and exact commands.</p>
+      <p class="bc-b">Lore preserves the operational details that summarization destroys: file paths, error messages, exact commands, and why decisions were made. Distillation, not summarization.</p>
     </div>
     <div class="bc bc-2 sr">
       <p class="bc-tag">Architecture</p>
       <h3 class="bc-t">Three-Tier Memory</h3>
-      <p class="bc-b">Instead of basic summarization, Lore uses a sophisticated distillation process to categorize knowledge, keeping context relevant and precise.</p>
+      <p class="bc-b">Temporal storage (FTS5-indexed messages), distilled observation logs (timestamped, priority-tagged), and long-term curated knowledge — following Nuum and Mastra's research.</p>
     </div>
     <div class="bc bc-3 sr">
       <div>
         <p class="bc-tag">Integration</p>
-        <h3 class="bc-t">Plug & Play with Claude Code</h3>
-        <p class="bc-b">Get started in seconds. LoreAI integrates directly with your existing AI stack (Claude Code, Pi, OpenCode) via a simple JSON configuration.</p>
+        <h3 class="bc-t">Works with Any AI Client</h3>
+        <p class="bc-b">Transparent proxy on port 6969 — supports Anthropic and OpenAI protocols. Point Claude Code, Cursor, Copilot, Windsurf, or any compatible client at the gateway. Zero client changes.</p>
       </div>
       <div class="code-block">
-        <code><span class="ck">// opencode.json</span><br>
-{<br>
-&nbsp;&nbsp;<span class="cv">"plugin"</span>: [<br>
-&nbsp;&nbsp;&nbsp;&nbsp;<span class="ck">"@loreai/opencode"</span><br>
-&nbsp;&nbsp;]<br>
-}</code>
+        <code><span class="ck"># Start the gateway</span><br>
+<span class="cv">$</span> npx @loreai/gateway<br>
+<br>
+<span class="ck"># Point your client at it</span><br>
+<span class="cv">ANTHROPIC_BASE_URL</span>=<span class="ck">http://localhost:6969</span></code>
       </div>
     </div>
   </div>
@@ -409,19 +415,24 @@
 <!-- CTA -->
 <section class="cta" id="waitlist">
   <div class="cta-inner">
-    <h2 class="sr">Upgrade your AI’s <em>intelligence.</em></h2>
-    <p class="cta-sub sr">LoreAI is open source and currently in development. Implement persistent AI memory in your workflow today.</p>
-    <div class="cta-form sr">
-      <a href="https://github.com/byk/loreai" target="_blank" style="text-decoration:none;">
-        <button class="cta-submit">View on GitHub</button>
-      </a>
-    </div>
+    <h2 class="sr">Get early access to <em>Lore.</em></h2>
+    <p class="cta-sub sr">Join the waitlist and be the first to know when new features ship. We'll never spam you.</p>
+    <form class="cta-form sr" id="waitlist-form" action="https://formsubmit.co/byk@lore.ai" method="POST">
+      <input type="hidden" name="_subject" value="New Lore Waitlist Signup">
+      <input type="hidden" name="_captcha" value="false">
+      <input type="hidden" name="_template" value="box">
+      <input type="hidden" name="_next" value="https://byk.github.io/loreai/#waitlist">
+      <input class="cta-input" type="email" name="email" placeholder="your@email.com" id="emailInput" required />
+      <button class="cta-submit" type="submit" id="submitBtn">Join Waitlist</button>
+    </form>
+    <p class="cta-note sr">No spam. Unsubscribe anytime.</p>
+    <p class="cta-success" id="waitlist-success">✓ You're on the list. We'll be in touch.</p>
   </div>
 </section>
 
 <footer>
   <div class="foot-bottom">
-    <p>© 2025 LoreAI Project. Built for the next generation of developers.</p>
+    <p>© 2026 Burak Yigit Kaya · FSL-1.1-Apache-2.0</p>
   </div>
 </footer>
 
@@ -442,6 +453,52 @@
     entries.forEach(e => { if(e.isIntersecting){ e.target.classList.add('in'); } });
   }, { threshold: 0.1 });
   document.querySelectorAll('.sr').forEach(el => obs.observe(el));
+
+  // dynamic version from GitHub releases
+  (async () => {
+    const badge = document.getElementById('version-badge');
+    try {
+      const res = await fetch('https://api.github.com/repos/BYK/loreai/releases/latest');
+      if (res.ok) {
+        const data = await res.json();
+        badge.textContent = 'v' + (data.tag_name || '0.13.4');
+      } else {
+        badge.textContent = 'v0.13.4';
+      }
+    } catch {
+      badge.textContent = 'v0.13.4';
+    }
+  })();
+
+  // waitlist form — intercept submit for AJAX + feedback
+  const form = document.getElementById('waitlist-form');
+  form?.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const btn = document.getElementById('submitBtn');
+    const inp = document.getElementById('emailInput');
+    const success = document.getElementById('waitlist-success');
+    const email = inp.value;
+    if (!email) return;
+
+    btn.textContent = 'Sending…';
+    btn.disabled = true;
+
+    try {
+      await fetch(form.action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+    } catch { /* formsubmit.co may redirect — that's fine */ }
+
+    // Always show success (formsubmit handles the email)
+    btn.textContent = '✓ You\'re on the list';
+    btn.style.background = 'var(--g2)';
+    inp.value = '';
+    inp.placeholder = 'Thanks! We\'ll be in touch.';
+    success.classList.add('show');
+    form.querySelector('.cta-note')?.remove();
+  });
 </script>
 </body>
 </html>
