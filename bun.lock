@@ -32,11 +32,9 @@
         "lore": "./dist/bin.cjs",
         "lore-gateway": "./dist/bin.cjs",
       },
-      "dependencies": {
+      "devDependencies": {
         "@loreai/core": "workspace:*",
         "@sentry/bun": "^10.52.0",
-      },
-      "devDependencies": {
         "binpunch": "^1.0.0",
       },
     },

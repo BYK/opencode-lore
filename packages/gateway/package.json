@@ -23,13 +23,11 @@
     "build:binary": "bun run script/build.ts --binary",
     "start": "bun run src/index.ts"
   },
-  "dependencies": {
-    "@loreai/core": "workspace:*",
-    "@sentry/bun": "^10.52.0"
-  },
+  "dependencies": {},
   "files": [
     "src/",
     "dist/",
+    "!dist/**/*.map",
     "README.md",
     "LICENSE"
   ],
@@ -56,6 +54,8 @@
   ],
   "author": "BYK",
   "devDependencies": {
+    "@loreai/core": "workspace:*",
+    "@sentry/bun": "^10.52.0",
     "binpunch": "^1.0.0"
   }
 }
