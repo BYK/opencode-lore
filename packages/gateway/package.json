@@ -13,11 +13,14 @@
     }
   },
   "bin": {
-    "lore-gateway": "./dist/index.js"
+    "lore": "./dist/bin.cjs",
+    "lore-gateway": "./dist/bin.cjs"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "bun run script/build.ts",
+    "bundle": "bun run script/bundle.ts",
+    "build:binary": "bun run script/build.ts --binary",
     "start": "bun run src/index.ts"
   },
   "dependencies": {
@@ -30,6 +33,7 @@
     "LICENSE"
   ],
   "engines": {
+    "node": ">=22.15",
     "bun": ">=1.2.0"
   },
   "repository": {
