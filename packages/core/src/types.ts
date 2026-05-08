@@ -79,6 +79,8 @@ export type LoreReasoningPart = {
   messageID: string;
   type: "reasoning";
   text: string;
+  /** Anthropic extended-thinking signature; opaque, must be round-tripped. */
+  signature?: string;
 };
 
 export type LoreToolStatePending = {

@@ -97,6 +97,9 @@ function contentBlockToPart(
         messageID,
         type: "reasoning",
         text: block.thinking,
+        ...(block.signature != null
+          ? { signature: block.signature }
+          : undefined),
       } satisfies LoreReasoningPart;
 
     case "tool_use":
