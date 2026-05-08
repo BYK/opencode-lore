@@ -68,13 +68,18 @@ export function mapOffsetToJsonPath(json: string, offset: number): string {
   if (offset >= json.length) return "<end>";
   if (offset === 0) return "<start>";
 
-  const path: (string | number)[] = [];
-  let depth = 0;
+  // Stack-based JSON path tracker. Each frame represents a nesting level.
+  // - object frames: { kind: "object", key: current key or "" }
+  // - array frames:  { kind: "array", index: current element index }
+  type Frame =
+    | { kind: "object"; key: string }
+    | { kind: "array"; index: number };
+
+  const stack: Frame[] = [];
   let inString = false;
   let escaped = false;
   let currentKey = "";
   let collectingKey = false;
-  let arrayIndex: number[] = []; // stack of array indices per depth
 
   for (let i = 0; i < json.length && i < offset; i++) {
     const ch = json[i];
@@ -92,10 +97,7 @@ export function mapOffsetToJsonPath(json: string, offset: number): string {
       }
       if (ch === '"') {
         inString = false;
-        if (collectingKey) {
-          collectingKey = false;
-          // Key will be pushed on the next ':'
-        }
+        collectingKey = false;
         continue;
       }
       if (collectingKey) currentKey += ch;
@@ -105,86 +107,66 @@ export function mapOffsetToJsonPath(json: string, offset: number): string {
     switch (ch) {
       case '"':
         inString = true;
-        // If we're in an object context and haven't seen ':' yet, start collecting key
-        if (i + 1 < json.length) {
-          // Look ahead to see if this is a key (followed eventually by ':')
-          // Simple heuristic: if we just saw '{' or ',' in object context, it's a key
-          collectingKey = isObjectContext(json, i);
-          if (collectingKey) currentKey = "";
-        }
+        // Determine if this quote starts a key (object context, key position)
+        collectingKey = isObjectKeyPosition(json, i);
+        if (collectingKey) currentKey = "";
         break;
 
       case "{":
-        depth++;
-        arrayIndex.push(-1); // -1 = object context
+        stack.push({ kind: "object", key: "" });
         break;
 
       case "[":
-        depth++;
-        arrayIndex.push(0); // array context, start at 0
+        stack.push({ kind: "array", index: 0 });
         break;
 
       case "}":
       case "]":
-        if (path.length > 0 && path.length >= depth) {
-          path.length = depth - 1;
-        }
-        depth--;
-        arrayIndex.pop();
+        stack.pop();
         break;
 
       case ":":
-        // Push the key we just collected
-        if (currentKey) {
-          // Trim path to current depth - 1, then push key
-          path.length = depth - 1;
-          path.push(currentKey);
+        // Assign the collected key to the current object frame
+        if (currentKey && stack.length > 0) {
+          const top = stack[stack.length - 1];
+          if (top.kind === "object") {
+            top.key = currentKey;
+          }
           currentKey = "";
         }
         break;
 
       case ",":
-        // In array context, increment index
-        if (arrayIndex.length > 0) {
-          const topIdx = arrayIndex.length - 1;
-          if (arrayIndex[topIdx] >= 0) {
-            arrayIndex[topIdx]++;
-            // Update path with new array index
-            path.length = depth - 1;
-            path.push(arrayIndex[topIdx]);
+        // In array context, advance to the next element
+        if (stack.length > 0) {
+          const top = stack[stack.length - 1];
+          if (top.kind === "array") {
+            top.index++;
           }
         }
         break;
     }
   }
 
-  // For arrays, also push the initial [0] element if we haven't yet
-  if (arrayIndex.length > 0) {
-    const topIdx = arrayIndex.length - 1;
-    if (arrayIndex[topIdx] >= 0 && (path.length < depth || typeof path[path.length - 1] !== "number")) {
-      path.length = depth - 1;
-      path.push(arrayIndex[topIdx]);
+  // Build path from the stack
+  const parts: string[] = [];
+  for (const frame of stack) {
+    if (frame.kind === "object" && frame.key) {
+      parts.push(parts.length === 0 ? frame.key : `.${frame.key}`);
+    } else if (frame.kind === "array") {
+      parts.push(`[${frame.index}]`);
     }
   }
 
-  if (path.length === 0) return "<root>";
-
-  return path
-    .map((p, i) =>
-      typeof p === "number"
-        ? `[${p}]`
-        : i === 0
-          ? p
-          : `.${p}`,
-    )
-    .join("");
+  return parts.length === 0 ? "<root>" : parts.join("");
 }
 
 /**
- * Simple heuristic: are we in an object context where a '"' starts a key?
- * Scans backwards from offset to find the last structural character.
+ * Determine if a '"' at `offset` starts an object key.
+ * Scans backwards to find the last structural character — if it's '{' or ','
+ * we're in key position (not value position).
  */
-function isObjectContext(json: string, offset: number): boolean {
+function isObjectKeyPosition(json: string, offset: number): boolean {
   for (let i = offset - 1; i >= 0; i--) {
     const ch = json[i];
     if (ch === " " || ch === "\n" || ch === "\r" || ch === "\t") continue;
