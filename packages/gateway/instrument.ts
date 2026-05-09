@@ -1,9 +1,16 @@
 /**
- * Sentry instrumentation — prod-only.
+ * Sentry instrumentation.
  *
- * Gated by LORE_CLI_VERSION: in dev mode the constant is undefined and
- * VERSION falls back to "dev", so Sentry is never initialized. In binary
- * and npm builds, esbuild injects a real semver string.
+ * By default, Sentry is enabled in production builds (where esbuild
+ * injects a real semver string via LORE_CLI_VERSION) and disabled in
+ * dev mode (VERSION falls back to "dev").
+ *
+ * Explicit control via SENTRY_ENABLED env var:
+ *   - SENTRY_ENABLED=1  → force on  (useful for local dev testing)
+ *   - SENTRY_ENABLED=0  → force off (opt out in production)
+ *
+ * When force-enabled in dev mode, environment is set to "development";
+ * production builds always use "production".
  *
  * This file is imported as a side-effect from both entry points:
  *   - src/cli/bin.ts  (standalone binary)
@@ -11,7 +18,7 @@
  *
  * Static imports are used (not dynamic) because the CJS npm bundle
  * does not support top-level await. The modules are loaded but
- * Sentry.init() only runs when VERSION is a real semver string.
+ * Sentry.init() only runs when the gate passes.
  */
 import * as Sentry from "@sentry/bun";
 import { log } from "@loreai/core";
@@ -52,11 +59,17 @@ if (typeof __SENTRY_DEBUG_ID__ !== "undefined") {
   }
 }
 
-if (VERSION !== "dev" && !Sentry.isInitialized()) {
+const sentryEnvVar = process.env.SENTRY_ENABLED?.trim();
+const isDev = VERSION === "dev";
+const sentryEnabled =
+  sentryEnvVar === "1" ? true : sentryEnvVar === "0" ? false : !isDev;
+
+if (sentryEnabled && !Sentry.isInitialized()) {
   Sentry.init({
     dsn: "https://0282201d6a3df3bc46423e61012ae62b@o275100.ingest.us.sentry.io/4511355222622208",
 
     release: VERSION,
+    environment: isDev ? "development" : "production",
 
     // Adds request headers and IP for users, for more info visit:
     // https://docs.sentry.io/platforms/javascript/guides/bun/configuration/options/#sendDefaultPii
