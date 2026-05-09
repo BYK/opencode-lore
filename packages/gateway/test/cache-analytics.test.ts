@@ -6,6 +6,7 @@ import {
   mapOffsetToJsonPath,
   inferDivergenceReason,
   analyzeCacheTurn,
+  normalizeBodyForComparison,
 } from "../src/cache-analytics";
 import type { CacheAnalytics, GatewayUsage } from "../src/translate/types";
 
@@ -439,5 +440,75 @@ describe("analyzeCacheTurn", () => {
 
     expect(result.divergencePoint).toMatch(/messages\[1\]/);
     expect(result.divergenceReason).toMatch(/message at position 1 content changed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeBodyForComparison
+// ---------------------------------------------------------------------------
+
+describe("normalizeBodyForComparison", () => {
+  test("replaces cch= hex hash with fixed placeholder", () => {
+    const body = '{"system":[{"type":"text","text":"entrypoint=cli; cch=f0e67;\\nYou are Claude Code"}]}';
+    const normalized = normalizeBodyForComparison(body);
+    expect(normalized).toBe('{"system":[{"type":"text","text":"entrypoint=cli; cch=__;\\nYou are Claude Code"}]}');
+  });
+
+  test("handles varying cch lengths", () => {
+    expect(normalizeBodyForComparison("cch=abc;")).toBe("cch=__;");
+    expect(normalizeBodyForComparison("cch=abcdef0123;")).toBe("cch=__;");
+    expect(normalizeBodyForComparison("cch=A1B2C3;")).toBe("cch=__;");
+  });
+
+  test("does not modify bodies without cch=", () => {
+    const body = '{"model":"opus","system":"You are Claude"}';
+    expect(normalizeBodyForComparison(body)).toBe(body);
+  });
+
+  test("handles multiple cch= occurrences", () => {
+    const body = "cch=aaa; some text cch=bbb;";
+    expect(normalizeBodyForComparison(body)).toBe("cch=__; some text cch=__;");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// analyzeCacheTurn — cch= normalization
+// ---------------------------------------------------------------------------
+
+describe("analyzeCacheTurn — cch normalization", () => {
+  test("treats bodies differing only in cch= as identical", () => {
+    const analytics = makeCacheAnalytics();
+    const body1 = JSON.stringify({
+      system: [{ type: "text", text: "entrypoint=cli; cch=f0e67;\nYou are Claude Code" }],
+      messages: [{ role: "user", content: "hello" }],
+    });
+    const body2 = JSON.stringify({
+      system: [{ type: "text", text: "entrypoint=cli; cch=35c93;\nYou are Claude Code" }],
+      messages: [{ role: "user", content: "hello" }],
+    });
+
+    analyzeCacheTurn(analytics, body1, makeUsage());
+    const result = analyzeCacheTurn(analytics, body2, makeUsage());
+
+    expect(result.divergencePoint).toBe("<identical>");
+    expect(result.divergenceReason).toBe("request bodies are identical");
+  });
+
+  test("still detects real system prompt changes alongside cch=", () => {
+    const analytics = makeCacheAnalytics();
+    const body1 = JSON.stringify({
+      system: [{ type: "text", text: "entrypoint=cli; cch=f0e67;\nYou are Claude Code v1" }],
+      messages: [{ role: "user", content: "hello" }],
+    });
+    const body2 = JSON.stringify({
+      system: [{ type: "text", text: "entrypoint=cli; cch=35c93;\nYou are Claude Code v2" }],
+      messages: [{ role: "user", content: "hello" }],
+    });
+
+    analyzeCacheTurn(analytics, body1, makeUsage());
+    const result = analyzeCacheTurn(analytics, body2, makeUsage());
+
+    expect(result.divergencePoint).toMatch(/system/);
+    expect(result.prefixMatchPercent).toBeGreaterThan(0.5);
   });
 });

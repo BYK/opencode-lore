@@ -151,8 +151,44 @@ export function setGenAiUsageAttributes(
 }
 
 // ---------------------------------------------------------------------------
-// Cost estimation metrics
+// Cache analytics span enrichment
 // ---------------------------------------------------------------------------
+
+import type { CacheTurnAnalysis } from "./translate/types.ts";
+
+/**
+ * Set cache analytics attributes on a gen_ai.chat span.
+ *
+ * Called after `analyzeCacheTurn()` returns — adds divergence diagnostics
+ * and prefix match data so cache busting issues are visible in Sentry traces
+ * without needing to grep server logs.
+ *
+ * For early divergences (< 5% prefix match), also includes short byte
+ * snippets around the divergence point for forensic debugging.
+ */
+export function setCacheAnalyticsAttributes(
+  span: Sentry.Span,
+  analysis: CacheTurnAnalysis,
+  bustCause: string,
+  prevSnippet?: string,
+  currSnippet?: string,
+): void {
+  span.setAttribute("lore.cache.turn", analysis.turn);
+  span.setAttribute("lore.cache.hit_rate", Math.round(analysis.cacheHitRate * 1000) / 1000);
+  span.setAttribute("lore.cache.prefix_match", Math.round(analysis.prefixMatchPercent * 1000) / 1000);
+  span.setAttribute("lore.cache.divergence_point", analysis.divergencePoint);
+  span.setAttribute("lore.cache.divergence_reason", analysis.divergenceReason);
+  span.setAttribute("lore.cache.bust_cause", bustCause);
+
+  // Include diverging byte snippets for early divergences — these are from the
+  // system prompt prefix (client env info), not user conversation content.
+  if (prevSnippet) {
+    span.setAttribute("lore.cache.divergence_prev_snippet", prevSnippet);
+  }
+  if (currSnippet) {
+    span.setAttribute("lore.cache.divergence_curr_snippet", currSnippet);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Cache bust telemetry

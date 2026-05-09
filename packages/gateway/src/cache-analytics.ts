@@ -36,6 +36,30 @@ export function decompressBody(compressed: Uint8Array): string {
 }
 
 // ---------------------------------------------------------------------------
+// Body normalization for stable comparison
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a serialized request body for cache comparison by stripping
+ * volatile metadata that clients embed in the system prompt.
+ *
+ * Claude Code prepends `entrypoint=cli; cch=XXXXX;\n` to its system prompt
+ * where `cch` is a content-cache hash that changes every turn. This busts
+ * our byte-level prefix comparison even though the actual prompt content
+ * is stable (and Anthropic's token-level cache hits fine).
+ *
+ * We replace the volatile `cch=...;` segment with a fixed placeholder so
+ * the comparison sees the bodies as prefix-identical when only this hash
+ * changed. The upstream request is never modified — only our analytics copy.
+ */
+const CCH_PATTERN = /cch=[0-9a-fA-F]+;/g;
+const CCH_REPLACEMENT = "cch=__;";
+
+export function normalizeBodyForComparison(body: string): string {
+  return body.replace(CCH_PATTERN, CCH_REPLACEMENT);
+}
+
+// ---------------------------------------------------------------------------
 // Byte-level prefix comparison
 // ---------------------------------------------------------------------------
 
@@ -288,26 +312,49 @@ export function analyzeCacheTurn(
   let prefixMatchPercent = 0;
   let divergencePoint = "<first-turn>";
   let divergenceReason = "first turn — no previous request to compare";
+  let prevSnippet: string | undefined;
+  let currSnippet: string | undefined;
+
+  // Normalize the current body for comparison: strip volatile client metadata
+  // (e.g. Claude Code's per-turn `cch=XXXXX;` hash) so it doesn't pollute
+  // prefix comparison. The previous body was already normalized before storage.
+  const normalizedBody = normalizeBodyForComparison(currentBody);
 
   // Compare with previous body if available
   if (analytics.lastRequestBody !== null) {
     const prevBody = decompressBody(analytics.lastRequestBody);
     const prevLength = prevBody.length;
-    const currLength = currentBody.length;
+    const currLength = normalizedBody.length;
 
-    prefixMatchBytes = findDivergenceOffset(prevBody, currentBody);
+    prefixMatchBytes = findDivergenceOffset(prevBody, normalizedBody);
     const minLength = Math.min(prevLength, currLength);
     prefixMatchPercent = minLength > 0 ? prefixMatchBytes / minLength : 0;
 
     if (prefixMatchBytes < minLength) {
       // Actual divergence within the shared prefix
-      divergencePoint = mapOffsetToJsonPath(currentBody, prefixMatchBytes);
+      divergencePoint = mapOffsetToJsonPath(normalizedBody, prefixMatchBytes);
       divergenceReason = inferDivergenceReason(
         divergencePoint,
         prevLength,
         currLength,
         messageCount,
       );
+
+      // Capture and log diverging byte snippets for early divergences (< 5%
+      // prefix match) to help diagnose what the client is changing (e.g.
+      // timestamps, turn counters). Snippets are also stored on the result
+      // for Sentry span enrichment.
+      if (prefixMatchPercent < 0.05) {
+        const start = Math.max(0, prefixMatchBytes - 20);
+        const end = prefixMatchBytes + 80;
+        prevSnippet = prevBody.slice(start, Math.min(prevLength, end));
+        currSnippet = normalizedBody.slice(start, Math.min(currLength, end));
+        log.info(
+          `cache-analytics: early divergence at byte ${prefixMatchBytes}` +
+            `\n  prev: ${JSON.stringify(prevSnippet)}` +
+            `\n  curr: ${JSON.stringify(currSnippet)}`,
+        );
+      }
     } else if (prevLength !== currLength) {
       // One is a prefix of the other — new content appended/removed
       divergencePoint = "<end>";
@@ -321,9 +368,11 @@ export function analyzeCacheTurn(
     }
   }
 
-  // Store compressed body for next turn
-  analytics.lastRequestBody = compressBody(currentBody);
-  analytics.lastRequestBodyLength = currentBody.length;
+  // Store normalized + compressed body for next turn. We store the normalized
+  // version so the next turn's comparison is apples-to-apples (both sides
+  // have volatile metadata stripped).
+  analytics.lastRequestBody = compressBody(normalizedBody);
+  analytics.lastRequestBodyLength = normalizedBody.length;
   analytics.lastCacheRead = cacheRead;
   analytics.lastCacheCreation = cacheCreation;
 
@@ -337,6 +386,8 @@ export function analyzeCacheTurn(
     prefixMatchPercent,
     divergencePoint,
     divergenceReason,
+    prevSnippet,
+    currSnippet,
   };
 
   // Log structured analysis

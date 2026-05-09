@@ -97,13 +97,14 @@ import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySyn
 import * as Sentry from "@sentry/bun";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
-  setSentryRequestContext,
-  setSentryCacheContext,
-  setSentryLightContext,
-  setGenAiUsageAttributes,
-  emitCostMetric,
-  emitCacheBustMetric,
-  type AnthropicUsage,
+   setSentryRequestContext,
+   setSentryCacheContext,
+   setSentryLightContext,
+   setGenAiUsageAttributes,
+   setCacheAnalyticsAttributes,
+   emitCostMetric,
+   emitCacheBustMetric,
+   type AnthropicUsage,
 } from "./sentry";
 import {
   RECALL_GATEWAY_TOOL,
@@ -899,7 +900,7 @@ function postResponse(
       getLastTransformedCount(sessionID),
     );
 
-    // --- Sentry cache context + cost metric + span finalization ---
+    // --- Sentry cache context + cost metric ---
     setSentryCacheContext(resp.usage);
     const usageForSentry: AnthropicUsage = {
       input_tokens: resp.usage.inputTokens,
@@ -910,10 +911,11 @@ function postResponse(
     emitCostMetric(resp.model, usageForSentry, "conversation");
     if (genAiSpan) {
       setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
-      genAiSpan.end();
     }
 
     // --- Cache analytics + bust cause telemetry ---
+    // Run BEFORE genAiSpan.end() so we can enrich the span with
+    // divergence diagnostics (divergence point, prefix match, bust cause).
     if (requestBody) {
       const turnAnalysis = analyzeCacheTurn(
         sessionState.cacheAnalytics, requestBody, resp.usage, sessionID,
@@ -923,6 +925,12 @@ function postResponse(
         turnAnalysis,
         sessionState.lastTurnWasIdle ?? false,
       );
+      if (genAiSpan) {
+        setCacheAnalyticsAttributes(
+          genAiSpan, turnAnalysis, bustCause,
+          turnAnalysis.prevSnippet, turnAnalysis.currSnippet,
+        );
+      }
       emitCacheBustMetric(
         bustCause,
         resp.usage.cacheCreationInputTokens ?? 0,
@@ -939,6 +947,11 @@ function postResponse(
       if (sessionState.coldCacheWindow.length > 20) {
         sessionState.coldCacheWindow.shift();
       }
+    }
+
+    // --- Finalize gen_ai.chat span (after cache analytics enrichment) ---
+    if (genAiSpan) {
+      genAiSpan.end();
     }
 
     // --- Bust rate feedback for dynamic context cap ---
