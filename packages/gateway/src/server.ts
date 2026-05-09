@@ -197,6 +197,9 @@ export function startServer(config: GatewayConfig): {
   const server = Bun.serve({
     port: config.port,
     hostname: config.host,
+    // Bun defaults to 10s which is too short for LLM streaming responses.
+    // 255 is the maximum allowed by Bun.
+    idleTimeout: 255,
 
     async fetch(req: Request): Promise<Response> {
       const url = new URL(req.url);
