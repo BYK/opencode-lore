@@ -11,6 +11,8 @@ export interface StartOptions {
   port?: number;
   host?: string;
   debug?: boolean;
+  /** Suppress verbose banner (env vars, export hints). Used in embedded mode. */
+  quiet?: boolean;
 }
 
 /**
@@ -51,23 +53,25 @@ export async function commandStart(opts: StartOptions): Promise<never> {
 
   const addr = `http://${config.host}:${port}`;
   console.error(`[lore] Gateway listening on ${addr}`);
-  console.error(
-    `[lore] Model routing: claude-* → Anthropic, nvidia/* → Nvidia NIM, gpt-* → OpenAI, …`,
-  );
-  console.error("");
-  console.error("[lore] Point your AI agent at the gateway:");
-  console.error(`  export ANTHROPIC_BASE_URL=${addr}`);
-  console.error(`  export OPENAI_BASE_URL=${addr}/v1`);
-  console.error("");
-  console.error("[lore] Configuration (environment variables):");
-  console.error(`  LORE_LISTEN_PORT        Port to listen on (current: ${port})`);
-  console.error(`  LORE_LISTEN_HOST        Host to bind to (current: ${config.host})`);
-  console.error(`  LORE_UPSTREAM_ANTHROPIC Anthropic API URL (current: ${config.upstreamAnthropic})`);
-  console.error(`  LORE_UPSTREAM_OPENAI    OpenAI API URL (current: ${config.upstreamOpenAI})`);
-  console.error(`  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`);
-  console.error(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
-  console.error(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
 
+  if (!opts.quiet) {
+    console.error(
+      `[lore] Model routing: claude-* → Anthropic, nvidia/* → Nvidia NIM, gpt-* → OpenAI, …`,
+    );
+    console.error("");
+    console.error("[lore] Point your AI agent at the gateway:");
+    console.error(`  export ANTHROPIC_BASE_URL=${addr}`);
+    console.error(`  export OPENAI_BASE_URL=${addr}/v1`);
+    console.error("");
+    console.error("[lore] Configuration (environment variables):");
+    console.error(`  LORE_LISTEN_PORT        Port to listen on (current: ${port})`);
+    console.error(`  LORE_LISTEN_HOST        Host to bind to (current: ${config.host})`);
+    console.error(`  LORE_UPSTREAM_ANTHROPIC Anthropic API URL (current: ${config.upstreamAnthropic})`);
+    console.error(`  LORE_UPSTREAM_OPENAI    OpenAI API URL (current: ${config.upstreamOpenAI})`);
+    console.error(`  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`);
+    console.error(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
+    console.error(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
+  }
   // Block until signal
   const onSignal = async () => {
     await shutdown();

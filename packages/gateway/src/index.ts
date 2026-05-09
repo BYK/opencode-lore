@@ -37,5 +37,5 @@ if (typeof Bun !== "undefined" && Bun.main === import.meta.path) {
   // no reason to auto-detect agents when launched as an embedded server.
   // esbuild CJS output drops import.meta to `{}` so the condition is
   // always false in the npm bundle — the await is dead-code-eliminated.
-  import("./cli/start").then(({ commandStart }) => commandStart({}));
+  import("./cli/start").then(({ commandStart }) => commandStart({ quiet: true }));
 }
