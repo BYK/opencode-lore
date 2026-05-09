@@ -56,6 +56,9 @@ export {
   projectName,
   loadForceMinLayer,
   saveForceMinLayer,
+  getMeta,
+  setMeta,
+  getInstanceId,
   close,
 } from "./db";
 export {

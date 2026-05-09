@@ -3,7 +3,7 @@ import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 import { homedir } from "os";
 
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 const MIGRATIONS: string[] = [
   `
@@ -350,6 +350,18 @@ const MIGRATIONS: string[] = [
   ALTER TABLE distillations ADD COLUMN r_compression REAL;
   ALTER TABLE distillations ADD COLUMN c_norm REAL;
   `,
+  `
+  -- Version 13: Installation metadata table for telemetry and diagnostics.
+  --
+  -- Separate from kv_meta (plugin state) — this holds installation-scoped
+  -- values: instance_id, release_channel, etc. Has updated_at for tracking
+  -- when values last changed.
+  CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 function dataDir() {
@@ -490,6 +502,11 @@ function recoverMissingObjects(database: Database) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
 }
 
@@ -571,4 +588,39 @@ export function saveForceMinLayer(sessionID: string, layer: number): void {
       )
       .run(sessionID, layer, Date.now());
   }
+}
+
+// ---------------------------------------------------------------------------
+// Installation metadata (metadata table)
+// ---------------------------------------------------------------------------
+
+/** Get a metadata value by key. Returns null if not found. */
+export function getMeta(key: string): string | null {
+  const row = db()
+    .query("SELECT value FROM metadata WHERE key = ?")
+    .get(key) as { value: string } | null;
+  return row?.value ?? null;
+}
+
+/** Set a metadata value (upsert). */
+export function setMeta(key: string, value: string): void {
+  db()
+    .query(
+      "INSERT INTO metadata (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?",
+    )
+    .run(key, value, Date.now(), value, Date.now());
+}
+
+/**
+ * Get or create the installation instance ID.
+ *
+ * Generated once (UUID v4) on first call, then persisted in the metadata
+ * table across process restarts and upgrades.
+ */
+export function getInstanceId(): string {
+  const existing = getMeta("instance_id");
+  if (existing) return existing;
+  const id = crypto.randomUUID();
+  setMeta("instance_id", id);
+  return id;
 }

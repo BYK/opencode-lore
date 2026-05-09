@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { db, close, ensureProject, projectId, loadForceMinLayer, saveForceMinLayer } from "../src/db";
+import { db, close, ensureProject, projectId, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId } from "../src/db";
 
 
 describe("db", () => {
@@ -15,13 +15,14 @@ describe("db", () => {
     expect(names).toContain("knowledge");
     expect(names).toContain("schema_version");
     expect(names).toContain("session_state");
+    expect(names).toContain("metadata");
   });
 
   test("schema version is set", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(12);
+    expect(row.version).toBe(13);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -111,6 +112,39 @@ describe("db", () => {
     expect(tables.map((t) => t.name)).toContain("kv_meta");
   });
 
+  test("metadata table exists (migration v13)", () => {
+    const tables = db()
+      .query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((t) => t.name)).toContain("metadata");
+  });
+
+  test("getMeta returns null for unknown key", () => {
+    expect(getMeta("nonexistent_key")).toBeNull();
+  });
+
+  test("setMeta and getMeta round-trip", () => {
+    setMeta("test_key", "test_value");
+    expect(getMeta("test_key")).toBe("test_value");
+  });
+
+  test("setMeta upserts on conflict", () => {
+    setMeta("upsert_key", "first");
+    expect(getMeta("upsert_key")).toBe("first");
+    setMeta("upsert_key", "second");
+    expect(getMeta("upsert_key")).toBe("second");
+  });
+
+  test("getInstanceId generates and persists UUID", () => {
+    const id = getInstanceId();
+    expect(id).toBeTruthy();
+    expect(typeof id).toBe("string");
+    // UUID v4 format
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    // Same value on subsequent calls
+    expect(getInstanceId()).toBe(id);
+  });
+
   test("db() re-initializes after close()", () => {
     // Ensure the singleton is populated
     const first = db();
@@ -131,26 +165,35 @@ describe("db", () => {
     expect(row!.name).toBe("kv_meta");
   });
 
-  test("recoverMissingObjects creates kv_meta when version=latest but table is missing", () => {
-    // Simulate the exact scenario: DB at current version but kv_meta missing
-    // due to a partial migration 7 (ALTER TABLE duplicate column aborted exec
-    // before CREATE TABLE kv_meta).
+  test("recoverMissingObjects creates kv_meta and metadata when version=latest but tables are missing", () => {
+    // Simulate the exact scenario: DB at current version but tables missing
+    // due to a partial migration (ALTER TABLE duplicate column aborted exec
+    // before CREATE TABLE).
     const d = db();
 
-    // Drop kv_meta to simulate the broken state
+    // Drop both tables to simulate the broken state
     d.exec("DROP TABLE IF EXISTS kv_meta");
-    const before = d
-      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'")
-      .get();
-    expect(before).toBeNull();
+    d.exec("DROP TABLE IF EXISTS metadata");
+    expect(
+      d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'").get(),
+    ).toBeNull();
+    expect(
+      d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'").get(),
+    ).toBeNull();
 
-    // Close and re-open — migrate() should recover the missing table
+    // Close and re-open — migrate() should recover the missing tables
     close();
     const fresh = db();
-    const after = fresh
+    const afterKv = fresh
       .query("SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'")
       .get() as { name: string } | null;
-    expect(after).not.toBeNull();
-    expect(after!.name).toBe("kv_meta");
+    expect(afterKv).not.toBeNull();
+    expect(afterKv!.name).toBe("kv_meta");
+
+    const afterMeta = fresh
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'")
+      .get() as { name: string } | null;
+    expect(afterMeta).not.toBeNull();
+    expect(afterMeta!.name).toBe("metadata");
   });
 });

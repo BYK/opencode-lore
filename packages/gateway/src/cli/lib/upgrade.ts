@@ -19,6 +19,7 @@
 import { chmodSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { getMeta, setMeta } from "@loreai/core";
 
 import {
   acquireLock,
@@ -68,17 +69,37 @@ export type OfflineMode = false | "explicit" | "network-fallback";
 // ---------------------------------------------------------------------------
 
 const CHANNEL_FILE = "channel";
+const CHANNEL_META_KEY = "release_channel";
 
 /**
- * Read the persisted release channel from ~/.lore/channel.
+ * Read the persisted release channel.
+ *
+ * Checks the metadata table first, then falls back to the legacy
+ * ~/.lore/channel file for backwards compatibility. If the file
+ * exists but the DB doesn't have the value, migrates to DB.
+ *
  * Returns "stable" if not set or on any error.
  */
 export function getReleaseChannel(): ReleaseChannel {
+  // 1. Check metadata table (primary)
+  try {
+    const dbValue = getMeta(CHANNEL_META_KEY);
+    if (dbValue === "nightly") return "nightly";
+    if (dbValue === "stable") return "stable";
+  } catch {
+    // DB not available — fall through to file
+  }
+
+  // 2. Fall back to legacy file
   try {
     const content = require("node:fs")
       .readFileSync(join(getConfigDir(), CHANNEL_FILE), "utf-8")
       .trim();
-    if (content === "nightly") return "nightly";
+    if (content === "nightly") {
+      // Migrate file value to DB
+      try { setMeta(CHANNEL_META_KEY, "nightly"); } catch { /* best-effort */ }
+      return "nightly";
+    }
   } catch {
     // File doesn't exist or unreadable — default to stable
   }
@@ -86,16 +107,27 @@ export function getReleaseChannel(): ReleaseChannel {
 }
 
 /**
- * Persist the release channel to ~/.lore/channel.
+ * Persist the release channel to the metadata table.
+ *
+ * Also writes the legacy file for older binary versions that may
+ * still read it.
  */
 export function setReleaseChannel(channel: ReleaseChannel): void {
+  // Primary: metadata table
+  try {
+    setMeta(CHANNEL_META_KEY, channel);
+  } catch {
+    // Best-effort — don't fail the upgrade if DB write fails
+  }
+
+  // Legacy: file (for backwards compat with older binaries)
   try {
     const fs = require("node:fs");
     const dir = getConfigDir();
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(join(dir, CHANNEL_FILE), channel, "utf-8");
   } catch {
-    // Best-effort — don't fail the upgrade if persistence fails
+    // Best-effort
   }
 }
 

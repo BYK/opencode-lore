@@ -11,6 +11,8 @@
  * even when multiple clients are connected simultaneously.
  */
 
+import { createHash } from "node:crypto";
+
 // ---------------------------------------------------------------------------
 // AuthCredential type
 // ---------------------------------------------------------------------------
@@ -63,14 +65,18 @@ export function authHeaders(cred: AuthCredential): Record<string, string> {
 }
 
 /**
- * Non-sensitive suffix for fingerprinting — last 8 chars of credential value.
+ * Privacy-safe credential fingerprint — SHA-256 of scheme + value, truncated
+ * to 16 hex chars (64 bits).
  *
  * Used to differentiate sessions that share the same first message but use
- * different API keys or OAuth tokens. The suffix alone cannot reconstruct
- * the full credential.
+ * different API keys or OAuth tokens. The scheme prefix prevents collisions
+ * between an API key and a bearer token with the same value. Not reversible.
  */
 export function authFingerprint(cred: AuthCredential): string {
-  return cred.value.slice(-8);
+  return createHash("sha256")
+    .update(`${cred.scheme}|${cred.value}`)
+    .digest("hex")
+    .slice(0, 16);
 }
 
 // ---------------------------------------------------------------------------

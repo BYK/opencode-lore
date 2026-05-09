@@ -19,8 +19,14 @@
 
 import type { LLMClient } from "@loreai/core";
 import { log } from "@loreai/core";
+import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
 import { authHeaders } from "./auth";
+import {
+  setGenAiUsageAttributes,
+  emitCostMetric,
+  type AnthropicUsage,
+} from "./sentry";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -339,6 +345,8 @@ export function createBatchLLMClient(
               type: "succeeded" | "errored" | "canceled" | "expired";
               message?: {
                 content?: Array<{ type: string; text?: string }>;
+                model?: string;
+                usage?: AnthropicUsage;
               };
               error?: { type: string; message: string };
             };
@@ -349,9 +357,32 @@ export function createBatchLLMClient(
 
           switch (result.result.type) {
             case "succeeded": {
-              const textBlock = result.result.message?.content?.find(
+              const msg = result.result.message;
+              const textBlock = msg?.content?.find(
                 (b) => b.type === "text" && typeof b.text === "string",
               );
+
+              // Emit gen_ai.chat span for batch result with usage + queue time
+              if (Sentry.isInitialized() && msg?.usage) {
+                Sentry.startSpan(
+                  {
+                    op: "gen_ai.chat",
+                    name: `chat ${pending.params.model}`,
+                    attributes: {
+                      "gen_ai.operation.name": "chat",
+                      "gen_ai.request.model": pending.params.model,
+                      "gen_ai.provider.name": "anthropic",
+                      "lore.call_type": "batch",
+                      "lore.batch_queue_ms": Date.now() - pending.enqueuedAt,
+                    },
+                  },
+                  (span) => {
+                    setGenAiUsageAttributes(span, msg.usage!, msg.model);
+                  },
+                );
+                emitCostMetric(pending.params.model, msg.usage, "batch");
+              }
+
               pending.resolve(textBlock?.text ?? null);
               totalResolved++;
               break;

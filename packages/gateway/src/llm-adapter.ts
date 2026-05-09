@@ -6,8 +6,14 @@
 
 import type { LLMClient } from "@loreai/core";
 import { log } from "@loreai/core";
+import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
 import { authHeaders } from "./auth";
+import {
+  setGenAiUsageAttributes,
+  emitCostMetric,
+  type AnthropicUsage,
+} from "./sentry";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -101,76 +107,103 @@ export function createGatewayLLMClient(
           messages: [{ role: "user", content: user }],
         });
 
-        const headers = {
+        const reqHeaders = {
           "Content-Type": "application/json",
           "anthropic-version": "2023-06-01",
           ...authHeaders(cred),
         };
 
-        // Retry loop for transient errors (429, 5xx)
-        for (let attempt = 0; ; attempt++) {
-          let response: Response;
-          try {
-            response = await fetch(url, {
-              method: "POST",
-              headers,
-              // opts.thinking is intentionally not forwarded — this bare API
-              // call never includes the `thinking` parameter so Anthropic
-              // models won't produce thinking tokens regardless.
-              body,
-            });
-          } catch (e) {
-            // Network/fetch error — retry if attempts remain
-            if (attempt < MAX_RETRIES) {
-              const delay = backoffMs(attempt, null);
-              log.warn(
-                `worker request network error (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms`,
+        // Wrap the entire retry loop in a gen_ai.chat span so it captures
+        // real wall-clock duration including retries and backoff delays.
+        return await Sentry.startSpan(
+          {
+            op: "gen_ai.chat",
+            name: `chat ${model.modelID}`,
+            attributes: {
+              "gen_ai.operation.name": "chat",
+              "gen_ai.request.model": model.modelID,
+              "gen_ai.provider.name": "anthropic",
+              "lore.worker_id": opts?.workerID ?? "unknown",
+              "lore.call_type": "direct",
+            },
+          },
+          async (span) => {
+            // Retry loop for transient errors (429, 5xx)
+            for (let attempt = 0; ; attempt++) {
+              let response: Response;
+              try {
+                response = await fetch(url, {
+                  method: "POST",
+                  headers: reqHeaders,
+                  // opts.thinking is intentionally not forwarded — this bare API
+                  // call never includes the `thinking` parameter so Anthropic
+                  // models won't produce thinking tokens regardless.
+                  body,
+                });
+              } catch (e) {
+                // Network/fetch error — retry if attempts remain
+                if (attempt < MAX_RETRIES) {
+                  const delay = backoffMs(attempt, null);
+                  log.warn(
+                    `worker request network error (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms`,
+                  );
+                  await sleep(delay);
+                  continue;
+                }
+                throw e; // exhausted retries — rethrow to outer catch
+              }
+
+              if (response.ok) {
+                const data = (await response.json()) as {
+                  content?: Array<{ type: string; text?: string }>;
+                  model?: string;
+                  usage?: AnthropicUsage;
+                };
+
+                // Set usage attributes on the span
+                if (data.usage) {
+                  setGenAiUsageAttributes(span, data.usage, data.model);
+                  emitCostMetric(model.modelID, data.usage, "direct");
+                }
+
+                const textBlock = data.content?.find(
+                  (b) => b.type === "text" && typeof b.text === "string",
+                );
+
+                return textBlock?.text ?? null;
+              }
+
+              // Non-transient error — fail immediately, no retry
+              if (!TRANSIENT_CODES.has(response.status)) {
+                const text = await response.text().catch(() => "(no body)");
+                log.error(
+                  `worker upstream request failed: ${response.status} ${response.statusText} — ${text}`,
+                );
+                span.setStatus({ code: 2, message: `HTTP ${response.status}` });
+                return null;
+              }
+
+              // Transient error — retry if attempts remain
+              if (attempt < MAX_RETRIES) {
+                const retryAfter = parseRetryAfter(response);
+                const delay = backoffMs(attempt, retryAfter);
+                log.warn(
+                  `worker upstream ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms`,
+                );
+                await sleep(delay);
+                continue;
+              }
+
+              // Exhausted retries
+              const text = await response.text().catch(() => "(no body)");
+              log.error(
+                `worker upstream request failed after ${MAX_RETRIES + 1} attempts: ${response.status} ${response.statusText} — ${text}`,
               );
-              await sleep(delay);
-              continue;
+              span.setStatus({ code: 2, message: `HTTP exhausted retries` });
+              return null;
             }
-            throw e; // exhausted retries — rethrow to outer catch
-          }
-
-          if (response.ok) {
-            const data = (await response.json()) as {
-              content?: Array<{ type: string; text?: string }>;
-            };
-
-            const textBlock = data.content?.find(
-              (b) => b.type === "text" && typeof b.text === "string",
-            );
-
-            return textBlock?.text ?? null;
-          }
-
-          // Non-transient error — fail immediately, no retry
-          if (!TRANSIENT_CODES.has(response.status)) {
-            const text = await response.text().catch(() => "(no body)");
-            log.error(
-              `worker upstream request failed: ${response.status} ${response.statusText} — ${text}`,
-            );
-            return null;
-          }
-
-          // Transient error — retry if attempts remain
-          if (attempt < MAX_RETRIES) {
-            const retryAfter = parseRetryAfter(response);
-            const delay = backoffMs(attempt, retryAfter);
-            log.warn(
-              `worker upstream ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms`,
-            );
-            await sleep(delay);
-            continue;
-          }
-
-          // Exhausted retries
-          const text = await response.text().catch(() => "(no body)");
-          log.error(
-            `worker upstream request failed after ${MAX_RETRIES + 1} attempts: ${response.status} ${response.statusText} — ${text}`,
-          );
-          return null;
-        }
+          },
+        );
       } catch (e) {
         log.error("worker prompt failed:", e);
         return null;

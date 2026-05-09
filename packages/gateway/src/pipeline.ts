@@ -91,7 +91,16 @@ import {
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { getWorkerModel, resetWorkerModelState } from "./worker-model";
+import * as Sentry from "@sentry/bun";
 import { analyzeCacheTurn } from "./cache-analytics";
+import {
+  setSentryRequestContext,
+  setSentryCacheContext,
+  setSentryLightContext,
+  setGenAiUsageAttributes,
+  emitCostMetric,
+  type AnthropicUsage,
+} from "./sentry";
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
@@ -308,6 +317,9 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     // Wrap with batch queue for 50% cost savings on non-urgent worker calls.
     // Enabled by default — disable via LORE_BATCH_DISABLED=1.
     const batchDisabled = process.env.LORE_BATCH_DISABLED === "1";
+    if (Sentry.isInitialized()) {
+      Sentry.setTag("batch_enabled", String(!batchDisabled));
+    }
     if (batchDisabled) {
       llmClient = inner;
     } else {
@@ -854,6 +866,8 @@ function postResponse(
   config: GatewayConfig,
   /** Serialized JSON body sent upstream — for cache prefix comparison. */
   requestBody?: string,
+  /** Active gen_ai.chat span to finalize with usage attributes. */
+  genAiSpan?: Sentry.Span,
 ): void {
   const { sessionID, projectPath } = sessionState;
 
@@ -868,6 +882,20 @@ function postResponse(
       sessionID,
       getLastTransformedCount(sessionID),
     );
+
+    // --- Sentry cache context + cost metric + span finalization ---
+    setSentryCacheContext(resp.usage);
+    const usageForSentry: AnthropicUsage = {
+      input_tokens: resp.usage.inputTokens,
+      output_tokens: resp.usage.outputTokens,
+      cache_read_input_tokens: resp.usage.cacheReadInputTokens,
+      cache_creation_input_tokens: resp.usage.cacheCreationInputTokens,
+    };
+    emitCostMetric(resp.model, usageForSentry, "conversation");
+    if (genAiSpan) {
+      setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
+      genAiSpan.end();
+    }
 
     // --- Cache analytics ---
     if (requestBody) {
@@ -987,6 +1015,8 @@ async function handleCompaction(
   const sessionState = getOrCreateSession(sessionID, projectPath);
   const llm = getLLMClient(config);
 
+  setSentryLightContext({ model: req.model, projectPath });
+
   log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
 
   // 1. Force-distill all undistilled messages.
@@ -1074,6 +1104,8 @@ async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
+  setSentryLightContext({ model: req.model });
+
   const { response: upstreamResponse } = await forwardToUpstream(req, config);
 
   // For streaming, pipe through unchanged
@@ -1142,6 +1174,16 @@ async function handleConversationTurn(
 
   // Track session model for worker model discovery
   lastSeenSessionModel = req.model;
+
+  // --- Sentry scope enrichment ---
+  setSentryRequestContext({
+    authFingerprint: cred ? authFingerprint(cred) : null,
+    sessionID,
+    model: req.model,
+    upstreamUrl: resolveUpstreamRoute(req.model)?.url ?? config.upstreamAnthropic,
+    port: config.port,
+    projectPath,
+  });
 
   // --- Expand recall markers from previous turns ---
   // Scan all assistant messages for marker text blocks and restore them
@@ -1317,6 +1359,23 @@ async function handleConversationTurn(
     cacheTools: true,
     cacheConversation: true,
   };
+
+  // Start gen_ai.chat span before the upstream call so it captures real
+  // wall-clock duration (including network latency and streaming time).
+  // The span is ended in postResponse() after usage attributes are set.
+  const genAiSpan = Sentry.startInactiveSpan({
+    op: "gen_ai.chat",
+    name: `chat ${req.model}`,
+    attributes: {
+      "gen_ai.operation.name": "chat",
+      "gen_ai.request.model": req.model,
+      "gen_ai.provider.name":
+        resolveUpstreamRoute(req.model)?.protocol ?? "anthropic",
+      "gen_ai.response.streaming": req.stream,
+      // NO gen_ai.input.messages — privacy (proxy for other people's projects)
+    },
+  });
+
   const { response: upstreamResponse, serializedBody: requestBody } =
     await forwardToUpstream(
       modifiedReq,
@@ -1330,6 +1389,8 @@ async function handleConversationTurn(
     log.error(
       `upstream error: ${upstreamResponse.status} ${errorBody.slice(0, 500)}`,
     );
+    genAiSpan.setStatus({ code: 2, message: `HTTP ${upstreamResponse.status}` });
+    genAiSpan.end();
     return new Response(errorBody, {
       status: upstreamResponse.status,
       headers: { "content-type": "application/json" },
@@ -1344,7 +1405,7 @@ async function handleConversationTurn(
     );
     return buildStreamingResponse(
       upstreamResponse,
-      (resp) => postResponse(req, resp, sessionState, config, requestBody),
+      (resp) => postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
       hasRecallTool
         ? { modifiedReq, config, sessionState, cacheOptions }
         : undefined,
@@ -1381,7 +1442,7 @@ async function handleConversationTurn(
       log.info(
         `recall (non-stream, mixed): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
       );
-      postResponse(req, markerResp, sessionState, config, requestBody);
+      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
       return nonStreamHttpResponse(markerResp);
     }
 
@@ -1404,7 +1465,7 @@ async function handleConversationTurn(
         `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
       );
       // Fall back to response with marker (no continuation)
-      postResponse(req, markerResp, sessionState, config, requestBody);
+      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
       return nonStreamHttpResponse(markerResp);
     }
 
@@ -1424,11 +1485,11 @@ async function handleConversationTurn(
         resp.usage.cacheCreationInputTokens;
     }
 
-    postResponse(req, continuationResp, sessionState, config, requestBody);
+    postResponse(req, continuationResp, sessionState, config, requestBody, genAiSpan);
     return nonStreamHttpResponse(continuationResp);
   }
 
-  postResponse(req, resp, sessionState, config, requestBody);
+  postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
   return nonStreamHttpResponse(resp);
 }
 
