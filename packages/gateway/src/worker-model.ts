@@ -50,11 +50,12 @@ type ModelsDevResponse = {
 };
 
 /**
- * Hardcoded fallback costs (per-million-token, USD) used when models.dev
- * API is unreachable. Prefix-matched against model IDs.
+ * Minimal fallback costs (per-million-token, USD) used when models.dev
+ * API is unreachable. Only includes models involved in worker selection
+ * decisions — everything else uses the generic unknown-model default.
  *
- * Covers Anthropic + OpenAI families (the two providers with validated
- * worker model mappings). Other providers use the unknown-model default.
+ * Dynamic pricing from models.dev is the primary source; these are a
+ * safety net for offline/unreachable scenarios.
  */
 const FALLBACK_PRICING: Array<{
   prefix: string;
@@ -65,30 +66,13 @@ const FALLBACK_PRICING: Array<{
   context: number;
   outputLimit: number;
 }> = [
-  // Anthropic
-  { prefix: "claude-opus-4-6", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25, context: 1_000_000, outputLimit: 128_000 },
-  { prefix: "claude-opus-4-5", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25, context: 200_000, outputLimit: 64_000 },
-  { prefix: "claude-opus-4", input: 15, output: 75, cache_read: 1.5, cache_write: 18.75, context: 200_000, outputLimit: 32_000 },
-  { prefix: "claude-sonnet-4-6", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 1_000_000, outputLimit: 64_000 },
-  { prefix: "claude-sonnet-4", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 200_000, outputLimit: 64_000 },
-  { prefix: "claude-haiku-4-5", input: 1, output: 5, cache_read: 0.1, cache_write: 1.25, context: 200_000, outputLimit: 64_000 },
-  { prefix: "claude-haiku-3-5", input: 0.8, output: 4, cache_read: 0.08, cache_write: 1.0, context: 200_000, outputLimit: 8_192 },
-  { prefix: "claude-sonnet-3-5", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 200_000, outputLimit: 8_192 },
-  { prefix: "claude-3-haiku", input: 0.25, output: 1.25, cache_read: 0.03, cache_write: 0.3125, context: 200_000, outputLimit: 4_096 },
-  { prefix: "claude-3-sonnet", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 200_000, outputLimit: 4_096 },
-  { prefix: "claude-3-opus", input: 15, output: 75, cache_read: 1.5, cache_write: 18.75, context: 200_000, outputLimit: 4_096 },
-  // OpenAI
-  { prefix: "gpt-5.5", input: 5, output: 30, cache_read: 1.25, cache_write: 6.25, context: 1_050_000, outputLimit: 100_000 },
-  { prefix: "gpt-5.4-mini", input: 0.75, output: 4.5, cache_read: 0.19, cache_write: 0.94, context: 400_000, outputLimit: 100_000 },
-  { prefix: "gpt-5.4-nano", input: 0.2, output: 1.25, cache_read: 0.05, cache_write: 0.25, context: 400_000, outputLimit: 100_000 },
+  // Session models that trigger cost-aware worker selection (input ≥ $1.50/M)
+  { prefix: "claude-opus-4", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25, context: 1_000_000, outputLimit: 128_000 },
   { prefix: "gpt-5.4", input: 2.5, output: 15, cache_read: 0.625, cache_write: 3.125, context: 1_050_000, outputLimit: 100_000 },
-  { prefix: "gpt-5-mini", input: 0.25, output: 2, cache_read: 0.0625, cache_write: 0.3125, context: 400_000, outputLimit: 100_000 },
-  { prefix: "gpt-5-nano", input: 0.05, output: 0.4, cache_read: 0.0125, cache_write: 0.0625, context: 400_000, outputLimit: 100_000 },
-  { prefix: "gpt-5", input: 1.25, output: 10, cache_read: 0.3125, cache_write: 1.5625, context: 400_000, outputLimit: 100_000 },
-  { prefix: "gpt-4o-mini", input: 0.15, output: 0.6, cache_read: 0.075, cache_write: 0.1875, context: 128_000, outputLimit: 16_384 },
-  { prefix: "gpt-4o", input: 2.5, output: 10, cache_read: 1.25, cache_write: 3.125, context: 128_000, outputLimit: 16_384 },
-  { prefix: "gpt-4.1-mini", input: 0.4, output: 1.6, cache_read: 0.1, cache_write: 0.5, context: 1_047_576, outputLimit: 32_768 },
-  { prefix: "gpt-4.1", input: 2, output: 8, cache_read: 0.5, cache_write: 2.5, context: 1_047_576, outputLimit: 32_768 },
+  { prefix: "gpt-5.5", input: 5, output: 30, cache_read: 1.25, cache_write: 6.25, context: 1_050_000, outputLimit: 100_000 },
+  // Worker model defaults
+  { prefix: "claude-sonnet-4", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 1_000_000, outputLimit: 64_000 },
+  { prefix: "gpt-5.4-mini", input: 0.75, output: 4.5, cache_read: 0.19, cache_write: 0.94, context: 400_000, outputLimit: 100_000 },
 ];
 
 function fallbackEntry(modelID: string): ModelsDevEntry {
@@ -271,12 +255,15 @@ const WORKER_DEFAULTS: Record<string, { providerID: string; modelID: string; alr
 const EXPENSIVE_MODEL_THRESHOLD = 1.5;
 
 /**
- * General-purpose fallback worker for providers without a validated
- * same-family alternative. GPT-5.4-mini matched GPT-5.4 exactly (24 obs
- * each) on distillation quality and is widely available through OpenAI
- * directly and GitHub Copilot.
+ * General-purpose fallback worker for GitHub Copilot sessions where no
+ * same-family worker is detected. GPT-5.4-mini matched GPT-5.4 exactly
+ * (24 obs each) on distillation quality.
+ *
+ * Only used for GitHub Copilot (where all models are available at no
+ * extra cost). For other providers, we fall back to the session model
+ * rather than risk calling a provider that may not be configured.
  */
-const GENERAL_FALLBACK_WORKER = { providerID: "openai", modelID: "gpt-5.4-mini" };
+const GENERAL_FALLBACK_WORKER = { providerID: "github-copilot", modelID: "gpt-5.4-mini" };
 
 /**
  * For GitHub Copilot sessions, pick the worker based on which provider family
@@ -319,10 +306,9 @@ export function getWorkerModel(): { providerID: string; modelID: string } | unde
         const mapping = WORKER_DEFAULTS[providerID];
         if (mapping && !mapping.alreadyCheap(cfg.model.modelID)) {
           costAwareDefault = { providerID: mapping.providerID, modelID: mapping.modelID };
-        } else if (!mapping) {
-          // Unknown provider with expensive model — use general fallback
-          costAwareDefault = GENERAL_FALLBACK_WORKER;
         }
+        // Unknown providers (Google, xAI, Mistral, etc.): fall back to session
+        // model rather than calling a provider that may not be configured.
       }
     }
   }
