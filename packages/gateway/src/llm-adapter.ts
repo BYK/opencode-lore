@@ -9,6 +9,7 @@ import { log } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
 import { authHeaders } from "./auth";
+import { buildBillingBlock, signBody } from "./cch";
 import {
   setGenAiUsageAttributes,
   emitCostMetric,
@@ -23,15 +24,23 @@ import {
 export const activeWorkerCalls = new Set<string>();
 
 // ---------------------------------------------------------------------------
-// Retry helpers
+// Retry helpers (exported for testing)
 // ---------------------------------------------------------------------------
 
 /** HTTP status codes that are transient and worth retrying. */
 const TRANSIENT_CODES = new Set([429, 500, 502, 503, 529]);
-const MAX_RETRIES = 3;
+
+/** Max retries by error category. */
+const MAX_RETRIES_RATE_LIMIT = 5; // 429s: ~2-3 min with server-guided backoff
+const MAX_RETRIES_SERVER = 3; // 5xx: fast retries
+
+export function maxRetriesFor(status: number | null): number {
+  if (status === 429) return MAX_RETRIES_RATE_LIMIT;
+  return MAX_RETRIES_SERVER;
+}
 
 /** Parse the Retry-After header into milliseconds, or null if absent/invalid. */
-function parseRetryAfter(response: Response): number | null {
+export function parseRetryAfter(response: Response): number | null {
   const header = response.headers.get("retry-after");
   if (!header) return null;
   const seconds = Number(header);
@@ -41,11 +50,25 @@ function parseRetryAfter(response: Response): number | null {
   return null;
 }
 
-/** Compute delay for a retry attempt, respecting Retry-After on the first try. */
-function backoffMs(attempt: number, retryAfterMs: number | null): number {
-  if (attempt === 0 && retryAfterMs != null)
-    return Math.min(retryAfterMs, 30_000); // cap Retry-After at 30s
-  return Math.min(1000 * 2 ** attempt, 8000); // 1s, 2s, 4s, capped at 8s
+/**
+ * Compute delay for a retry attempt.
+ * - Always honor Retry-After when present (capped at 120s)
+ * - 429 without Retry-After: conservative 15s, 30s, 45s, 60s, 60s
+ * - 5xx: aggressive 1s, 2s, 4s (capped 8s)
+ */
+export function backoffMs(
+  attempt: number,
+  retryAfterMs: number | null,
+  status: number | null,
+): number {
+  // Always honor Retry-After from server (any attempt, any status)
+  if (retryAfterMs != null) return Math.min(retryAfterMs, 120_000);
+
+  // 429 without Retry-After: conservative delays
+  if (status === 429) return Math.min(15_000 + (attempt + 1) * 15_000, 60_000);
+
+  // 5xx: aggressive exponential backoff
+  return Math.min(1000 * 2 ** attempt, 8000);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -84,28 +107,49 @@ export function createGatewayLLMClient(
       activeWorkerCalls.add(callID);
 
       try {
+        // --- Build system payload ---
+        // For bearer tokens (Claude Code OAuth), inject the billing header
+        // as the first system block with a cch=00000 placeholder that gets
+        // signed after JSON serialization.
+        const billingBlock =
+          cred.scheme === "bearer" ? buildBillingBlock() : null;
+
         // System prompt caching for workers: send as block array with 1h TTL.
         // Worker calls come in bursts (distillation, curation) separated by
         // minutes of user thinking — 5m TTL expires between bursts, but 1h
         // survives. The system prompt (DISTILLATION_SYSTEM, etc.) is static
         // across all calls → near-100% cache hit rate after the first write.
         // Cost: 1.25× base for the initial write, 0.1× for subsequent reads.
-        const systemPayload = system
+        const systemBlocks = system
           ? [
               {
-                type: "text",
+                type: "text" as const,
                 text: system,
                 cache_control: { type: "ephemeral", ttl: "1h" },
               },
             ]
-          : undefined;
+          : [];
 
-        const body = JSON.stringify({
+        const systemPayload =
+          billingBlock || systemBlocks.length > 0
+            ? [
+                ...(billingBlock ? [billingBlock] : []),
+                ...systemBlocks,
+              ]
+            : undefined;
+
+        // Build body with cch=00000 placeholder, then sign if needed
+        let body = JSON.stringify({
           model: model.modelID,
           max_tokens: 8192,
-          system: systemPayload ?? system,
+          system: systemPayload,
           messages: [{ role: "user", content: user }],
         });
+
+        // Sign the body: compute xxHash64 and replace cch=00000 with real hash
+        if (billingBlock) {
+          body = signBody(body);
+        }
 
         const reqHeaders = {
           "Content-Type": "application/json",
@@ -128,6 +172,12 @@ export function createGatewayLLMClient(
             },
           },
           async (span) => {
+            // Track retry metrics for span enrichment
+            let retryCount = 0;
+            let totalDelayMs = 0;
+            let lastRetryAfterMs: number | null = null;
+            let finalStatus = 0;
+
             // Retry loop for transient errors (429, 5xx)
             for (let attempt = 0; ; attempt++) {
               let response: Response;
@@ -142,16 +192,26 @@ export function createGatewayLLMClient(
                 });
               } catch (e) {
                 // Network/fetch error — retry if attempts remain
-                if (attempt < MAX_RETRIES) {
-                  const delay = backoffMs(attempt, null);
+                const maxRetries = maxRetriesFor(null);
+                if (attempt < maxRetries) {
+                  const delay = backoffMs(attempt, null, null);
+                  retryCount++;
+                  totalDelayMs += delay;
                   log.warn(
-                    `worker request network error (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms`,
+                    `worker request network error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms`,
                   );
                   await sleep(delay);
                   continue;
                 }
+                // Enrich span before rethrowing
+                if (retryCount > 0) {
+                  span.setAttribute("lore.retry.count", retryCount);
+                  span.setAttribute("lore.retry.total_delay_ms", totalDelayMs);
+                }
                 throw e; // exhausted retries — rethrow to outer catch
               }
+
+              finalStatus = response.status;
 
               if (response.ok) {
                 const data = (await response.json()) as {
@@ -164,6 +224,19 @@ export function createGatewayLLMClient(
                 if (data.usage) {
                   setGenAiUsageAttributes(span, data.usage, data.model);
                   emitCostMetric(model.modelID, data.usage, "direct");
+                }
+
+                // Enrich span with retry metadata on eventual success
+                if (retryCount > 0) {
+                  span.setAttribute("lore.retry.count", retryCount);
+                  span.setAttribute("lore.retry.total_delay_ms", totalDelayMs);
+                  if (lastRetryAfterMs != null) {
+                    span.setAttribute(
+                      "lore.retry.last_retry_after_ms",
+                      lastRetryAfterMs,
+                    );
+                  }
+                  span.setAttribute("lore.retry.final_status", finalStatus);
                 }
 
                 const textBlock = data.content?.find(
@@ -184,21 +257,62 @@ export function createGatewayLLMClient(
               }
 
               // Transient error — retry if attempts remain
-              if (attempt < MAX_RETRIES) {
+              const maxRetries = maxRetriesFor(response.status);
+              if (attempt < maxRetries) {
                 const retryAfter = parseRetryAfter(response);
-                const delay = backoffMs(attempt, retryAfter);
+                const delay = backoffMs(attempt, retryAfter, response.status);
+                retryCount++;
+                totalDelayMs += delay;
+                if (retryAfter != null) lastRetryAfterMs = retryAfter;
                 log.warn(
-                  `worker upstream ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms`,
+                  `worker upstream ${response.status} (attempt ${attempt + 1}/${maxRetries + 1}), ` +
+                    `retrying in ${delay}ms` +
+                    (retryAfter != null
+                      ? ` (retry-after: ${Math.round(retryAfter / 1000)}s)`
+                      : ""),
                 );
                 await sleep(delay);
                 continue;
               }
 
-              // Exhausted retries
+              // Exhausted retries — log, capture Sentry error, enrich span
               const text = await response.text().catch(() => "(no body)");
               log.error(
-                `worker upstream request failed after ${MAX_RETRIES + 1} attempts: ${response.status} ${response.statusText} — ${text}`,
+                `worker upstream request failed after ${maxRetries + 1} attempts: ${response.status} ${response.statusText} — ${text}`,
               );
+
+              // Capture as Sentry error for alerting
+              Sentry.captureException(
+                new Error(
+                  `Worker upstream exhausted ${maxRetries + 1} retries: ${response.status} ${response.statusText}`,
+                ),
+                {
+                  fingerprint: [
+                    "LOREAI-GATEWAY",
+                    "worker-retry-exhausted",
+                    String(response.status),
+                  ],
+                  extra: {
+                    status: response.status,
+                    attempts: maxRetries + 1,
+                    totalDelayMs,
+                    lastRetryAfterMs,
+                    model: model.modelID,
+                    workerID: opts?.workerID ?? "unknown",
+                  },
+                },
+              );
+
+              // Enrich span with retry metadata
+              span.setAttribute("lore.retry.count", retryCount);
+              span.setAttribute("lore.retry.total_delay_ms", totalDelayMs);
+              if (lastRetryAfterMs != null) {
+                span.setAttribute(
+                  "lore.retry.last_retry_after_ms",
+                  lastRetryAfterMs,
+                );
+              }
+              span.setAttribute("lore.retry.final_status", finalStatus);
               span.setStatus({ code: 2, message: `HTTP exhausted retries` });
               return null;
             }
