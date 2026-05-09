@@ -1,259 +1,42 @@
 import { describe, test, expect } from "bun:test";
-import {
-  selectWorkerCandidates,
-  computeModelFingerprint,
-  structuralCheck,
-  parseJudgeScore,
-  type ModelInfo,
-} from "../src/worker-model";
+import { resolveWorkerModel } from "../src/worker-model";
 import { computeLayer0Cap } from "../src/gradient";
 
 // ---------------------------------------------------------------------------
-// selectWorkerCandidates
+// resolveWorkerModel
 // ---------------------------------------------------------------------------
 
-const mkModel = (
-  id: string,
-  provider: string,
-  costInput: number,
-  reasoning?: boolean,
-): ModelInfo => ({
-  id,
-  providerID: provider,
-  cost: { input: costInput },
-  status: "active",
-  capabilities: { input: { text: true }, reasoning },
-});
-
-describe("selectWorkerCandidates", () => {
-  const haiku = mkModel("claude-haiku-4-5", "anthropic", 1);
-  const sonnet = mkModel("claude-sonnet-4-6", "anthropic", 3);
-  const opus = mkModel("claude-opus-4-7", "anthropic", 5);
-  const gemini = mkModel("gemini-pro", "google", 2);
-
-  test("returns cheapest + one-below-session for Opus session", () => {
-    const candidates = selectWorkerCandidates(
-      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
-      [haiku, sonnet, opus, gemini],
+describe("resolveWorkerModel", () => {
+  test("returns explicit workerModel config when set", () => {
+    const result = resolveWorkerModel(
+      "anthropic",
+      { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+      { providerID: "anthropic", modelID: "claude-opus-4-6" },
     );
-    // Should pick haiku (cheapest) and sonnet (one below opus)
-    expect(candidates.length).toBe(2);
-    expect(candidates[0].id).toBe("claude-haiku-4-5");
-    expect(candidates[1].id).toBe("claude-sonnet-4-6");
+    expect(result).toEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
   });
 
-  test("returns only cheapest when session is Sonnet (one-below = cheapest)", () => {
-    const candidates = selectWorkerCandidates(
-      { id: sonnet.id, providerID: "anthropic", cost: { input: 3 } },
-      [haiku, sonnet, opus],
+  test("falls back to config model when no workerModel override", () => {
+    const result = resolveWorkerModel(
+      "anthropic",
+      undefined,
+      { providerID: "anthropic", modelID: "claude-opus-4-6" },
     );
-    // Haiku is both cheapest and one-below-sonnet → deduplicated to 1
-    expect(candidates.length).toBe(1);
-    expect(candidates[0].id).toBe("claude-haiku-4-5");
+    expect(result).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-6" });
   });
 
-  test("returns session model when it is the cheapest", () => {
-    const candidates = selectWorkerCandidates(
-      { id: haiku.id, providerID: "anthropic", cost: { input: 1 } },
-      [haiku, sonnet, opus],
+  test("returns undefined when no config at all", () => {
+    const result = resolveWorkerModel("anthropic", undefined, undefined);
+    expect(result).toBeUndefined();
+  });
+
+  test("workerModel takes priority over configModel", () => {
+    const result = resolveWorkerModel(
+      "anthropic",
+      { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+      { providerID: "anthropic", modelID: "claude-opus-4-6" },
     );
-    expect(candidates.length).toBe(1);
-    expect(candidates[0].id).toBe("claude-haiku-4-5");
-  });
-
-  test("filters to same provider only", () => {
-    const candidates = selectWorkerCandidates(
-      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
-      [gemini], // only google models
-    );
-    expect(candidates.length).toBe(0);
-  });
-
-  test("filters out inactive models", () => {
-    const deprecated = { ...sonnet, status: "deprecated" };
-    const candidates = selectWorkerCandidates(
-      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
-      [deprecated, haiku, opus],
-    );
-    // Should still find haiku (active)
-    expect(candidates.some((c) => c.id === "claude-haiku-4-5")).toBe(true);
-    expect(candidates.some((c) => c.id === "claude-sonnet-4-6")).toBe(false);
-  });
-
-  test("returns empty array when no eligible models", () => {
-    const candidates = selectWorkerCandidates(
-      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
-      [],
-    );
-    expect(candidates.length).toBe(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// selectWorkerCandidates — reasoning preference
-// ---------------------------------------------------------------------------
-
-describe("selectWorkerCandidates — reasoning preference", () => {
-  test("prefers non-reasoning model at equal cost", () => {
-    const sonnetReasoning = mkModel("claude-sonnet-4-6-thinking", "anthropic", 3, true);
-    const sonnetPlain = mkModel("claude-sonnet-4-6", "anthropic", 3, false);
-    const opus = mkModel("claude-opus-4-7", "anthropic", 5, true);
-
-    const candidates = selectWorkerCandidates(
-      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
-      [sonnetReasoning, sonnetPlain, opus],
-    );
-
-    // Both are at cost 3: non-reasoning is cheapest (sorted first),
-    // reasoning is one-below-session (last among cost < 5).
-    // The non-reasoning model should come first in the candidates array.
-    expect(candidates.length).toBe(2);
-    expect(candidates[0].id).toBe("claude-sonnet-4-6"); // non-reasoning first
-    expect(candidates[1].id).toBe("claude-sonnet-4-6-thinking");
-  });
-
-  test("cheapest non-reasoning wins over costlier non-reasoning", () => {
-    const haiku = mkModel("claude-haiku-4-5", "anthropic", 1, false);
-    const sonnet = mkModel("claude-sonnet-4-6", "anthropic", 3, false);
-    const opus = mkModel("claude-opus-4-7", "anthropic", 5, true);
-
-    const candidates = selectWorkerCandidates(
-      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
-      [haiku, sonnet, opus],
-    );
-
-    expect(candidates.length).toBe(2);
-    expect(candidates[0].id).toBe("claude-haiku-4-5");
-    expect(candidates[1].id).toBe("claude-sonnet-4-6");
-  });
-
-  test("reasoning model still selected if it is the only cheaper option", () => {
-    const sonnetReasoning = mkModel("claude-sonnet-4-6-thinking", "anthropic", 3, true);
-    const opus = mkModel("claude-opus-4-7", "anthropic", 5, true);
-
-    const candidates = selectWorkerCandidates(
-      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
-      [sonnetReasoning, opus],
-    );
-
-    expect(candidates.length).toBe(1);
-    expect(candidates[0].id).toBe("claude-sonnet-4-6-thinking");
-  });
-
-  test("undefined reasoning is treated as non-reasoning (backwards compat)", () => {
-    const haikuNoFlag = mkModel("claude-haiku-4-5", "anthropic", 1); // reasoning=undefined
-    const haikuReasoning = mkModel("claude-haiku-4-5-thinking", "anthropic", 1, true);
-    const opus = mkModel("claude-opus-4-7", "anthropic", 5, true);
-
-    const candidates = selectWorkerCandidates(
-      { id: opus.id, providerID: "anthropic", cost: { input: 5 } },
-      [haikuReasoning, haikuNoFlag, opus],
-    );
-
-    // At equal cost, undefined reasoning (falsy) sorts before reasoning=true
-    expect(candidates[0].id).toBe("claude-haiku-4-5");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// computeModelFingerprint
-// ---------------------------------------------------------------------------
-
-describe("computeModelFingerprint", () => {
-  test("is deterministic", () => {
-    const a = computeModelFingerprint("anthropic", "opus-4-7", ["haiku", "sonnet", "opus"]);
-    const b = computeModelFingerprint("anthropic", "opus-4-7", ["haiku", "sonnet", "opus"]);
-    expect(a).toBe(b);
-  });
-
-  test("changes when model list changes", () => {
-    const a = computeModelFingerprint("anthropic", "opus-4-7", ["haiku", "sonnet", "opus"]);
-    const b = computeModelFingerprint("anthropic", "opus-4-7", ["haiku", "sonnet", "opus", "haiku-new"]);
-    expect(a).not.toBe(b);
-  });
-
-  test("changes when session model changes", () => {
-    const a = computeModelFingerprint("anthropic", "opus-4-6", ["haiku", "sonnet", "opus"]);
-    const b = computeModelFingerprint("anthropic", "opus-4-7", ["haiku", "sonnet", "opus"]);
-    expect(a).not.toBe(b);
-  });
-
-  test("order-independent (sorts internally)", () => {
-    const a = computeModelFingerprint("anthropic", "opus", ["haiku", "sonnet"]);
-    const b = computeModelFingerprint("anthropic", "opus", ["sonnet", "haiku"]);
-    expect(a).toBe(b);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// structuralCheck
-// ---------------------------------------------------------------------------
-
-describe("structuralCheck", () => {
-  const reference = "Line 1: user asked about X\nLine 2: decided to do Y\nLine 3: implemented Z\n";
-
-  test("passes when candidate has similar structure", () => {
-    const candidate = "Obs 1: question about X\nObs 2: decision Y\nObs 3: did Z\n";
-    const result = structuralCheck(candidate, reference);
-    expect(result.passed).toBe(true);
-  });
-
-  test("fails when candidate is null (parse failure)", () => {
-    const result = structuralCheck(null, reference);
-    expect(result.passed).toBe(false);
-    expect(result.reason).toBe("parse_failed");
-  });
-
-  test("fails when candidate is empty", () => {
-    const result = structuralCheck("", reference);
-    expect(result.passed).toBe(false);
-    expect(result.reason).toBe("empty");
-  });
-
-  test("fails when observation count is too low", () => {
-    const candidate = "Just one line\n";
-    const result = structuralCheck(candidate, reference);
-    expect(result.passed).toBe(false);
-    expect(result.reason).toContain("observation_count");
-  });
-
-  test("fails when token count is >3x reference", () => {
-    // Same line count as reference but each line is 10x longer → token count way over 3x
-    const candidate = "Line 1: " + "x".repeat(500) + "\nLine 2: " + "x".repeat(500) + "\nLine 3: " + "x".repeat(500) + "\n";
-    const result = structuralCheck(candidate, reference);
-    expect(result.passed).toBe(false);
-    expect(result.reason).toContain("3x");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// parseJudgeScore
-// ---------------------------------------------------------------------------
-
-describe("parseJudgeScore", () => {
-  test("parses single digit", () => {
-    expect(parseJudgeScore("4")).toBe(4);
-  });
-
-  test("parses digit with trailing text", () => {
-    expect(parseJudgeScore("3\nThe candidate captures most facts")).toBe(3);
-  });
-
-  test("parses with leading whitespace", () => {
-    expect(parseJudgeScore("  5")).toBe(5);
-  });
-
-  test("returns null for non-digit", () => {
-    expect(parseJudgeScore("The score is 4")).toBeNull();
-  });
-
-  test("returns null for out-of-range digit", () => {
-    expect(parseJudgeScore("0")).toBeNull();
-    expect(parseJudgeScore("6")).toBeNull();
-  });
-
-  test("returns null for empty string", () => {
-    expect(parseJudgeScore("")).toBeNull();
+    expect(result?.modelID).toBe("claude-haiku-4-5");
   });
 });
 

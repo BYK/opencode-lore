@@ -23,8 +23,7 @@ import {
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
-import type { AuthCredential } from "./auth";
-import { maybeValidateWorkerModel, getWorkerModel } from "./worker-model";
+import { getWorkerModel } from "./worker-model";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -103,38 +102,13 @@ export function touchSession(
  *
  * @param projectPath - Resolved project directory path
  * @param llm - LLM client for worker calls (distillation, curation)
- * @param upstreamUrl - Anthropic API base URL (for model discovery)
- * @param getAuth - Callback to resolve auth credentials
- * @param sessionModel - Model ID used for conversation (frontier model)
  */
 export function buildIdleWorkHandler(
   projectPath: string,
   llm: LLMClient,
-  upstreamUrl: string,
-  getAuth: () => AuthCredential | null,
-  sessionModel: string,
 ): (sessionID: string, state: SessionState) => Promise<void> {
   return async (sessionID: string, state: SessionState) => {
     const cfg = loreConfig();
-
-    // 0. Worker model validation — discover cheaper models for background work.
-    // Runs before distillation/curation so the resolved model is up-to-date.
-    try {
-      const cred = getAuth();
-      if (cred) {
-        await maybeValidateWorkerModel(
-          sessionModel,
-          upstreamUrl,
-          cred,
-          llm,
-          projectPath,
-          sessionID,
-        );
-      }
-    } catch (e) {
-      log.error("idle worker model validation error:", e);
-    }
-
     const model = getWorkerModel();
 
     // 1. Distillation — force-distill ALL pending messages on idle, even

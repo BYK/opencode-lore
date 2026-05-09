@@ -90,7 +90,7 @@ import {
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
-import { getWorkerModel, resetWorkerModelState } from "./worker-model";
+import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySync } from "./worker-model";
 import * as Sentry from "@sentry/bun";
 import { analyzeCacheTurn } from "./cache-analytics";
 import {
@@ -237,33 +237,33 @@ let stopIdleScheduler: (() => void) | null = null;
 let lastSeenSessionModel: string | null = null;
 
 // ---------------------------------------------------------------------------
-// Model limits — hardcoded for known models, fallback for unknown
+// Model limits — fetched from models.dev, fallback for unknown
 // ---------------------------------------------------------------------------
 
 type ModelSpec = {
   context: number;
   output: number;
-  /** Cache-read cost per token in USD (Anthropic: 10% of input price). */
+  /** Cache-read cost per token in USD. */
   cacheReadCost?: number;
-};
-
-const MODEL_SPECS: Record<string, ModelSpec> = {
-  // Pricing: https://docs.anthropic.com/en/docs/about-claude/models
-  // Cache-read = input_price / 1_000_000 * 0.1 (10% of input for Anthropic)
-  "claude-opus-4":     { context: 200_000, output: 32_000, cacheReadCost: 15 / 1_000_000 * 0.1 },
-  "claude-sonnet-4":   { context: 200_000, output: 16_000, cacheReadCost: 3 / 1_000_000 * 0.1 },
-  "claude-sonnet-3-5": { context: 200_000, output: 8_192,  cacheReadCost: 3 / 1_000_000 * 0.1 },
-  "claude-haiku-3-5":  { context: 200_000, output: 8_192,  cacheReadCost: 0.80 / 1_000_000 * 0.1 },
 };
 
 const DEFAULT_MODEL_SPEC: ModelSpec = { context: 200_000, output: 8_192 };
 
+/**
+ * Look up model limits and cache-read cost from models.dev data.
+ *
+ * Uses the sync cache populated by `fetchModelData()` during init.
+ * Falls back to sensible defaults if the cache isn't warm yet.
+ */
 function getModelSpec(model: string): ModelSpec {
-  // Check for prefix matches: "claude-opus-4-20250514" → "claude-opus-4"
-  for (const [prefix, spec] of Object.entries(MODEL_SPECS)) {
-    if (model.startsWith(prefix)) return spec;
-  }
-  return DEFAULT_MODEL_SPEC;
+  const entry = getModelEntrySync(model);
+  return {
+    context: entry.limit?.context ?? DEFAULT_MODEL_SPEC.context,
+    output: entry.limit?.output ?? DEFAULT_MODEL_SPEC.output,
+    cacheReadCost: entry.cost?.cache_read != null
+      ? entry.cost.cache_read / 1_000_000  // models.dev is per-million, we need per-token
+      : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -282,18 +282,18 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
   initialized = true;
   cachedProjectPath = projectPath;
 
+  // Pre-warm models.dev pricing/limits cache so synchronous lookups in the
+  // request hot path (getModelSpec, emitCostMetric) resolve from memory.
+  fetchModelData().catch((e) => log.warn("models.dev pre-warm failed:", e));
+
   // Start the idle scheduler for background work (distillation, curation,
   // pruning, AGENTS.md export). Uses a 30s poll interval and fires for any
   // session whose lastRequestTime exceeds the idle timeout.
   if (config && !stopIdleScheduler) {
     const llm = getLLMClient(config);
-    const sessionModelID = lastSeenSessionModel ?? (loreConfig().model?.modelID ?? "claude-sonnet-4-20250514");
     const idleHandler = buildIdleWorkHandler(
       projectPath,
       llm,
-      config.upstreamAnthropic,
-      () => resolveAuth(),
-      sessionModelID,
     );
     stopIdleScheduler = startIdleScheduler(config, sessions, idleHandler);
   }

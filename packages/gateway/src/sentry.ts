@@ -154,28 +154,20 @@ export function setGenAiUsageAttributes(
 // Cost estimation metrics
 // ---------------------------------------------------------------------------
 
-/**
- * Per-model pricing (USD per million tokens).
- * Source: https://docs.anthropic.com/en/docs/about-claude/models
- */
-type ModelPricing = { input: number; output: number };
+import { getModelEntry } from "./worker-model";
 
-const MODEL_PRICING: Record<string, ModelPricing> = {
-  "claude-opus-4": { input: 15, output: 75 },
-  "claude-sonnet-4": { input: 3, output: 15 },
-  "claude-sonnet-3-5": { input: 3, output: 15 },
-  "claude-haiku-3-5": { input: 0.80, output: 4 },
-};
+type ModelPricing = { input: number; output: number };
 
 const DEFAULT_PRICING: ModelPricing = { input: 3, output: 15 };
 
 /**
- * Look up pricing by model name, supporting prefix matches
- * (e.g. "claude-sonnet-4-20250514" → "claude-sonnet-4").
+ * Look up pricing for a model from models.dev (cached, fetched at startup).
+ * Falls back to sensible defaults if the fetch hasn't completed yet.
  */
-function getPricing(model: string): ModelPricing {
-  for (const [prefix, pricing] of Object.entries(MODEL_PRICING)) {
-    if (model.startsWith(prefix)) return pricing;
+async function getPricing(model: string): Promise<ModelPricing> {
+  const entry = await getModelEntry(model);
+  if (entry.cost?.input != null && entry.cost?.output != null) {
+    return { input: entry.cost.input, output: entry.cost.output };
   }
   return DEFAULT_PRICING;
 }
@@ -183,7 +175,8 @@ function getPricing(model: string): ModelPricing {
 /**
  * Emit a cost-estimate metric for an LLM call.
  *
- * Uses Anthropic's published pricing. Batch calls get 50% discount.
+ * Uses live pricing from models.dev (fetched at gateway startup, cached 1h).
+ * Batch calls get 50% discount.
  * Emits as a Sentry distribution metric (aggregatable/chartable).
  */
 export function emitCostMetric(
@@ -193,16 +186,22 @@ export function emitCostMetric(
 ): void {
   if (!Sentry.isInitialized()) return;
 
-  const pricing = getPricing(model);
-  const multiplier = callType === "batch" ? 0.5 : 1.0;
-  const inputCost =
-    ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * multiplier;
-  const outputCost =
-    ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * multiplier;
-  const totalCost = inputCost + outputCost;
+  // Fire-and-forget: pricing lookup is async but we don't want to block callers.
+  // The models.dev data is cached after first fetch, so subsequent calls resolve
+  // from memory without network I/O.
+  getPricing(model).then((pricing) => {
+    const multiplier = callType === "batch" ? 0.5 : 1.0;
+    const inputCost =
+      ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * multiplier;
+    const outputCost =
+      ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * multiplier;
+    const totalCost = inputCost + outputCost;
 
-  Sentry.metrics.distribution("lore.llm_cost_usd", totalCost, {
-    attributes: { model, call_type: callType },
-    unit: "dollar",
+    Sentry.metrics.distribution("lore.llm_cost_usd", totalCost, {
+      attributes: { model, call_type: callType },
+      unit: "dollar",
+    });
+  }).catch(() => {
+    // Silently ignore — cost metrics are best-effort, not critical path.
   });
 }
