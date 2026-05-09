@@ -190,9 +190,14 @@ export function emitCacheBustMetric(
 
 import { getModelEntry } from "./worker-model";
 
-type ModelPricing = { input: number; output: number };
+type ModelPricing = {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+};
 
-const DEFAULT_PRICING: ModelPricing = { input: 3, output: 15 };
+const DEFAULT_PRICING: ModelPricing = { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 };
 
 /**
  * Look up pricing for a model from models.dev (cached, fetched at startup).
@@ -200,18 +205,28 @@ const DEFAULT_PRICING: ModelPricing = { input: 3, output: 15 };
  */
 async function getPricing(model: string): Promise<ModelPricing> {
   const entry = await getModelEntry(model);
-  if (entry.cost?.input != null && entry.cost?.output != null) {
-    return { input: entry.cost.input, output: entry.cost.output };
-  }
-  return DEFAULT_PRICING;
+  const input = entry.cost?.input ?? DEFAULT_PRICING.input;
+  return {
+    input,
+    output: entry.cost?.output ?? DEFAULT_PRICING.output,
+    cache_read: entry.cost?.cache_read ?? input * 0.1,
+    cache_write: entry.cost?.cache_write ?? input * 1.25,
+  };
 }
 
 /**
  * Emit a cost-estimate metric for an LLM call.
  *
  * Uses live pricing from models.dev (fetched at gateway startup, cached 1h).
- * Batch calls get 50% discount.
- * Emits as a Sentry distribution metric (aggregatable/chartable).
+ * Properly accounts for cache-read and cache-write pricing tiers, and
+ * applies the 50% batch discount only to base input/output (not cache ops,
+ * which are not discounted by the batch API).
+ *
+ * Token categories from Anthropic:
+ *  - input_tokens: uncached input (base input price)
+ *  - cache_read_input_tokens: served from prompt cache (0.1× input price)
+ *  - cache_creation_input_tokens: written to prompt cache (1.25× input price)
+ *  - output_tokens: generated output (output price)
  */
 export function emitCostMetric(
   model: string,
@@ -224,12 +239,20 @@ export function emitCostMetric(
   // The models.dev data is cached after first fetch, so subsequent calls resolve
   // from memory without network I/O.
   getPricing(model).then((pricing) => {
-    const multiplier = callType === "batch" ? 0.5 : 1.0;
-    const inputCost =
-      ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * multiplier;
+    // Batch discount applies to base input/output only — cache ops have their
+    // own pricing tiers and are not discounted by the batch API.
+    const batchMultiplier = callType === "batch" ? 0.5 : 1.0;
+
+    const uncachedInputCost =
+      ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * batchMultiplier;
+    const cacheReadCost =
+      ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * pricing.cache_read;
+    const cacheWriteCost =
+      ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * pricing.cache_write;
     const outputCost =
-      ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * multiplier;
-    const totalCost = inputCost + outputCost;
+      ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * batchMultiplier;
+
+    const totalCost = uncachedInputCost + cacheReadCost + cacheWriteCost + outputCost;
 
     Sentry.metrics.distribution("lore.llm_cost_usd", totalCost, {
       attributes: { model, call_type: callType },

@@ -915,6 +915,7 @@ function postResponse(
     if (requestBody) {
       const turnAnalysis = analyzeCacheTurn(
         sessionState.cacheAnalytics, requestBody, resp.usage, sessionID,
+        sessionState.messageCount,
       );
       const bustCause = categorizeBust(
         turnAnalysis,

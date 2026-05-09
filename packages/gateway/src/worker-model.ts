@@ -207,18 +207,43 @@ export function clearModelDataCache(): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * Cost-aware default: when the session model costs ≥$5/M input (opus tier),
+ * default background workers to sonnet-4 which produces equivalent-quality
+ * distillations at ~60% lower cost. The user can always override via the
+ * explicit `workerModel` config.
+ */
+const SONNET_WORKER_DEFAULT = { providerID: "anthropic", modelID: "claude-sonnet-4-20250514" };
+const EXPENSIVE_MODEL_THRESHOLD = 5; // $/M input tokens
+
+/**
  * Resolve the effective worker model for background calls.
  *
  * Checks (in order):
  *  1. Explicit config override (`workerModel` in lore config)
- *  2. Config model fallback (session model)
+ *  2. Cost-aware default (sonnet-4 when session model is ≥$5/M input)
+ *  3. Config model fallback (session model)
  */
 export function getWorkerModel(): { providerID: string; modelID: string } | undefined {
   const cfg = loreConfig();
+
+  // Determine if the session model is expensive enough to warrant a cheaper worker
+  let costAwareDefault: { providerID: string; modelID: string } | undefined;
+  if (cfg.model?.modelID) {
+    const entry = getModelEntrySync(cfg.model.modelID);
+    const inputCost = entry.cost?.input ?? 3;
+    if (inputCost >= EXPENSIVE_MODEL_THRESHOLD) {
+      // Don't downgrade if the session model IS already sonnet or cheaper
+      if (!cfg.model.modelID.includes("sonnet") && !cfg.model.modelID.includes("haiku")) {
+        costAwareDefault = SONNET_WORKER_DEFAULT;
+      }
+    }
+  }
+
   return workerModel.resolveWorkerModel(
     "anthropic",
     cfg.workerModel,
     cfg.model,
+    costAwareDefault,
   );
 }
 

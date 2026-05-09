@@ -195,9 +195,21 @@ describe("mapOffsetToJsonPath", () => {
 // ---------------------------------------------------------------------------
 
 describe("inferDivergenceReason", () => {
-  test("system prompt", () => {
+  test("system prompt — bare", () => {
     expect(inferDivergenceReason("system", 100, 100)).toBe(
       "system prompt changed",
+    );
+  });
+
+  test("system prompt — host block", () => {
+    expect(inferDivergenceReason("system[0].text", 100, 100)).toBe(
+      "host system prompt changed",
+    );
+  });
+
+  test("system prompt — LTM block", () => {
+    expect(inferDivergenceReason("system[1].text", 100, 100)).toBe(
+      "LTM knowledge block updated (background curation/consolidation)",
     );
   });
 
@@ -211,21 +223,39 @@ describe("inferDivergenceReason", () => {
     );
   });
 
-  test("message content change", () => {
+  test("message content change — no message count", () => {
     expect(
       inferDivergenceReason("messages[3].content[1]", 100, 100),
-    ).toBe("message 3 content changed");
+    ).toBe("message at position 3 content changed");
+  });
+
+  test("message content change — new message at end", () => {
+    expect(
+      inferDivergenceReason("messages[9].content[0]", 100, 120, 10),
+    ).toBe("new conversation message (normal turn progression)");
+  });
+
+  test("message content change — earlier message modified", () => {
+    expect(
+      inferDivergenceReason("messages[3].content[1]", 100, 100, 10),
+    ).toBe("earlier message modified at position 3 (window shift or content change)");
+  });
+
+  test("message content change — distilled prefix rewrite", () => {
+    expect(
+      inferDivergenceReason("messages[0].content[0]", 100, 100, 10),
+    ).toBe("distilled conversation prefix changed (meta-distillation rewrite)");
   });
 
   test("appended content", () => {
     expect(inferDivergenceReason("<end>", 100, 200)).toBe(
-      "new content appended",
+      "new message appended (normal conversation growth)",
     );
   });
 
   test("truncated content", () => {
     expect(inferDivergenceReason("<end>", 200, 100)).toBe(
-      "content truncated",
+      "context window compressed (gradient eviction)",
     );
   });
 });
@@ -408,6 +438,6 @@ describe("analyzeCacheTurn", () => {
     const result = analyzeCacheTurn(analytics, body2, makeUsage());
 
     expect(result.divergencePoint).toMatch(/messages\[1\]/);
-    expect(result.divergenceReason).toMatch(/message 1 content changed/);
+    expect(result.divergenceReason).toMatch(/message at position 1 content changed/);
   });
 });

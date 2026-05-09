@@ -1,15 +1,15 @@
 /**
  * Worker model resolution.
  *
- * Background workers (distillation, curation, query expansion) use the session
- * model by default. An explicit `workerModel` config override is supported for
- * cases where the user wants to pin background work to a specific model.
+ * Background workers (distillation, curation, query expansion) default to
+ * sonnet-4 when the session model is more expensive ($5+/M input, i.e. opus).
+ * Sonnet produces equivalent-quality distillations at ~60% lower cost.
+ * An explicit `workerModel` config override takes priority over this default.
  *
- * Previously this module contained dynamic worker model selection with
- * candidate discovery, two-phase validation (structural check + LLM judge),
- * and fingerprint-based staleness detection. That complexity was removed in
- * favor of always using the session model — A/B testing showed the quality
- * gap on complex conversations wasn't worth the infrastructure cost.
+ * Resolution order:
+ *   1. Explicit config override (`workerModel`)
+ *   2. Cost-aware default (sonnet-4 for expensive session models)
+ *   3. Session model fallback (same model as the conversation)
  */
 
 // ---------------------------------------------------------------------------
@@ -35,15 +35,20 @@ export type ModelInfo = {
 
 /**
  * Resolve the effective worker model for a given provider.
- * Priority: explicit config override > session model (fallback).
+ * Priority: explicit config override > cost-aware default > session model.
  */
 export function resolveWorkerModel(
   _providerID: string,
   configWorkerModel?: { providerID: string; modelID: string },
   configModel?: { providerID: string; modelID: string },
+  costAwareDefault?: { providerID: string; modelID: string },
 ): { providerID: string; modelID: string } | undefined {
   // Explicit override wins
   if (configWorkerModel) return configWorkerModel;
+
+  // Cost-aware default: cheaper model for background work when the session
+  // model is expensive. Caller determines when this applies based on pricing.
+  if (costAwareDefault) return costAwareDefault;
 
   // Fall back to the session model config (or undefined = host default)
   return configModel;

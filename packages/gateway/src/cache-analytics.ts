@@ -182,22 +182,40 @@ function isObjectKeyPosition(json: string, offset: number): boolean {
 
 /**
  * Infer a human-readable reason from the semantic path.
+ *
+ * Maps raw JSON paths to intuitive descriptions:
+ *  - system[0] → host system prompt (stable, cached)
+ *  - system[1] → LTM knowledge block (our injection)
+ *  - messages near end → "new user/assistant message"
+ *  - messages mid-conversation → "earlier message modified" (distillation rewrite)
+ *
+ * @param messageCount - total messages in the current request (for end-detection)
  */
 export function inferDivergenceReason(
   path: string,
   prevLength: number,
   currLength: number,
+  messageCount?: number,
 ): string {
   if (path === "<end>") {
     return currLength > prevLength
-      ? "new content appended"
-      : "content truncated";
+      ? "new message appended (normal conversation growth)"
+      : "context window compressed (gradient eviction)";
   }
   if (path === "<start>") return "request structure changed from start";
   if (path === "<root>") return "top-level structure changed";
 
+  // System prompt blocks:
+  //  system[0] = host system prompt (stable, cached with 1h TTL)
+  //  system[1] = LTM knowledge block (Lore's injection, changes on curation)
+  //  bare "system" = plain string system prompt (no array structure)
+  if (path === "system[0]" || path.startsWith("system[0]"))
+    return "host system prompt changed";
+  if (path === "system[1]" || path.startsWith("system[1]"))
+    return "LTM knowledge block updated (background curation/consolidation)";
   if (path === "system" || path.startsWith("system"))
     return "system prompt changed";
+
   if (path === "model") return "model changed";
   if (path === "max_tokens") return "max_tokens changed";
   if (path === "tools" || path.startsWith("tools"))
@@ -207,12 +225,27 @@ export function inferDivergenceReason(
   const msgMatch = path.match(/^messages\[(\d+)\]/);
   if (msgMatch) {
     const idx = parseInt(msgMatch[1], 10);
-    const rest = path.slice(msgMatch[0].length);
 
-    if (!rest) return `message ${idx} structure changed`;
-    if (rest === ".role") return `message ${idx} role changed`;
+    // Determine if this is a new message at the end or a mid-conversation change
+    if (messageCount != null && messageCount > 0) {
+      // New messages: index near the end of the conversation (within last 2 messages)
+      if (idx >= messageCount - 2) {
+        return "new conversation message (normal turn progression)";
+      }
+      // Early messages: likely distilled prefix rewrite
+      if (idx <= 1) {
+        return "distilled conversation prefix changed (meta-distillation rewrite)";
+      }
+      // Mid-conversation: window shift or content edit
+      return `earlier message modified at position ${idx} (window shift or content change)`;
+    }
+
+    // Fallback without message count context
+    const rest = path.slice(msgMatch[0].length);
+    if (!rest) return `message at position ${idx} structure changed`;
+    if (rest === ".role") return `message at position ${idx} role changed`;
     if (rest.startsWith(".content"))
-      return `message ${idx} content changed`;
+      return `message at position ${idx} content changed`;
   }
 
   return `changed at ${path}`;
@@ -234,6 +267,8 @@ export function analyzeCacheTurn(
   currentBody: string,
   usage: GatewayUsage,
   sessionID?: string,
+  /** Number of messages in the current request (for human-friendly divergence reasons). */
+  messageCount?: number,
 ): CacheTurnAnalysis {
   analytics.turnCount++;
 
@@ -271,13 +306,14 @@ export function analyzeCacheTurn(
         divergencePoint,
         prevLength,
         currLength,
+        messageCount,
       );
     } else if (prevLength !== currLength) {
       // One is a prefix of the other — new content appended/removed
       divergencePoint = "<end>";
       divergenceReason = currLength > prevLength
-        ? "new content appended (likely new messages)"
-        : "content truncated (context window compressed)";
+        ? "new message appended (normal conversation growth)"
+        : "context window compressed (gradient eviction)";
     } else {
       // Identical bodies
       divergencePoint = "<identical>";
