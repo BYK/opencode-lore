@@ -1,4 +1,180 @@
 # Changelog
+## 0.15.0
+
+### New Features ✨
+
+#### Compact
+
+- Anchor /compact on prior summary via SDK live read by @BYK in [#100](https://github.com/BYK/loreai/pull/100)
+- Adopt upstream SUMMARY_TEMPLATE for /compact prompt by @BYK in [#92](https://github.com/BYK/loreai/pull/92)
+
+#### Distill
+
+- Anchor meta-distillation on prior summary; loadForSession excludes archived by @BYK in [#101](https://github.com/BYK/loreai/pull/101)
+- Truncate oversized tool outputs in distillation input by @BYK in [#94](https://github.com/BYK/loreai/pull/94)
+
+#### Gateway
+
+- Debug ID source maps + zero runtime dependencies by @BYK in [#171](https://github.com/BYK/loreai/pull/171)
+- Background version check with upgrade nag by @BYK in [#168](https://github.com/BYK/loreai/pull/168)
+- Implement delta-based self-upgrade system by @BYK in [#166](https://github.com/BYK/loreai/pull/166)
+- Show env vars and agent integration info on lore start by @BYK in [#165](https://github.com/BYK/loreai/pull/165)
+- CLI skeleton with npm bundle, binary build, and CI smoke tests by @BYK in [#159](https://github.com/BYK/loreai/pull/159)
+- Ground-truth cache analytics with request body prefix diff by @BYK in [#155](https://github.com/BYK/loreai/pull/155)
+- Worker model discovery via /v1/models API + models.dev pricing by @BYK in [#142](https://github.com/BYK/loreai/pull/142)
+- Transparent recall tool interception by @BYK in [#139](https://github.com/BYK/loreai/pull/139)
+- Per-session auth isolation + OAuth Bearer support by @BYK in [#135](https://github.com/BYK/loreai/pull/135)
+- Replace content markers with fingerprint-based session tracking by @BYK in [#125](https://github.com/BYK/loreai/pull/125)
+
+#### Gradient
+
+- Range-aware file read deduplication by @BYK in [#120](https://github.com/BYK/loreai/pull/120)
+- Token-budget tail sizing in layer 4 by @BYK in [#104](https://github.com/BYK/loreai/pull/104)
+- Cold-cache idle-resume cache refresh by @BYK in [#95](https://github.com/BYK/loreai/pull/95)
+
+#### Worker Model
+
+- Prefer non-reasoning models and disable thinking on worker calls by @BYK in [#122](https://github.com/BYK/loreai/pull/122)
+- Wire up dynamic model selection on session idle by @BYK in [#118](https://github.com/BYK/loreai/pull/118)
+
+#### Other
+
+- (db) Persist r_compression and c_norm on distillations (schema v12) by @BYK in [#116](https://github.com/BYK/loreai/pull/116)
+- (pi) @loreai/pi extension — Lore memory for Pi coding-agent by @BYK in [#78](https://github.com/BYK/loreai/pull/78)
+- (recovery) Media-aware overflow recovery preserves user intent by @BYK in [#99](https://github.com/BYK/loreai/pull/99)
+- (website) Add landing page by @sylncnr in [#152](https://github.com/BYK/loreai/pull/152)
+- Sentry observability with AI monitoring, metadata table, and cost metrics by @BYK in [#176](https://github.com/BYK/loreai/pull/176)
+- Wire structured logs and error capture to Sentry in prod builds by @BYK in [#170](https://github.com/BYK/loreai/pull/170)
+- Web install script and updated landing page by @BYK in [#163](https://github.com/BYK/loreai/pull/163)
+- Layered cache breakpoints and LTM content-diff pinning by @BYK in [#157](https://github.com/BYK/loreai/pull/157)
+- Emit '[Searching memory...]' indicator for Case 2 (mixed tools) by @BYK in [6ef1b7b0](https://github.com/BYK/loreai/commit/6ef1b7b0a8cbcbd4accc952ccb3477fa6f47775d)
+- Local embeddings, exact keyword boost, and pattern extraction by @BYK in [#136](https://github.com/BYK/loreai/pull/136)
+- Batch queue for Anthropic Message Batches API (50% worker cost savings) by @BYK in [#134](https://github.com/BYK/loreai/pull/134)
+- Context health diagnostics — C_norm, R_compression, time-gap segmentation, recall recency by @BYK in [#113](https://github.com/BYK/loreai/pull/113)
+- Cost reduction — layer-0 cap, worker model, tighter defaults by @BYK in [#105](https://github.com/BYK/loreai/pull/105)
+
+### Bug Fixes 🐛
+
+#### Ci
+
+- Use non-hidden placeholder for release-patches artifact by @BYK in [ac910438](https://github.com/BYK/loreai/commit/ac91043841c984d7f2f753237fcfb344ec9023dc)
+- Use non-hidden placeholder for release-patches artifact by @BYK in [ea2cdf02](https://github.com/BYK/loreai/commit/ea2cdf023c128cb5a872aa1844f35d0915699022)
+- Always upload release-patches artifact on release branches by @BYK in [9bf811fa](https://github.com/BYK/loreai/commit/9bf811fad0fcf7b3a0356e45cf9ef24ead353466)
+- Always upload release-patches artifact on release branches by @BYK in [3131210c](https://github.com/BYK/loreai/commit/3131210c36b8e9fd7fb26949d74a23edb25082a6)
+- Include @loreai/gateway in pack and publish targets by @BYK in [0b8a2213](https://github.com/BYK/loreai/commit/0b8a221390891a7d683dd6e3bc924d0f357ac10d)
+
+#### Db
+
+- Use os.homedir() for cross-platform data directory resolution by @BYK in [#131](https://github.com/BYK/loreai/pull/131)
+- Recover missing kv_meta from partial migration failure by @BYK in [#114](https://github.com/BYK/loreai/pull/114)
+- Prevent singleton poisoning when migrate() throws by @BYK in [#111](https://github.com/BYK/loreai/pull/111)
+
+#### Gateway
+
+- Align npm package with sentry-cli pattern by @BYK in [b190738a](https://github.com/BYK/loreai/commit/b190738a8ddec006dd0e6946b68d57e43fc1947b)
+- Don't wipe dist-bin/ between cross-platform binary builds by @BYK in [a6d4db7f](https://github.com/BYK/loreai/commit/a6d4db7fd06d2efdcc06be2d694083e830557beb)
+- Add worker retry with backoff and batch API circuit breaker by @BYK in [#164](https://github.com/BYK/loreai/pull/164)
+- Suppress agent detection noise in embedded server mode by @BYK in [#161](https://github.com/BYK/loreai/pull/161)
+- Preserve thinking block signature through Lore format round-trip by @BYK in [#162](https://github.com/BYK/loreai/pull/162)
+- Cache analytics JSON path missing array index for first element by @BYK in [#156](https://github.com/BYK/loreai/pull/156)
+
+#### Gradient
+
+- Deterministic timestamps in sanitizeToolParts by @BYK in [#124](https://github.com/BYK/loreai/pull/124)
+- Protect active tool-call chains from output stripping by @BYK in [#109](https://github.com/BYK/loreai/pull/109)
+
+#### Opencode
+
+- Robust context-overflow detection with upstream regex list by @BYK in [#93](https://github.com/BYK/loreai/pull/93)
+- Hoist ltmSessionCache to avoid TDZ on startup by @BYK in [#77](https://github.com/BYK/loreai/pull/77)
+
+#### Release
+
+- Include gateway in bump-version.sh for Craft publish by @BYK in [8db81083](https://github.com/BYK/loreai/commit/8db8108387e1eea706c56866cb9312f80a02ed4d)
+- Patch bun.lock workspace versions during bump by @BYK in [#88](https://github.com/BYK/loreai/pull/88)
+- Custom bump script to work around npm workspace:* incompatibility by @BYK in [#83](https://github.com/BYK/loreai/pull/83)
+
+#### Other
+
+- (cache) Remove idle-handler LTM cache invalidation to preserve warm prefix by @BYK in [#160](https://github.com/BYK/loreai/pull/160)
+- (distill) Wrap metaDistill store+archive in a transaction by @BYK in [#103](https://github.com/BYK/loreai/pull/103)
+- (pi) Add pi.extensions manifest and externalize pi ecosystem deps by @BYK in [#90](https://github.com/BYK/loreai/pull/90)
+- (publish) Add registry-url to setup-node for npm OIDC by @BYK in [#85](https://github.com/BYK/loreai/pull/85)
+- Include binary and patch artifacts in Craft release workflow by @BYK in [#172](https://github.com/BYK/loreai/pull/172)
+- Pin @huggingface/hub@2.11.0 to avoid broken xetchunk-wasm workspace refs by @BYK in [#150](https://github.com/BYK/loreai/pull/150)
+- Resolve all 11 audit vulnerabilities (7 high, 4 moderate) by @BYK in [#149](https://github.com/BYK/loreai/pull/149)
+- Resolve typecheck error in content-based fingerprint and increase hysteresis to 15% with high-water mark budget by @BYK in [4e59e007](https://github.com/BYK/loreai/commit/4e59e00776913e9fbe7d604a3746ed7b57ada856)
+- Eliminate gradient cache busts with deterministic IDs, offset-from-end pins, and cost-aware cap by @BYK in [13f09ad3](https://github.com/BYK/loreai/commit/13f09ad326f91d5a8b0bdc3f56af166bef4dbfc5)
+- Stabilize gradient cache with budget snapshot, hysteresis, and per-session LTM by @BYK in [#144](https://github.com/BYK/loreai/pull/144)
+- Type errors in Case 2 integration tests by @BYK in [77eb640e](https://github.com/BYK/loreai/commit/77eb640ec3f7920a462f628d59d42ba3a209db30)
+- Deprecated worker models, invalid cache TTL format, and batch error logging by @BYK in [#140](https://github.com/BYK/loreai/pull/140)
+- Prevent re-entrant deadlock in event hook (MaxListenersExceeded hang) by @BYK in [#138](https://github.com/BYK/loreai/pull/138)
+- Reduce cache-bust cost with idle threshold, sticky layers, bust tracking, and meta-distill gating by @BYK in [#132](https://github.com/BYK/loreai/pull/132)
+- CROSS JOIN for FTS5 queries — prevent server freeze on recall by @BYK in [#107](https://github.com/BYK/loreai/pull/107)
+- Add root exports trampoline for file:// plugin loading by @BYK in [#73](https://github.com/BYK/loreai/pull/73)
+
+### Documentation 📚
+
+- Update landing page with gateway architecture and waitlist form by @sylncnr in [#153](https://github.com/BYK/loreai/pull/153)
+- Add prompt change discipline guide by @BYK in [#97](https://github.com/BYK/loreai/pull/97)
+- Per-package README and LICENSE for npm by @BYK in [#80](https://github.com/BYK/loreai/pull/80)
+
+### Internal Changes 🔧
+
+#### Agents Md
+
+- Sync curator entries before release by @BYK in [#82](https://github.com/BYK/loreai/pull/82)
+- Monorepo milestone — root trampoline documented by @BYK in [#74](https://github.com/BYK/loreai/pull/74)
+- Sync curator-managed knowledge entries by @BYK in [#70](https://github.com/BYK/loreai/pull/70)
+
+#### Core
+
+- Decouple from @opencode-ai/sdk with host-agnostic types and LLMClient by @BYK in [#76](https://github.com/BYK/loreai/pull/76)
+- Add esbuild build script for node + bun targets by @BYK in [#75](https://github.com/BYK/loreai/pull/75)
+- Abstract SQLite driver behind #db/driver subpath by @BYK in [#72](https://github.com/BYK/loreai/pull/72)
+
+#### Gradient
+
+- Batch distillation consumption at turn boundaries by @BYK in [#123](https://github.com/BYK/loreai/pull/123)
+- Pin reasoning preservation across all gradient layers by @BYK in [#96](https://github.com/BYK/loreai/pull/96)
+
+#### Opencode
+
+- Skip duplicated logic when gateway is active by @BYK in [#158](https://github.com/BYK/loreai/pull/158)
+- Add upstream-drift contract tests for hook invocation by @BYK in [#102](https://github.com/BYK/loreai/pull/102)
+
+#### Other
+
+- (gateway) Unified recall marker-and-expand strategy by @BYK in [#154](https://github.com/BYK/loreai/pull/154)
+- (temporal) Unambiguous chunk terminator in partsToText by @BYK in [#98](https://github.com/BYK/loreai/pull/98)
+- Add dist-bin/ to gitignore by @BYK in [#169](https://github.com/BYK/loreai/pull/169)
+- Add nightly builds with delta patches and GHCR distribution by @BYK in [#167](https://github.com/BYK/loreai/pull/167)
+- Use models.dev unified JSON API for cost data by @BYK in [#143](https://github.com/BYK/loreai/pull/143)
+- Case 2 (mixed tools) integration tests for recall interception by @BYK in [#141](https://github.com/BYK/loreai/pull/141)
+- Migrate knowledge entries from AGENTS.md to .lore.md by @BYK in [da2a18bb](https://github.com/BYK/loreai/commit/da2a18bb4e4c1200601b57d68ab4e70bbd0b688c)
+- Remove gateway observer hooks and dead recorder exports by @BYK in [#130](https://github.com/BYK/loreai/pull/130)
+- Remove read-time temporal enrichment from distillation prefix by @BYK in [#129](https://github.com/BYK/loreai/pull/129)
+- Update license to FSL-1.1-Apache-2.0 by @BYK in [#126](https://github.com/BYK/loreai/pull/126)
+- Update repository URLs to BYK/loreai after rename by @BYK in [#86](https://github.com/BYK/loreai/pull/86)
+- Rename opencode-lore to @loreai/opencode with legacy mirror by @BYK in [#81](https://github.com/BYK/loreai/pull/81)
+- Multi-package release pipeline for @loreai scope by @BYK in [#79](https://github.com/BYK/loreai/pull/79)
+- Split into @loreai/core + opencode-lore monorepo by @BYK in [#71](https://github.com/BYK/loreai/pull/71)
+
+### Other
+
+- release: 0.14.0 by @BYK in [ec0ad773](https://github.com/BYK/loreai/commit/ec0ad773468f7b632f5b21624d8e1f6de8a0c904)
+- Create CNAME by @BYK in [a892d4c9](https://github.com/BYK/loreai/commit/a892d4c95d8c41917266c232641e21f861e4d815)
+- Delete CNAME by @BYK in [fdff9751](https://github.com/BYK/loreai/commit/fdff975152570cd71dfbfacd4295c7076384f771)
+- Create CNAME by @BYK in [3734d0fa](https://github.com/BYK/loreai/commit/3734d0fa534f3b0db39f53ff2d987c62e9c8fd63)
+- release: 0.13.4 by @BYK in [ff3d1645](https://github.com/BYK/loreai/commit/ff3d1645c21617fee177b2d02504010b0be197d3)
+- release: 0.13.3 by @BYK in [3ee00766](https://github.com/BYK/loreai/commit/3ee007663fa02be76fa45f1f221b00bc66297355)
+- release: 0.12.0 by @BYK in [389e73c5](https://github.com/BYK/loreai/commit/389e73c5bdb29c549b5dd7389f3405dccccd182d)
+- release: 0.11.1 by @BYK in [43ead9f3](https://github.com/BYK/loreai/commit/43ead9f33427d9673944298b11ae39ccd989665c)
+- release: 0.11.0 by @BYK in [cc12aafb](https://github.com/BYK/loreai/commit/cc12aafb2c25b51e9738d4b0da2037391b4efc29)
+- release: 0.10.2 by @BYK in [0fe8fbcf](https://github.com/BYK/loreai/commit/0fe8fbcf03f757e519068c86551f14f0940ef5ad)
+- release: 0.10.1 by @BYK in [fa8e4704](https://github.com/BYK/loreai/commit/fa8e4704f5a32933e2f92eafe8e8e35f3c206f08)
+- release: 0.10.0 by @BYK in [e08f26fb](https://github.com/BYK/loreai/commit/e08f26fb7d34bfe27f4992c406a2f96ff09a6ca8)
+
 ## 0.14.0
 
 ### New Features ✨

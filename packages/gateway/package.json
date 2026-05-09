@@ -1,6 +1,6 @@
 {
   "name": "@loreai/gateway",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "description": "Lore as a transparent LLM proxy — context management for any AI coding client",
