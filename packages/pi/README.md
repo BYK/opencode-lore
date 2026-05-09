@@ -18,6 +18,24 @@ Add to your `~/.pi/settings.json`:
 
 Then run `pi install` once. The extension auto-loads on every Pi session.
 
+## Local embeddings (optional)
+
+By default, recall uses `fastembed` (bge-small-en-v1.5, ~33MB) for on-device vector search — no API key required. `fastembed` ships native bindings via `onnxruntime-node`, which has known install issues on some configurations (e.g. CUDA 13 on Linux/x64 — see [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)). It's declared as an `optionalDependencies` of `@loreai/core`, so install will succeed regardless: if `fastembed` doesn't build, recall transparently falls back to FTS-only search.
+
+If you want local embeddings on a system where `fastembed`'s postinstall fails, skip the CUDA EP download — the bundled CPU EP is sufficient for `bge-small-en-v1.5`:
+
+```bash
+ONNXRUNTIME_NODE_INSTALL_CUDA=skip pi install
+```
+
+Or configure a hosted provider in `.lore.json`:
+
+```json
+{ "search": { "embeddings": { "provider": "voyage" } } }
+```
+
+(also supports `"openai"`; reads `VOYAGE_API_KEY` / `OPENAI_API_KEY` from env).
+
 ## Companion packages
 
 Lore ships as three packages sharing the same SQLite database at `~/.local/share/opencode-lore/lore.db`:

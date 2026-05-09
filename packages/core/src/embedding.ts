@@ -137,6 +137,83 @@ class OpenAIProvider implements EmbeddingProvider {
 // ---------------------------------------------------------------------------
 
 /**
+ * Thrown when `LocalProvider` is requested but `fastembed` cannot be loaded.
+ * `fastembed` is an optionalDependency of `@loreai/core`: if its postinstall
+ * fails (e.g. CUDA 13 hits the upstream `onnxruntime-node` bug — see #185),
+ * the package install still succeeds but local embeddings are disabled.
+ * Callers in `recall.ts` / `ltm.ts` / `distillation.ts` already gate on
+ * `isAvailable()`, which flips to `false` after this error fires once.
+ */
+export class LocalProviderUnavailableError extends Error {
+  constructor(cause?: unknown) {
+    super(
+      "Local embedding provider unavailable: 'fastembed' is not installed. " +
+        "Configure search.embeddings.provider to 'voyage' or 'openai', or " +
+        "reinstall with ONNXRUNTIME_NODE_INSTALL_CUDA=skip to retry the optional fastembed install.",
+    );
+    this.name = "LocalProviderUnavailableError";
+    if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+/** Cache of the fastembed module-load probe.
+ *  null = not yet probed; module = imported successfully; false = import failed. */
+let fastembedModule: typeof import("fastembed") | null = null;
+let fastembedProbed: boolean = false;
+let fastembedAvailable: boolean = false;
+let fastembedLogged: boolean = false;
+
+/** For tests: reset the fastembed probe cache. */
+export function _resetFastembedProbe(): void {
+  fastembedModule = null;
+  fastembedProbed = false;
+  fastembedAvailable = false;
+  fastembedLogged = false;
+}
+
+/** For tests: simulate fastembed being unresolvable, without mocking the
+ *  dynamic import. After this call, `tryLoadFastembed()` short-circuits to
+ *  `null` and `isAvailable()` returns false for the local provider. */
+export function _markFastembedUnavailable(): void {
+  fastembedModule = null;
+  fastembedProbed = true;
+  fastembedAvailable = false;
+  fastembedLogged = true; // suppress the info log in tests
+}
+
+/**
+ * Probe `fastembed` once. Returns the module on success, `null` on failure.
+ * Logs an info-level note exactly once on the first failure so users know
+ * how to recover (switch provider, or reinstall with the CUDA env-var).
+ */
+async function tryLoadFastembed(): Promise<typeof import("fastembed") | null> {
+  if (fastembedProbed) return fastembedAvailable ? fastembedModule : null;
+  try {
+    fastembedModule = await import("fastembed");
+    fastembedAvailable = true;
+  } catch (err) {
+    fastembedAvailable = false;
+    if (!fastembedLogged) {
+      fastembedLogged = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      log.info(
+        `local embedding provider unavailable (fastembed not installed: ${msg}) — ` +
+          `set search.embeddings.provider to 'voyage' or 'openai', or reinstall with ` +
+          `ONNXRUNTIME_NODE_INSTALL_CUDA=skip to retry the optional fastembed install`,
+      );
+    }
+  } finally {
+    fastembedProbed = true;
+  }
+  return fastembedAvailable ? fastembedModule : null;
+}
+
+/** True iff the fastembed probe has run and reported the module missing. */
+function fastembedKnownUnavailable(): boolean {
+  return fastembedProbed && !fastembedAvailable;
+}
+
+/**
  * Local embedding provider using fastembed (bge-small-en-v1.5 by default).
  *
  * No API key required — runs entirely on-device via ONNX Runtime.
@@ -145,7 +222,8 @@ class OpenAIProvider implements EmbeddingProvider {
  *
  * Uses dynamic import so the module is only loaded when the "local"
  * provider is actually selected — avoids startup cost and allows
- * graceful fallback if fastembed is not installed.
+ * graceful fallback when the optional `fastembed` peer isn't installed
+ * (its native onnxruntime-node may fail to build, e.g. on CUDA 13).
  */
 class LocalProvider implements EmbeddingProvider {
   readonly maxBatchSize = 256;
@@ -161,7 +239,9 @@ class LocalProvider implements EmbeddingProvider {
     if (this.model) return this.model;
     if (!this.initPromise) {
       this.initPromise = (async () => {
-        const { EmbeddingModel, FlagEmbedding } = await import("fastembed");
+        const fastembed = await tryLoadFastembed();
+        if (!fastembed) throw new LocalProviderUnavailableError();
+        const { EmbeddingModel, FlagEmbedding } = fastembed;
         // Map config model string to EmbeddingModel enum value.
         // If the configured model matches an enum key, use it; otherwise try
         // the raw string as a model name (CUSTOM model support in fastembed).
@@ -174,7 +254,13 @@ class LocalProvider implements EmbeddingProvider {
         } as { model: typeof EmbeddingModel.BGESmallENV15 });
         this.model = m;
         return m;
-      })();
+      })().catch((err) => {
+        // Don't cache a rejected init — let a later call retry if the user
+        // installs fastembed in-process. (For LocalProviderUnavailableError
+        // the probe cache short-circuits anyway, so retries are cheap.)
+        this.initPromise = null;
+        throw err;
+      });
     }
     return this.initPromise;
   }
@@ -239,12 +325,12 @@ function getProvider(): EmbeddingProvider | null {
 
   switch (providerName) {
     case "local": {
-      try {
-        cachedProvider = new LocalProvider(model);
-      } catch {
-        log.info("local embedding provider unavailable (fastembed not installed)");
-        cachedProvider = null;
-      }
+      // `fastembed` is an optionalDependency. We construct the provider
+      // optimistically here; the import + ONNX init happens lazily in
+      // `LocalProvider.getModel()`, which throws `LocalProviderUnavailableError`
+      // if the optional dep isn't installed. After that first failure
+      // `isAvailable()` short-circuits to false and callers fall back to FTS.
+      cachedProvider = new LocalProvider(model);
       break;
     }
     case "voyage": {
@@ -284,9 +370,16 @@ export function resetProvider(): void {
 
 /** Returns true if embedding is available.
  *  Active when the configured provider's API key is set, unless explicitly
- *  disabled via `search.embeddings.enabled: false` in .lore.json. */
+ *  disabled via `search.embeddings.enabled: false` in .lore.json.
+ *
+ *  For the `local` provider, also returns false once we've discovered the
+ *  optional `fastembed` peer is missing — callers (recall, ltm, distillation)
+ *  use this gate to skip embedding work and fall back to FTS-only search. */
 export function isAvailable(): boolean {
-  return getProvider() !== null;
+  const provider = getProvider();
+  if (!provider) return false;
+  if (provider instanceof LocalProvider && fastembedKnownUnavailable()) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------

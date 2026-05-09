@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { afterEach, describe, test, expect, beforeEach } from "bun:test";
 import { db, ensureProject } from "../src/db";
 import {
   cosineSimilarity,
@@ -8,6 +8,10 @@ import {
   vectorSearch,
   checkConfigChange,
   resetProvider,
+  embed,
+  LocalProviderUnavailableError,
+  _resetFastembedProbe,
+  _markFastembedUnavailable,
 } from "../src/embedding";
 
 describe("cosineSimilarity", () => {
@@ -99,6 +103,54 @@ describe("isAvailable", () => {
     // After reset, re-evaluation with default config should still work
     expect(isAvailable()).toBe(true);
     resetProvider();
+  });
+});
+
+describe("fastembed unavailable fallback (#185)", () => {
+  // Simulates the CUDA-13 install failure path: the optional `fastembed` peer
+  // isn't installed, so the local provider's dynamic import fails. Callers
+  // should see `isAvailable() === false` and never have to handle a thrown
+  // error from deep inside `embed()`.
+
+  afterEach(() => {
+    // Restore real probe state for subsequent tests (the LocalProvider
+    // integration suite below depends on fastembed actually loading).
+    _resetFastembedProbe();
+    resetProvider();
+  });
+
+  test("isAvailable() returns false once fastembed is known missing", () => {
+    resetProvider();
+    _resetFastembedProbe();
+    expect(isAvailable()).toBe(true); // optimistic before probe runs
+
+    _markFastembedUnavailable();
+    expect(isAvailable()).toBe(false);
+  });
+
+  test("embed() throws LocalProviderUnavailableError when fastembed is missing", async () => {
+    resetProvider();
+    _markFastembedUnavailable();
+
+    let caught: unknown;
+    try {
+      await embed(["test"], "query");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(LocalProviderUnavailableError);
+    expect((caught as Error).message).toContain("fastembed");
+  });
+
+  test("isAvailable() flips to false after the first embed() failure", async () => {
+    resetProvider();
+    _markFastembedUnavailable();
+
+    // First embed call surfaces the error (callers like recall.ts wrap in try/catch).
+    await expect(embed(["test"], "query")).rejects.toBeInstanceOf(LocalProviderUnavailableError);
+
+    // Subsequent isAvailable() calls short-circuit so callers stop calling embed().
+    expect(isAvailable()).toBe(false);
   });
 });
 

@@ -22,6 +22,10 @@ Restart OpenCode and the plugin will be installed automatically.
 
 > This package is also published as [`opencode-lore`](https://www.npmjs.com/package/opencode-lore) (legacy alias). Both names ship identical code at every release — either works.
 
+## Local embeddings (optional)
+
+Recall uses `fastembed` for on-device vector search by default. It's an `optionalDependencies` of `@loreai/core`: if its native `onnxruntime-node` postinstall fails (e.g. CUDA 13 on Linux/x64 — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)), install still succeeds and recall falls back to FTS-only. To force a local-embeddings install on such a host, set `ONNXRUNTIME_NODE_INSTALL_CUDA=skip` before installing — or configure `search.embeddings.provider` to `"voyage"` / `"openai"` in `.lore.json`.
+
 ## Companion packages
 
 Lore ships as three packages sharing the same SQLite database at `~/.local/share/opencode-lore/lore.db`:
