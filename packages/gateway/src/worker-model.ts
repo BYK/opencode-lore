@@ -212,7 +212,7 @@ export function clearModelDataCache(): void {
  * distillations at ~60% lower cost. The user can always override via the
  * explicit `workerModel` config.
  */
-const SONNET_WORKER_DEFAULT = { providerID: "anthropic", modelID: "claude-sonnet-4-20250514" };
+const SONNET_WORKER_DEFAULT = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
 const EXPENSIVE_MODEL_THRESHOLD = 5; // $/M input tokens
 
 /**
