@@ -544,15 +544,40 @@ function buildStreamingResponse(
   const accumulator: StreamAccumulator = recallAccum ?? createStreamAccumulator();
   const encoder = new TextEncoder();
 
+  // Client-disconnect detection: shared between start() and cancel()
+  let cancelled = false;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
   const stream = new ReadableStream({
     async start(controller) {
+      // Guard helpers for client-disconnect safety
+      const safeEnqueue = (data: Uint8Array): boolean => {
+        if (cancelled) return false;
+        try {
+          controller.enqueue(data);
+          return true;
+        } catch {
+          cancelled = true;
+          return false;
+        }
+      };
+      const safeClose = (): void => {
+        if (cancelled) return;
+        try {
+          controller.close();
+        } catch {
+          // Already closed/cancelled
+        }
+      };
+
       try {
         // Parse and forward upstream SSE events
         const reader = upstreamResponse.body!.getReader();
+        activeReader = reader;
         for await (const { event, data } of parseSSEStream(reader)) {
           const forwarded = accumulator.processEvent(event, data);
           if (forwarded) {
-            controller.enqueue(encoder.encode(forwarded));
+            if (!safeEnqueue(encoder.encode(forwarded))) break;
           }
         }
 
@@ -599,7 +624,7 @@ function buildStreamingResponse(
                 index: markerIdx,
               })),
             ].join("");
-            controller.enqueue(encoder.encode(syntheticMarker));
+            if (!safeEnqueue(encoder.encode(syntheticMarker))) return;
 
             if (recallAccum.hasOtherTools()) {
               // Forward held-back events, close stream
@@ -610,13 +635,13 @@ function buildStreamingResponse(
 
               const heldBack = recallAccum.heldBackEvents();
               if (heldBack) {
-                controller.enqueue(encoder.encode(heldBack));
+                safeEnqueue(encoder.encode(heldBack));
               }
 
               // Post-stream: store response with marker text (not raw tool_use)
               const markerResp = replaceRecallWithMarker(resp);
               onComplete(markerResp);
-              controller.close();
+              safeClose();
               return;
             }
 
@@ -647,11 +672,11 @@ function buildStreamingResponse(
               );
               const heldBack = recallAccum.heldBackEvents();
               if (heldBack) {
-                controller.enqueue(encoder.encode(heldBack));
+                safeEnqueue(encoder.encode(heldBack));
               }
               const markerResp = replaceRecallWithMarker(resp);
               onComplete(markerResp);
-              controller.close();
+              safeClose();
               return;
             }
 
@@ -668,11 +693,11 @@ function buildStreamingResponse(
               // Forward the held-back events to close the stream gracefully
               const heldBack = recallAccum.heldBackEvents();
               if (heldBack) {
-                controller.enqueue(encoder.encode(heldBack));
+                safeEnqueue(encoder.encode(heldBack));
               }
               const markerResp = replaceRecallWithMarker(resp);
               onComplete(markerResp);
-              controller.close();
+              safeClose();
               return;
             }
 
@@ -682,6 +707,7 @@ function buildStreamingResponse(
             // +1 accounts for the synthetic marker block.
             const blockOffset = recallAccum.clientBlockCount() + 1;
             const contReader = followUpResponse.body!.getReader();
+            activeReader = contReader;
             let contEventCount = 0;
 
             for await (const { event: contEvent, data: contData } of parseSSEStream(contReader)) {
@@ -705,7 +731,7 @@ function buildStreamingResponse(
                       contEvent,
                       JSON.stringify(parsed),
                     );
-                    controller.enqueue(encoder.encode(adjusted));
+                    if (!safeEnqueue(encoder.encode(adjusted))) break;
                     continue;
                   }
                 } catch {
@@ -715,7 +741,7 @@ function buildStreamingResponse(
 
               // Forward message_delta, message_stop, and other events as-is
               const forwarded = formatSSEEvent(contEvent, contData);
-              controller.enqueue(encoder.encode(forwarded));
+              if (!safeEnqueue(encoder.encode(forwarded))) break;
             }
 
             log.info(
@@ -728,7 +754,7 @@ function buildStreamingResponse(
             // round-trip the marker ↔ tool_use/tool_result correctly.
             const markerResp = replaceRecallWithMarker(resp);
             onComplete(markerResp);
-            controller.close();
+            safeClose();
             return;
           }
         }
@@ -736,7 +762,7 @@ function buildStreamingResponse(
         // No recall — normal path
         const response = accumulator.getResponse();
         onComplete(response);
-        controller.close();
+        safeClose();
       } catch (err) {
         log.error("streaming pipeline error:", err);
         try {
@@ -745,6 +771,10 @@ function buildStreamingResponse(
           // Controller already closed or cancelled — error already logged above
         }
       }
+    },
+    cancel() {
+      cancelled = true;
+      try { activeReader?.cancel(); } catch { /* ignore */ }
     },
   });
 
