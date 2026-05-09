@@ -35,7 +35,7 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 /** Shape of a model entry in the models.dev JSON API. */
 export type ModelsDevEntry = {
   id: string;
-  cost?: { input?: number; output?: number; cache_read?: number };
+  cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
   limit?: { context?: number; output?: number };
 };
 
@@ -55,20 +55,21 @@ const FALLBACK_PRICING: Array<{
   input: number;
   output: number;
   cache_read: number;
+  cache_write: number;
   context: number;
   outputLimit: number;
 }> = [
-  { prefix: "claude-opus-4-6", input: 5, output: 25, cache_read: 0.5, context: 1_000_000, outputLimit: 128_000 },
-  { prefix: "claude-opus-4-5", input: 5, output: 25, cache_read: 0.5, context: 200_000, outputLimit: 64_000 },
-  { prefix: "claude-opus-4", input: 15, output: 75, cache_read: 1.5, context: 200_000, outputLimit: 32_000 },
-  { prefix: "claude-sonnet-4-6", input: 3, output: 15, cache_read: 0.3, context: 1_000_000, outputLimit: 64_000 },
-  { prefix: "claude-sonnet-4", input: 3, output: 15, cache_read: 0.3, context: 200_000, outputLimit: 64_000 },
-  { prefix: "claude-haiku-4-5", input: 1, output: 5, cache_read: 0.1, context: 200_000, outputLimit: 64_000 },
-  { prefix: "claude-haiku-3-5", input: 0.8, output: 4, cache_read: 0.08, context: 200_000, outputLimit: 8_192 },
-  { prefix: "claude-sonnet-3-5", input: 3, output: 15, cache_read: 0.3, context: 200_000, outputLimit: 8_192 },
-  { prefix: "claude-3-haiku", input: 0.25, output: 1.25, cache_read: 0.03, context: 200_000, outputLimit: 4_096 },
-  { prefix: "claude-3-sonnet", input: 3, output: 15, cache_read: 0.3, context: 200_000, outputLimit: 4_096 },
-  { prefix: "claude-3-opus", input: 15, output: 75, cache_read: 1.5, context: 200_000, outputLimit: 4_096 },
+  { prefix: "claude-opus-4-6", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25, context: 1_000_000, outputLimit: 128_000 },
+  { prefix: "claude-opus-4-5", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25, context: 200_000, outputLimit: 64_000 },
+  { prefix: "claude-opus-4", input: 15, output: 75, cache_read: 1.5, cache_write: 18.75, context: 200_000, outputLimit: 32_000 },
+  { prefix: "claude-sonnet-4-6", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 1_000_000, outputLimit: 64_000 },
+  { prefix: "claude-sonnet-4", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 200_000, outputLimit: 64_000 },
+  { prefix: "claude-haiku-4-5", input: 1, output: 5, cache_read: 0.1, cache_write: 1.25, context: 200_000, outputLimit: 64_000 },
+  { prefix: "claude-haiku-3-5", input: 0.8, output: 4, cache_read: 0.08, cache_write: 1.0, context: 200_000, outputLimit: 8_192 },
+  { prefix: "claude-sonnet-3-5", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 200_000, outputLimit: 8_192 },
+  { prefix: "claude-3-haiku", input: 0.25, output: 1.25, cache_read: 0.03, cache_write: 0.3125, context: 200_000, outputLimit: 4_096 },
+  { prefix: "claude-3-sonnet", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 200_000, outputLimit: 4_096 },
+  { prefix: "claude-3-opus", input: 15, output: 75, cache_read: 1.5, cache_write: 18.75, context: 200_000, outputLimit: 4_096 },
 ];
 
 function fallbackEntry(modelID: string): ModelsDevEntry {
@@ -76,7 +77,7 @@ function fallbackEntry(modelID: string): ModelsDevEntry {
     if (modelID.startsWith(fb.prefix)) {
       return {
         id: modelID,
-        cost: { input: fb.input, output: fb.output, cache_read: fb.cache_read },
+        cost: { input: fb.input, output: fb.output, cache_read: fb.cache_read, cache_write: fb.cache_write },
         limit: { context: fb.context, output: fb.outputLimit },
       };
     }
@@ -84,7 +85,7 @@ function fallbackEntry(modelID: string): ModelsDevEntry {
   // Unknown model — assume mid-range so metrics are roughly correct
   return {
     id: modelID,
-    cost: { input: 3, output: 15, cache_read: 0.3 },
+    cost: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
     limit: { context: 200_000, output: 8_192 },
   };
 }
@@ -122,7 +123,12 @@ export async function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
 
     const modelData = new Map<string, ModelsDevEntry>();
     for (const [modelId, entry] of Object.entries(anthropic)) {
-      modelData.set(modelId, { ...entry, id: modelId });
+      const e: ModelsDevEntry = { ...entry, id: modelId };
+      // Compute cache_write cost if not provided (Anthropic: 1.25× input price)
+      if (e.cost && e.cost.cache_write == null && e.cost.input != null) {
+        e.cost.cache_write = e.cost.input * 1.25;
+      }
+      modelData.set(modelId, e);
     }
 
     cachedModelData = modelData;

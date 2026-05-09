@@ -219,4 +219,13 @@ export type SessionState = {
   recallStore: RecallStore;
   /** Cache analytics — request body prefix comparison + API cache fields. */
   cacheAnalytics: CacheAnalytics;
+  /** Set true in handleConversationTurn when an idle resume was detected;
+   *  consumed by postResponse for cache-bust cause telemetry. One-shot. */
+  lastTurnWasIdle?: boolean;
+  /** Rolling window of recent turns' cold-cache status for auto-TTL upgrade.
+   *  true = cold cache (full bust), false = cache hit. */
+  coldCacheWindow?: boolean[];
+  /** Resolved conversation TTL for this session ("5m" | "1h"). Updated by
+   *  the auto-upgrade logic each turn. */
+  resolvedConversationTTL?: "5m" | "1h";
 };

@@ -321,6 +321,75 @@ export function analyzeCacheTurn(
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Bust cause categorization
+// ---------------------------------------------------------------------------
+
+/** Cache event categories for telemetry. */
+export type CacheBustCause =
+  | "first-turn"       // session's first request (unavoidable)
+  | "system-change"    // divergence in system blocks (LTM update)
+  | "tools-change"     // tool definitions changed
+  | "prefix-rewrite"   // distilled prefix content changed (meta-distillation)
+  | "window-shift"     // raw window eviction changed message positions
+  | "idle-resume"      // first turn after idle detection (cold cache)
+  | "incremental"      // normal append (cache hit, write only new tail)
+  | "unknown";         // unclassified
+
+/**
+ * Categorize a cache event from the turn analysis.
+ *
+ * Uses the divergence point from byte-level prefix comparison plus the
+ * API's cache usage fields to classify what caused the event.
+ *
+ * @param analysis - Per-turn analysis from analyzeCacheTurn()
+ * @param isPostIdle - Whether this turn is a post-idle resume
+ */
+export function categorizeBust(
+  analysis: CacheTurnAnalysis,
+  isPostIdle: boolean,
+): CacheBustCause {
+  const { turn, cacheRead, cacheCreation, divergencePoint } = analysis;
+
+  // First turn — no prior request to compare
+  if (turn <= 1 || divergencePoint === "<first-turn>") return "first-turn";
+
+  // Not a bust: cache read > 0, creation is only the new tail
+  if (cacheRead > 0 && cacheCreation > 0) return "incremental";
+  if (cacheRead > 0 && cacheCreation === 0) return "incremental";
+
+  // Full bust: cacheRead === 0 and cacheCreation > 0
+  if (cacheRead === 0 && cacheCreation > 0) {
+    // Post-idle: cold cache regardless of divergence reason
+    if (isPostIdle) return "idle-resume";
+
+    // Classify by divergence location
+    if (divergencePoint === "<identical>") return "unknown"; // shouldn't happen with a bust
+    if (divergencePoint === "<start>" || divergencePoint === "<root>")
+      return "prefix-rewrite";
+    if (divergencePoint === "system" || divergencePoint.startsWith("system"))
+      return "system-change";
+    if (divergencePoint === "tools" || divergencePoint.startsWith("tools"))
+      return "tools-change";
+
+    // Message-level divergence
+    const msgMatch = divergencePoint.match(/^messages\[(\d+)\]/);
+    if (msgMatch) {
+      const idx = parseInt(msgMatch[1], 10);
+      // Early message changes (index 0 or 1) likely indicate prefix rewrite
+      // (distilled prefix is injected as messages[0] and messages[1])
+      if (idx <= 1) return "prefix-rewrite";
+      // Later message changes indicate window shift (raw window eviction)
+      return "window-shift";
+    }
+
+    return "unknown";
+  }
+
+  // No cache activity at all (unusual)
+  return "unknown";
+}
+
 /**
  * Log a cache analytics summary for the session.
  * Suitable for calling on session cleanup or periodically.

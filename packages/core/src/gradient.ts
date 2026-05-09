@@ -46,6 +46,127 @@ let maxLayer0Tokens = 0;
 
 const MIN_LAYER0_FLOOR = 40_000;
 
+// ---------------------------------------------------------------------------
+// Cost-aware context token cap (layer 1+)
+//
+// Limits total tokens (distilled + raw) to keep per-bust cache write cost
+// bounded. For opus-4-6 at $6.25/M write, a $1.00 target yields a 160K cap.
+// For sonnet-4 at $3.75/M write, the cap is 267K (effectively uncapped).
+//
+// The cap is further adjusted dynamically per session via bust rate EMA and
+// inter-bust interval tracking: tighten when busts are frequent, relax when
+// the cache is working well. Asymmetric rates: tighten fast, relax slowly.
+// ---------------------------------------------------------------------------
+
+/** Static ceiling for total context tokens, derived from model pricing.
+ *  0 = disabled (no cap). Set via setMaxContextTokens(). */
+let maxContextTokensCeiling = 0;
+
+const MIN_CONTEXT_FLOOR = 100_000;
+
+/** Compute the context ceiling from a per-bust cost target and cache-write price per token. */
+export function computeContextCap(
+  targetBustCost: number,
+  cacheWriteCostPerToken: number,
+): number {
+  if (targetBustCost <= 0 || cacheWriteCostPerToken <= 0) return 0;
+  return Math.max(MIN_CONTEXT_FLOOR, Math.floor(targetBustCost / cacheWriteCostPerToken));
+}
+
+/** Set the static context ceiling. Called by the host adapter after computing
+ *  from model pricing. The effective per-session cap may be lower due to
+ *  dynamic adaptation (bust rate EMA). */
+export function setMaxContextTokens(tokens: number) {
+  maxContextTokensCeiling = Math.max(0, Math.floor(tokens));
+}
+
+/** Returns the current static ceiling (for external callers / tests). */
+export function getMaxContextTokens(): number {
+  return maxContextTokensCeiling;
+}
+
+/**
+ * Feed cache usage data after each API response. Updates the per-session
+ * bust rate EMA and inter-bust interval, which adjust the effective context
+ * cap dynamically.
+ *
+ * @param cacheWrite - cache_creation_input_tokens from the API response
+ * @param cacheRead  - cache_read_input_tokens from the API response
+ * @param sessionID  - session that produced this response
+ */
+export function updateBustRate(
+  cacheWrite: number,
+  cacheRead: number,
+  sessionID?: string,
+): void {
+  if (!sessionID) return;
+  const state = getSessionState(sessionID);
+  const total = cacheWrite + cacheRead;
+  if (total === 0) return;
+
+  // Bust ratio: fraction of total input that was cache-written (0 = all reads, 1 = all writes)
+  const bustRatio = cacheWrite / total;
+
+  // EMA update (α = 0.3 for smoothing — responsive but not twitchy)
+  state.bustRateEMA =
+    state.bustRateEMA < 0
+      ? bustRatio  // first observation
+      : state.bustRateEMA * 0.7 + bustRatio * 0.3;
+
+  // Inter-bust interval tracking: a "bust" is when >50% of input is writes
+  const now = Date.now();
+  if (bustRatio > 0.5) {
+    if (state.lastBustAt > 0) {
+      const interval = now - state.lastBustAt;
+      state.interBustIntervalEMA =
+        state.interBustIntervalEMA < 0
+          ? interval
+          : state.interBustIntervalEMA * 0.7 + interval * 0.3;
+    }
+    state.lastBustAt = now;
+  }
+
+  // Adapt per-session cap based on bust rate and interval
+  adaptContextCap(state);
+}
+
+/** Adapt the per-session context cap based on bust rate and break frequency. */
+function adaptContextCap(state: SessionState): void {
+  if (maxContextTokensCeiling <= 0) return; // disabled
+
+  const cap = state.dynamicContextCap > 0
+    ? state.dynamicContextCap
+    : maxContextTokensCeiling;
+
+  let newCap = cap;
+
+  // Primary signal: bust rate EMA
+  if (state.bustRateEMA > 0.8) {
+    // Mostly writes — tighten by 10%
+    newCap = Math.floor(cap * 0.90);
+  } else if (state.bustRateEMA < 0.3) {
+    // Mostly reads — relax by 5% (slower than tightening)
+    newCap = Math.floor(cap * 1.05);
+  }
+
+  // Secondary signal: inter-bust interval
+  if (state.interBustIntervalEMA > 0) {
+    if (state.interBustIntervalEMA < 2 * 60_000) {
+      // Busts less than 2 min apart — proactively tighten by extra 5%
+      newCap = Math.floor(newCap * 0.95);
+    } else if (state.interBustIntervalEMA > 10 * 60_000) {
+      // Busts more than 10 min apart — allow extra relaxation
+      newCap = Math.floor(newCap * 1.03);
+    }
+  }
+
+  // Clamp to [floor, ceiling]
+  state.dynamicContextCap = Math.max(
+    MIN_CONTEXT_FLOOR,
+    Math.min(maxContextTokensCeiling, newCap),
+  );
+}
+
 // Conservative overhead reserve for first-turn (before calibration):
 // accounts for provider system prompt + AGENTS.md + tool definitions + env info
 const FIRST_TURN_OVERHEAD = 15_000;
@@ -133,6 +254,18 @@ type SessionState = {
   /** Consecutive turns at layer >= 2. When >= 3, log a compaction hint. */
   consecutiveHighLayer: number;
 
+  // --- Cost-aware context cap dynamic state ---
+
+  /** EMA of bust ratio (cacheWrite / total). -1 = uninitialized. */
+  bustRateEMA: number;
+  /** EMA of time between full busts (ms). -1 = uninitialized. */
+  interBustIntervalEMA: number;
+  /** Epoch ms of the last full bust (cacheWrite > 50% of total). 0 = never. */
+  lastBustAt: number;
+  /** Per-session dynamic context cap (tokens). Adjusted by adaptContextCap().
+   *  0 = use the static ceiling (maxContextTokensCeiling). */
+  dynamicContextCap: number;
+
   /**
    * Distillation row snapshot — cached to avoid hitting the DB on every
    * transform() call. Refreshed only at turn boundaries (when a new user
@@ -165,6 +298,11 @@ function makeSessionState(): SessionState {
     cameOutOfIdle: false,
     postIdleCompact: false,
     consecutiveHighLayer: 0,
+
+    bustRateEMA: -1,
+    interBustIntervalEMA: -1,
+    lastBustAt: 0,
+    dynamicContextCap: 0,
 
     distillationSnapshot: null,
   };
@@ -1315,10 +1453,23 @@ function transformInner(input: {
   // minus LTM tokens already injected into the system prompt this turn.
   // Read LTM tokens from per-session state to avoid cross-session contamination.
   const sessLtmTokens = sid ? sessState.ltmTokens : ltmTokensFallback;
-  const usable = Math.max(
+  const usableRaw = Math.max(
     0,
     contextLimit - outputReserved - overhead - sessLtmTokens,
   );
+
+  // Cost-aware context cap: limit total distilled + raw tokens to keep
+  // per-bust cache write cost bounded. On opus-4-6 at $6.25/M, a $1.00
+  // target yields a 160K ceiling; on sonnet-4 at $3.75/M, 267K (effectively
+  // uncapped at 200K context). Per-session dynamic adaptation may reduce
+  // this further based on observed bust rate and break frequency.
+  const effectiveCap = sid && sessState.dynamicContextCap > 0
+    ? sessState.dynamicContextCap
+    : maxContextTokensCeiling;
+  const usable = effectiveCap > 0 && usableRaw > effectiveCap
+    ? effectiveCap
+    : usableRaw;
+
   const distilledBudget = Math.floor(usable * cfg.budget.distilled);
   // Base raw budget. May be overridden below for post-idle compact mode.
   let rawBudget = Math.floor(usable * cfg.budget.raw);
@@ -1385,12 +1536,11 @@ function transformInner(input: {
     sessState.postIdleCompact = false;
     // Skip layer 0 — don't pass through all raw messages on a cold cache.
     effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
-    // Use a tighter raw budget: 20% of usable instead of the normal 40%.
-    // The distilled prefix covers the older history; the raw window only
-    // needs the current turn + minimal recent context. This reduces the
-    // total cold-cache write cost by up to 20% of usable (~29K tokens on
-    // a 200K context model).
-    rawBudget = Math.floor(usable * 0.20);
+    // Use a tighter raw budget. When the cost-aware context cap is active,
+    // total write size is already bounded — use a moderate 30%. Without
+    // the cap, use a tighter 20% to limit cold-write cost directly.
+    const postIdleRawFraction = effectiveCap > 0 ? 0.30 : 0.20;
+    rawBudget = Math.floor(usable * postIdleRawFraction);
     log.info(
       `post-idle compact: session=${sid} rawBudget=${rawBudget}` +
       ` (${Math.floor(usable * cfg.budget.raw)}→${rawBudget})`,
