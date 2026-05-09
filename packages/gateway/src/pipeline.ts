@@ -612,11 +612,10 @@ function buildStreamingResponse(
                 controller.enqueue(encoder.encode(heldBack));
               }
 
-              controller.close();
-
               // Post-stream: store response with marker text (not raw tool_use)
               const markerResp = replaceRecallWithMarker(resp);
               onComplete(markerResp);
+              controller.close();
               return;
             }
 
@@ -649,9 +648,9 @@ function buildStreamingResponse(
               if (heldBack) {
                 controller.enqueue(encoder.encode(heldBack));
               }
-              controller.close();
               const markerResp = replaceRecallWithMarker(resp);
               onComplete(markerResp);
+              controller.close();
               return;
             }
 
@@ -670,9 +669,9 @@ function buildStreamingResponse(
               if (heldBack) {
                 controller.enqueue(encoder.encode(heldBack));
               }
-              controller.close();
               const markerResp = replaceRecallWithMarker(resp);
               onComplete(markerResp);
+              controller.close();
               return;
             }
 
@@ -723,24 +722,27 @@ function buildStreamingResponse(
                 `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
             );
 
-            controller.close();
-
             // Post-stream: store response with marker text for temporal storage.
             // The marker replaces the raw tool_use, so future turns can
             // round-trip the marker ↔ tool_use/tool_result correctly.
             const markerResp = replaceRecallWithMarker(resp);
             onComplete(markerResp);
+            controller.close();
             return;
           }
         }
 
         // No recall — normal path
-        controller.close();
         const response = accumulator.getResponse();
         onComplete(response);
+        controller.close();
       } catch (err) {
         log.error("streaming pipeline error:", err);
-        controller.error(err);
+        try {
+          controller.error(err);
+        } catch {
+          // Controller already closed or cancelled — error already logged above
+        }
       }
     },
   });
