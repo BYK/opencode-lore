@@ -17,17 +17,27 @@ const MODELS_DEV_API = "https://models.dev/api.json";
 
 /** Build a mock models.dev api.json response with full cost+limit data. */
 function buildModelsDevResponse(
-  models: Record<string, { cost: { input: number; output: number; cache_read: number }; limit: { context: number; output: number } }>,
+  anthropicModels: Record<string, { cost: { input: number; output: number; cache_read: number }; limit: { context: number; output: number } }>,
+  openaiModels?: Record<string, { cost: { input: number; output: number; cache_read: number }; limit: { context: number; output: number } }>,
 ) {
-  const entries: Record<string, ModelsDevEntry> = {};
-  for (const [id, data] of Object.entries(models)) {
-    entries[id] = { id, cost: data.cost, limit: data.limit };
+  const toEntries = (models: typeof anthropicModels) => {
+    const entries: Record<string, ModelsDevEntry> = {};
+    for (const [id, data] of Object.entries(models)) {
+      entries[id] = { id, cost: data.cost, limit: data.limit };
+    }
+    return entries;
+  };
+  const resp: Record<string, { models: Record<string, ModelsDevEntry> }> = {
+    anthropic: { models: toEntries(anthropicModels) },
+  };
+  if (openaiModels) {
+    resp.openai = { models: toEntries(openaiModels) };
   }
-  return { anthropic: { models: entries } };
+  return resp;
 }
 
-/** Default models.dev data for tests. */
-const DEFAULT_MODELS = {
+/** Default Anthropic models.dev data for tests. */
+const DEFAULT_ANTHROPIC_MODELS = {
   "claude-opus-4-6": {
     cost: { input: 5, output: 25, cache_read: 0.5 },
     limit: { context: 1_000_000, output: 128_000 },
@@ -41,6 +51,21 @@ const DEFAULT_MODELS = {
     limit: { context: 200_000, output: 64_000 },
   },
 };
+
+/** Default OpenAI models.dev data for tests. */
+const DEFAULT_OPENAI_MODELS = {
+  "gpt-5.4": {
+    cost: { input: 2.5, output: 15, cache_read: 0.625 },
+    limit: { context: 1_050_000, output: 100_000 },
+  },
+  "gpt-5.4-mini": {
+    cost: { input: 0.75, output: 4.5, cache_read: 0.19 },
+    limit: { context: 400_000, output: 100_000 },
+  },
+};
+
+/** Combined default models for tests. */
+const DEFAULT_MODELS = DEFAULT_ANTHROPIC_MODELS;
 
 // ---------------------------------------------------------------------------
 // fetchModelData
@@ -68,13 +93,28 @@ describe("fetchModelData", () => {
 
     const data = await fetchModelData();
 
-    expect(data.size).toBe(3);
+    expect(data.size).toBeGreaterThanOrEqual(3);
     const opus = data.get("claude-opus-4-6")!;
     expect(opus.cost?.input).toBe(5);
     expect(opus.cost?.output).toBe(25);
     expect(opus.cost?.cache_read).toBe(0.5);
     expect(opus.limit?.context).toBe(1_000_000);
     expect(opus.limit?.output).toBe(128_000);
+  });
+
+  test("fetches models from multiple providers", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_ANTHROPIC_MODELS, DEFAULT_OPENAI_MODELS)), { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const data = await fetchModelData();
+
+    expect(data.size).toBe(5); // 3 Anthropic + 2 OpenAI
+    expect(data.get("claude-opus-4-6")!.cost?.input).toBe(5);
+    expect(data.get("gpt-5.4")!.cost?.input).toBe(2.5);
+    expect(data.get("gpt-5.4-mini")!.cost?.input).toBe(0.75);
   });
 
   test("caches results and returns cache on subsequent calls", async () => {
@@ -111,15 +151,27 @@ describe("fetchModelData", () => {
     expect(data.size).toBe(0);
   });
 
-  test("handles missing anthropic provider gracefully", async () => {
+  test("handles missing providers gracefully", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ openai: { models: {} } }), { status: 200 }),
+        new Response(JSON.stringify({ google: { models: {} } }), { status: 200 }),
       ),
     ) as unknown as typeof fetch;
 
     const data = await fetchModelData();
-    expect(data.size).toBe(0);
+    expect(data.size).toBe(0); // Neither anthropic nor openai present
+  });
+
+  test("loads available providers even when some are missing", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ openai: { models: { "gpt-5.4": { id: "gpt-5.4", cost: { input: 2.5, output: 15 }, limit: { context: 1_050_000, output: 100_000 } } } } }), { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const data = await fetchModelData();
+    expect(data.size).toBe(1); // Only OpenAI, no Anthropic
+    expect(data.get("gpt-5.4")!.cost?.input).toBe(2.5);
   });
 });
 

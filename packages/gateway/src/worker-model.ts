@@ -27,10 +27,13 @@ import {
  */
 const MODELS_DEV_API = "https://models.dev/api.json";
 
-/** Cached models.dev data: full model entries for Anthropic. */
+/** Cached models.dev data: model entries for all supported providers. */
 let cachedModelData: Map<string, ModelsDevEntry> | null = null;
 let cachedModelDataAt = 0;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/** Providers to fetch pricing data for from models.dev. */
+const SUPPORTED_PROVIDERS = ["anthropic", "openai"] as const;
 
 /** Shape of a model entry in the models.dev JSON API. */
 export type ModelsDevEntry = {
@@ -49,6 +52,9 @@ type ModelsDevResponse = {
 /**
  * Hardcoded fallback costs (per-million-token, USD) used when models.dev
  * API is unreachable. Prefix-matched against model IDs.
+ *
+ * Covers Anthropic + OpenAI families (the two providers with validated
+ * worker model mappings). Other providers use the unknown-model default.
  */
 const FALLBACK_PRICING: Array<{
   prefix: string;
@@ -59,6 +65,7 @@ const FALLBACK_PRICING: Array<{
   context: number;
   outputLimit: number;
 }> = [
+  // Anthropic
   { prefix: "claude-opus-4-6", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25, context: 1_000_000, outputLimit: 128_000 },
   { prefix: "claude-opus-4-5", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25, context: 200_000, outputLimit: 64_000 },
   { prefix: "claude-opus-4", input: 15, output: 75, cache_read: 1.5, cache_write: 18.75, context: 200_000, outputLimit: 32_000 },
@@ -70,6 +77,18 @@ const FALLBACK_PRICING: Array<{
   { prefix: "claude-3-haiku", input: 0.25, output: 1.25, cache_read: 0.03, cache_write: 0.3125, context: 200_000, outputLimit: 4_096 },
   { prefix: "claude-3-sonnet", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 200_000, outputLimit: 4_096 },
   { prefix: "claude-3-opus", input: 15, output: 75, cache_read: 1.5, cache_write: 18.75, context: 200_000, outputLimit: 4_096 },
+  // OpenAI
+  { prefix: "gpt-5.5", input: 5, output: 30, cache_read: 1.25, cache_write: 6.25, context: 1_050_000, outputLimit: 100_000 },
+  { prefix: "gpt-5.4-mini", input: 0.75, output: 4.5, cache_read: 0.19, cache_write: 0.94, context: 400_000, outputLimit: 100_000 },
+  { prefix: "gpt-5.4-nano", input: 0.2, output: 1.25, cache_read: 0.05, cache_write: 0.25, context: 400_000, outputLimit: 100_000 },
+  { prefix: "gpt-5.4", input: 2.5, output: 15, cache_read: 0.625, cache_write: 3.125, context: 1_050_000, outputLimit: 100_000 },
+  { prefix: "gpt-5-mini", input: 0.25, output: 2, cache_read: 0.0625, cache_write: 0.3125, context: 400_000, outputLimit: 100_000 },
+  { prefix: "gpt-5-nano", input: 0.05, output: 0.4, cache_read: 0.0125, cache_write: 0.0625, context: 400_000, outputLimit: 100_000 },
+  { prefix: "gpt-5", input: 1.25, output: 10, cache_read: 0.3125, cache_write: 1.5625, context: 400_000, outputLimit: 100_000 },
+  { prefix: "gpt-4o-mini", input: 0.15, output: 0.6, cache_read: 0.075, cache_write: 0.1875, context: 128_000, outputLimit: 16_384 },
+  { prefix: "gpt-4o", input: 2.5, output: 10, cache_read: 1.25, cache_write: 3.125, context: 128_000, outputLimit: 16_384 },
+  { prefix: "gpt-4.1-mini", input: 0.4, output: 1.6, cache_read: 0.1, cache_write: 0.5, context: 1_047_576, outputLimit: 32_768 },
+  { prefix: "gpt-4.1", input: 2, output: 8, cache_read: 0.5, cache_write: 2.5, context: 1_047_576, outputLimit: 32_768 },
 ];
 
 function fallbackEntry(modelID: string): ModelsDevEntry {
@@ -91,10 +110,10 @@ function fallbackEntry(modelID: string): ModelsDevEntry {
 }
 
 /**
- * Fetch model data from models.dev for Anthropic models.
+ * Fetch model data from models.dev for supported providers.
  *
  * Single HTTP request, cached for 1 hour. Returns a map of
- * modelID → entry with cost and limit data.
+ * modelID → entry with cost and limit data across all supported providers.
  */
 export async function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
   // Return cache if fresh
@@ -115,26 +134,29 @@ export async function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
     }
 
     const data = (await response.json()) as ModelsDevResponse;
-    const anthropic = data.anthropic?.models;
-    if (!anthropic) {
-      log.warn("models.dev API: no anthropic provider found");
-      return cachedModelData ?? new Map();
-    }
-
     const modelData = new Map<string, ModelsDevEntry>();
-    for (const [modelId, entry] of Object.entries(anthropic)) {
-      const e: ModelsDevEntry = { ...entry, id: modelId };
-      // Compute cache_write cost if not provided (Anthropic: 1.25× input price)
-      if (e.cost && e.cost.cache_write == null && e.cost.input != null) {
-        e.cost.cache_write = e.cost.input * 1.25;
+
+    for (const providerName of SUPPORTED_PROVIDERS) {
+      const providerModels = data[providerName]?.models;
+      if (!providerModels) {
+        log.warn(`models.dev API: no ${providerName} provider found`);
+        continue;
       }
-      modelData.set(modelId, e);
+
+      for (const [modelId, entry] of Object.entries(providerModels)) {
+        const e: ModelsDevEntry = { ...entry, id: modelId };
+        // Compute cache_write cost if not provided (typically 1.25× input price)
+        if (e.cost && e.cost.cache_write == null && e.cost.input != null) {
+          e.cost.cache_write = e.cost.input * 1.25;
+        }
+        modelData.set(modelId, e);
+      }
     }
 
     cachedModelData = modelData;
     cachedModelDataAt = Date.now();
 
-    log.info(`models.dev: loaded data for ${modelData.size} anthropic models`);
+    log.info(`models.dev: loaded data for ${modelData.size} models across ${SUPPORTED_PROVIDERS.join(", ")}`);
     return modelData;
   } catch (e) {
     log.warn("models.dev API error:", e);
@@ -207,40 +229,106 @@ export function clearModelDataCache(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Cost-aware default: when the session model costs ≥$5/M input (opus tier),
- * default background workers to sonnet-4 which produces equivalent-quality
- * distillations at ~60% lower cost. The user can always override via the
- * explicit `workerModel` config.
+ * Cost-aware worker model defaults per provider family.
+ *
+ * When the session model costs ≥ EXPENSIVE_MODEL_THRESHOLD, background workers
+ * (distillation, curation, query expansion) use a cheaper model from the same
+ * provider family. Each mapping was validated via A/B testing on large
+ * conversation segments (22 msgs, complex debugging with corrections).
+ *
+ * Validated pairs (observation counts on large segment):
+ *   Anthropic:  Opus 4.6 (23 obs) → Sonnet 4.6 (25 obs)  — quality parity
+ *   OpenAI:     GPT-5.4  (24 obs) → GPT-5.4-mini (24 obs) — exact match
+ *
+ * Disqualified (>20% observation loss):
+ *   Google:     Gemini 3.1 Pro (20 obs) → Gemini 3 Flash (13 obs) — -35% drop
+ *
+ * Untested (API returned no response via OpenCode SDK):
+ *   xAI, Mistral — fall back to session model
  */
-const SONNET_WORKER_DEFAULT = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
-const EXPENSIVE_MODEL_THRESHOLD = 5; // $/M input tokens
+const WORKER_DEFAULTS: Record<string, { providerID: string; modelID: string; alreadyCheap: (id: string) => boolean }> = {
+  // Anthropic: sonnet-4-6 matches opus quality on distillation at 40% lower cost
+  anthropic: {
+    providerID: "anthropic",
+    modelID: "claude-sonnet-4-6",
+    alreadyCheap: (id) => id.includes("sonnet") || id.includes("haiku"),
+  },
+  // OpenAI: gpt-5.4-mini matched gpt-5.4 exactly (24 obs each) at 70% lower cost
+  openai: {
+    providerID: "openai",
+    modelID: "gpt-5.4-mini",
+    alreadyCheap: (id) => id.includes("mini") || id.includes("nano"),
+  },
+  // GitHub Copilot proxies multiple providers — match by model ID prefix
+  "github-copilot": {
+    providerID: "github-copilot",
+    modelID: "gpt-5.4-mini", // default; overridden by _resolveGitHubCopilotWorker
+    alreadyCheap: (id) => id.includes("mini") || id.includes("nano") || id.includes("flash") || id.includes("haiku"),
+  },
+};
+
+/** Cost threshold ($/M input) above which we downgrade to a cheaper worker. */
+const EXPENSIVE_MODEL_THRESHOLD = 1.5;
+
+/**
+ * General-purpose fallback worker for providers without a validated
+ * same-family alternative. GPT-5.4-mini matched GPT-5.4 exactly (24 obs
+ * each) on distillation quality and is widely available through OpenAI
+ * directly and GitHub Copilot.
+ */
+const GENERAL_FALLBACK_WORKER = { providerID: "openai", modelID: "gpt-5.4-mini" };
+
+/**
+ * For GitHub Copilot sessions, pick the worker based on which provider family
+ * the session model belongs to (detected via model ID prefix).
+ */
+function resolveGitHubCopilotWorker(sessionModelID: string): { providerID: string; modelID: string } {
+  if (sessionModelID.startsWith("claude-")) {
+    return { providerID: "github-copilot", modelID: "claude-sonnet-4.6" };
+  }
+  // For all other model families (OpenAI, Google, xAI, etc.) use GPT-5.4-mini
+  // which is available on Copilot and validated for quality parity
+  return { providerID: "github-copilot", modelID: "gpt-5.4-mini" };
+}
 
 /**
  * Resolve the effective worker model for background calls.
  *
  * Checks (in order):
  *  1. Explicit config override (`workerModel` in lore config)
- *  2. Cost-aware default (sonnet-4 when session model is ≥$5/M input)
- *  3. Config model fallback (session model)
+ *  2. Provider-aware cost default (validated cheaper model from same family)
+ *  3. General fallback (GPT-5.4-mini) for unknown providers
+ *  4. Config model fallback (session model)
  */
 export function getWorkerModel(): { providerID: string; modelID: string } | undefined {
   const cfg = loreConfig();
 
   // Determine if the session model is expensive enough to warrant a cheaper worker
   let costAwareDefault: { providerID: string; modelID: string } | undefined;
-  if (cfg.model?.modelID) {
+  if (cfg.model?.modelID && cfg.model?.providerID) {
     const entry = getModelEntrySync(cfg.model.modelID);
     const inputCost = entry.cost?.input ?? 3;
+
     if (inputCost >= EXPENSIVE_MODEL_THRESHOLD) {
-      // Don't downgrade if the session model IS already sonnet or cheaper
-      if (!cfg.model.modelID.includes("sonnet") && !cfg.model.modelID.includes("haiku")) {
-        costAwareDefault = SONNET_WORKER_DEFAULT;
+      const providerID = cfg.model.providerID;
+
+      if (providerID === "github-copilot") {
+        // GitHub Copilot proxies many providers — detect family from model ID
+        costAwareDefault = resolveGitHubCopilotWorker(cfg.model.modelID);
+      } else {
+        const mapping = WORKER_DEFAULTS[providerID];
+        if (mapping && !mapping.alreadyCheap(cfg.model.modelID)) {
+          costAwareDefault = { providerID: mapping.providerID, modelID: mapping.modelID };
+        } else if (!mapping) {
+          // Unknown provider with expensive model — use general fallback
+          costAwareDefault = GENERAL_FALLBACK_WORKER;
+        }
       }
     }
   }
 
   return workerModel.resolveWorkerModel(
-    "anthropic",
+    cfg.model?.providerID ?? "anthropic",
     cfg.workerModel,
     cfg.model,
     costAwareDefault,
