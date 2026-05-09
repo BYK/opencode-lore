@@ -95,6 +95,7 @@ import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySync } from "./worker-model";
 import * as Sentry from "@sentry/bun";
+import { captureBillingPrefix } from "./cch";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
    setSentryRequestContext,
@@ -1245,6 +1246,11 @@ async function handleConversationTurn(
   if (cred) {
     setLastSeenAuth(cred);
   }
+
+  // Capture billing header prefix for worker cch computation.
+  // Bearer tokens (Claude Code OAuth) embed an x-anthropic-billing-header in
+  // the system prompt; we extract the prefix so workers can build their own.
+  captureBillingPrefix(req.system);
 
   // --- 3. Session identification ---
   const { sessionID, isNew } = await identifySession(req, projectPath);
