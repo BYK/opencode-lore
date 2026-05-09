@@ -670,9 +670,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   /**
    * Resolve the model to use for background worker calls.
    *
-   * Worker model validation is now handled by the gateway (via /v1/models
-   * API discovery), which writes validated models to kv_meta. This function
-   * reads the validated result — no OpenCode-side validation needed.
+   * Priority: explicit config override > session model fallback.
    */
   function getWorkerModel(): { providerID: string; modelID: string } | undefined {
     const cfg = config();
@@ -797,10 +795,6 @@ export const LorePlugin: Plugin = async (ctx) => {
       } catch (e) {
         log.error("consolidation error:", e);
       }
-
-      // Worker model validation is now handled by the gateway (via /v1/models
-      // API discovery). The gateway writes validated models to kv_meta, and
-      // getWorkerModel() reads them — no OpenCode-side validation needed.
 
       // Prune temporal messages after distillation and curation have run.
       // Pass 1: TTL — remove distilled messages older than retention period.

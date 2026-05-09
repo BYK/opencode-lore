@@ -1,75 +1,42 @@
 /**
- * Gateway worker model discovery and resolution.
+ * Gateway model pricing and resolution.
  *
- * Discovers available models from the upstream Anthropic `/v1/models` API,
- * fetches per-model pricing from models.dev (open-source model database),
- * and integrates with core's worker model validation/resolution pipeline.
+ * Fetches per-model pricing from models.dev (open-source model database)
+ * for cost estimation in Sentry metrics and gradient cost-aware capping.
  *
- * This replaces the OpenCode adapter's `getProviderModels()` +
- * `maybeValidateWorkerModel()` — the gateway is the universal path and
- * doesn't depend on the OpenCode SDK's model listing (which can report
- * deprecated models as "active").
+ * Worker model resolution delegates to core's simple chain:
+ *   explicit config override > session model fallback.
  */
 
 import {
   workerModel,
-  temporal,
-  distillation as distillationMod,
   config as loreConfig,
   log,
 } from "@loreai/core";
-import type { LLMClient } from "@loreai/core";
-import type { AuthCredential } from "./auth";
-import { authHeaders } from "./auth";
 
 // ---------------------------------------------------------------------------
-// Cost lookup — models.dev with hardcoded fallback
+// Cost lookup — models.dev
 // ---------------------------------------------------------------------------
 
 /**
  * models.dev JSON API endpoint — returns all providers/models with pricing.
  *
  * Single request replaces N individual TOML fetches. Response shape:
- *   { anthropic: { models: { "claude-sonnet-4-20250514": { cost: { input: 3 }, ... }, ... } } }
- * Cost values are per-million-token USD.
+ *   { anthropic: { models: { "claude-sonnet-4-20250514": { cost: { input: 3, output: 15, cache_read: 0.3 }, limit: { context: 200000, output: 64000 } }, ... } } }
+ * Cost values are per-million-token USD. Limit values are token counts.
  */
 const MODELS_DEV_API = "https://models.dev/api.json";
 
-/** Cached models.dev cost data: modelID → per-million-token input cost. */
-let cachedCostMap: Map<string, number> | null = null;
-let cachedCostMapAt = 0;
-const COST_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
-
-/**
- * Hardcoded fallback costs (per-input-token, USD) used when models.dev
- * API is unreachable. Prefix-matched against model IDs.
- *
- * These only serve as a safety net — runtime pricing from models.dev is
- * preferred and fetched on every discovery cycle (cached 1h).
- */
-const FALLBACK_COSTS: Array<{ prefix: string; inputCostPerToken: number }> = [
-  { prefix: "claude-opus-4", inputCostPerToken: 15 / 1_000_000 },
-  { prefix: "claude-sonnet-4", inputCostPerToken: 3 / 1_000_000 },
-  { prefix: "claude-haiku-4", inputCostPerToken: 1 / 1_000_000 },
-  { prefix: "claude-haiku-3-5", inputCostPerToken: 0.8 / 1_000_000 },
-  { prefix: "claude-sonnet-3-5", inputCostPerToken: 3 / 1_000_000 },
-  { prefix: "claude-3-haiku", inputCostPerToken: 0.25 / 1_000_000 },
-  { prefix: "claude-3-sonnet", inputCostPerToken: 3 / 1_000_000 },
-  { prefix: "claude-3-opus", inputCostPerToken: 15 / 1_000_000 },
-];
-
-function fallbackCost(modelID: string): number {
-  for (const { prefix, inputCostPerToken } of FALLBACK_COSTS) {
-    if (modelID.startsWith(prefix)) return inputCostPerToken;
-  }
-  // Unknown model — assume expensive so it doesn't get picked as a worker
-  return 100 / 1_000_000;
-}
+/** Cached models.dev data: full model entries for Anthropic. */
+let cachedModelData: Map<string, ModelsDevEntry> | null = null;
+let cachedModelDataAt = 0;
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /** Shape of a model entry in the models.dev JSON API. */
-type ModelsDevEntry = {
+export type ModelsDevEntry = {
   id: string;
-  cost?: { input?: number };
+  cost?: { input?: number; output?: number; cache_read?: number };
+  limit?: { context?: number; output?: number };
 };
 
 /** Shape of the models.dev JSON API response (subset we care about). */
@@ -80,15 +47,58 @@ type ModelsDevResponse = {
 };
 
 /**
- * Fetch the models.dev cost map for Anthropic models.
- *
- * Single HTTP request to the JSON API, cached for 1 hour.
- * Returns a map of modelID → per-million-token input cost.
+ * Hardcoded fallback costs (per-million-token, USD) used when models.dev
+ * API is unreachable. Prefix-matched against model IDs.
  */
-export async function fetchCostMap(): Promise<Map<string, number>> {
+const FALLBACK_PRICING: Array<{
+  prefix: string;
+  input: number;
+  output: number;
+  cache_read: number;
+  context: number;
+  outputLimit: number;
+}> = [
+  { prefix: "claude-opus-4-6", input: 5, output: 25, cache_read: 0.5, context: 1_000_000, outputLimit: 128_000 },
+  { prefix: "claude-opus-4-5", input: 5, output: 25, cache_read: 0.5, context: 200_000, outputLimit: 64_000 },
+  { prefix: "claude-opus-4", input: 15, output: 75, cache_read: 1.5, context: 200_000, outputLimit: 32_000 },
+  { prefix: "claude-sonnet-4-6", input: 3, output: 15, cache_read: 0.3, context: 1_000_000, outputLimit: 64_000 },
+  { prefix: "claude-sonnet-4", input: 3, output: 15, cache_read: 0.3, context: 200_000, outputLimit: 64_000 },
+  { prefix: "claude-haiku-4-5", input: 1, output: 5, cache_read: 0.1, context: 200_000, outputLimit: 64_000 },
+  { prefix: "claude-haiku-3-5", input: 0.8, output: 4, cache_read: 0.08, context: 200_000, outputLimit: 8_192 },
+  { prefix: "claude-sonnet-3-5", input: 3, output: 15, cache_read: 0.3, context: 200_000, outputLimit: 8_192 },
+  { prefix: "claude-3-haiku", input: 0.25, output: 1.25, cache_read: 0.03, context: 200_000, outputLimit: 4_096 },
+  { prefix: "claude-3-sonnet", input: 3, output: 15, cache_read: 0.3, context: 200_000, outputLimit: 4_096 },
+  { prefix: "claude-3-opus", input: 15, output: 75, cache_read: 1.5, context: 200_000, outputLimit: 4_096 },
+];
+
+function fallbackEntry(modelID: string): ModelsDevEntry {
+  for (const fb of FALLBACK_PRICING) {
+    if (modelID.startsWith(fb.prefix)) {
+      return {
+        id: modelID,
+        cost: { input: fb.input, output: fb.output, cache_read: fb.cache_read },
+        limit: { context: fb.context, output: fb.outputLimit },
+      };
+    }
+  }
+  // Unknown model — assume mid-range so metrics are roughly correct
+  return {
+    id: modelID,
+    cost: { input: 3, output: 15, cache_read: 0.3 },
+    limit: { context: 200_000, output: 8_192 },
+  };
+}
+
+/**
+ * Fetch model data from models.dev for Anthropic models.
+ *
+ * Single HTTP request, cached for 1 hour. Returns a map of
+ * modelID → entry with cost and limit data.
+ */
+export async function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
   // Return cache if fresh
-  if (cachedCostMap && Date.now() - cachedCostMapAt < COST_CACHE_TTL_MS) {
-    return cachedCostMap;
+  if (cachedModelData && Date.now() - cachedModelDataAt < CACHE_TTL_MS) {
+    return cachedModelData;
   }
 
   try {
@@ -100,283 +110,90 @@ export async function fetchCostMap(): Promise<Map<string, number>> {
 
     if (!response.ok) {
       log.warn(`models.dev API failed: ${response.status} ${response.statusText}`);
-      return cachedCostMap ?? new Map();
+      return cachedModelData ?? new Map();
     }
 
     const data = (await response.json()) as ModelsDevResponse;
     const anthropic = data.anthropic?.models;
     if (!anthropic) {
       log.warn("models.dev API: no anthropic provider found");
-      return cachedCostMap ?? new Map();
+      return cachedModelData ?? new Map();
     }
 
-    const costMap = new Map<string, number>();
+    const modelData = new Map<string, ModelsDevEntry>();
     for (const [modelId, entry] of Object.entries(anthropic)) {
-      if (entry.cost?.input != null) {
-        costMap.set(modelId, entry.cost.input);
-      }
+      modelData.set(modelId, { ...entry, id: modelId });
     }
 
-    cachedCostMap = costMap;
-    cachedCostMapAt = Date.now();
+    cachedModelData = modelData;
+    cachedModelDataAt = Date.now();
 
-    log.info(`models.dev: loaded costs for ${costMap.size} anthropic models`);
-    return costMap;
+    log.info(`models.dev: loaded data for ${modelData.size} anthropic models`);
+    return modelData;
   } catch (e) {
     log.warn("models.dev API error:", e);
-    return cachedCostMap ?? new Map();
+    return cachedModelData ?? new Map();
   }
-}
-
-/** Clear the cached cost map (for testing). */
-export function clearCostCache(): void {
-  cachedCostMap = null;
-  cachedCostMapAt = 0;
 }
 
 /**
- * Fetch per-model input cost from models.dev JSON API.
+ * Look up model data by ID, with prefix matching and fallback.
  *
- * Single HTTP request fetches all Anthropic model costs. Returns a map of
- * modelID → per-token cost. Models not found in models.dev get fallback costs.
+ * First tries exact match, then prefix match (e.g. "claude-opus-4-6-20260101"
+ * matches "claude-opus-4-6"), then falls back to hardcoded defaults.
  */
-export async function fetchModelCosts(
-  modelIDs: string[],
-): Promise<Map<string, number>> {
-  const costMap = await fetchCostMap();
-  const costs = new Map<string, number>();
+export async function getModelEntry(modelID: string): Promise<ModelsDevEntry> {
+  const data = await fetchModelData();
 
-  for (const id of modelIDs) {
-    const costPerMillion = costMap.get(id);
-    if (costPerMillion != null) {
-      costs.set(id, costPerMillion / 1_000_000);
-    } else {
-      costs.set(id, fallbackCost(id));
-    }
+  // Exact match
+  const exact = data.get(modelID);
+  if (exact) return exact;
+
+  // Prefix match: find the entry whose ID is a prefix of the requested model
+  for (const [id, entry] of data) {
+    if (modelID.startsWith(id)) return entry;
   }
 
-  return costs;
+  // Reverse prefix: find if the requested model is a prefix of any entry
+  for (const [id, entry] of data) {
+    if (id.startsWith(modelID)) return entry;
+  }
+
+  return fallbackEntry(modelID);
 }
-
-// ---------------------------------------------------------------------------
-// Anthropic /v1/models API types (subset we care about)
-// ---------------------------------------------------------------------------
-
-type AnthropicModelEntry = {
-  id: string;
-  display_name: string;
-  created_at: string;
-  capabilities?: {
-    thinking?: { supported: boolean };
-  };
-};
-
-type AnthropicModelsResponse = {
-  data: AnthropicModelEntry[];
-  has_more: boolean;
-  last_id?: string;
-};
-
-// ---------------------------------------------------------------------------
-// Model discovery — fetch from upstream /v1/models
-// ---------------------------------------------------------------------------
-
-/** Cached model list with TTL. */
-let cachedModels: workerModel.ModelInfo[] | null = null;
-let cachedModelsAt = 0;
-const MODEL_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /**
- * Fetch available Anthropic models from the upstream API.
+ * Synchronous model entry lookup — reads from the in-memory cache only.
  *
- * Results are cached for 1 hour — model listings change rarely and we
- * don't want to hit the API on every idle cycle.
- *
- * Unlike the OpenCode SDK's `provider.list()`, the Anthropic `/v1/models`
- * API only returns models that actually exist — deprecated models are
- * removed, so we never get stale entries like `claude-3-haiku-20240307`.
+ * Use this on the hot request path where async is impractical. Returns
+ * fallback defaults if the cache hasn't been populated yet (e.g. before
+ * the first `fetchModelData()` call completes). Pre-warm the cache by
+ * calling `fetchModelData()` during gateway init.
  */
-export async function discoverModels(
-  upstreamUrl: string,
-  cred: AuthCredential,
-): Promise<workerModel.ModelInfo[]> {
-  // Return cache if fresh
-  if (cachedModels && Date.now() - cachedModelsAt < MODEL_CACHE_TTL_MS) {
-    return cachedModels;
+export function getModelEntrySync(modelID: string): ModelsDevEntry {
+  if (!cachedModelData) return fallbackEntry(modelID);
+
+  // Exact match
+  const exact = cachedModelData.get(modelID);
+  if (exact) return exact;
+
+  // Prefix match
+  for (const [id, entry] of cachedModelData) {
+    if (modelID.startsWith(id)) return entry;
   }
 
-  try {
-    const entries: AnthropicModelEntry[] = [];
-    let afterId: string | undefined;
-
-    // Paginate through all models
-    do {
-      const url = new URL(`${upstreamUrl}/v1/models`);
-      url.searchParams.set("limit", "1000");
-      if (afterId) url.searchParams.set("after_id", afterId);
-
-      const response = await fetch(url.toString(), {
-        headers: {
-          "content-type": "application/json",
-          "anthropic-version": "2023-06-01",
-          ...authHeaders(cred),
-        },
-      });
-
-      if (!response.ok) {
-        const text = await response.text().catch(() => "(no body)");
-        log.warn(
-          `model discovery failed: ${response.status} ${response.statusText} — ${text}`,
-        );
-        return cachedModels ?? [];
-      }
-
-      const data = (await response.json()) as AnthropicModelsResponse;
-
-      for (const entry of data.data) {
-        entries.push(entry);
-      }
-
-      afterId = data.has_more ? data.last_id : undefined;
-    } while (afterId);
-
-    // Fetch costs from models.dev in parallel (with fallback to hardcoded)
-    const modelIDs = entries.map((e) => e.id);
-    const costs = await fetchModelCosts(modelIDs);
-
-    const models: workerModel.ModelInfo[] = entries.map((entry) => ({
-      id: entry.id,
-      providerID: "anthropic",
-      cost: { input: costs.get(entry.id) ?? fallbackCost(entry.id) },
-      status: "active", // Only active models are returned by the API
-      capabilities: {
-        input: { text: true }, // All Anthropic models accept text
-        reasoning: entry.capabilities?.thinking?.supported ?? false,
-      },
-    }));
-
-    cachedModels = models;
-    cachedModelsAt = Date.now();
-
-    log.info(
-      `model discovery: found ${models.length} models (${models.map((m) => m.id).join(", ")})`,
-    );
-
-    return models;
-  } catch (e) {
-    log.warn("model discovery error:", e);
-    return cachedModels ?? [];
+  // Reverse prefix
+  for (const [id, entry] of cachedModelData) {
+    if (id.startsWith(modelID)) return entry;
   }
+
+  return fallbackEntry(modelID);
 }
 
-/** Clear the cached model list (for testing). */
-export function clearModelCache(): void {
-  cachedModels = null;
-  cachedModelsAt = 0;
-}
-
-// ---------------------------------------------------------------------------
-// Worker model validation — gateway version of maybeValidateWorkerModel
-// ---------------------------------------------------------------------------
-
-/** Guard against concurrent validation runs. */
-let validating = false;
-
-/**
- * Run worker model validation if needed.
- *
- * Called on session idle — discovers available models, selects candidates,
- * checks if the stored validation is stale, and runs the two-phase
- * comparison (structural check + LLM judge) if needed.
- *
- * @param sessionModel  The model ID being used for conversation (frontier)
- * @param upstreamUrl   Anthropic API base URL
- * @param cred          Auth credential for API calls
- * @param llm           LLM client for validation prompts
- * @param projectPath   Project directory path
- * @param sessionID     Session ID for loading reference distillation data
- */
-export async function maybeValidateWorkerModel(
-  sessionModel: string,
-  upstreamUrl: string,
-  cred: AuthCredential,
-  llm: LLMClient,
-  projectPath: string,
-  sessionID: string,
-): Promise<void> {
-  if (validating) return;
-
-  const cfg = loreConfig();
-  if (cfg.workerModel) return; // explicit override — skip auto-selection
-
-  const models = await discoverModels(upstreamUrl, cred);
-  if (models.length === 0) return;
-
-  // Build the session model info for candidate selection.
-  // Use cost from discovered models if available, otherwise fallback.
-  const discoveredModel = models.find((m) => m.id === sessionModel);
-  const sessionModelInfo: Parameters<typeof workerModel.selectWorkerCandidates>[0] = {
-    id: sessionModel,
-    providerID: "anthropic",
-    cost: { input: discoveredModel?.cost.input ?? fallbackCost(sessionModel) },
-  };
-
-  const candidates = workerModel.selectWorkerCandidates(sessionModelInfo, models);
-  if (candidates.length === 0) return;
-  // If session model is already the cheapest, no comparison needed
-  if (candidates.length === 1 && candidates[0].id === sessionModel) return;
-
-  const fingerprint = workerModel.computeModelFingerprint(
-    "anthropic",
-    sessionModel,
-    models.filter((m) => m.providerID === "anthropic").map((m) => m.id),
-  );
-
-  const stored = workerModel.getValidatedWorkerModel("anthropic");
-  if (!workerModel.isValidationStale(stored, fingerprint)) return;
-
-  // Need reference distillation data
-  const distillations = distillationMod.loadForSession(projectPath, sessionID, true);
-  const gen0 = distillations.filter((d) => d.generation === 0);
-  if (gen0.length === 0) return;
-
-  const reference = gen0[gen0.length - 1]; // most recent gen-0
-  const sourceIds = reference.source_ids;
-  if (sourceIds.length === 0) return;
-
-  // Load source temporal messages
-  const allMessages = temporal.bySession(projectPath, sessionID);
-  const sourceSet = new Set(sourceIds);
-  const sourceMessages = allMessages.filter((m) => sourceSet.has(m.id));
-  if (sourceMessages.length === 0) return;
-
-  const messagesText = sourceMessages.map((m) => m.content).join("\n");
-  const date = new Date(sourceMessages[0].created_at).toLocaleDateString(
-    "en-US",
-    { year: "numeric", month: "long", day: "numeric" },
-  );
-
-  validating = true;
-  try {
-    const result = await workerModel.runValidation({
-      llm,
-      providerID: "anthropic",
-      sessionModelID: sessionModel,
-      candidates,
-      referenceObservations: reference.observations,
-      sourceMessagesText: messagesText,
-      date,
-    });
-    if (result) {
-      log.info(
-        `worker model validated: ${result.modelID} (judge=${result.judgeScore}) — saving 50%+ on worker calls`,
-      );
-    }
-  } catch (e) {
-    log.error("worker model validation error:", e);
-  } finally {
-    validating = false;
-  }
+/** Clear cached data (for testing). */
+export function clearModelDataCache(): void {
+  cachedModelData = null;
+  cachedModelDataAt = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -388,8 +205,7 @@ export async function maybeValidateWorkerModel(
  *
  * Checks (in order):
  *  1. Explicit config override (`workerModel` in lore config)
- *  2. Validated auto-selection from kv_meta (with 24h TTL)
- *  3. Config model fallback (frontier model)
+ *  2. Config model fallback (session model)
  */
 export function getWorkerModel(): { providerID: string; modelID: string } | undefined {
   const cfg = loreConfig();
@@ -402,7 +218,5 @@ export function getWorkerModel(): { providerID: string; modelID: string } | unde
 
 /** Reset module state (for testing). */
 export function resetWorkerModelState(): void {
-  clearModelCache();
-  clearCostCache();
-  validating = false;
+  clearModelDataCache();
 }
