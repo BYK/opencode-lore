@@ -185,6 +185,12 @@ export type CacheTurnAnalysis = {
   divergencePoint: string;
   /** Human-readable reason (e.g. "system prompt changed", "new message appended"). */
   divergenceReason: string;
+
+  // --- Forensic snippets for early divergences (< 5% prefix match) ---
+  /** Short snippet of previous body around the divergence point. */
+  prevSnippet?: string;
+  /** Short snippet of current body around the divergence point. */
+  currSnippet?: string;
 };
 
 /** Per-session cache analytics state. */
