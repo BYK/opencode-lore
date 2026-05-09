@@ -35,8 +35,20 @@ export const LoreConfig = z.object({
        *  cost-aware formula from targetCacheReadCostPerTurn. 0 = disabled
        *  (no cap, use full context). Default: undefined (use cost-aware auto). */
       maxLayer0Tokens: z.number().min(0).optional(),
+      /** Target maximum cost (USD) for a single full cache bust (cold write of
+       *  the entire context). Controls the total-context token cap at layer 1+:
+       *  maxContextTokens = targetBustCost / cacheWriteCostPerToken.
+       *  For opus-4-6 ($6.25/M write): $1.00 → 160K cap.
+       *  For sonnet-4 ($3.75/M write): $1.00 → 267K (effectively uncapped at 200K).
+       *  The cap is further adjusted dynamically per session based on observed
+       *  bust rate (EMA) and break frequency. Default: 1.00. Set to 0 to disable. */
+      targetBustCost: z.number().min(0).default(1.00),
+      /** Direct override for the total-context token cap at layer 1+. When set,
+       *  bypasses the cost-aware formula from targetBustCost. 0 = disabled.
+       *  Default: undefined (use cost-aware auto). */
+      maxContextTokens: z.number().min(0).optional(),
     })
-    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.05, targetCacheReadCostPerTurn: 0.10 }),
+    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.05, targetCacheReadCostPerTurn: 0.10, targetBustCost: 1.00 }),
   /**
    * Cold-cache idle-resume handling.
    *
@@ -155,6 +167,18 @@ export const LoreConfig = z.object({
       queryExpansion: false,
       embeddings: { enabled: true, provider: "local" as const, model: "BGESmallENV15", dimensions: 384 },
     }),
+  cache: z
+    .object({
+      /** TTL for the conversation cache breakpoint.
+       *  - "5m" — standard Anthropic ephemeral (5 min eviction, 1.25× write cost)
+       *  - "1h" — extended 1-hour TTL (2× write cost, requires extended cache tier)
+       *  - "auto" — auto-upgrade to 1h when frequent cold-cache turns are detected.
+       *    Monitors rolling window of recent turns; upgrades when >40% are cold-cache,
+       *    downgrades when <20%. Auto-syncs idleResumeMinutes to 60 when 1h is active.
+       *  Default: "auto". */
+      conversationTTL: z.enum(["5m", "1h", "auto"]).default("auto"),
+    })
+    .default({ conversationTTL: "auto" }),
   crossProject: z.boolean().default(false),
   agentsFile: z
     .object({

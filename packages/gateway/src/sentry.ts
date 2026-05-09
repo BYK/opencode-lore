@@ -154,6 +154,40 @@ export function setGenAiUsageAttributes(
 // Cost estimation metrics
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Cache bust telemetry
+// ---------------------------------------------------------------------------
+
+/**
+ * Emit cache-bust cause metrics for observability and cost analysis.
+ *
+ * Emits a counter per cause category and a distribution of cache-write
+ * token counts, both tagged by cause and model. Enables identifying which
+ * bust causes dominate and tracking improvements over time.
+ */
+export function emitCacheBustMetric(
+  cause: string,
+  writeTokens: number,
+  model: string,
+): void {
+  if (!Sentry.isInitialized()) return;
+
+  Sentry.metrics.count("lore.cache_bust", 1, {
+    attributes: { cause, model },
+  });
+
+  if (writeTokens > 0) {
+    Sentry.metrics.distribution("lore.cache_bust_tokens", writeTokens, {
+      attributes: { cause, model },
+      unit: "token",
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cost estimation metrics
+// ---------------------------------------------------------------------------
+
 import { getModelEntry } from "./worker-model";
 
 type ModelPricing = { input: number; output: number };

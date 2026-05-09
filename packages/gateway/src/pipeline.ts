@@ -27,6 +27,9 @@ import {
   getLtmBudget,
   setMaxLayer0Tokens,
   computeLayer0Cap,
+  setMaxContextTokens,
+  computeContextCap,
+  updateBustRate,
   calibrate,
   getLastTransformedCount,
   onIdleResume,
@@ -92,13 +95,14 @@ import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySync } from "./worker-model";
 import * as Sentry from "@sentry/bun";
-import { analyzeCacheTurn } from "./cache-analytics";
+import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
   setSentryRequestContext,
   setSentryCacheContext,
   setSentryLightContext,
   setGenAiUsageAttributes,
   emitCostMetric,
+  emitCacheBustMetric,
   type AnthropicUsage,
 } from "./sentry";
 import {
@@ -245,12 +249,16 @@ type ModelSpec = {
   output: number;
   /** Cache-read cost per token in USD. */
   cacheReadCost?: number;
+  /** Cache-write cost per token in USD (Anthropic: 1.25× input). */
+  cacheWriteCost?: number;
+  /** Input cost per million tokens (for cost-tier decisions). */
+  inputCostPerMillion?: number;
 };
 
 const DEFAULT_MODEL_SPEC: ModelSpec = { context: 200_000, output: 8_192 };
 
 /**
- * Look up model limits and cache-read cost from models.dev data.
+ * Look up model limits and cost data from models.dev.
  *
  * Uses the sync cache populated by `fetchModelData()` during init.
  * Falls back to sensible defaults if the cache isn't warm yet.
@@ -263,6 +271,12 @@ function getModelSpec(model: string): ModelSpec {
     cacheReadCost: entry.cost?.cache_read != null
       ? entry.cost.cache_read / 1_000_000  // models.dev is per-million, we need per-token
       : undefined,
+    cacheWriteCost: entry.cost?.cache_write != null
+      ? entry.cost.cache_write / 1_000_000
+      : entry.cost?.input != null
+        ? (entry.cost.input * 1.25) / 1_000_000  // Anthropic: cache_write = 1.25× input
+        : undefined,
+    inputCostPerMillion: entry.cost?.input ?? undefined,
   };
 }
 
@@ -897,10 +911,39 @@ function postResponse(
       genAiSpan.end();
     }
 
-    // --- Cache analytics ---
+    // --- Cache analytics + bust cause telemetry ---
     if (requestBody) {
-      analyzeCacheTurn(sessionState.cacheAnalytics, requestBody, resp.usage, sessionID);
+      const turnAnalysis = analyzeCacheTurn(
+        sessionState.cacheAnalytics, requestBody, resp.usage, sessionID,
+      );
+      const bustCause = categorizeBust(
+        turnAnalysis,
+        sessionState.lastTurnWasIdle ?? false,
+      );
+      emitCacheBustMetric(
+        bustCause,
+        resp.usage.cacheCreationInputTokens ?? 0,
+        resp.model,
+      );
+      sessionState.lastTurnWasIdle = false; // consumed
+
+      // Track cold-cache turns for auto-TTL upgrade (rolling 20-turn window)
+      const cacheRead = resp.usage.cacheReadInputTokens ?? 0;
+      const cacheCreation = resp.usage.cacheCreationInputTokens ?? 0;
+      const isColdTurn = cacheRead === 0 && cacheCreation > 0;
+      if (!sessionState.coldCacheWindow) sessionState.coldCacheWindow = [];
+      sessionState.coldCacheWindow.push(isColdTurn);
+      if (sessionState.coldCacheWindow.length > 20) {
+        sessionState.coldCacheWindow.shift();
+      }
     }
+
+    // --- Bust rate feedback for dynamic context cap ---
+    updateBustRate(
+      resp.usage.cacheCreationInputTokens ?? 0,
+      resp.usage.cacheReadInputTokens ?? 0,
+      sessionState.sessionID,
+    );
 
     // --- Temporal storage ---
     // Store all messages (user + assistant) from this turn.
@@ -982,11 +1025,20 @@ function scheduleBackgroundWork(
       .catch((e) => log.error("background distillation failed:", e));
   }
 
-  // Curation: run periodically when the knowledge system is enabled
+  // Curation: run periodically when the knowledge system is enabled.
+  // Cost-aware frequency: on expensive models, curate less often to reduce
+  // the probability of LTM changes that bust the cache. Each LTM change
+  // that exceeds the diff pinning threshold invalidates tools + messages.
+  const modelInputCost = getModelEntrySync(
+    getWorkerModel()?.modelID ?? "unknown",
+  ).cost?.input ?? 3;
+  const curationMultiplier = modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+  const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
+
   if (
     cfg.knowledge.enabled &&
     cfg.curator.onIdle &&
-    sessionState.turnsSinceCuration >= cfg.curator.afterTurns
+    sessionState.turnsSinceCuration >= effectiveAfterTurns
   ) {
     curator
       .run({ llm, projectPath, sessionID, model })
@@ -1219,9 +1271,29 @@ async function handleConversationTurn(
     ));
   }
 
+  // Cost-aware total context cap (layer 1+): explicit config wins > cost formula > disabled.
+  // Limits per-bust cache write cost. Dynamic adaptation per session is handled
+  // in gradient.ts via updateBustRate() feedback from postResponse().
+  if (cfg.budget.maxContextTokens !== undefined) {
+    setMaxContextTokens(cfg.budget.maxContextTokens);
+  } else if (modelSpec.cacheWriteCost && cfg.budget.targetBustCost > 0) {
+    setMaxContextTokens(computeContextCap(
+      cfg.budget.targetBustCost,
+      modelSpec.cacheWriteCost,
+    ));
+  }
+
   // --- 5. Cold-cache idle-resume ---
-  const thresholdMs = cfg.idleResumeMinutes * 60_000;
+  // Auto-sync idle threshold with conversation TTL: when 1h TTL is active
+  // (explicit or auto-upgraded), use 60 min idle threshold instead of the
+  // configured value (which defaults to 5 min for the default cache tier).
+  const effectiveIdleMinutes =
+    sessionState.resolvedConversationTTL === "1h" && cfg.idleResumeMinutes <= 5
+      ? 60
+      : cfg.idleResumeMinutes;
+  const thresholdMs = effectiveIdleMinutes * 60_000;
   const idleResult = onIdleResume(sessionID, thresholdMs);
+  sessionState.lastTurnWasIdle = idleResult.triggered;
   if (idleResult.triggered) {
     ltmSessionCache.delete(sessionID);
     log.info(
@@ -1259,11 +1331,20 @@ async function handleConversationTurn(
 
       if (cached) {
         // Content-diff pinning: only update the injected LTM text if the
-        // new content differs by >5% from what's currently pinned. This
-        // prevents cache busts from minor BM25 re-ranking after background
-        // curation/consolidation invalidates the LTM cache.
+        // new content differs by more than a threshold from what's currently
+        // pinned. This prevents cache busts from minor BM25 re-ranking after
+        // background curation/consolidation invalidates the LTM cache.
+        // Cost-aware threshold: on expensive models, tolerate larger diffs
+        // before busting the cache prefix (opus: 15%, sonnet: 10%, haiku: 5%).
+        const baseDiffThreshold = 0.05;
+        const effectiveDiffThreshold = (modelSpec.inputCostPerMillion ?? 3) >= 5
+          ? Math.min(baseDiffThreshold * 3, 0.20)  // opus: 15%
+          : (modelSpec.inputCostPerMillion ?? 3) >= 1
+            ? Math.min(baseDiffThreshold * 2, 0.15)  // sonnet: 10%
+            : baseDiffThreshold;                       // haiku: 5%
+
         const pinned = ltmPinnedText.get(sessionID);
-        if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < 0.05) {
+        if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < effectiveDiffThreshold) {
           // Near-identical — keep the pinned text to preserve cache prefix
           ltmText = pinned.formatted;
           setLtmTokens(pinned.tokenCount, sessionID);
@@ -1350,14 +1431,43 @@ async function handleConversationTurn(
   //  - System prompt: 1h TTL (host prompt is very stable within a session)
   //  - LTM: separate system block (no breakpoint, benefits from prefix)
   //  - Tools: 1h TTL on last tool (recall + git reminder are static)
-  //  - Conversation: 5m TTL on last message block
+  //  - Conversation: configurable TTL on last message block (5m default, 1h opt-in/auto)
   // Title/summary passthrough (handlePassthrough) never reaches here — it
   // forwards the raw request without buildAnthropicRequest, so no caching.
+
+  // Resolve conversation cache TTL: explicit "5m"/"1h" pass through,
+  // "auto" upgrades to 1h when cold-cache turns exceed 40% of recent window.
+  let resolvedConversationTTL: "5m" | "1h" = sessionState.resolvedConversationTTL ?? "5m";
+  const configTTL = cfg.cache.conversationTTL;
+  if (configTTL === "5m" || configTTL === "1h") {
+    resolvedConversationTTL = configTTL;
+  } else if (configTTL === "auto") {
+    const window = sessionState.coldCacheWindow;
+    if (window && window.length >= 5) {
+      const coldFraction = window.filter(Boolean).length / window.length;
+      if (coldFraction > 0.4 && resolvedConversationTTL === "5m") {
+        resolvedConversationTTL = "1h";
+        log.info(
+          `auto-upgrade conversation TTL to 1h: session=${sessionID.slice(0, 16)}` +
+          ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
+        );
+      } else if (coldFraction < 0.2 && resolvedConversationTTL === "1h") {
+        resolvedConversationTTL = "5m";
+        log.info(
+          `auto-downgrade conversation TTL to 5m: session=${sessionID.slice(0, 16)}` +
+          ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
+        );
+      }
+    }
+  }
+  sessionState.resolvedConversationTTL = resolvedConversationTTL;
+
   const cacheOptions: AnthropicCacheOptions = {
     systemTTL: "1h",
     ltmSystem: ltmText,
     cacheTools: true,
     cacheConversation: true,
+    conversationTTL: resolvedConversationTTL,
   };
 
   // Start gen_ai.chat span before the upstream call so it captures real

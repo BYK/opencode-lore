@@ -293,6 +293,17 @@ export type AnthropicCacheOptions = {
    * cost), and writes only the new tail (1.25×).
    */
   cacheConversation?: boolean;
+
+  /**
+   * TTL for the conversation cache breakpoint.
+   * - `"5m"` (default) — standard Anthropic ephemeral (5 min eviction)
+   * - `"1h"` — extended 1-hour TTL (requires Anthropic extended cache tier).
+   *   Costs 2× input price per write instead of 1.25×, but dramatically
+   *   reduces cold-cache frequency for users who take frequent short breaks.
+   *
+   * Only applies when `cacheConversation` is true.
+   */
+  conversationTTL?: "5m" | "1h";
 };
 
 // ---------------------------------------------------------------------------
@@ -390,9 +401,12 @@ export function buildAnthropicRequest(
     const lastMsg = messages[messages.length - 1]!;
     if (lastMsg.content.length > 0) {
       const lastBlock = lastMsg.content[lastMsg.content.length - 1]!;
-      (lastBlock as Record<string, unknown>).cache_control = {
-        type: "ephemeral",
-      };
+      // Use configured TTL: "1h" for extended cache tier (2× write cost but
+      // 12× longer eviction window), bare ephemeral (5m) otherwise.
+      (lastBlock as Record<string, unknown>).cache_control =
+        cache.conversationTTL === "1h"
+          ? { type: "ephemeral", ttl: "1h" }
+          : { type: "ephemeral" };
     }
   }
 
