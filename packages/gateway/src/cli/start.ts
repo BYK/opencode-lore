@@ -49,7 +49,20 @@ export function startGateway(opts: StartOptions = {}): {
  * SIGINT/SIGTERM.
  */
 export async function commandStart(opts: StartOptions): Promise<never> {
-  const { config, port, shutdown } = startGateway(opts);
+  let result: ReturnType<typeof startGateway>;
+  try {
+    result = startGateway(opts);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/port\b.*\bin use/i.test(msg) || /EADDRINUSE/i.test(msg)) {
+      if (!opts.quiet) {
+        console.error(`[lore] ${msg}`);
+      }
+      process.exit(1);
+    }
+    throw e;
+  }
+  const { config, port, shutdown } = result;
 
   const addr = `http://${config.host}:${port}`;
   console.error(`[lore] Gateway listening on ${addr}`);

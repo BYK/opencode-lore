@@ -467,6 +467,9 @@ let processInitDone = false;
 let processGatewayActive = false;
 let processGatewayBase = "";
 
+/** Memoized gateway init promise — ensures concurrent plugin calls don't race. */
+let gatewayInitPromise: Promise<boolean> | null = null;
+
 export const LorePlugin: Plugin = async (ctx) => {
   // Resolve the gateway base URL — explicit env var or default.
   const gatewayBase =
@@ -481,18 +484,23 @@ export const LorePlugin: Plugin = async (ctx) => {
       process.argv.some((a) => a.includes(".test."));
 
     if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
-      if (await probeGateway(gatewayBase)) {
-        log.info(`gateway detected at ${gatewayBase}`);
-        gatewayActive = true;
-      } else {
-        log.info(`starting gateway at ${gatewayBase}…`);
-        if (await spawnGateway(gatewayBase)) {
-          log.info(`gateway started at ${gatewayBase}`);
-          gatewayActive = true;
-        } else {
+      // Memoize so concurrent LorePlugin calls don't race on probe→spawn.
+      if (!gatewayInitPromise) {
+        gatewayInitPromise = (async () => {
+          if (await probeGateway(gatewayBase)) {
+            log.info(`gateway detected at ${gatewayBase}`);
+            return true;
+          }
+          log.info(`starting gateway at ${gatewayBase}…`);
+          if (await spawnGateway(gatewayBase)) {
+            log.info(`gateway started at ${gatewayBase}`);
+            return true;
+          }
           log.info("gateway unavailable, running in plugin mode");
-        }
+          return false;
+        })();
       }
+      gatewayActive = await gatewayInitPromise;
     }
     processGatewayActive = gatewayActive;
     processGatewayBase = gatewayBase;
