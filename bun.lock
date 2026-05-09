@@ -13,7 +13,7 @@
     },
     "packages/core": {
       "name": "@loreai/core",
-      "version": "0.15.0",
+      "version": "0.16.0",
       "dependencies": {
         "@huggingface/hub": "2.11.0",
         "fastembed": "^2.1.0",
@@ -27,7 +27,7 @@
     },
     "packages/gateway": {
       "name": "@loreai/gateway",
-      "version": "0.15.0",
+      "version": "0.16.0",
       "bin": {
         "lore": "./dist/bin.cjs",
         "lore-gateway": "./dist/bin.cjs",
@@ -40,7 +40,7 @@
     },
     "packages/opencode": {
       "name": "@loreai/opencode",
-      "version": "0.15.0",
+      "version": "0.16.0",
       "dependencies": {
         "@loreai/core": "workspace:*",
       },
@@ -54,7 +54,7 @@
     },
     "packages/pi": {
       "name": "@loreai/pi",
-      "version": "0.15.0",
+      "version": "0.16.0",
       "dependencies": {
         "@loreai/core": "workspace:*",
       },

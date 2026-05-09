@@ -1,4 +1,11 @@
 # Changelog
+## 0.16.0
+
+### New Features ✨
+
+- (gateway) Add SENTRY_ENABLED toggle and environment tagging by @BYK in [#178](https://github.com/BYK/loreai/pull/178)
+- Simplify worker model to session model, use live models.dev pricing by @BYK in [#179](https://github.com/BYK/loreai/pull/179)
+
 ## 0.15.0
 
 ### New Features ✨
