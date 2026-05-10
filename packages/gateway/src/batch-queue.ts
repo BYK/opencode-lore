@@ -551,7 +551,7 @@ export function createBatchLLMClient(
           customId,
           params: {
             model: model.modelID,
-            max_tokens: 8192,
+            max_tokens: opts?.maxTokens ?? 8192,
             system: systemPayload ?? system,
             messages: [{ role: "user", content: user }],
           },

@@ -174,7 +174,7 @@ export function createGatewayLLMClient(
         // Build body with cch=00000 placeholder, then sign if needed
         let body = JSON.stringify({
           model: model.modelID,
-          max_tokens: 8192,
+          max_tokens: opts?.maxTokens ?? 8192,
           system: systemPayload,
           messages: [{ role: "user", content: user }],
         });

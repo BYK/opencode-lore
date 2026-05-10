@@ -6,6 +6,7 @@ import {
   latestMetaObservations,
   metaDistill,
   detectSegments,
+  workerTokenBudget,
   type Distillation,
 } from "../src/distillation";
 import * as temporal from "../src/temporal";
@@ -978,5 +979,44 @@ describe("context health columns", () => {
     const valuedRow = rows.find((r) => r.r_compression !== null);
     expect(nullRow).toBeDefined();
     expect(valuedRow).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// workerTokenBudget
+// ---------------------------------------------------------------------------
+
+describe("workerTokenBudget", () => {
+  test("returns computed value within floor and cap", () => {
+    // 15000 * 0.25 = 3750 — between floor (1024) and cap (8192)
+    expect(workerTokenBudget(15000, 0.25, 1024, 8192)).toBe(3750);
+  });
+
+  test("returns floor when computed is below floor", () => {
+    // 100 * 0.25 = 25 — below floor
+    expect(workerTokenBudget(100, 0.25, 1024, 8192)).toBe(1024);
+  });
+
+  test("returns cap when computed exceeds cap", () => {
+    // 100000 * 0.25 = 25000 — above cap
+    expect(workerTokenBudget(100000, 0.25, 1024, 8192)).toBe(8192);
+  });
+
+  test("returns floor for zero input", () => {
+    expect(workerTokenBudget(0, 0.25, 1024, 8192)).toBe(1024);
+  });
+
+  test("returns floor for negative input", () => {
+    expect(workerTokenBudget(-500, 0.25, 1024, 8192)).toBe(1024);
+  });
+
+  test("handles ratio of 0.5 (compaction)", () => {
+    // 10000 * 0.5 = 5000
+    expect(workerTokenBudget(10000, 0.5, 2048, 20000)).toBe(5000);
+  });
+
+  test("ceil rounds up fractional tokens", () => {
+    // 10001 * 0.25 = 2500.25 → ceil = 2501
+    expect(workerTokenBudget(10001, 0.25, 1024, 8192)).toBe(2501);
   });
 });

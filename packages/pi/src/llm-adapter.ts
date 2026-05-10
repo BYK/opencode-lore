@@ -36,6 +36,7 @@ export function createPiLLMClient(
         model?: { providerID: string; modelID: string };
         workerID?: string;
         thinking?: boolean;
+        maxTokens?: number;
       },
     ): Promise<string | null> {
       // Resolve the model: opts.model (per-call override) > defaultModel (session model)
@@ -82,7 +83,7 @@ export function createPiLLMClient(
           {
             apiKey: auth.apiKey,
             headers: auth.headers,
-            maxTokens: 8192,
+            maxTokens: opts?.maxTokens ?? 8192,
             // Surface the ctx.signal if it's defined — lets user abort
             // cancel pending worker LLM calls. Defined during active turns.
             signal: ctx.signal,

@@ -245,6 +245,21 @@ export interface LLMClient {
        * auth through their own mechanisms.
        */
       sessionID?: string;
+      /**
+       * Maximum output tokens for this call. When absent, the adapter
+       * uses its built-in default (typically 8192).
+       *
+       * Worker call sites should set this explicitly based on expected
+       * output size to avoid wasting tokens on unnecessarily large
+       * output budgets.
+       *
+       * Adapter behavior:
+       * - Gateway: uses as `max_tokens` in the API request body
+       * - Pi: passes as `maxTokens` to `complete()`
+       * - OpenCode: cannot honor — SDK has no maxTokens on session.prompt();
+       *   the field is silently ignored
+       */
+      maxTokens?: number;
     },
   ): Promise<string | null>;
 }

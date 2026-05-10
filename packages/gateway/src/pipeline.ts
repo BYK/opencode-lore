@@ -100,7 +100,8 @@ import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySync } from "./worker-model";
 import * as Sentry from "@sentry/bun";
-import { captureBillingPrefix, resignBody } from "./cch";
+import { captureBillingPrefix, hasBillingHeader, resignBody } from "./cch";
+import { detectClientType } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
    setSentryRequestContext,
@@ -294,6 +295,55 @@ function getModelSpec(model: string): ModelSpec {
         : undefined,
     inputCostPerMillion: entry.cost?.input ?? undefined,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic max_tokens sizing for non-Claude-Code clients
+// ---------------------------------------------------------------------------
+
+const MAX_TOKENS_FLOOR = 8192;
+const MAX_TOKENS_BUFFER = 1000;
+const MAX_TOKENS_EMA_MULTIPLIER = 3;
+
+/**
+ * Compute a right-sized `max_tokens` value for a conversation turn using
+ * a hybrid headroom + history approach.
+ *
+ * - Turn 1 (no history): returns `ceiling` (32K) — matches Claude Code.
+ * - Turns 2+: 3× output EMA, clamped by context headroom and ceiling.
+ * - After truncation (`stop_reason: "length"`): jumps back to ceiling.
+ *
+ * Exported for testing.
+ */
+export function computeMaxTokens(
+  modelOutput: number,
+  modelContext: number,
+  outputEMA: number | undefined,
+  lastStopReason: string | undefined,
+  lastInputTokens: number | undefined,
+): number {
+  const ceiling = Math.min(modelOutput, 32_000);
+
+  // Turn 1: no history — use ceiling (matches Claude Code default)
+  if (outputEMA == null) return ceiling;
+
+  // Headroom: how much output the context can afford given last known input
+  const estimatedInput = lastInputTokens ?? 0;
+  const headroom = Math.max(
+    MAX_TOKENS_FLOOR,
+    modelContext - estimatedInput - MAX_TOKENS_BUFFER,
+  );
+
+  // History: 3× recent output EMA — generous multiplier to absorb spikes
+  let adaptive = Math.max(MAX_TOKENS_FLOOR, MAX_TOKENS_EMA_MULTIPLIER * outputEMA);
+
+  // Safety: if last turn was truncated, jump to ceiling
+  if (lastStopReason === "length") {
+    adaptive = ceiling;
+  }
+
+  // Clamp: history within headroom, within ceiling
+  return Math.min(headroom, Math.max(adaptive, MAX_TOKENS_FLOOR), ceiling);
 }
 
 // ---------------------------------------------------------------------------
@@ -1160,6 +1210,24 @@ function postResponse(
     sessionState.turnsSinceCuration =
       (sessionState.turnsSinceCuration ?? 0) + 1;
 
+    // --- Output tracking for dynamic max_tokens sizing ---
+    sessionState.lastStopReason = resp.stopReason;
+    sessionState.lastInputTokens =
+      (resp.usage.inputTokens ?? 0) +
+      (resp.usage.cacheReadInputTokens ?? 0) +
+      (resp.usage.cacheCreationInputTokens ?? 0);
+    const outputTokens = resp.usage.outputTokens;
+    if (outputTokens > 0) {
+      const EMA_ALPHA = 0.3;
+      sessionState.outputTokensEMA =
+        sessionState.outputTokensEMA == null
+          ? outputTokens
+          : Math.round(
+              sessionState.outputTokensEMA * (1 - EMA_ALPHA) +
+                outputTokens * EMA_ALPHA,
+            );
+    }
+
     // --- Schedule background work (fire-and-forget) ---
     scheduleBackgroundWork(sessionState, config);
   } catch (e) {
@@ -1312,10 +1380,13 @@ async function handleCompaction(
     ? `${context}\n\n---\n\n${compactPrompt}`
     : compactPrompt;
 
+  const compactInputTokens = Math.ceil(userContent.length / 3);
+  const compactMaxTokens = Math.max(2048, Math.min(Math.ceil(compactInputTokens * 0.5), 20_000));
   const summaryText = await llm.prompt(compactPrompt, userContent, {
     model: cfg.model,
     workerID: "lore-compact",
     urgent: true, // Client is blocking on this response
+    maxTokens: compactMaxTokens,
   });
 
   const summary = summaryText ?? "(Compaction failed — no summary generated.)";
@@ -1490,6 +1561,31 @@ async function handleConversationTurn(
       cfg.budget.targetBustCost,
       modelSpec.cacheWriteCost,
     ));
+  }
+
+  // --- 4c. Dynamic max_tokens sizing for non-Claude-Code clients ---
+  // Claude Code manages its own max_tokens (32K for modern models). Non-CC
+  // clients (OpenCode, generic) often send low/missing values (defaults to
+  // 4096 in ingress parsing). Apply a hybrid headroom + history algorithm
+  // that tightens from the 32K ceiling based on actual output patterns.
+  const clientType = detectClientType(req.rawHeaders);
+  const isCC = clientType === "claude-code" || hasBillingHeader(req.system);
+  if (!isCC) {
+    const computed = computeMaxTokens(
+      modelSpec.output,
+      modelSpec.context,
+      sessionState.outputTokensEMA,
+      sessionState.lastStopReason,
+      sessionState.lastInputTokens,
+    );
+    if (req.maxTokens !== computed) {
+      log.info(
+        `max_tokens: ${req.maxTokens} → ${computed} ` +
+          `(client=${clientType}, ema=${sessionState.outputTokensEMA ?? "none"}, ` +
+          `lastStop=${sessionState.lastStopReason ?? "none"})`,
+      );
+      req.maxTokens = computed;
+    }
   }
 
   // --- 5. Cold-cache idle-resume ---

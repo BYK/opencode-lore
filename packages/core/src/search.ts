@@ -335,7 +335,7 @@ export async function expandQuery(
       llm.prompt(
         QUERY_EXPANSION_SYSTEM,
         `Input: "${query}"`,
-        { model, workerID: "lore-query-expand", thinking: false, urgent: true, sessionID },
+        { model, workerID: "lore-query-expand", thinking: false, urgent: true, sessionID, maxTokens: 256 },
       ),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), TIMEOUT_MS)),
     ]);

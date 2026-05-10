@@ -61,6 +61,23 @@ export function detectSegments(
   return splitSegments(messages, maxSegment);
 }
 
+/**
+ * Compute the max_tokens budget for a worker LLM call.
+ *
+ * @param inputTokens  Estimated source token count
+ * @param ratio        Compression ratio (0.0–1.0) — output ≈ ratio × input
+ * @param floor        Minimum output tokens
+ * @param cap          Maximum output tokens
+ */
+export function workerTokenBudget(
+  inputTokens: number,
+  ratio: number,
+  floor: number,
+  cap: number,
+): number {
+  return Math.max(floor, Math.min(Math.ceil(inputTokens * ratio), cap));
+}
+
 /** Minimum segment size — segments smaller than this get merged. */
 const MIN_SEGMENT = 3;
 
@@ -634,10 +651,12 @@ async function distillSegment(input: {
   });
 
   const model = input.model ?? config().model;
+  const sourceTokens = input.messages.reduce((sum, m) => sum + m.tokens, 0);
+  const maxTokens = workerTokenBudget(sourceTokens, 0.25, 1024, 8192);
   const responseText = await input.llm.prompt(
     DISTILLATION_SYSTEM,
     userContent,
-    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID },
+    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID, maxTokens },
   );
   if (!responseText) return null;
 
@@ -646,7 +665,6 @@ async function distillSegment(input: {
 
   // Compute context health metrics before storing.
   const distilledTokens = Math.ceil(result.observations.length / 3);
-  const sourceTokens = input.messages.reduce((sum, m) => sum + m.tokens, 0);
   const rComp = compressionRatio(distilledTokens, sourceTokens);
   const cNorm = temporal.temporalCnorm(input.messages.map((m) => m.created_at));
 
@@ -731,10 +749,12 @@ export async function metaDistill(input: {
   const userContent = recursiveUser(existing, priorMeta?.observations);
 
   const model = input.model ?? config().model;
+  const inputTokens = Math.ceil(userContent.length / 3);
+  const maxTokens = workerTokenBudget(inputTokens, 0.25, 1024, 8192);
   const responseText = await input.llm.prompt(
     RECURSIVE_SYSTEM,
     userContent,
-    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID },
+    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID, maxTokens },
   );
   if (!responseText) return null;
 

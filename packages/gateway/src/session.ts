@@ -224,6 +224,42 @@ export const MESSAGE_COUNT_PROXIMITY_THRESHOLD = 20;
 // Tier 1: Known session headers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Client type detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Client type for behavioral decisions (e.g. max_tokens sizing).
+ *
+ * - "claude-code": manages its own max_tokens (32K for modern models)
+ * - "opencode": uses x-session-affinity, currently sends no max_tokens
+ * - "generic": unknown client
+ */
+export type ClientType = "claude-code" | "opencode" | "generic";
+
+/**
+ * Detect the client type from request headers.
+ *
+ * Detection hierarchy:
+ *  1. x-claude-code-session-id → "claude-code"
+ *  2. x-session-affinity → "opencode"
+ *  3. absence of all → "generic"
+ *
+ * For edge cases (Claude Code OAuth without session header), callers can
+ * additionally check hasBillingHeader() on the system prompt.
+ */
+export function detectClientType(
+  rawHeaders: Record<string, string>,
+): ClientType {
+  if (rawHeaders["x-claude-code-session-id"]) return "claude-code";
+  if (rawHeaders["x-session-affinity"]) return "opencode";
+  return "generic";
+}
+
+// ---------------------------------------------------------------------------
+// Session identification
+// ---------------------------------------------------------------------------
+
 /**
  * Well-known HTTP headers that carry a persistent, unique session ID.
  * Checked in order — first match wins.

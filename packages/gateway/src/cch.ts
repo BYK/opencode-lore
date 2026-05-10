@@ -168,6 +168,11 @@ export function resignBody(
 const BILLING_HEADER_RE =
   /^x-anthropic-billing-header:\s*cc_version=[^;]+;\s*cc_entrypoint=[^;]+;\s*cch=[0-9a-fA-F]+;/;
 
+/** Check if a system prompt contains the Claude Code billing header. */
+export function hasBillingHeader(system: string): boolean {
+  return BILLING_HEADER_RE.test(system);
+}
+
 /** Sessions that use bearer-token auth and need billing headers on workers. */
 const sessionNeedsBilling = new Map<string, boolean>();
 

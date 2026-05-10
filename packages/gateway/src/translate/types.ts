@@ -244,4 +244,13 @@ export type SessionState = {
   /** Candidate headers being tracked during the Tier 2 learning phase.
    *  Key: header name. Value: last seen value + consecutive stable turn count. */
   candidateHeaders?: Map<string, { value: string; seenCount: number }>;
+
+  // --- Dynamic max_tokens sizing ---
+
+  /** EMA of output tokens across recent turns (α=0.3). */
+  outputTokensEMA?: number;
+  /** Stop reason from the last completed turn (e.g. "end_turn", "tool_use", "length"). */
+  lastStopReason?: string;
+  /** Total input tokens from the last completed turn (for headroom calculation). */
+  lastInputTokens?: number;
 };
