@@ -34,7 +34,7 @@
  * Usage:
  *   bun run packages/gateway/script/vendor-embeddings.ts --target <target>
  *
- *   --target  One of: darwin-arm64, darwin-x64, linux-x64, windows-x64.
+ *   --target  One of: darwin-arm64, linux-x64, windows-x64.
  *             Defaults to the current host. linux-arm64 is rejected.
  *   --all     Prepare staging for all supported targets (ignores --target).
  */

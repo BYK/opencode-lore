@@ -12,17 +12,17 @@
  * No runtime side effects — safe to import for path lookup.
  */
 
-/** Targets we vendor fastembed for. linux-arm64 is intentionally absent —
- *  `@anush008/tokenizers` doesn't publish a native pkg for that platform. */
+/** Targets we vendor fastembed for.
+ *  - `linux-arm64` absent: `@anush008/tokenizers` has no native pkg.
+ *  - `darwin-x64` absent: Apple Silicon-only macOS support (Intel Macs
+ *    aren't worth the build/test surface). */
 export type VendorTarget =
   | "darwin-arm64"
-  | "darwin-x64"
   | "linux-x64"
   | "windows-x64";
 
 export const VENDOR_TARGETS: VendorTarget[] = [
   "darwin-arm64",
-  "darwin-x64",
   "linux-x64",
   "windows-x64",
 ];
@@ -79,8 +79,6 @@ export function sideLoadLibRelPath(target: VendorTarget): string {
       return `${base}/linux/x64/libonnxruntime.so.1`;
     case "darwin-arm64":
       return `${base}/darwin/arm64/libonnxruntime.1.21.0.dylib`;
-    case "darwin-x64":
-      return `${base}/darwin/x64/libonnxruntime.1.21.0.dylib`;
     case "windows-x64":
       return `${base}/win32/x64/onnxruntime.dll`;
     default: {

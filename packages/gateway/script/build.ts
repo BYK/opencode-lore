@@ -59,14 +59,13 @@ const pkg = JSON.parse(
   readFileSync(join(packageDir, "package.json"), "utf8"),
 ) as { version: string };
 
-/** Targets we vendor fastembed for. linux-arm64 is intentionally absent —
- *  see packages/gateway/script/vendor-paths.ts for the reason
- *  (@anush008/tokenizers has no published native package for it). Binaries
- *  for that target ship without an embedded fastembed and rely on the
- *  auto-fallback to a remote provider at runtime. */
+/** Targets we vendor fastembed for. linux-arm64 + darwin-x64 are
+ *  intentionally absent — see packages/gateway/script/vendor-paths.ts
+ *  for the reasons. Binaries for unvendored targets ship without
+ *  embedded fastembed and rely on the auto-fallback to a remote
+ *  provider at runtime. */
 const VENDORED_TARGETS = new Set<string>([
   "darwin-arm64",
-  "darwin-x64",
   "linux-x64",
   "windows-x64",
 ]);
@@ -109,7 +108,6 @@ async function buildLibrary() {
 /** Bun compile targets we support. */
 const VALID_TARGETS = [
   "darwin-arm64",
-  "darwin-x64",
   "linux-arm64",
   "linux-x64",
   "windows-x64",
