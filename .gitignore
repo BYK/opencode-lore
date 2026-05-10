@@ -2,6 +2,8 @@ node_modules/
 dist/
 dist-bin/
 dist-tarballs/
+.vendor-build/
+dist-vendor/
 local_cache/
 *.tgz
 *.db

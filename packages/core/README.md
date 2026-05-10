@@ -21,7 +21,14 @@ You only need to install this directly if you're building a new adapter. End use
 
 ### Optional dependency: `fastembed`
 
-`fastembed` is declared as an `optionalDependencies` because its native `onnxruntime-node` bindings can fail to build on some hosts (e.g. CUDA 13 on Linux/x64 — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)). Install always succeeds; if the optional install fails, recall falls back to FTS-only and the configured `voyage`/`openai` providers continue to work. To force a local-embeddings install on a CUDA-13 host, run with `ONNXRUNTIME_NODE_INSTALL_CUDA=skip` — the bundled CPU EP is sufficient for `bge-small-en-v1.5`.
+`fastembed` is declared as an `optionalDependencies` because its native `onnxruntime-node` bindings can fail to build on some hosts (e.g. CUDA 13 on Linux/x64 — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)). Install always succeeds, and `embed()` resolves a provider in this order:
+
+1. **Vendored** (standalone `lore` binary only) — fastembed and its native bindings are bundled directly into the binary at compile time via `bun build --compile`. The bge-small INT8 model files and the side-load `libonnxruntime` shared library ride along as Bun assets and are materialized to `~/.lore/embeddings-vendored/v{version}-{target}/` on first call. Supported targets: `darwin-arm64`, `darwin-x64`, `linux-x64`, `windows-x64`. (`linux-arm64` is unvendored — `@anush008/tokenizers` doesn't publish a native package for it.)
+2. **npm-installed** — `import("fastembed")` resolves to the user's `node_modules`, including the optional-dep install.
+3. **Remote auto-fallback** — when the local probe fails AND `VOYAGE_API_KEY` or `OPENAI_API_KEY` is set, `embed()` swaps to that provider for the rest of the process. Voyage wins ties.
+4. **FTS-only** — if none of the above resolve, `recall.runRecall()` and `vectorSearch()` return zero hits and callers continue with full-text search only.
+
+To force the optional install on a CUDA-13 host, run with `ONNXRUNTIME_NODE_INSTALL_CUDA=skip` — the bundled CPU EP is sufficient for `bge-small-en-v1.5`.
 
 ## Documentation
 

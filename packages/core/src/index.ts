@@ -14,6 +14,7 @@ export * as ltm from "./ltm";
 export * as distillation from "./distillation";
 export * as curator from "./curator";
 export * as embedding from "./embedding";
+export * as embeddingVendor from "./embedding-vendor";
 export * as latReader from "./lat-reader";
 export * as patternExtract from "./pattern-extract";
 export * as log from "./log";

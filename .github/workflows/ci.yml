@@ -86,6 +86,24 @@ jobs:
             packages/gateway/package.json > packages/gateway/package.json.tmp
           mv packages/gateway/package.json.tmp packages/gateway/package.json
 
+      # The vendor staging tree (`.vendor-build/<target>/node_modules/`) is
+      # what `bun build --compile` walks at binary build time to bundle
+      # fastembed + onnxruntime-node + @anush008/tokenizers-* (incl. native
+      # bindings) per target. Plus a shared bge-small model cache. They
+      # depend only on the fastembed pin in @loreai/core's package.json
+      # and the vendor scripts themselves, so cache aggressively —
+      # rebuilding only when those change.
+      - name: Cache vendor staging dirs
+        id: vendor-cache
+        uses: actions/cache@v4
+        with:
+          path: .vendor-build
+          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
+
+      - name: Populate vendor staging (cache miss)
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
+        run: bun run packages/gateway/script/vendor-embeddings.ts --all
+
       - name: Build linux-x64 binary
         run: bun run --filter '@loreai/gateway' build:binary
         env:
@@ -95,6 +113,23 @@ jobs:
         run: |
           ./packages/gateway/dist-bin/lore-linux-x64 --version
           ./packages/gateway/dist-bin/lore-linux-x64 help
+
+          # Verify the vendor wrapper actually executed and registered the
+          # model paths on globalThis. --print-vendor-info dumps the
+          # registration; the JQ check confirms the structure matches what
+          # the LocalProvider expects. Catches build regressions that would
+          # silently ship a binary without local embeddings.
+          info=$(./packages/gateway/dist-bin/lore-linux-x64 --print-vendor-info)
+          echo "Vendor info: $info"
+          echo "$info" | jq -e '.target == "linux-x64" and .modelAbsoluteDirPath != null and .modelName == "model_quantized.onnx"' \
+            || (echo "::error::vendor not embedded in linux-x64 binary"; exit 1)
+
+          # End-to-end: run an actual embedding through the bundled
+          # fastembed. Catches model-load regressions (tokenizer file
+          # naming, ONNX layout, side-load lib preload) that the registration
+          # check alone wouldn't surface.
+          ./packages/gateway/dist-bin/lore-linux-x64 --check-embeddings \
+            || (echo "::error::--check-embeddings failed in linux-x64 binary"; exit 1)
 
           # Start gateway, hit health endpoint, shut down
           ./packages/gateway/dist-bin/lore-linux-x64 start -p 7991 &
@@ -157,6 +192,11 @@ jobs:
             name=$(tar -xzOf "$t" package/package.json | jq -r '.name')
             echo "$(basename "$t") → $name"
           done
+
+      # Vendor staging dirs are populated from the build above (same job
+      # = same workspace). The cache step above ensures `.vendor-build/`
+      # exists even when the test-job's build:binary call was skipped on
+      # PR runs. No additional vendor step needed here.
 
       # Build standalone binaries for all supported platforms and gzip them.
       # The linux-x64 binary was already built above; rebuild with --release
@@ -224,6 +264,19 @@ jobs:
             packages/gateway/package.json > packages/gateway/package.json.tmp
           mv packages/gateway/package.json.tmp packages/gateway/package.json
           echo "Building nightly version: ${{ needs.test.outputs.nightly-version }}"
+
+      # Restore vendor staging dirs (populated by the test job's cache step,
+      # keyed on package.json + the vendor scripts' contents).
+      - name: Cache vendor staging dirs
+        id: vendor-cache
+        uses: actions/cache@v4
+        with:
+          path: .vendor-build
+          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
+
+      - name: Populate vendor staging (cache miss)
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
+        run: bun run packages/gateway/script/vendor-embeddings.ts --all
 
       - name: Build all platform binaries
         run: |
