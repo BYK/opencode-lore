@@ -370,6 +370,13 @@ function dataDir() {
   return join(base, "opencode-lore");
 }
 
+/** Return the resolved path of the SQLite database file. */
+export function dbPath(): string {
+  const envPath = process.env.LORE_DB_PATH;
+  if (envPath) return envPath;
+  return join(dataDir(), "lore.db");
+}
+
 let instance: Database | undefined;
 
 export function db(): Database {

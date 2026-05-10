@@ -10,8 +10,12 @@
 export interface GatewayConfig {
   /** Port to listen on. Default: 6969. Env: LORE_LISTEN_PORT */
   port: number;
-  /** Host to bind to. Default: "127.0.0.1". Env: LORE_LISTEN_HOST */
-  host: string;
+  /**
+   * Hosts to bind to. Default: ["127.0.0.1"].
+   * Env: LORE_LISTEN_HOST (comma-separated for multiple addresses).
+   * CLI: --host (can be specified multiple times, or comma-separated).
+   */
+  hosts: string[];
   /** Upstream Anthropic API URL. Default: "https://api.anthropic.com". Env: LORE_UPSTREAM_ANTHROPIC */
   upstreamAnthropic: string;
   /** Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI */
@@ -31,7 +35,7 @@ export function loadConfig(): GatewayConfig {
   const env = process.env;
   return {
     port: parsePort(env.LORE_LISTEN_PORT, 6969),
-    host: env.LORE_LISTEN_HOST || "127.0.0.1",
+    hosts: parseHosts(env.LORE_LISTEN_HOST),
     upstreamAnthropic: trimTrailingSlash(
       env.LORE_UPSTREAM_ANTHROPIC || "https://api.anthropic.com",
     ),
@@ -192,6 +196,15 @@ function parsePositiveInt(
 
 function isTruthy(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true";
+}
+
+function parseHosts(value: string | undefined): string[] {
+  if (!value) return ["127.0.0.1"];
+  const hosts = value
+    .split(",")
+    .map((h) => h.trim())
+    .filter(Boolean);
+  return hosts.length ? hosts : ["127.0.0.1"];
 }
 
 function trimTrailingSlash(url: string): string {

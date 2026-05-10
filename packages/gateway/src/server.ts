@@ -193,61 +193,76 @@ async function handleOpenAIChatCompletions(
 export function startServer(config: GatewayConfig): {
   stop: () => void;
   port: number;
+  hosts: string[];
 } {
-  const server = Bun.serve({
-    port: config.port,
-    hostname: config.host,
-    // Bun defaults to 10s which is too short for LLM streaming responses.
-    // 255 is the maximum allowed by Bun.
-    idleTimeout: 255,
+  // Shared fetch handler for all server instances.
+  const fetch = async (req: Request): Promise<Response> => {
+    const url = new URL(req.url);
+    const { pathname } = url;
+    const method = req.method;
 
-    async fetch(req: Request): Promise<Response> {
-      const url = new URL(req.url);
-      const { pathname } = url;
-      const method = req.method;
+    // CORS preflight
+    if (method === "OPTIONS") {
+      return withCors(new Response(null, { status: 204 }));
+    }
 
-      // CORS preflight
-      if (method === "OPTIONS") {
-        return withCors(new Response(null, { status: 204 }));
+    if (config.debug) {
+      console.error(`[lore] ${method} ${pathname}`);
+    }
+
+    try {
+      // POST /v1/messages — Anthropic protocol
+      if (method === "POST" && pathname === "/v1/messages") {
+        return await handleAnthropicMessages(req, config);
       }
 
-      if (config.debug) {
-        console.error(`[lore] ${method} ${pathname}`);
+      // POST /v1/chat/completions — OpenAI protocol
+      if (method === "POST" && pathname === "/v1/chat/completions") {
+        return await handleOpenAIChatCompletions(req, config);
       }
 
-      try {
-        // POST /v1/messages — Anthropic protocol
-        if (method === "POST" && pathname === "/v1/messages") {
-          return await handleAnthropicMessages(req, config);
-        }
-
-        // POST /v1/chat/completions — OpenAI protocol
-        if (method === "POST" && pathname === "/v1/chat/completions") {
-          return await handleOpenAIChatCompletions(req, config);
-        }
-
-        // GET /v1/models — passthrough
-        if (method === "GET" && pathname === "/v1/models") {
-          return await handleModelsPassthrough(config);
-        }
-
-        // GET /health — health check
-        if (method === "GET" && pathname === "/health") {
-          return handleHealth();
-        }
-
-        // 404 for everything else
-        return errorResponse(404, "not_found", `No route for ${method} ${pathname}`);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : "Internal server error";
-        console.error(`[lore] uncaught error: ${msg}`);
-        return errorResponse(500, "api_error", msg);
+      // GET /v1/models — passthrough
+      if (method === "GET" && pathname === "/v1/models") {
+        return await handleModelsPassthrough(config);
       }
-    },
-  });
+
+      // GET /health — health check
+      if (method === "GET" && pathname === "/health") {
+        return handleHealth();
+      }
+
+      // GET/POST /ui/* — Web dashboard (lazy-imported to keep proxy hot path fast)
+      if (pathname === "/ui" || pathname.startsWith("/ui/")) {
+        const { handleUIRequest } = await import("./ui");
+        return withCors(await handleUIRequest(req, url));
+      }
+
+      // 404 for everything else
+      return errorResponse(404, "not_found", `No route for ${method} ${pathname}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Internal server error";
+      console.error(`[lore] uncaught error: ${msg}`);
+      return errorResponse(500, "api_error", msg);
+    }
+  };
+
+  // Spawn one Bun.serve() per host address. This allows binding to
+  // specific interfaces (e.g. 127.0.0.1 + a Tailscale IP) without
+  // opening to 0.0.0.0.
+  const servers = config.hosts.map((host) =>
+    Bun.serve({
+      port: config.port,
+      hostname: host,
+      // Bun defaults to 10s which is too short for LLM streaming responses.
+      // 255 is the maximum allowed by Bun.
+      idleTimeout: 255,
+      fetch,
+    }),
+  );
 
   return {
-    stop: () => server.stop(),
-    port: server.port ?? config.port,
+    stop: () => servers.forEach((s) => s.stop()),
+    port: servers[0].port ?? config.port,
+    hosts: config.hosts,
   };
 }

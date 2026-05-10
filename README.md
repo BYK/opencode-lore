@@ -233,6 +233,68 @@ The assistant gets a `recall` tool that searches across stored messages and know
 - "What was the error from the migration?"
 - "What's my database schema convention?"
 
+## CLI tools
+
+Lore includes a CLI for inspecting and managing stored data. These commands work **without the gateway running** — they access the SQLite database directly.
+
+### `lore data` — Data management
+
+```bash
+# List all tracked projects
+lore data list projects
+
+# List knowledge, sessions, or distillations for the current project
+lore data list knowledge
+lore data list sessions
+lore data list distillations --project /path/to/project
+
+# Show full detail for an entry (supports partial ID prefix)
+lore data show knowledge abc12345
+lore data show session abc12345-6789
+lore data show distillation abc12345
+
+# Clear all data for a project (regenerates .lore.md)
+lore data clear --project .
+
+# Clear specific data types
+lore data clear --project . --knowledge
+lore data clear --project . --temporal
+lore data clear --project . --distillations
+
+# Nuclear option: wipe the entire database
+lore data clear --all
+
+# Delete a single entry
+lore data delete knowledge abc12345
+lore data delete session abc12345-6789
+```
+
+All destructive commands prompt for confirmation. Use `--yes` to skip (for scripts). Use `--json` on any list/show command for machine-readable output.
+
+> **Starting fresh in a project?** Run `lore data clear --project .` to wipe all stored memories for the current directory. This regenerates `.lore.md` — commit the change to prevent old knowledge from being re-imported from git history.
+
+### `lore recall` — Search from the terminal
+
+```bash
+# Search project memory
+lore recall "error handling patterns"
+
+# Search with options
+lore recall "auth decision" --scope knowledge --limit 5
+lore recall "migration error" --project /path/to/project --json
+```
+
+### Web dashboard
+
+When the gateway is running, visit **http://localhost:6969/ui** for a web-based dashboard that lets you:
+
+- Browse all projects, their knowledge entries, sessions, and distillations
+- View full detail for any entry
+- Search across all data sources (uses the same recall engine)
+- Delete entries or clear project data
+
+The dashboard is server-rendered HTML with no external dependencies — it works in any browser, including terminal browsers.
+
 ## lat.md compatibility
 
 If your project uses [lat.md](https://github.com/1st1/lat.md) to maintain a knowledge graph, Lore automatically indexes the `lat.md/` directory and includes its sections in recall results. No configuration needed — if the directory exists, Lore parses the markdown files, extracts sections, and ranks them alongside its own knowledge entries using BM25 + RRF fusion.

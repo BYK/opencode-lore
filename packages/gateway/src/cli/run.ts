@@ -123,7 +123,7 @@ export async function commandRun(
 ): Promise<void> {
   // 1. Start gateway
   const { config, port, shutdown } = startGateway(opts);
-  const gatewayUrl = `http://${config.host}:${port}`;
+  const gatewayUrl = `http://${config.hosts[0]}:${port}`;
 
   console.error(`[lore] Gateway listening on ${gatewayUrl}`);
 

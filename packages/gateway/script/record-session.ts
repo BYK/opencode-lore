@@ -81,16 +81,17 @@ const relOutput = outputPath.startsWith(packageDir)
   : outputPath;
 
 console.error(`[record] Recording to: ${relOutput}`);
+const recordHost = config.hosts[0];
 console.error(
-  `[record] Gateway running at http://${config.host}:${server.port}`,
+  `[record] Gateway running at http://${recordHost}:${server.port}`,
 );
 console.error("[record] ");
 console.error("[record] Point your client at this URL:");
 console.error(
-  `[record]   export ANTHROPIC_BASE_URL=http://${config.host}:${server.port}`,
+  `[record]   export ANTHROPIC_BASE_URL=http://${recordHost}:${server.port}`,
 );
 console.error(
-  `[record]   # or: "provider": {"anthropic": {"options": {"baseURL": "http://${config.host}:${server.port}/v1"}}}`,
+  `[record]   # or: "provider": {"anthropic": {"options": {"baseURL": "http://${recordHost}:${server.port}/v1"}}}`,
 );
 console.error("[record] ");
 console.error("[record] Press Ctrl+C to stop recording.");

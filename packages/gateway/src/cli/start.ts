@@ -9,7 +9,7 @@ import { resetPipelineState } from "../pipeline";
 
 export interface StartOptions {
   port?: number;
-  host?: string;
+  hosts?: string[];
   debug?: boolean;
   /** Suppress verbose banner (env vars, export hints). Used in embedded mode. */
   quiet?: boolean;
@@ -29,7 +29,7 @@ export function startGateway(opts: StartOptions = {}): {
 
   // CLI overrides
   if (opts.port !== undefined) config.port = opts.port;
-  if (opts.host !== undefined) config.host = opts.host;
+  if (opts.hosts?.length) config.hosts = opts.hosts;
   if (opts.debug !== undefined) config.debug = opts.debug;
 
   const server = startServer(config);
@@ -64,21 +64,22 @@ export async function commandStart(opts: StartOptions): Promise<never> {
   }
   const { config, port, shutdown } = result;
 
-  const addr = `http://${config.host}:${port}`;
-  console.error(`[lore] Gateway listening on ${addr}`);
+  const addrs = config.hosts.map((h) => `http://${h}:${port}`);
+  console.error(`[lore] Gateway listening on ${addrs.join(", ")}`);
 
   if (!opts.quiet) {
+    const localAddr = addrs[0];
     console.error(
       `[lore] Model routing: claude-* → Anthropic, nvidia/* → Nvidia NIM, gpt-* → OpenAI, …`,
     );
     console.error("");
     console.error("[lore] Point your AI agent at the gateway:");
-    console.error(`  export ANTHROPIC_BASE_URL=${addr}`);
-    console.error(`  export OPENAI_BASE_URL=${addr}/v1`);
+    console.error(`  export ANTHROPIC_BASE_URL=${localAddr}`);
+    console.error(`  export OPENAI_BASE_URL=${localAddr}/v1`);
     console.error("");
     console.error("[lore] Configuration (environment variables):");
     console.error(`  LORE_LISTEN_PORT        Port to listen on (current: ${port})`);
-    console.error(`  LORE_LISTEN_HOST        Host to bind to (current: ${config.host})`);
+    console.error(`  LORE_LISTEN_HOST        Hosts to bind to, comma-separated (current: ${config.hosts.join(",")})`);
     console.error(`  LORE_UPSTREAM_ANTHROPIC Anthropic API URL (current: ${config.upstreamAnthropic})`);
     console.error(`  LORE_UPSTREAM_OPENAI    OpenAI API URL (current: ${config.upstreamOpenAI})`);
     console.error(`  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`);

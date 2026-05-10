@@ -11,6 +11,7 @@
 
 export * as temporal from "./temporal";
 export * as ltm from "./ltm";
+export * as data from "./data";
 export * as distillation from "./distillation";
 export * as curator from "./curator";
 export * as embedding from "./embedding";
@@ -51,6 +52,7 @@ export { isTextPart, isReasoningPart, isToolPart } from "./types";
 export { load, config, type LoreConfig } from "./config";
 export {
   db,
+  dbPath,
   ensureProject,
   isFirstRun,
   projectId,

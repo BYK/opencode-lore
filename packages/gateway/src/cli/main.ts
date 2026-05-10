@@ -6,6 +6,8 @@
  * Commands:
  *   (none) / run   → start gateway + launch agent
  *   start          → start gateway server only
+ *   data           → inspect and manage stored data
+ *   recall         → search project memory from the terminal
  *   upgrade        → self-update
  *   help           → print usage
  */
@@ -26,7 +28,7 @@ import {
 /** Options shared by all commands. */
 const OPTIONS = {
   port: { type: "string" as const, short: "p" },
-  host: { type: "string" as const, short: "H" },
+  host: { type: "string" as const, short: "H", multiple: true },
   debug: { type: "boolean" as const, short: "d" },
   version: { type: "boolean" as const, short: "v" },
   help: { type: "boolean" as const, short: "h" },
@@ -52,12 +54,15 @@ function parsePort(value: string): number {
 
 function buildStartOptions(values: {
   port?: string;
-  host?: string;
+  host?: string[];
   debug?: boolean;
 }): StartOptions {
+  // Flatten: each --host value may itself be comma-separated
+  const hosts = values.host
+    ?.flatMap((h) => h.split(",").map((s) => s.trim()).filter(Boolean));
   return {
     port: values.port ? parsePort(values.port) : undefined,
-    host: values.host ?? undefined,
+    hosts: hosts?.length ? hosts : undefined,
     debug: values.debug ?? undefined,
   };
 }
@@ -139,7 +144,7 @@ export async function _cli(): Promise<void> {
   const rest = positionals.slice(1);
 
   const startOpts = buildStartOptions(
-    values as { port?: string; host?: string; debug?: boolean },
+    values as { port?: string; host?: string[]; debug?: boolean },
   );
 
   // Start background update check (non-blocking).
@@ -160,6 +165,18 @@ export async function _cli(): Promise<void> {
         // when only `lore start` or `lore help` is needed.
         const { commandRun } = await import("./run");
         await commandRun(startOpts, rest);
+        break;
+      }
+
+      case "data": {
+        const { commandData } = await import("./data");
+        await commandData(rest, values as Record<string, unknown>);
+        break;
+      }
+
+      case "recall": {
+        const { commandRecall } = await import("./recall-cmd");
+        await commandRecall(rest, values as Record<string, unknown>);
         break;
       }
 
