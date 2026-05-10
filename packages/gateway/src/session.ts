@@ -1,18 +1,28 @@
 /**
  * Session identification for the Lore gateway proxy.
  *
- * Raw LLM API requests carry no session ID, so the gateway injects a
- * text-block marker `[lore:<base62>]` into the first response of a new
- * session. Subsequent requests from the same session echo it back in
- * the message history, allowing the gateway to correlate turns.
+ * Uses a 3-tier identification strategy:
+ *
+ *  **Tier 1 — Known headers** (immediate match):
+ *    `x-claude-code-session-id` (Claude Code), `x-session-affinity`
+ *    (OpenCode). These persist for the entire client session and survive
+ *    model changes, compaction, and context rewriting.
+ *    `x-parent-session-id` links sub-agent requests to a parent session.
+ *
+ *  **Tier 2 — Learned headers** (bootstrapped via fingerprint):
+ *    During the first few fingerprinted turns, collect candidate `x-`
+ *    headers with ID-like values. Promote a header after it is stable
+ *    within a session (same value across 3 turns) AND varies across
+ *    different sessions (not a global constant like client version).
+ *
+ *  **Tier 3 — Fingerprint fallback** (bootstrap + unknown clients):
+ *    SHA-256 of the first user message + auth suffix. Used to bootstrap
+ *    Tier 2 learning and as permanent fallback for headerless clients.
+ *    Model is intentionally excluded (model strings change mid-session).
  *
  * The session ID packs 8 random bytes + 4 bytes of unix timestamp
  * (seconds, big-endian) into 12 bytes, then base62-encodes them to a
  * compact alphanumeric string (~17 chars).
- *
- * A SHA-256 fingerprint of the first user message serves as a
- * belt-and-suspenders fallback for sessions that haven't received their
- * marker yet (e.g. the very first request before any response).
  *
  * This module has zero dependencies on `@loreai/core` — pure utility.
  */
@@ -157,18 +167,19 @@ export function scanForMarker(
 
 /**
  * Compute a SHA-256 fingerprint from the first user message's content,
- * optionally incorporating the model name and an auth credential suffix.
+ * optionally incorporating an auth credential suffix.
  *
- * Returns the first 16 hex characters of the hash. Used as the primary
- * session correlator — combined with message-count proximity to
- * disambiguate forked sessions that share the same first message.
+ * Returns the first 16 hex characters of the hash. Used as the Tier 3
+ * (fallback) session correlator — combined with message-count proximity
+ * to disambiguate forked sessions that share the same first message.
  *
- * Including `model` and `authSuffix` ensures that a key change or model
- * switch creates a new session rather than reusing an existing one.
+ * Model is intentionally excluded: model strings change mid-session
+ * (e.g. `claude-opus-4-7` → `opus-4-6`) and including them caused
+ * confirmed session splits in production.
  */
 export async function fingerprintMessages(
   messages: Array<{ role: string; content: unknown }>,
-  extras?: { model?: string; authSuffix?: string },
+  extras?: { authSuffix?: string },
 ): Promise<string> {
   let firstUserContent = "";
   for (const msg of messages) {
@@ -179,8 +190,7 @@ export async function fingerprintMessages(
     }
   }
 
-  const material =
-    firstUserContent + (extras?.model ?? "") + (extras?.authSuffix ?? "");
+  const material = firstUserContent + (extras?.authSuffix ?? "");
   const encoded = new TextEncoder().encode(material);
   const hash = await crypto.subtle.digest("SHA-256", encoded);
   const bytes = new Uint8Array(hash);
@@ -205,3 +215,231 @@ export async function fingerprintMessages(
  * reliably distinguishing forks (which typically differ by 50+).
  */
 export const MESSAGE_COUNT_PROXIMITY_THRESHOLD = 20;
+
+// ===========================================================================
+// 3-Tier Session Identification
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Tier 1: Known session headers
+// ---------------------------------------------------------------------------
+
+/**
+ * Well-known HTTP headers that carry a persistent, unique session ID.
+ * Checked in order — first match wins.
+ */
+export const KNOWN_SESSION_HEADERS = [
+  "x-claude-code-session-id", // Claude Code (UUID, persists for CLI session)
+  "x-session-affinity",       // OpenCode  (nanoid, persists for session)
+] as const;
+
+/**
+ * Headers that link a sub-agent request to its parent session.
+ * When present, the request is attributed to the parent session
+ * rather than creating a new one.
+ */
+export const PARENT_SESSION_HEADERS = [
+  "x-parent-session-id", // OpenCode sub-sessions
+] as const;
+
+/**
+ * Extract a session ID from known headers (Tier 1).
+ *
+ * Returns the session ID value and the header name that provided it,
+ * plus an optional parent session ID for sub-agent merging.
+ * Returns `null` if no known session header is present.
+ */
+export function extractKnownSessionHeader(
+  rawHeaders: Record<string, string>,
+): { sessionId: string; headerName: string } | null {
+  for (const name of KNOWN_SESSION_HEADERS) {
+    const value = rawHeaders[name];
+    if (value && value.length > 0) {
+      return { sessionId: value, headerName: name };
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract a parent session ID from known parent headers.
+ * Returns the parent session ID value, or `null` if not present.
+ */
+export function extractParentSessionId(
+  rawHeaders: Record<string, string>,
+): string | null {
+  for (const name of PARENT_SESSION_HEADERS) {
+    const value = rawHeaders[name];
+    if (value && value.length > 0) return value;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2: Learned session headers
+// ---------------------------------------------------------------------------
+
+/** Pattern for header names likely to carry a session ID. */
+const SESSION_HEADER_PATTERN =
+  /^x-.*session(?!.*(?:token|cookie|auth|secret))/i;
+
+/** Pattern for header names carrying affinity/routing IDs. */
+const AFFINITY_HEADER_PATTERN = /^x-.*affinity/i;
+
+/**
+ * ID-like value heuristic: 8–128 characters, alphanumeric + dash/underscore.
+ * Rejects JWTs (contain `.`), URLs (contain `/`), booleans, timestamps,
+ * and long content strings.
+ */
+const ID_VALUE_PATTERN = /^[a-zA-Z0-9_-]{8,128}$/;
+
+/** Number of consecutive stable turns before promoting a candidate header. */
+const LEARNING_THRESHOLD = 3;
+
+/** Candidate header being tracked during the learning phase. */
+export interface HeaderCandidate {
+  value: string;
+  seenCount: number;
+}
+
+/**
+ * Global tracking of distinct header values across all sessions.
+ *
+ * Used for the cross-session uniqueness check (Y-axis filter):
+ * if a header has the same value across multiple fingerprinted
+ * sessions, it's a global constant (client version, auth hash)
+ * rather than a per-session identifier.
+ *
+ * Key: lowercase header name. Value: set of distinct values observed.
+ */
+const globalHeaderValues = new Map<string, Set<string>>();
+
+/** Reset global header tracking state. Exported for tests only. */
+export function _resetGlobalHeaderValues(): void {
+  globalHeaderValues.clear();
+}
+
+/**
+ * Check whether a header name is a plausible session ID carrier.
+ *
+ * Returns `true` for:
+ *  - Any `x-` header whose name contains "session" (excluding
+ *    token/cookie/auth/secret variants)
+ *  - Any `x-` header whose name contains "affinity"
+ */
+export function isSessionHeaderName(name: string): boolean {
+  return SESSION_HEADER_PATTERN.test(name) || AFFINITY_HEADER_PATTERN.test(name);
+}
+
+/**
+ * Check whether a value looks like an identifier (not a JWT, URL,
+ * boolean, or long content string).
+ */
+export function isIdLikeValue(value: string): boolean {
+  return ID_VALUE_PATTERN.test(value);
+}
+
+/**
+ * Collect candidate headers from a request that could carry session IDs.
+ *
+ * Returns all `x-` prefixed headers with ID-like values — both those
+ * matching the session/affinity name patterns and generic ones. The
+ * learning algorithm will filter by stability over time.
+ */
+export function collectCandidateHeaders(
+  rawHeaders: Record<string, string>,
+): Map<string, string> {
+  const candidates = new Map<string, string>();
+  for (const [name, value] of Object.entries(rawHeaders)) {
+    if (!name.startsWith("x-")) continue;
+    if (!isIdLikeValue(value)) continue;
+
+    // Accept if name matches session/affinity pattern, or if the value
+    // is ID-like (the stability filter will sort out false positives).
+    candidates.set(name, value);
+  }
+  return candidates;
+}
+
+/**
+ * Run the header learning algorithm for a session.
+ *
+ * Called on every fingerprinted turn (Tier 3). Updates per-session
+ * candidate tracking and global cross-session value maps.
+ *
+ * Returns the promoted header `{ name, value }` if a candidate
+ * reached the learning threshold and passed the cross-session
+ * uniqueness check, or `null` if still learning.
+ */
+export function learnHeaders(
+  candidates: Map<string, HeaderCandidate> | undefined,
+  rawHeaders: Record<string, string>,
+): {
+  updatedCandidates: Map<string, HeaderCandidate>;
+  promoted: { name: string; value: string } | null;
+} {
+  const currentCandidates = candidates ?? new Map<string, HeaderCandidate>();
+  const incoming = collectCandidateHeaders(rawHeaders);
+
+  // Update candidates: increment stable, reset changed, add new
+  for (const [name, value] of incoming) {
+    const existing = currentCandidates.get(name);
+    if (existing) {
+      if (existing.value === value) {
+        existing.seenCount++;
+      } else {
+        // Value changed — reset. Not a stable session ID.
+        existing.value = value;
+        existing.seenCount = 1;
+      }
+    } else {
+      currentCandidates.set(name, { value, seenCount: 1 });
+    }
+
+    // Update global cross-session tracking
+    let globalSet = globalHeaderValues.get(name);
+    if (!globalSet) {
+      globalSet = new Set();
+      globalHeaderValues.set(name, globalSet);
+    }
+    globalSet.add(value);
+  }
+
+  // Remove candidates that disappeared from this request
+  for (const [name] of currentCandidates) {
+    if (!incoming.has(name)) {
+      currentCandidates.delete(name);
+    }
+  }
+
+  // Check for promotion: stable within session + unique across sessions
+  // Prioritize headers whose name matches session/affinity patterns
+  let promoted: { name: string; value: string } | null = null;
+
+  // First pass: prefer pattern-matched names
+  for (const [name, candidate] of currentCandidates) {
+    if (candidate.seenCount < LEARNING_THRESHOLD) continue;
+    if (!isSessionHeaderName(name)) continue;
+
+    const globalSet = globalHeaderValues.get(name);
+    if (globalSet && globalSet.size > 1) {
+      promoted = { name, value: candidate.value };
+      break;
+    }
+  }
+
+  // Second pass: any ID-like header that passes both axes
+  if (!promoted) {
+    for (const [name, candidate] of currentCandidates) {
+      if (candidate.seenCount < LEARNING_THRESHOLD) continue;
+
+      const globalSet = globalHeaderValues.get(name);
+      if (globalSet && globalSet.size > 1) {
+        promoted = { name, value: candidate.value };
+        break;
+      }
+    }
+  }
+
+  return { updatedCandidates: currentCandidates, promoted };
+}

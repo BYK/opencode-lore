@@ -213,7 +213,7 @@ export type CacheAnalytics = {
 export type SessionState = {
   sessionID: string;
   projectPath: string;
-  /** SHA-256 fingerprint of the first user message — used for session correlation. */
+  /** SHA-256 fingerprint of the first user message — used for Tier 3 session correlation. */
   fingerprint: string;
   /** Unix timestamp (ms) of the last request in this session. */
   lastRequestTime: number;
@@ -234,4 +234,14 @@ export type SessionState = {
   /** Resolved conversation TTL for this session ("5m" | "1h"). Updated by
    *  the auto-upgrade logic each turn. */
   resolvedConversationTTL?: "5m" | "1h";
+
+  // --- Tier 1/2 session header identification ---
+
+  /** Header-based session ID value (Tier 1 known header or Tier 2 promoted learned header). */
+  headerSessionId?: string;
+  /** Name of the header that provided `headerSessionId`. */
+  headerName?: string;
+  /** Candidate headers being tracked during the Tier 2 learning phase.
+   *  Key: header name. Value: last seen value + consecutive stable turn count. */
+  candidateHeaders?: Map<string, { value: string; seenCount: number }>;
 };
