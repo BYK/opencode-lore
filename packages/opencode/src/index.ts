@@ -700,7 +700,7 @@ export const LorePlugin: Plugin = async (ctx) => {
       if (
         force ||
         pending >= cfg.distillation.minMessages ||
-        needsUrgentDistillation()
+        needsUrgentDistillation(sessionID)
       ) {
         // Skip meta-distillation when the prompt cache is likely still warm.
         // Meta-distill rewrites row IDs → invalidates distilled prefix cache →
@@ -1250,7 +1250,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           );
         }
 
-        if (result.layer >= 2 && sessionID) {
+        if (result.layer >= 1 && sessionID) {
           backgroundDistill(sessionID);
         }
       } catch (e) {

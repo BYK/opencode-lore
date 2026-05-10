@@ -1139,7 +1139,7 @@ function scheduleBackgroundWork(
   // Check if urgent distillation is needed (gradient flagged it).
   // Mark urgent: true so these bypass the batch queue — the gradient is
   // in overflow and needs the result before the next user turn.
-  if (needsUrgentDistillation()) {
+  if (needsUrgentDistillation(sessionState.sessionID)) {
     distillation
       .run({
         llm,

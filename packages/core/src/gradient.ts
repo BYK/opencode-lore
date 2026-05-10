@@ -1429,11 +1429,13 @@ export type TransformResult = {
   rawBudget: number;
 };
 
-// Signal that we need urgent distillation
-let urgentDistillation = false;
-export function needsUrgentDistillation(): boolean {
-  const v = urgentDistillation;
-  urgentDistillation = false;
+// Per-session urgent distillation tracking.
+// Keyed by sessionID. Set by layer returns in transformInner(),
+// consumed (read + delete) by needsUrgentDistillation(sessionID).
+const urgentDistillationMap = new Map<string, boolean>();
+export function needsUrgentDistillation(sessionID: string): boolean {
+  const v = urgentDistillationMap.get(sessionID) ?? false;
+  urgentDistillationMap.delete(sessionID);
   return v;
 }
 
@@ -1650,7 +1652,12 @@ function transformInner(input: {
           rawBudget,
           strip: "none",
         });
-    if (fitsWithSafetyMargin(layer1)) return { ...layer1!, layer: 1, usable, distilledBudget, rawBudget };
+    if (fitsWithSafetyMargin(layer1)) {
+      if (cached.tokens === 0 && sid) {
+        urgentDistillationMap.set(sid, true);
+      }
+      return { ...layer1!, layer: 1, usable, distilledBudget, rawBudget };
+    }
   }
 
   // Layer 1 didn't fit (or was force-skipped) — reset the raw window cache.
@@ -1670,7 +1677,7 @@ function transformInner(input: {
       protectedTurns: 2,
     });
     if (fitsWithSafetyMargin(layer2)) {
-      urgentDistillation = true;
+      if (sid) urgentDistillationMap.set(sid, true);
       return { ...layer2!, layer: 2, usable, distilledBudget, rawBudget };
     }
   }
@@ -1691,7 +1698,7 @@ function transformInner(input: {
     strip: "all-tools",
   });
   if (fitsWithSafetyMargin(layer3)) {
-    urgentDistillation = true;
+    if (sid) urgentDistillationMap.set(sid, true);
     return { ...layer3!, layer: 3, usable, distilledBudget, rawBudget };
   }
 
@@ -1708,7 +1715,7 @@ function transformInner(input: {
   // if it alone exceeds the tail budget — layer 4 is the terminal layer
   // and must always return. Remaining budget is filled backward with older
   // messages.
-  urgentDistillation = true;
+  if (sid) urgentDistillationMap.set(sid, true);
   const nuclearDistillations = distillations.slice(-2);
   const nuclearPrefix = distilledPrefix(nuclearDistillations);
   const nuclearPrefixTokens = nuclearPrefix.reduce(

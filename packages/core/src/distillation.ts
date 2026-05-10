@@ -12,7 +12,7 @@ import {
   RECURSIVE_SYSTEM,
   recursiveUser,
 } from "./prompt";
-import { needsUrgentDistillation, toolStripAnnotation } from "./gradient";
+import { toolStripAnnotation } from "./gradient";
 import { workerSessionIDs } from "./worker";
 import type { LLMClient } from "./types";
 
@@ -599,8 +599,10 @@ export async function run(input: {
       rounds++;
     }
 
-    // Check if we still need urgent distillation
-    if (!needsUrgentDistillation()) break;
+    // Continue looping only when explicitly forced (urgent/overflow recovery).
+    // Previously re-polled needsUrgentDistillation() here, but that consumed
+    // the per-session flag and raced with the caller that already checked it.
+    if (!input.force) break;
   }
 
   return { rounds, distilled };
