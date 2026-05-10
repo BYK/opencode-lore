@@ -423,11 +423,19 @@ async function buildBinary() {
   // The compile entry is the wrapper when vendoring (which lives inside
   // the staging dir, so Bun resolves "fastembed" + transitive deps from
   // the per-target node_modules), otherwise the esbuild bundle directly.
-  // No `--external` flags: we WANT Bun to bundle fastembed + onnxruntime
-  // -node + @anush008/tokenizers — including their .node addons — into
-  // the binary.
+  //
+  // Vendored targets: no --external flags — we WANT Bun to bundle
+  // fastembed + onnxruntime-node + @anush008/tokenizers (including their
+  // .node addons) into the binary.
+  //
+  // Unvendored targets (e.g. linux-arm64): the esbuild bundle (bin.js)
+  // contains bare `import("fastembed")` (marked external by esbuild).
+  // Without a staging dir's node_modules nearby, Bun can't resolve it.
+  // We pass --external so Bun leaves the import as-is; at runtime the
+  // dynamic import fails, the try/catch in embedding.ts catches it, and
+  // the auto-fallback to a remote provider kicks in.
   const compileEntry = wrapperPath ?? bundlePath;
-  const compileCmd = [
+  const compileArgs = [
     "bun", "build", "--compile",
     "--target", `bun-${target}`,
     // "linked" embeds a sourcemap in the binary. At runtime, Bun's engine
@@ -435,8 +443,14 @@ async function buildBinary() {
     // the esbuild output's coordinate space.
     "--sourcemap=linked",
     "--outfile", binaryPath,
+    // For unvendored targets, keep native embedding packages external so
+    // the compile step doesn't fail trying to resolve them from dist-bin/.
+    ...(!stagingDir
+      ? ["--external", "fastembed", "--external", "onnxruntime-*", "--external", "@anush008/*"]
+      : []),
     compileEntry,
-  ].join(" ");
+  ];
+  const compileCmd = compileArgs.join(" ");
 
   try {
     execSync(compileCmd, { stdio: "inherit", cwd: packageDir });
