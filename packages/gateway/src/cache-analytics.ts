@@ -41,22 +41,40 @@ export function decompressBody(compressed: Uint8Array): string {
 
 /**
  * Normalize a serialized request body for cache comparison by stripping
- * volatile metadata that clients embed in the system prompt.
+ * volatile metadata that clients embed in the request.
  *
- * Claude Code prepends `entrypoint=cli; cch=XXXXX;\n` to its system prompt
- * where `cch` is a content-cache hash that changes every turn. This busts
- * our byte-level prefix comparison even though the actual prompt content
- * is stable (and Anthropic's token-level cache hits fine).
- *
- * We replace the volatile `cch=...;` segment with a fixed placeholder so
- * the comparison sees the bodies as prefix-identical when only this hash
- * changed. The upstream request is never modified — only our analytics copy.
+ * The upstream request is NEVER modified — only the analytics copy.
+ * Both the stored (previous) and current bodies are normalized, so
+ * variable-width replacements are safe (offsets stay aligned across turns).
  */
+
+/** Claude Code content-cache hash: changes every turn. */
 const CCH_PATTERN = /cch=[0-9a-fA-F]+;/g;
 const CCH_REPLACEMENT = "cch=__;";
 
+/**
+ * Claude Code version suffix: 3 hex chars derived from
+ * sha256(salt + chars_from_first_user_message + version).
+ * Changes between sessions. Only the suffix is normalized —
+ * the base version (e.g. 2.1.37) is preserved so genuine
+ * version upgrades still show as divergence.
+ */
+const CC_VERSION_SUFFIX_PATTERN =
+  /(cc_version=\d+\.\d+\.\d+)\.[0-9a-f]{3};/g;
+const CC_VERSION_SUFFIX_REPLACEMENT = "$1.___;";
+
+/**
+ * Top-level max_tokens: Claude Code may vary this between turns.
+ * Anchored to the JSON body start so it only matches the top-level
+ * field, not occurrences in message content or tool descriptions.
+ */
+const TOP_LEVEL_MAX_TOKENS = /^(\{"model":"[^"]+","max_tokens":)\d+/;
+
 export function normalizeBodyForComparison(body: string): string {
-  return body.replace(CCH_PATTERN, CCH_REPLACEMENT);
+  return body
+    .replace(CCH_PATTERN, CCH_REPLACEMENT)
+    .replace(CC_VERSION_SUFFIX_PATTERN, CC_VERSION_SUFFIX_REPLACEMENT)
+    .replace(TOP_LEVEL_MAX_TOKENS, "$1_");
 }
 
 // ---------------------------------------------------------------------------

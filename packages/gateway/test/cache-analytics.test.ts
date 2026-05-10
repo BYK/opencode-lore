@@ -469,6 +469,52 @@ describe("normalizeBodyForComparison", () => {
     const body = "cch=aaa; some text cch=bbb;";
     expect(normalizeBodyForComparison(body)).toBe("cch=__; some text cch=__;");
   });
+
+  test("normalizes cc_version suffix to fixed placeholder", () => {
+    const body =
+      '{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.37.5a7; cc_entrypoint=cli; cch=__;\\nYou are Claude Code"}]}';
+    const normalized = normalizeBodyForComparison(body);
+    expect(normalized).toBe(
+      '{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.37.___; cc_entrypoint=cli; cch=__;\\nYou are Claude Code"}]}',
+    );
+  });
+
+  test("preserves cc_version base version (only strips suffix)", () => {
+    const body1 = normalizeBodyForComparison("cc_version=2.1.37.abc;");
+    const body2 = normalizeBodyForComparison("cc_version=2.1.37.def;");
+    expect(body1).toBe(body2); // same base version → identical
+
+    const body3 = normalizeBodyForComparison("cc_version=2.2.0.abc;");
+    expect(body3).not.toBe(body1); // different base version → different
+  });
+
+  test("normalizes top-level max_tokens", () => {
+    const body =
+      '{"model":"claude-sonnet-4-20250514","max_tokens":16000,"stream":true}';
+    const normalized = normalizeBodyForComparison(body);
+    expect(normalized).toBe(
+      '{"model":"claude-sonnet-4-20250514","max_tokens":_,"stream":true}',
+    );
+  });
+
+  test("does not normalize max_tokens in message content", () => {
+    const body =
+      '{"model":"claude-sonnet-4-20250514","max_tokens":8192,"stream":true,"messages":[{"content":"set max_tokens to 16000"}]}';
+    const normalized = normalizeBodyForComparison(body);
+    // Top-level normalized, but content preserved
+    expect(normalized).toContain('"max_tokens":_,');
+    expect(normalized).toContain("set max_tokens to 16000");
+  });
+
+  test("handles different max_tokens digit counts identically", () => {
+    const make = (n: number) =>
+      `{"model":"claude-sonnet-4-20250514","max_tokens":${n},"stream":true}`;
+    const a = normalizeBodyForComparison(make(4096));
+    const b = normalizeBodyForComparison(make(16000));
+    const c = normalizeBodyForComparison(make(128000));
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -510,5 +556,44 @@ describe("analyzeCacheTurn — cch normalization", () => {
 
     expect(result.divergencePoint).toMatch(/system/);
     expect(result.prefixMatchPercent).toBeGreaterThan(0.5);
+  });
+
+  test("treats bodies differing only in cc_version suffix as identical", () => {
+    const analytics = makeCacheAnalytics();
+    const make = (suffix: string) =>
+      JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 8192,
+        stream: true,
+        system: [{
+          type: "text",
+          text: `x-anthropic-billing-header: cc_version=2.1.37.${suffix}; cc_entrypoint=cli; cch=abc12;\nYou are Claude Code`,
+        }],
+        messages: [{ role: "user", content: "hello" }],
+      });
+
+    analyzeCacheTurn(analytics, make("aba"), makeUsage());
+    const result = analyzeCacheTurn(analytics, make("5a7"), makeUsage());
+
+    expect(result.divergencePoint).toBe("<identical>");
+    expect(result.divergenceReason).toBe("request bodies are identical");
+  });
+
+  test("treats bodies differing only in max_tokens as identical", () => {
+    const analytics = makeCacheAnalytics();
+    const make = (tokens: number) =>
+      JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: tokens,
+        stream: true,
+        system: [{ type: "text", text: "You are Claude Code" }],
+        messages: [{ role: "user", content: "hello" }],
+      });
+
+    analyzeCacheTurn(analytics, make(16000), makeUsage());
+    const result = analyzeCacheTurn(analytics, make(8192), makeUsage());
+
+    expect(result.divergencePoint).toBe("<identical>");
+    expect(result.divergenceReason).toBe("request bodies are identical");
   });
 });
