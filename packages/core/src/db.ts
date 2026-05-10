@@ -2,8 +2,9 @@ import { Database } from "#db/driver";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 import { homedir } from "os";
+import { getGitRemote } from "./git";
 
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 const MIGRATIONS: string[] = [
   `
@@ -362,6 +363,27 @@ const MIGRATIONS: string[] = [
     updated_at INTEGER NOT NULL
   );
   `,
+  `
+  -- Version 14: Git-based project identification.
+  --
+  -- Projects can now be identified by their git remote URL in addition to
+  -- filesystem path. This enables worktree, clone, and fork awareness:
+  -- the same repository accessed from different paths shares one project.
+  --
+  -- git_remote: Normalized canonical remote URL (e.g. "github.com/user/repo").
+  -- NULL for non-git directories or repos with no remotes.
+  --
+  -- project_path_aliases: Maps additional filesystem paths to existing
+  -- projects. When ensureProject() finds a match by git_remote, the
+  -- alternate path is registered here for O(1) subsequent lookups.
+  ALTER TABLE projects ADD COLUMN git_remote TEXT;
+  CREATE INDEX IF NOT EXISTS idx_projects_git_remote ON projects(git_remote);
+
+  CREATE TABLE IF NOT EXISTS project_path_aliases (
+    path TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+  );
+  `,
 ];
 
 function dataDir() {
@@ -514,7 +536,62 @@ function recoverMissingObjects(database: Database) {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS project_path_aliases (
+      path TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+    );
   `);
+}
+
+/**
+ * Merge all data from `sourceId` project into `targetId` project.
+ *
+ * Moves knowledge, temporal messages, distillations, LAT sections, and
+ * path aliases from source to target. Registers the source project's path
+ * as an alias of the target. Deletes the source project row.
+ *
+ * Used internally during lazy git-remote backfill when two path-only
+ * projects are discovered to share the same git remote.
+ */
+export function mergeProjectInternal(
+  sourceId: string,
+  targetId: string,
+): void {
+  const d = db();
+  d.exec("BEGIN IMMEDIATE");
+  try {
+    d.query("UPDATE knowledge SET project_id = ? WHERE project_id = ?").run(
+      targetId,
+      sourceId,
+    );
+    d.query(
+      "UPDATE temporal_messages SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    d.query(
+      "UPDATE distillations SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    d.query("UPDATE lat_sections SET project_id = ? WHERE project_id = ?").run(
+      targetId,
+      sourceId,
+    );
+    d.query(
+      "UPDATE OR IGNORE project_path_aliases SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    // Register source's path as alias of target
+    const sourceRow = d
+      .query("SELECT path FROM projects WHERE id = ?")
+      .get(sourceId) as { path: string } | null;
+    if (sourceRow) {
+      d.query(
+        "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+      ).run(sourceRow.path, targetId);
+    }
+    d.query("DELETE FROM projects WHERE id = ?").run(sourceId);
+    d.exec("COMMIT");
+  } catch (e) {
+    d.exec("ROLLBACK");
+    throw e;
+  }
 }
 
 export function close() {
@@ -525,17 +602,85 @@ export function close() {
 }
 
 // Project management
+
+/**
+ * Look up or create a project by filesystem path, with git-remote awareness.
+ *
+ * Resolution order:
+ *  1. Exact path match in `projects` table (fast path, O(1) index scan)
+ *  2. Path alias match in `project_path_aliases` (worktree/clone re-visits)
+ *  3. Git remote match — runs `git remote -v` (once per unique path, cached),
+ *     finds an existing project with the same normalized remote URL
+ *  4. Create a new project row
+ *
+ * When a git-remote match is found (step 3), the new path is registered as
+ * an alias so subsequent calls skip the subprocess. If the matched project's
+ * git_remote was not yet populated (pre-v14 rows), it is backfilled lazily.
+ */
 export function ensureProject(path: string, name?: string): string {
+  // 1. Exact path match (fast path)
   const existing = db()
-    .query("SELECT id FROM projects WHERE path = ?")
-    .get(path) as { id: string } | null;
-  if (existing) return existing.id;
+    .query("SELECT id, git_remote FROM projects WHERE path = ?")
+    .get(path) as { id: string; git_remote: string | null } | null;
+  if (existing) {
+    // Lazy backfill: populate git_remote on pre-v14 rows
+    if (!existing.git_remote) {
+      const gitRemote = getGitRemote(path);
+      if (gitRemote) {
+        // Check for conflict: another project already has this git_remote.
+        // If so, merge the conflicting project into this one (one-time).
+        const conflict = db()
+          .query(
+            "SELECT id FROM projects WHERE git_remote = ? AND id != ? LIMIT 1",
+          )
+          .get(gitRemote, existing.id) as { id: string } | null;
+        if (conflict) {
+          mergeProjectInternal(conflict.id, existing.id);
+        }
+        db()
+          .query("UPDATE projects SET git_remote = ? WHERE id = ?")
+          .run(gitRemote, existing.id);
+      }
+    }
+    return existing.id;
+  }
+
+  // 2. Check path aliases (worktree/clone re-visits)
+  const alias = db()
+    .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
+    .get(path) as { project_id: string } | null;
+  if (alias) return alias.project_id;
+
+  // 3. Git remote identification
+  const gitRemote = getGitRemote(path);
+  if (gitRemote) {
+    const byRemote = db()
+      .query("SELECT id FROM projects WHERE git_remote = ? LIMIT 1")
+      .get(gitRemote) as { id: string } | null;
+    if (byRemote) {
+      // Register this path as an alias for O(1) future lookups
+      db()
+        .query(
+          "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+        )
+        .run(path, byRemote.id);
+      return byRemote.id;
+    }
+  }
+
+  // 4. Create new project
   const id = crypto.randomUUID();
   db()
     .query(
-      "INSERT INTO projects (id, path, name, created_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
     )
-    .run(id, path, name ?? path.split("/").pop() ?? "unknown", Date.now());
+    .run(
+      id,
+      path,
+      name ?? path.split("/").pop() ?? "unknown",
+      gitRemote,
+      Date.now(),
+    );
   return id;
 }
 
@@ -543,7 +688,13 @@ export function projectId(path: string): string | undefined {
   const row = db()
     .query("SELECT id FROM projects WHERE path = ?")
     .get(path) as { id: string } | null;
-  return row?.id;
+  if (row) return row.id;
+
+  // Check path aliases (worktree/clone paths registered by ensureProject)
+  const alias = db()
+    .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
+    .get(path) as { project_id: string } | null;
+  return alias?.project_id;
 }
 
 /** Look up a project's display name by its internal ID. */

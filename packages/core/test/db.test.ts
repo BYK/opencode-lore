@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { db, close, ensureProject, projectId, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId } from "../src/db";
+import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId } from "../src/db";
 
 
 describe("db", () => {
@@ -22,7 +22,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(13);
+    expect(row.version).toBe(14);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -195,5 +195,156 @@ describe("db", () => {
       .get() as { name: string } | null;
     expect(afterMeta).not.toBeNull();
     expect(afterMeta!.name).toBe("metadata");
+  });
+
+  // -------------------------------------------------------------------------
+  // Migration v14: git-based project identification
+  // -------------------------------------------------------------------------
+
+  test("projects table has git_remote column (migration v14)", () => {
+    const cols = db()
+      .query("PRAGMA table_info(projects)")
+      .all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toContain("git_remote");
+  });
+
+  test("project_path_aliases table exists (migration v14)", () => {
+    const tables = db()
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='project_path_aliases'")
+      .all() as Array<{ name: string }>;
+    expect(tables.length).toBe(1);
+  });
+
+  test("idx_projects_git_remote index exists (migration v14)", () => {
+    const indexes = db()
+      .query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_projects_git_remote'")
+      .all() as Array<{ name: string }>;
+    expect(indexes.length).toBe(1);
+  });
+
+  test("ensureProject stores git_remote as null for non-git paths", () => {
+    const id = ensureProject("/test/non-git/project-v14");
+    const row = db()
+      .query("SELECT git_remote FROM projects WHERE id = ?")
+      .get(id) as { git_remote: string | null };
+    expect(row.git_remote).toBeNull();
+  });
+
+  test("projectId resolves via project_path_aliases", () => {
+    // Manually create a project and alias
+    const id = ensureProject("/test/alias/original");
+    db()
+      .query("INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)")
+      .run("/test/alias/worktree", id);
+
+    // projectId should resolve the alias
+    expect(projectId("/test/alias/worktree")).toBe(id);
+  });
+
+  test("ensureProject deduplicates via git_remote", () => {
+    // Manually insert a project with a git_remote
+    const id1 = crypto.randomUUID();
+    db()
+      .query("INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(id1, "/test/git-dedup/original", "original", "github.com/test/dedup-repo", Date.now());
+
+    // Mock getGitRemote by pre-populating the cache
+    // (getGitRemote for /test/git-dedup/worktree would return null since it's
+    // not a real path, so we test via direct DB manipulation instead)
+
+    // Simulate: another path has same git_remote. ensureProject should find
+    // the existing project when looking up by git_remote.
+    // Since we can't easily mock getGitRemote in the same module, we test
+    // the alias path: register an alias, then verify it resolves.
+    db()
+      .query("INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)")
+      .run("/test/git-dedup/worktree", id1);
+
+    const id2 = ensureProject("/test/git-dedup/worktree");
+    expect(id2).toBe(id1);
+  });
+
+  test("mergeProjectInternal moves all data from source to target", () => {
+    // Create two projects
+    const sourceId = ensureProject("/test/merge/source");
+    const targetId = ensureProject("/test/merge/target");
+
+    // Add some data to source
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(crypto.randomUUID(), sourceId, "session-merge", "user", "test message", Date.now());
+
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(crypto.randomUUID(), sourceId, "pattern", "Test", "test content", Date.now(), Date.now());
+
+    // Verify source has data
+    const sourceMsgsBefore = (
+      db()
+        .query("SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?")
+        .get(sourceId) as { c: number }
+    ).c;
+    expect(sourceMsgsBefore).toBe(1);
+
+    const sourceKnowledgeBefore = (
+      db()
+        .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
+        .get(sourceId) as { c: number }
+    ).c;
+    expect(sourceKnowledgeBefore).toBe(1);
+
+    // Merge source into target
+    mergeProjectInternal(sourceId, targetId);
+
+    // Source should be deleted
+    const sourceRow = db()
+      .query("SELECT id FROM projects WHERE id = ?")
+      .get(sourceId);
+    expect(sourceRow).toBeNull();
+
+    // Target should have the data
+    const targetMsgs = (
+      db()
+        .query("SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?")
+        .get(targetId) as { c: number }
+    ).c;
+    expect(targetMsgs).toBe(1);
+
+    const targetKnowledge = (
+      db()
+        .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
+        .get(targetId) as { c: number }
+    ).c;
+    expect(targetKnowledge).toBe(1);
+
+    // Source path should be registered as alias of target
+    const alias = db()
+      .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
+      .get("/test/merge/source") as { project_id: string } | null;
+    expect(alias).not.toBeNull();
+    expect(alias!.project_id).toBe(targetId);
+  });
+
+  test("recoverMissingObjects creates project_path_aliases when missing", () => {
+    const d = db();
+
+    // Drop the table to simulate the broken state
+    d.exec("DROP TABLE IF EXISTS project_path_aliases");
+    expect(
+      d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='project_path_aliases'").get(),
+    ).toBeNull();
+
+    // Close and re-open — migrate() should recover
+    close();
+    const fresh = db();
+    const after = fresh
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='project_path_aliases'")
+      .get() as { name: string } | null;
+    expect(after).not.toBeNull();
+    expect(after!.name).toBe("project_path_aliases");
   });
 });

@@ -10,7 +10,15 @@
  */
 
 import { statSync, unlinkSync, existsSync } from "fs";
-import { db, ensureProject, projectId, close, dbPath } from "./db";
+import {
+  db,
+  ensureProject,
+  projectId,
+  close,
+  dbPath,
+  mergeProjectInternal,
+} from "./db";
+import { getGitRemote } from "./git";
 import * as ltm from "./ltm";
 import * as agentsFile from "./agents-file";
 
@@ -22,6 +30,7 @@ export type ProjectSummary = {
   id: string;
   path: string;
   name: string | null;
+  git_remote: string | null;
   created_at: number;
   knowledge_count: number;
   session_count: number;
@@ -80,7 +89,7 @@ export type GlobalStats = {
 export function listProjects(): ProjectSummary[] {
   return db()
     .query(
-      `SELECT p.id, p.path, p.name, p.created_at,
+      `SELECT p.id, p.path, p.name, p.git_remote, p.created_at,
         (SELECT COUNT(*) FROM knowledge WHERE project_id = p.id AND confidence > 0.2) as knowledge_count,
         (SELECT COUNT(DISTINCT session_id) FROM temporal_messages WHERE project_id = p.id) as session_count,
         (SELECT COUNT(*) FROM temporal_messages WHERE project_id = p.id) as message_count,
@@ -469,4 +478,141 @@ export function wipeDatabase(): string {
   // Re-initialize with fresh schema
   db();
   return p;
+}
+
+// ---------------------------------------------------------------------------
+// Project merging & git remote backfill
+// ---------------------------------------------------------------------------
+
+export type MergeResult = {
+  knowledge_moved: number;
+  messages_moved: number;
+  distillations_moved: number;
+};
+
+/**
+ * Merge a source project into a target project.
+ *
+ * Moves all data (knowledge, messages, distillations, LAT sections, path
+ * aliases) from source to target, then deletes the source project row.
+ * The source project's path is registered as an alias of the target.
+ *
+ * Returns counts of moved rows for reporting.
+ */
+export function mergeProjects(sourceId: string, targetId: string): MergeResult {
+  const database = db();
+
+  // Count before merging (result.changes is inflated by FTS triggers)
+  const counts = {
+    knowledge: (
+      database
+        .query(
+          "SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?",
+        )
+        .get(sourceId) as { c: number }
+    ).c,
+    messages: (
+      database
+        .query(
+          "SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?",
+        )
+        .get(sourceId) as { c: number }
+    ).c,
+    distillations: (
+      database
+        .query(
+          "SELECT COUNT(*) as c FROM distillations WHERE project_id = ?",
+        )
+        .get(sourceId) as { c: number }
+    ).c,
+  };
+
+  mergeProjectInternal(sourceId, targetId);
+
+  return {
+    knowledge_moved: counts.knowledge,
+    messages_moved: counts.messages,
+    distillations_moved: counts.distillations,
+  };
+}
+
+/**
+ * Backfill git_remote for existing projects and merge duplicates.
+ *
+ * Iterates all projects that lack a git_remote value, runs `git remote -v`
+ * on their stored path, and:
+ *  - If no other project shares that remote: sets git_remote on the row.
+ *  - If another project already has that remote: merges this project into
+ *    the existing one (consolidating fragmented data).
+ *
+ * Skips projects whose path no longer exists on disk or is not a git repo.
+ *
+ * Returns counts for reporting.
+ */
+export function backfillGitRemotes(): {
+  updated: number;
+  merged: number;
+  mergeDetails: Array<{
+    sourcePath: string;
+    targetPath: string;
+    gitRemote: string;
+    result: MergeResult;
+  }>;
+} {
+  const projects = db()
+    .query(
+      "SELECT id, path, git_remote FROM projects ORDER BY created_at ASC",
+    )
+    .all() as Array<{ id: string; path: string; git_remote: string | null }>;
+
+  let updated = 0;
+  let merged = 0;
+  const mergeDetails: Array<{
+    sourcePath: string;
+    targetPath: string;
+    gitRemote: string;
+    result: MergeResult;
+  }> = [];
+
+  for (const project of projects) {
+    // Skip if already has git_remote
+    if (project.git_remote) continue;
+
+    // Skip if path doesn't exist
+    if (!existsSync(project.path)) continue;
+
+    // Try to get git remote
+    const gitRemote = getGitRemote(project.path);
+    if (!gitRemote) continue;
+
+    // Check if another project already has this git_remote
+    const existing = db()
+      .query(
+        "SELECT id, path FROM projects WHERE git_remote = ? AND id != ? LIMIT 1",
+      )
+      .get(gitRemote, project.id) as {
+      id: string;
+      path: string;
+    } | null;
+
+    if (existing) {
+      // Merge this project into the existing one
+      const result = mergeProjects(project.id, existing.id);
+      mergeDetails.push({
+        sourcePath: project.path,
+        targetPath: existing.path,
+        gitRemote,
+        result,
+      });
+      merged++;
+    } else {
+      // Just set the git_remote
+      db()
+        .query("UPDATE projects SET git_remote = ? WHERE id = ?")
+        .run(gitRemote, project.id);
+      updated++;
+    }
+  }
+
+  return { updated, merged, mergeDetails };
 }
