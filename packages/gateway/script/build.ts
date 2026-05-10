@@ -299,24 +299,11 @@ async function buildBinary() {
     const sideLoadRel = sideLoadLibRelPath(target as VendorTarget);
     const sideLoadBasename = sideLoadLibBasename(target as VendorTarget);
 
-    // (b) Model files: copy from the shared cache into a per-target
-    //     `staging/embed-model/` dir. Keeps the wrapper's import paths
-    //     simple (`./embed-model/<file>`) and confines all asset
-    //     references to inside the staging dir, which makes Bun's
-    //     bundler happier than reaching across to a shared cache via
-    //     `../`.
-    const sharedModelDir = join(
-      repoRoot,
-      ".vendor-build",
-      ".model-cache",
-      MODEL_DIR_NAME,
-    );
-    const stagingModelDir = join(stagingDir, "embed-model");
-    rmSync(stagingModelDir, { recursive: true, force: true });
-    mkdirSync(stagingModelDir, { recursive: true });
-    for (const f of MODEL_FILES) {
-      copyFileSync(join(sharedModelDir, f), join(stagingModelDir, f));
-    }
+    // (b) Model files: imported directly from the shared, platform-
+    //     independent cache via a `../` relative path. Bun's bundler
+    //     happily resolves `with { type: "file" }` imports across the
+    //     staging boundary, so we don't need to copy the 33 MB model
+    //     into each per-target staging dir.
 
     // (c) bin.js + sourcemap. We bring the sourcemap along because Bun's
     //     `--sourcemap=linked` references it by sibling filename; if it
@@ -327,8 +314,11 @@ async function buildBinary() {
 
     // (d) The wrapper itself.
     wrapperPath = join(stagingDir, "wrapper.ts");
+    // Path from staging/wrapper.ts to the shared per-version model cache:
+    // .vendor-build/<target>/wrapper.ts → .vendor-build/.model-cache/<dir>/<file>.
+    const modelImportPrefix = `../.model-cache/${MODEL_DIR_NAME}`;
     const modelImports = MODEL_FILES.map(
-      (f, i) => `import _model_${i} from "./embed-model/${f}" with { type: "file" };`,
+      (f, i) => `import _model_${i} from ${JSON.stringify(`${modelImportPrefix}/${f}`)} with { type: "file" };`,
     ).join("\n");
     const modelEntries = MODEL_FILES.map(
       (f, i) => `  [${JSON.stringify(f)}, _model_${i}],`,
@@ -339,10 +329,26 @@ async function buildBinary() {
       `// as Bun assets, materialises them at process start, and hands off`,
       `// to bin.js. See the (a-d) notes in build.ts for the rationale.`,
       ``,
-      `import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";`,
+      `import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";`,
       `import { homedir } from "node:os";`,
       `import { dirname, join } from "node:path";`,
       `import { dlopen, FFIType } from "bun:ffi";`,
+      ``,
+      `// Race-safe materialisation: write to a per-pid tmp then rename.`,
+      `// renameSync is atomic on POSIX (overwrites if dest exists, but we`,
+      `// guard with existsSync first), and on Windows it errors EEXIST —`,
+      `// we drop our tmp in that case since the other process won.`,
+      `function materialize(src: string, dest: string): void {`,
+      `  if (existsSync(dest)) return;`,
+      `  const tmp = \`\${dest}.tmp.\${process.pid}\`;`,
+      `  writeFileSync(tmp, readFileSync(src));`,
+      `  try {`,
+      `    renameSync(tmp, dest);`,
+      `  } catch {`,
+      `    // Another process beat us. Drop our tmp.`,
+      `    try { unlinkSync(tmp); } catch { /* ignore */ }`,
+      `  }`,
+      `}`,
       ``,
       `import _libOnnx from "./${sideLoadRel}" with { type: "file" };`,
       modelImports,
@@ -358,12 +364,19 @@ async function buildBinary() {
       `const libDir = join(vendorRoot, "lib");`,
       `mkdirSync(libDir, { recursive: true });`,
       `const libPath = join(libDir, ${JSON.stringify(sideLoadBasename)});`,
-      `if (!existsSync(libPath)) {`,
-      `  writeFileSync(libPath, readFileSync(_libOnnx));`,
+      `materialize(_libOnnx, libPath);`,
+      `// OrtGetApiBase is exported by libonnxruntime across all`,
+      `// platforms we ship; we don't call it — the symbol entry is just`,
+      `// here because bun:ffi rejects an empty symbols set. If`,
+      `// onnxruntime ever drops/renames it (or the dylib install_name`,
+      `// doesn't match what we wrote), let fastembed's later init`,
+      `// produce the user-facing error rather than crashing here.`,
+      `try {`,
+      `  dlopen(libPath, { OrtGetApiBase: { args: [], returns: FFIType.ptr } });`,
+      `} catch {`,
+      `  // Lib loaded into address space anyway via a previous dlopen,`,
+      `  // or we'll fail downstream with a clearer diagnostic.`,
       `}`,
-      `// OrtGetApiBase is exported by libonnxruntime; we don't call it,`,
-      `// it's just here because bun:ffi rejects an empty symbols set.`,
-      `dlopen(libPath, { OrtGetApiBase: { args: [], returns: FFIType.ptr } });`,
       ``,
       `// (b) Materialise the model files. fastembed CUSTOM mode reads`,
       `// these from the dir via libc fs (through native code), so they`,
@@ -375,10 +388,7 @@ async function buildBinary() {
       modelEntries,
       `];`,
       `for (const [name, src] of modelEntries) {`,
-      `  const dest = join(modelDir, name);`,
-      `  if (!existsSync(dest)) {`,
-      `    writeFileSync(dest, readFileSync(src));`,
-      `  }`,
+      `  materialize(src, join(modelDir, name));`,
       `}`,
       ``,
       `// (c) Register for the LocalProvider.`,

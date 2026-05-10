@@ -92,9 +92,10 @@ export async function _cli(): Promise<void> {
     return;
   }
 
-  // --print-vendor-info (hidden; used by CI to verify the binary's vendor
-  // tarball was actually embedded and the wrapper ran before any other
-  // code). Lazy-import so the npm-mode bundle doesn't pay the cost.
+  // --print-vendor-info (hidden; used by CI to verify the binary's
+  // vendor wrapper ran before any other code and registered the model
+  // path on globalThis). Lazy-import so the npm-mode bundle doesn't pay
+  // the cost.
   if (values["print-vendor-info"]) {
     const { embeddingVendor } = await import("@loreai/core");
     const reg = embeddingVendor.vendorRegistration();
@@ -103,11 +104,12 @@ export async function _cli(): Promise<void> {
   }
 
   // --check-embeddings (hidden). End-to-end smoke for the embedding
-  // pipeline: extracts the vendor tarball, loads fastembed, runs one
-  // embedding through the local provider, prints `ok dim=N` or a clear
-  // failure message. Used by CI to catch regressions in the model load
-  // path that --print-vendor-info wouldn't surface (e.g. ONNX file
-  // mismatches, tokenizer file naming issues).
+  // pipeline: materialises the bundled side-load lib + model files,
+  // loads fastembed, runs one embedding through the local provider,
+  // prints `ok dim=N` or a clear failure message. Used by CI to catch
+  // regressions in the model load path that --print-vendor-info
+  // wouldn't surface (e.g. ONNX file mismatches, tokenizer file naming
+  // issues, dlopen install_name drift on macOS/Windows).
   if (values["check-embeddings"]) {
     const { embedding } = await import("@loreai/core");
     try {

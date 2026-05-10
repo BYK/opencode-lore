@@ -351,16 +351,29 @@ async function prepareStaging(target: Target): Promise<void> {
 
   // Sanity-check the side-load lib (the dynamic library
   // `onnxruntime_binding.node` dlopens at runtime, e.g.
-  // libonnxruntime.so.1). Bun's `--compile` embeds .node addons but
-  // doesn't follow their dlopen dependencies — build.ts's wrapper
-  // embeds and pre-loads this lib separately. Failing here means a
-  // silently-broken binary later.
+  // libonnxruntime.so.1 / libonnxruntime.1.21.0.dylib /
+  // onnxruntime.dll). Bun's `--compile` embeds .node addons but doesn't
+  // follow their dlopen dependencies — build.ts's wrapper embeds and
+  // pre-loads this lib separately. The hardcoded names in vendor-
+  // paths.ts ride on whatever version of onnxruntime-node `bun install`
+  // resolves to, so when a transitive bump changes the layout we want
+  // to bail at build time with the actual on-disk filenames in the
+  // error so vendor-paths.ts can be updated unambiguously.
   const sideLoadRel = sideLoadLibRelPath(target);
   const sideLoadAbs = join(stagingDir, sideLoadRel);
   if (!existsSync(sideLoadAbs)) {
+    const sideLoadDir = join(stagingDir, sideLoadRel.split("/").slice(0, -1).join("/"));
+    let dirContents: string;
+    try {
+      dirContents = readdirSync(sideLoadDir).join(", ") || "(empty)";
+    } catch {
+      dirContents = "(directory missing — onnxruntime-node bin/napi-v3 layout changed?)";
+    }
     bail(
       `[${target}] expected onnxruntime side-load lib at ${sideLoadRel} ` +
-        `but it's missing. Did onnxruntime-node change its bin/ layout?`,
+        `but it's missing.\n  Files actually in ${sideLoadDir.replace(stagingDir, ".")}: ${dirContents}\n  ` +
+        `Update sideLoadLibRelPath() in packages/gateway/script/vendor-paths.ts ` +
+        `to match the on-disk filename.`,
     );
   }
   const sideLoadMb = statSync(sideLoadAbs).size / 1024 / 1024;

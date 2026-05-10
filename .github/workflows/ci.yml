@@ -240,6 +240,82 @@ jobs:
             !packages/gateway/dist-bin/*.gz
 
   # ---------------------------------------------------------------------------
+  # Native smoke tests for non-Linux binaries.
+  #
+  # The test job above only builds and runs the linux-x64 binary. Cross-
+  # compiled darwin / windows binaries can't be exercised on a Linux
+  # runner — and dylib install_name / DLL import-name mismatches between
+  # what we hardcode in vendor-paths.ts and what onnxruntime-node 1.21
+  # actually ships will silently produce a binary that fails at runtime
+  # (the wrapper's bun:ffi.dlopen seats the lib but the addon's RPATH
+  # dlopen looks for a different name). This job catches that by
+  # building each native binary on its own runner and running
+  # `--check-embeddings` end-to-end.
+  #
+  # Only on PRs (and main pushes) — release builds are gated separately.
+  # ---------------------------------------------------------------------------
+
+  binary-smoke-native:
+    name: Binary smoke (${{ matrix.target }})
+    needs: [test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runs-on: macos-14
+            ext: ""
+          - target: darwin-x64
+            runs-on: macos-13
+            ext: ""
+          - target: windows-x64
+            runs-on: windows-latest
+            ext: ".exe"
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install
+
+      # Reuse the cache the test job populated (same key). The
+      # `.vendor-build/<target>/` tree contains platform-specific
+      # native bindings downloaded via `bun install --os=<os> --cpu=<cpu>`,
+      # which are valid regardless of the host that ran the install —
+      # cross-OS cache reuse is safe here.
+      - name: Restore vendor staging
+        id: vendor-cache
+        uses: actions/cache@v4
+        with:
+          path: .vendor-build
+          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
+
+      - name: Populate vendor staging (cache miss)
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
+        run: bun run packages/gateway/script/vendor-embeddings.ts --target ${{ matrix.target }}
+
+      - name: Build ${{ matrix.target }} binary
+        run: bun run --filter '@loreai/gateway' build:binary -- --target ${{ matrix.target }}
+
+      # End-to-end smoke. The native runner can actually execute its own
+      # binary, which is what catches dylib install_name / DLL import-
+      # name drift that the linux-x64 job can't.
+      - name: Smoke-test
+        shell: bash
+        run: |
+          BIN="./packages/gateway/dist-bin/lore-${{ matrix.target }}${{ matrix.ext }}"
+          "$BIN" --version
+          info=$("$BIN" --print-vendor-info)
+          echo "Vendor info: $info"
+          echo "$info" | jq -e '.target == "${{ matrix.target }}" and .modelAbsoluteDirPath != null and .modelName == "model_quantized.onnx"' \
+            || (echo "::error::vendor not embedded in ${{ matrix.target }} binary"; exit 1)
+          "$BIN" --check-embeddings \
+            || (echo "::error::--check-embeddings failed in ${{ matrix.target }} binary"; exit 1)
+
+  # ---------------------------------------------------------------------------
   # Nightly: build all platforms, generate patches, publish to GHCR
   # ---------------------------------------------------------------------------
 

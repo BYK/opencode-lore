@@ -290,10 +290,12 @@ class LocalProvider implements EmbeddingProvider {
         // Map config model string to EmbeddingModel enum value.
         // If the configured model matches an enum key, use it; otherwise try
         // the raw string as a model name (CUSTOM model support in fastembed).
-        // In vendored binary mode we ship the model files inside the
-        // tarball; pointing fastembed at that pre-populated dir via its
-        // CUSTOM-mode init skips the Hugging Face Hub download on first
-        // use, so the binary works fully offline. We use the Xenova INT8
+        // In vendored binary mode we ship the model files as Bun assets
+        // bundled into the binary by `bun build --compile`; the wrapper
+        // materialises them to ~/.lore/embeddings-vendored/v{ver}-{tgt}/
+        // on first run and points fastembed at that dir via its CUSTOM-
+        // mode init. Skips the Hugging Face Hub download on first use,
+        // so the binary works fully offline. We use the Xenova INT8
         // mirror (~17 MB) instead of fastembed's default Qdrant FP32
         // (~127 MB) — see vendor-embeddings.ts for rationale.
         //
