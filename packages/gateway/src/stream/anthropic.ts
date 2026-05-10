@@ -16,6 +16,7 @@ import type {
   GatewayResponse,
   GatewayUsage,
 } from "../translate/types";
+import { scaleUsageForClient } from "../compaction";
 
 // ---------------------------------------------------------------------------
 // SSE formatting
@@ -119,7 +120,13 @@ export interface StreamAccumulator {
   isDone(): boolean;
 }
 
-export function createStreamAccumulator(): StreamAccumulator {
+export function createStreamAccumulator(options?: {
+  /** When true, scale usage fields in client-facing SSE events so Claude Code's
+   *  auto-compact threshold is never reached.  Internal accumulation is unaffected. */
+  scaleClientUsage?: boolean;
+}): StreamAccumulator {
+  const shouldScale = options?.scaleClientUsage ?? false;
+
   let id = "";
   let model = "";
   let stopReason = "";
@@ -137,18 +144,68 @@ export function createStreamAccumulator(): StreamAccumulator {
   /** Track which indices have been finalized. */
   const finalized = new Set<number>();
 
-  function processEvent(eventType: string, data: string): string {
-    // Forward the event as-is regardless of processing outcome
-    const forwarded = formatSSEEvent(eventType, data);
+  /**
+   * Rewrite usage fields in a `message_start` or `message_delta` SSE event
+   * payload so the client sees scaled token counts.  Returns the modified
+   * JSON string, or `null` if no rewrite was needed.
+   */
+  function rewriteUsage(parsed: Record<string, unknown>, eventType: string): string | null {
+    if (!shouldScale) return null;
 
-    // Parse the data payload — if it's not valid JSON, just forward
+    if (eventType === "message_start") {
+      const message = parsed.message as Record<string, unknown> | undefined;
+      const msgUsage = message?.usage as Record<string, number> | undefined;
+      if (!msgUsage) return null;
+
+      const scaled = scaleUsageForClient({
+        input_tokens: msgUsage.input_tokens ?? 0,
+        output_tokens: msgUsage.output_tokens ?? 0,
+        cache_read_input_tokens: msgUsage.cache_read_input_tokens,
+        cache_creation_input_tokens: msgUsage.cache_creation_input_tokens,
+      });
+      // Only rewrite if scaling actually changed something
+      if (scaled === msgUsage) return null;
+
+      const rewritten = {
+        ...parsed,
+        message: { ...message, usage: { ...msgUsage, ...scaled } },
+      };
+      return JSON.stringify(rewritten);
+    }
+
+    if (eventType === "message_delta") {
+      const deltaUsage = parsed.usage as Record<string, number> | undefined;
+      if (!deltaUsage || typeof deltaUsage.output_tokens !== "number") return null;
+
+      // For message_delta, the usage only carries output_tokens.  We need to
+      // scale based on the *total* accumulated so far (input from message_start
+      // + output from this delta) so the proportional scaling is consistent.
+      const scaled = scaleUsageForClient({
+        input_tokens: usage.inputTokens,
+        output_tokens: deltaUsage.output_tokens,
+        cache_read_input_tokens: usage.cacheReadInputTokens,
+        cache_creation_input_tokens: usage.cacheCreationInputTokens,
+      });
+      const rewritten = {
+        ...parsed,
+        usage: { ...deltaUsage, output_tokens: scaled.output_tokens },
+      };
+      return JSON.stringify(rewritten);
+    }
+
+    return null;
+  }
+
+  function processEvent(eventType: string, data: string): string {
+    // Parse the data payload — if it's not valid JSON, just forward as-is
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(data) as Record<string, unknown>;
     } catch {
-      return forwarded;
+      return formatSSEEvent(eventType, data);
     }
 
+    // Accumulate real values internally (always unscaled)
     switch (eventType) {
       case "message_start":
         handleMessageStart(parsed);
@@ -171,7 +228,11 @@ export function createStreamAccumulator(): StreamAccumulator {
       // "ping" and unknown events — just forward
     }
 
-    return forwarded;
+    // Rewrite usage in client-facing events when scaling is active
+    const rewritten = rewriteUsage(parsed, eventType);
+    if (rewritten) return formatSSEEvent(eventType, rewritten);
+
+    return formatSSEEvent(eventType, data);
   }
 
   function handleMessageStart(parsed: Record<string, unknown>): void {
@@ -569,8 +630,10 @@ export interface RecallAwareAccumulator extends StreamAccumulator {
  */
 export function createRecallAwareAccumulator(
   recallToolName = "recall",
+  options?: { scaleClientUsage?: boolean },
 ): RecallAwareAccumulator {
-  // Delegate to the standard accumulator for actual accumulation
+  const shouldScale = options?.scaleClientUsage ?? false;
+  // Delegate to the standard accumulator for actual accumulation (never scales — internal only)
   const inner = createStreamAccumulator();
 
   /** Set of upstream block indices that are suppressed (recall). */
@@ -587,6 +650,56 @@ export function createRecallAwareAccumulator(
   let heldBack = "";
   /** Whether we've detected recall in this stream. */
   let recallDetected = false;
+
+  /** Scale usage in a parsed SSE event and return the rewritten JSON, or null if unchanged. */
+  function maybeScaleEvent(parsed: Record<string, unknown>, eventType: string): string | null {
+    if (!shouldScale) return null;
+
+    if (eventType === "message_start") {
+      const message = parsed.message as Record<string, unknown> | undefined;
+      const msgUsage = message?.usage as Record<string, number> | undefined;
+      if (!msgUsage) return null;
+      const scaled = scaleUsageForClient({
+        input_tokens: msgUsage.input_tokens ?? 0,
+        output_tokens: msgUsage.output_tokens ?? 0,
+        cache_read_input_tokens: msgUsage.cache_read_input_tokens,
+        cache_creation_input_tokens: msgUsage.cache_creation_input_tokens,
+      });
+      if (scaled === msgUsage) return null;
+      return JSON.stringify({
+        ...parsed,
+        message: { ...message, usage: { ...msgUsage, ...scaled } },
+      });
+    }
+
+    if (eventType === "message_delta") {
+      const deltaUsage = parsed.usage as Record<string, number> | undefined;
+      if (!deltaUsage || typeof deltaUsage.output_tokens !== "number") return null;
+      // Scale based on total accumulated in the inner accumulator
+      const innerResp = inner.getResponse();
+      const scaled = scaleUsageForClient({
+        input_tokens: innerResp.usage.inputTokens,
+        output_tokens: deltaUsage.output_tokens,
+        cache_read_input_tokens: innerResp.usage.cacheReadInputTokens,
+        cache_creation_input_tokens: innerResp.usage.cacheCreationInputTokens,
+      });
+      return JSON.stringify({
+        ...parsed,
+        usage: { ...deltaUsage, output_tokens: scaled.output_tokens },
+      });
+    }
+
+    return null;
+  }
+
+  /** Format an SSE event, applying usage scaling when active. */
+  function forwardEvent(eventType: string, data: string, parsed?: Record<string, unknown>): string {
+    if (parsed) {
+      const rewritten = maybeScaleEvent(parsed, eventType);
+      if (rewritten) return formatSSEEvent(eventType, rewritten);
+    }
+    return formatSSEEvent(eventType, data);
+  }
 
   function processEvent(eventType: string, data: string): string {
     // Always feed the inner accumulator (it tracks full state)
@@ -652,17 +765,18 @@ export function createRecallAwareAccumulator(
       case "message_delta":
       case "message_stop": {
         if (recallDetected) {
-          // Hold back — caller decides whether to forward or replace
-          heldBack += formatSSEEvent(eventType, data);
+          // Hold back — caller decides whether to forward or replace.
+          // Apply scaling to held-back events too (they may be forwarded later).
+          heldBack += forwardEvent(eventType, data, parsed);
           return "";
         }
         break;
       }
 
-      // message_start, ping, etc. — forward unchanged
+      // message_start, ping, etc. — forward with possible usage scaling
     }
 
-    return formatSSEEvent(eventType, data);
+    return forwardEvent(eventType, data, parsed);
   }
 
   return {

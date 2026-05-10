@@ -74,7 +74,87 @@ function estimateTokens(text: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// isCompactionRequest
+// Usage scaling — prevent client auto-compaction in hosted gateway scenarios
+// ---------------------------------------------------------------------------
+
+/**
+ * Claude Code's auto-compact threshold for a 200K context model:
+ *   effectiveContextWindow = contextWindow - min(maxOutputTokens, 20_000)
+ *   autoCompactThreshold  = effectiveContextWindow - 13_000
+ *
+ * For 200K context → 167K.  We report at most TARGET_RATIO × 167K ≈ 150K
+ * so the client's "X% until auto-compact" UI grows naturally but never
+ * triggers the compaction.
+ */
+const AUTOCOMPACT_THRESHOLD = 167_000;
+const TARGET_RATIO = 0.9;
+const MAX_REPORTED_USAGE = Math.floor(AUTOCOMPACT_THRESHOLD * TARGET_RATIO);
+
+/**
+ * Scale usage fields proportionally so the client's total
+ * (`input_tokens + cache_creation + cache_read + output_tokens`) stays
+ * below `MAX_REPORTED_USAGE`.
+ *
+ * Returns the original usage unchanged when the total is already safe.
+ * Internal Lore systems (calibrate, bustRate) must use the **real** values
+ * — only the client-facing response should carry the scaled values.
+ */
+export function scaleUsageForClient(usage: {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}): {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+} {
+  const total =
+    usage.input_tokens +
+    (usage.cache_read_input_tokens ?? 0) +
+    (usage.cache_creation_input_tokens ?? 0) +
+    usage.output_tokens;
+
+  if (total <= MAX_REPORTED_USAGE) return usage;
+
+  const scale = MAX_REPORTED_USAGE / total;
+  return {
+    input_tokens: Math.floor(usage.input_tokens * scale),
+    output_tokens: Math.floor(usage.output_tokens * scale),
+    ...(usage.cache_read_input_tokens != null
+      ? { cache_read_input_tokens: Math.floor(usage.cache_read_input_tokens * scale) }
+      : {}),
+    ...(usage.cache_creation_input_tokens != null
+      ? { cache_creation_input_tokens: Math.floor(usage.cache_creation_input_tokens * scale) }
+      : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// isStructuralCompaction — session-aware detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect compaction via structural session signals — no prompt pattern
+ * matching needed.  Works regardless of compaction prompt format changes.
+ *
+ * Signal: a known session previously had many messages (>10), but the
+ * current request has very few (≤3) — a >50 % drop.  This is the
+ * hallmark of Claude Code replacing its entire message history with a
+ * compaction summary.
+ */
+export function isStructuralCompaction(
+  req: GatewayRequest,
+  priorState?: { messageCount: number },
+): boolean {
+  if (!priorState || priorState.messageCount <= 10) return false;
+  const currCount = req.messages.length;
+  return currCount <= 3 && currCount < priorState.messageCount * 0.5;
+}
+
+// ---------------------------------------------------------------------------
+// isCompactionRequest — pattern-based detection (fallback)
 // ---------------------------------------------------------------------------
 
 /**

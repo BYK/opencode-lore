@@ -85,6 +85,9 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.error(`  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`);
     console.error(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
     console.error(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
+    console.error("");
+    console.error("[lore] When using Claude Code, also set:");
+    console.error("  export DISABLE_AUTO_COMPACT=1");
   }
   // Block until signal
   const onSignal = async () => {

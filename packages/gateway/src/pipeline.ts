@@ -59,9 +59,11 @@ import {
 } from "./session";
 import {
   isCompactionRequest,
+  isStructuralCompaction,
   isTitleOrSummaryRequest,
   extractPreviousSummary,
   buildCompactionResponse,
+  scaleUsageForClient,
 } from "./compaction";
 import {
   buildAnthropicRequest,
@@ -631,9 +633,10 @@ function buildStreamingResponse(
   },
 ): Response {
   const recallAccum = recallContext
-    ? createRecallAwareAccumulator(RECALL_TOOL_NAME)
+    ? createRecallAwareAccumulator(RECALL_TOOL_NAME, { scaleClientUsage: true })
     : null;
-  const accumulator: StreamAccumulator = recallAccum ?? createStreamAccumulator();
+  const accumulator: StreamAccumulator =
+    recallAccum ?? createStreamAccumulator({ scaleClientUsage: true });
   const encoder = new TextEncoder();
 
   // Client-disconnect detection: shared between start() and cancel()
@@ -831,7 +834,29 @@ function buildStreamingResponse(
                 }
               }
 
-              // Forward message_delta, message_stop, and other events as-is
+              // Forward message_delta, message_stop, and other events.
+              // Scale usage in message_delta to prevent client auto-compaction.
+              if (contEvent === "message_delta") {
+                try {
+                  const parsed = JSON.parse(contData) as Record<string, unknown>;
+                  const deltaUsage = parsed.usage as Record<string, number> | undefined;
+                  if (deltaUsage && typeof deltaUsage.output_tokens === "number") {
+                    const innerResp = accumulator.getResponse();
+                    const scaled = scaleUsageForClient({
+                      input_tokens: innerResp.usage.inputTokens,
+                      output_tokens: deltaUsage.output_tokens,
+                      cache_read_input_tokens: innerResp.usage.cacheReadInputTokens,
+                      cache_creation_input_tokens: innerResp.usage.cacheCreationInputTokens,
+                    });
+                    parsed.usage = { ...deltaUsage, output_tokens: scaled.output_tokens };
+                    const adjusted = formatSSEEvent(contEvent, JSON.stringify(parsed));
+                    if (!safeEnqueue(encoder.encode(adjusted))) break;
+                    continue;
+                  }
+                } catch {
+                  // Fall through to forward as-is
+                }
+              }
               const forwarded = formatSSEEvent(contEvent, contData);
               if (!safeEnqueue(encoder.encode(forwarded))) break;
             }
@@ -956,9 +981,27 @@ async function accumulateStreamResponse(
 
 /**
  * Convert a GatewayResponse to a non-streaming HTTP Response.
+ * Scales usage fields to prevent client auto-compaction.
  */
 function nonStreamHttpResponse(resp: GatewayResponse): Response {
-  const body = buildAnthropicNonStreamResponse(resp);
+  // Scale usage so the client's token total stays below auto-compact threshold.
+  // postResponse() has already consumed the real values for calibration/bustRate.
+  const scaledUsage = scaleUsageForClient({
+    input_tokens: resp.usage.inputTokens,
+    output_tokens: resp.usage.outputTokens,
+    cache_read_input_tokens: resp.usage.cacheReadInputTokens,
+    cache_creation_input_tokens: resp.usage.cacheCreationInputTokens,
+  });
+  const scaledResp: GatewayResponse = {
+    ...resp,
+    usage: {
+      inputTokens: scaledUsage.input_tokens,
+      outputTokens: scaledUsage.output_tokens,
+      cacheReadInputTokens: scaledUsage.cache_read_input_tokens,
+      cacheCreationInputTokens: scaledUsage.cache_creation_input_tokens,
+    },
+  };
+  const body = buildAnthropicNonStreamResponse(scaledResp);
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -1374,8 +1417,21 @@ async function handleConversationTurn(
     }
   }
 
+  // --- Compaction anomaly detection ---
+  // If we reach here (normal turn) with a large message count drop, the client
+  // performed compaction that slipped past both structural and pattern detection.
+  const prevMsgCount = sessionState.messageCount;
+  const currMsgCount = req.messages.length;
+  if (prevMsgCount > 10 && currMsgCount < prevMsgCount * 0.5) {
+    log.warn(
+      `compaction anomaly: session=${sessionID.slice(0, 16)} ` +
+        `messages dropped ${prevMsgCount}→${currMsgCount}. ` +
+        `Client may have compacted outside gateway control.`,
+    );
+  }
+
   // Always update message count for proximity matching
-  sessionState.messageCount = req.messages.length;
+  sessionState.messageCount = currMsgCount;
 
   // Track session model for worker model discovery
   lastSeenSessionModel = req.model;
@@ -1984,8 +2040,22 @@ export async function handleRequest(
       setLastSeenAuth(earlyAuth);
     }
 
+    // --- Quick Tier-1 session lookup for structural compaction detection ---
+    // O(1) header + map lookup — lets us compare message counts before routing.
+    let priorState: SessionState | undefined;
+    const known = extractKnownSessionHeader(req.rawHeaders);
+    if (known) {
+      const indexKey = `${known.headerName}:${known.sessionId}`;
+      const sid = headerSessionIndex.get(indexKey);
+      if (sid) priorState = sessions.get(sid);
+    }
+
     // --- Case 1: Compaction request → intercept ---
-    if (isCompactionRequest(req)) {
+    // Structural detection (session-aware) first, pattern matching as fallback.
+    if (
+      isStructuralCompaction(req, priorState) ||
+      isCompactionRequest(req)
+    ) {
       return await handleCompaction(req, config);
     }
 

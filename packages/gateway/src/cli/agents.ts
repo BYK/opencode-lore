@@ -59,7 +59,10 @@ export const AGENTS: AgentDef[] = [
     displayName: "Claude Code",
     binary: "claude",
     detect: () => which("claude"),
-    envVars: (url) => ({ ANTHROPIC_BASE_URL: url }),
+    envVars: (url) => ({
+      ANTHROPIC_BASE_URL: url,
+      DISABLE_AUTO_COMPACT: "1",
+    }),
   },
   {
     name: "codex",

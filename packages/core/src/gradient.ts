@@ -62,7 +62,7 @@ const MIN_LAYER0_FLOOR = 40_000;
  *  0 = disabled (no cap). Set via setMaxContextTokens(). */
 let maxContextTokensCeiling = 0;
 
-const MIN_CONTEXT_FLOOR = 100_000;
+const MIN_CONTEXT_FLOOR = 130_000;
 
 /** Compute the context ceiling from a per-bust cost target and cache-write price per token. */
 export function computeContextCap(
