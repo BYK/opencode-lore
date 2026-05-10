@@ -226,7 +226,15 @@ function fastembedKnownUnavailable(): boolean {
  * (its native onnxruntime-node may fail to build, e.g. on CUDA 13).
  */
 class LocalProvider implements EmbeddingProvider {
-  readonly maxBatchSize = 256;
+  // Small batch size: each fastembed `passageEmbed` call is a NAPI/ONNX
+  // synchronous inference that holds the JS thread for its full duration —
+  // a 256-doc batch pegs the event loop for tens of seconds and stalls the
+  // host's HTTP server (web UI, opencode session-connect). Keeping batches
+  // small bounds the worst-case event-loop block to ~1-2s on commodity CPU
+  // at the cost of more roundtrips through the loop. The startup-backfill
+  // loop also yields between batches, so a long backfill no longer means a
+  // long unresponsive window.
+  readonly maxBatchSize = 16;
   private model: unknown | null = null;
   private initPromise: Promise<unknown> | null = null;
   private modelName: string;
@@ -614,20 +622,58 @@ export function checkConfigChange(): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Delay before the startup backfill begins, so the host's HTTP server has
+ * a clear window to answer the first wave of requests (web UI shell load,
+ * terminal session-connect handshake) before we start pegging CPU on
+ * fastembed inference. Without this, the first user-visible action after
+ * a restart races against a thousand-document catch-up backfill.
+ */
+const STARTUP_BACKFILL_DELAY_MS = 5_000;
+
+/**
  * Run all embedding backfills and log coverage stats.
  *
  * This is the canonical entry point that every host adapter (OpenCode, Pi,
  * future ACP) should call once during init. It:
- *   1. Detects config changes (provider swap) and clears stale embeddings
- *   2. Backfills knowledge entries missing embeddings
- *   3. Backfills non-archived distillations missing embeddings
- *   4. Logs a one-line coverage summary to stderr (always visible, not gated)
+ *   1. Waits a short grace period so first-connect HTTP requests can finish
+ *   2. Detects config changes (provider swap) and clears stale embeddings
+ *   3. Backfills knowledge entries missing embeddings
+ *   4. Backfills non-archived distillations missing embeddings
+ *   5. Logs a one-line coverage summary to stderr (always visible, not gated)
  *
  * Fire-and-forget: callers should `.catch()` — embedding failures must not
  * block plugin initialization.
  */
 export async function runStartupBackfill(): Promise<void> {
   if (!isAvailable()) return;
+
+  // Surface backlog up-front so a slow startup is self-explanatory in logs.
+  // Counts use the same predicates the backfill loops use, so the two
+  // numbers always match what we're about to do.
+  const pendingKnowledge = (
+    db()
+      .query(
+        "SELECT COUNT(*) as n FROM knowledge WHERE embedding IS NULL AND confidence > 0.2",
+      )
+      .get() as { n: number }
+  ).n;
+  const pendingDistillations = (
+    db()
+      .query(
+        "SELECT COUNT(*) as n FROM distillations WHERE embedding IS NULL AND archived = 0 AND observations != ''",
+      )
+      .get() as { n: number }
+  ).n;
+
+  if (pendingKnowledge + pendingDistillations > 0) {
+    log.info(
+      `embedding backfill scheduled: ${pendingKnowledge} knowledge + ` +
+        `${pendingDistillations} distillations pending — starting in ` +
+        `${STARTUP_BACKFILL_DELAY_MS / 1000}s, batches yield between calls ` +
+        `(host stays responsive)`,
+    );
+    await new Promise<void>((r) => setTimeout(r, STARTUP_BACKFILL_DELAY_MS));
+  }
 
   const knowledgeEmbedded = await backfillEmbeddings();
   const distillationEmbedded = await backfillDistillationEmbeddings();
@@ -714,12 +760,23 @@ export async function backfillEmbeddings(): Promise<number> {
     } catch (err) {
       log.info(`embedding backfill batch ${i}-${i + batch.length} failed:`, err);
     }
+
+    // Yield to the event loop between batches. Local fastembed inference
+    // is sync NAPI work that blocks the JS thread for the full batch; this
+    // gives the host's HTTP server a chance to answer requests in between.
+    await yieldToEventLoop();
   }
 
   if (embedded > 0) {
     log.info(`embedded ${embedded} knowledge entries`);
   }
   return embedded;
+}
+
+/** Yield control to the event loop so HTTP handlers can run between
+ *  CPU-bound embedding batches. setImmediate fires after I/O callbacks. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((r) => setImmediate(r));
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +803,12 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
   const batchSize = provider.maxBatchSize;
   let embedded = 0;
 
+  // Progress logging: heartbeat every PROGRESS_INTERVAL embedded so a long
+  // backfill (e.g. 1000+ pending after a fastembed reinstall) doesn't look
+  // like a silent hang. Without this, only the final tally was logged.
+  const PROGRESS_INTERVAL = 256;
+  let nextProgressAt = PROGRESS_INTERVAL;
+
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
     const texts = batch.map((r) => r.observations);
@@ -763,6 +826,14 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
     } catch (err) {
       log.info(`distillation embedding backfill batch ${i}-${i + batch.length} failed:`, err);
     }
+
+    if (embedded >= nextProgressAt) {
+      log.info(`embedding distillations: ${embedded}/${rows.length}…`);
+      nextProgressAt = embedded + PROGRESS_INTERVAL;
+    }
+
+    // Yield to the event loop between batches — see backfillEmbeddings.
+    await yieldToEventLoop();
   }
 
   if (embedded > 0) {
