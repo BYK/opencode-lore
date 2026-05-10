@@ -30,6 +30,15 @@ const OPTIONS = {
   debug: { type: "boolean" as const, short: "d" },
   version: { type: "boolean" as const, short: "v" },
   help: { type: "boolean" as const, short: "h" },
+  // Hidden diagnostic: prints the vendored-fastembed registration set by
+  // the binary build wrapper (or "none" in npm mode). Used by CI to verify
+  // the embed-asset pipeline actually wired up. Not in help text.
+  "print-vendor-info": { type: "boolean" as const },
+  // Hidden diagnostic: actually exercises the local embedding provider
+  // (extracts vendor → loads fastembed → embeds a sample string) and
+  // prints success or the failure reason. Used by CI to catch model-load
+  // regressions that --print-vendor-info alone wouldn't surface.
+  "check-embeddings": { type: "boolean" as const },
 } as const;
 
 function parsePort(value: string): number {
@@ -80,6 +89,42 @@ export async function _cli(): Promise<void> {
   // --version / -v
   if (values.version) {
     printVersion();
+    return;
+  }
+
+  // --print-vendor-info (hidden; used by CI to verify the binary's
+  // vendor wrapper ran before any other code and registered the model
+  // path on globalThis). Lazy-import so the npm-mode bundle doesn't pay
+  // the cost.
+  if (values["print-vendor-info"]) {
+    const { embeddingVendor } = await import("@loreai/core");
+    const reg = embeddingVendor.vendorRegistration();
+    console.log(reg ? JSON.stringify(reg) : "none");
+    return;
+  }
+
+  // --check-embeddings (hidden). End-to-end smoke for the embedding
+  // pipeline: materialises the bundled side-load lib + model files,
+  // loads fastembed, runs one embedding through the local provider,
+  // prints `ok dim=N` or a clear failure message. Used by CI to catch
+  // regressions in the model load path that --print-vendor-info
+  // wouldn't surface (e.g. ONNX file mismatches, tokenizer file naming
+  // issues, dlopen install_name drift on macOS/Windows).
+  if (values["check-embeddings"]) {
+    const { embedding } = await import("@loreai/core");
+    try {
+      const [vec] = await embedding.embed(["hello world"], "query");
+      if (!vec || vec.length === 0) {
+        console.error("✗ embed returned empty vector");
+        process.exit(1);
+      }
+      console.log(`ok dim=${vec.length}`);
+    } catch (err) {
+      console.error(
+        `✗ embed failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
     return;
   }
 

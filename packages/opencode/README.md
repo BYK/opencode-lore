@@ -24,7 +24,13 @@ Restart OpenCode and the plugin will be installed automatically.
 
 ## Local embeddings (optional)
 
-Recall uses `fastembed` for on-device vector search by default. It's an `optionalDependencies` of `@loreai/core`: if its native `onnxruntime-node` postinstall fails (e.g. CUDA 13 on Linux/x64 — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)), install still succeeds and recall falls back to FTS-only. To force a local-embeddings install on such a host, set `ONNXRUNTIME_NODE_INSTALL_CUDA=skip` before installing — or configure `search.embeddings.provider` to `"voyage"` / `"openai"` in `.lore.json`.
+Recall uses `fastembed` for on-device vector search by default. It's an `optionalDependencies` of `@loreai/core`: if its native `onnxruntime-node` postinstall fails (e.g. CUDA 13 on Linux/x64 — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)), install still succeeds. Recovery options, in order of effort:
+
+1. **Set `VOYAGE_API_KEY` or `OPENAI_API_KEY`** — when fastembed can't load, recall transparently switches to that provider on the first call. Zero config.
+2. **Configure `search.embeddings.provider`** to `"voyage"` / `"openai"` in `.lore.json` to skip the local probe entirely.
+3. **Force the optional install** with `ONNXRUNTIME_NODE_INSTALL_CUDA=skip` set before `npm install` — the bundled CPU EP is sufficient for `bge-small-en-v1.5`.
+
+If none of the above are set and fastembed isn't available, recall falls back to FTS-only.
 
 ## Companion packages
 

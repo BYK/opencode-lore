@@ -1,4 +1,4 @@
-import { afterEach, describe, test, expect, beforeEach } from "bun:test";
+import { afterEach, describe, test, expect, beforeEach, mock } from "bun:test";
 import { db, ensureProject } from "../src/db";
 import {
   cosineSimilarity,
@@ -10,6 +10,7 @@ import {
   resetProvider,
   embed,
   LocalProviderUnavailableError,
+  pickRemoteFallback,
   _resetFastembedProbe,
   _markFastembedUnavailable,
 } from "../src/embedding";
@@ -111,8 +112,27 @@ describe("fastembed unavailable fallback (#185)", () => {
   // isn't installed, so the local provider's dynamic import fails. Callers
   // should see `isAvailable() === false` and never have to handle a thrown
   // error from deep inside `embed()`.
+  //
+  // These tests assert the *no-fallback* behaviour, so we explicitly strip
+  // any VOYAGE_API_KEY / OPENAI_API_KEY that happens to be in the dev env —
+  // otherwise `embed()` would auto-swap to a remote provider and the
+  // "throws LocalProviderUnavailableError" expectations would fail (with
+  // a 401 from a fake key, or a real call against a real key). The
+  // remote-fallback path is covered separately below.
+
+  let savedVoyage: string | undefined;
+  let savedOpenAI: string | undefined;
+
+  beforeEach(() => {
+    savedVoyage = process.env.VOYAGE_API_KEY;
+    savedOpenAI = process.env.OPENAI_API_KEY;
+    delete process.env.VOYAGE_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+  });
 
   afterEach(() => {
+    if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
+    if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
     // Restore real probe state for subsequent tests (the LocalProvider
     // integration suite below depends on fastembed actually loading).
     _resetFastembedProbe();
@@ -151,6 +171,165 @@ describe("fastembed unavailable fallback (#185)", () => {
 
     // Subsequent isAvailable() calls short-circuit so callers stop calling embed().
     expect(isAvailable()).toBe(false);
+  });
+});
+
+describe("auto-fallback to remote provider when fastembed is unavailable", () => {
+  // Companion to the no-fallback suite above. When fastembed can't load
+  // *and* a remote API key is present, `embed()` should auto-swap to that
+  // provider instead of throwing — and pin the swap so subsequent calls
+  // skip the local-then-fail path entirely.
+
+  let savedVoyage: string | undefined;
+  let savedOpenAI: string | undefined;
+  let savedFetch: typeof fetch;
+
+  beforeEach(() => {
+    savedVoyage = process.env.VOYAGE_API_KEY;
+    savedOpenAI = process.env.OPENAI_API_KEY;
+    delete process.env.VOYAGE_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    savedFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
+    else delete process.env.VOYAGE_API_KEY;
+    if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
+    else delete process.env.OPENAI_API_KEY;
+    globalThis.fetch = savedFetch;
+    _resetFastembedProbe();
+    resetProvider();
+  });
+
+  /** Build a fake fetch returning provider-shaped JSON. Records URLs for
+   *  assertions on which provider was hit. */
+  function fakeFetch(provider: "voyage" | "openai") {
+    const calls: string[] = [];
+    const fn = mock(async (url: string | URL | Request) => {
+      const u = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+      calls.push(u);
+      const dim = provider === "voyage" ? 1024 : 1536;
+      const embedding = Array.from({ length: dim }, (_, i) => i / dim);
+      const body =
+        provider === "voyage"
+          ? { data: [{ embedding, index: 0 }], model: "voyage-code-3", usage: { total_tokens: 1 } }
+          : { data: [{ embedding, index: 0 }], model: "text-embedding-3-small", usage: { prompt_tokens: 1, total_tokens: 1 } };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    // Cast through unknown — Mock<T> isn't structurally identical to typeof fetch
+    return { fetch: fn as unknown as typeof fetch, calls };
+  }
+
+  test("auto-falls back to Voyage when VOYAGE_API_KEY is set", async () => {
+    resetProvider();
+    _markFastembedUnavailable();
+    process.env.VOYAGE_API_KEY = "vk-test";
+    const { fetch, calls } = fakeFetch("voyage");
+    globalThis.fetch = fetch;
+
+    const [vec] = await embed(["test query"], "query");
+    expect(vec).toBeInstanceOf(Float32Array);
+    expect(vec.length).toBe(1024);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("voyageai.com");
+  });
+
+  test("auto-falls back to OpenAI when only OPENAI_API_KEY is set", async () => {
+    resetProvider();
+    _markFastembedUnavailable();
+    process.env.OPENAI_API_KEY = "sk-test";
+    const { fetch, calls } = fakeFetch("openai");
+    globalThis.fetch = fetch;
+
+    const [vec] = await embed(["test query"], "query");
+    expect(vec).toBeInstanceOf(Float32Array);
+    expect(vec.length).toBe(1536);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("openai.com");
+  });
+
+  test("Voyage wins when both keys are set", async () => {
+    resetProvider();
+    _markFastembedUnavailable();
+    process.env.VOYAGE_API_KEY = "vk-test";
+    process.env.OPENAI_API_KEY = "sk-test";
+    const { fetch, calls } = fakeFetch("voyage");
+    globalThis.fetch = fetch;
+
+    await embed(["x"], "query");
+    expect(calls[0]).toContain("voyageai.com");
+  });
+
+  test("subsequent embed() calls go directly to the swapped provider (no double fail)", async () => {
+    resetProvider();
+    _markFastembedUnavailable();
+    process.env.VOYAGE_API_KEY = "vk-test";
+    const { fetch, calls } = fakeFetch("voyage");
+    globalThis.fetch = fetch;
+
+    await embed(["one"], "query");
+    await embed(["two"], "query");
+    await embed(["three"], "query");
+
+    // Each embed call hits Voyage exactly once — no extra local-attempt round-trips.
+    expect(calls).toHaveLength(3);
+    expect(calls.every((u) => u.includes("voyageai.com"))).toBe(true);
+    // After swap, isAvailable stays true (provider is now Voyage, not LocalProvider).
+    expect(isAvailable()).toBe(true);
+  });
+
+  test("with no API keys set, embed() still throws LocalProviderUnavailableError", async () => {
+    resetProvider();
+    _markFastembedUnavailable();
+    // Neither VOYAGE_API_KEY nor OPENAI_API_KEY in env (cleared in beforeEach).
+
+    await expect(embed(["x"], "query")).rejects.toBeInstanceOf(LocalProviderUnavailableError);
+  });
+});
+
+describe("pickRemoteFallback", () => {
+  let savedVoyage: string | undefined;
+  let savedOpenAI: string | undefined;
+
+  beforeEach(() => {
+    savedVoyage = process.env.VOYAGE_API_KEY;
+    savedOpenAI = process.env.OPENAI_API_KEY;
+    delete process.env.VOYAGE_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  afterEach(() => {
+    if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
+    else delete process.env.VOYAGE_API_KEY;
+    if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
+    else delete process.env.OPENAI_API_KEY;
+  });
+
+  test("returns null when neither key is set", () => {
+    expect(pickRemoteFallback()).toBeNull();
+  });
+
+  test("returns Voyage when only VOYAGE_API_KEY is set", () => {
+    process.env.VOYAGE_API_KEY = "vk-test";
+    const result = pickRemoteFallback();
+    expect(result?.name).toBe("voyage");
+  });
+
+  test("returns OpenAI when only OPENAI_API_KEY is set", () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    const result = pickRemoteFallback();
+    expect(result?.name).toBe("openai");
+  });
+
+  test("Voyage wins when both keys are set", () => {
+    process.env.VOYAGE_API_KEY = "vk-test";
+    process.env.OPENAI_API_KEY = "sk-test";
+    const result = pickRemoteFallback();
+    expect(result?.name).toBe("voyage");
   });
 });
 

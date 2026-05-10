@@ -11,6 +11,7 @@
 import { db } from "./db";
 import { config } from "./config";
 import * as log from "./log";
+import { isVendoredBinary, vendorModelInfo } from "./embedding-vendor";
 
 /** Timeout for embedding API fetch calls (ms). Prevents a hanging API from
  *  blocking the recall tool indefinitely. 10s is generous for typical 100-500ms
@@ -184,28 +185,64 @@ export function _markFastembedUnavailable(): void {
 /**
  * Probe `fastembed` once. Returns the module on success, `null` on failure.
  * Logs an info-level note exactly once on the first failure so users know
- * how to recover (switch provider, or reinstall with the CUDA env-var).
+ * how to recover (switch provider, fix the install, or rely on the
+ * VOYAGE/OPENAI auto-fallback in `embed()`).
+ *
+ * In binary mode `import("fastembed")` resolves to the bundle Bun packed
+ * at compile time (the binary's wrapper has already preloaded the
+ * side-load `libonnxruntime` lib so the addon's dlopen succeeds). In
+ * npm mode it goes through standard module resolution and may fail if
+ * the optional postinstall didn't run.
  */
 async function tryLoadFastembed(): Promise<typeof import("fastembed") | null> {
   if (fastembedProbed) return fastembedAvailable ? fastembedModule : null;
   try {
-    fastembedModule = await import("fastembed");
+    fastembedModule = await loadFastembedModule();
     fastembedAvailable = true;
   } catch (err) {
     fastembedAvailable = false;
     if (!fastembedLogged) {
       fastembedLogged = true;
       const msg = err instanceof Error ? err.message : String(err);
+      // Binary mode: a load failure here is a real bug (everything was
+      // bundled at build time). npm mode: the optional dep didn't
+      // install — point the user at the standard recovery options.
+      const remediation = isVendoredBinary()
+        ? "this is a bug in the lore binary; please file an issue. " +
+          "Set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback in the meantime"
+        : "set search.embeddings.provider to 'voyage' or 'openai', " +
+          "set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback, " +
+          "or reinstall fastembed with ONNXRUNTIME_NODE_INSTALL_CUDA=skip";
       log.info(
-        `local embedding provider unavailable (fastembed not installed: ${msg}) — ` +
-          `set search.embeddings.provider to 'voyage' or 'openai', or reinstall with ` +
-          `ONNXRUNTIME_NODE_INSTALL_CUDA=skip to retry the optional fastembed install`,
+        `local embedding provider unavailable (fastembed not installed: ${msg}) — ${remediation}`,
       );
     }
   } finally {
     fastembedProbed = true;
   }
   return fastembedAvailable ? fastembedModule : null;
+}
+
+/**
+ * Resolve and import the fastembed module.
+ *
+ * One bare import covers both modes:
+ *
+ *   - Binary mode: `bun build --compile` resolves "fastembed" against the
+ *     per-target staging `node_modules/` at build time and bundles it
+ *     (plus its transitive deps and `.node` addons) into the binary. The
+ *     side-load `libonnxruntime.so.1` / `.dylib` / `.dll` is preloaded
+ *     by the binary's wrapper before this import evaluates, so the
+ *     bundled `onnxruntime_binding.node`'s dlopen finds the cached
+ *     handle instead of failing with "shared object not found".
+ *
+ *   - npm mode: standard Node/Bun resolution — works for `@loreai/core`
+ *     consumers whose `npm install` cleanly installed the optional dep.
+ *     If the postinstall failed (CUDA-13 hosts), the import throws here
+ *     and the caller logs + falls back to a remote provider.
+ */
+async function loadFastembedModule(): Promise<typeof import("fastembed")> {
+  return (await import("fastembed")) as typeof import("fastembed");
 }
 
 /** True iff the fastembed probe has run and reported the module missing. */
@@ -253,13 +290,37 @@ class LocalProvider implements EmbeddingProvider {
         // Map config model string to EmbeddingModel enum value.
         // If the configured model matches an enum key, use it; otherwise try
         // the raw string as a model name (CUSTOM model support in fastembed).
-        const enumValue = (EmbeddingModel as Record<string, string>)[this.modelName];
-        // fastembed's init() has overloaded signatures expecting specific enum
-        // members, but we resolve the model dynamically from config. The enum
-        // lookup guarantees a valid value at runtime; cast to satisfy the type.
-        const m = await FlagEmbedding.init({
-          model: enumValue ?? this.modelName,
-        } as { model: typeof EmbeddingModel.BGESmallENV15 });
+        // In vendored binary mode we ship the model files as Bun assets
+        // bundled into the binary by `bun build --compile`; the wrapper
+        // materialises them to ~/.lore/embeddings-vendored/v{ver}-{tgt}/
+        // on first run and points fastembed at that dir via its CUSTOM-
+        // mode init. Skips the Hugging Face Hub download on first use,
+        // so the binary works fully offline. We use the Xenova INT8
+        // mirror (~17 MB) instead of fastembed's default Qdrant FP32
+        // (~127 MB) — see vendor-embeddings.ts for rationale.
+        //
+        // Outside vendored mode we fall back to fastembed's stock model
+        // resolution (Qdrant repo + ~/.cache/fastembed download), so the
+        // npm consumers (@loreai/opencode, @loreai/pi) keep working
+        // unchanged.
+        const vendor = vendorModelInfo();
+        let m: unknown;
+        if (vendor) {
+          m = await FlagEmbedding.init({
+            model: EmbeddingModel.CUSTOM,
+            modelAbsoluteDirPath: vendor.modelAbsoluteDirPath,
+            modelName: vendor.modelName,
+          });
+        } else {
+          // fastembed's init() has overloaded signatures expecting specific
+          // enum members, but we resolve the model dynamically from config.
+          // The enum lookup guarantees a valid value at runtime; cast to
+          // satisfy the type.
+          const enumValue = (EmbeddingModel as Record<string, string>)[this.modelName];
+          m = await FlagEmbedding.init({
+            model: enumValue ?? this.modelName,
+          } as { model: typeof EmbeddingModel.BGESmallENV15 });
+        }
         this.model = m;
         return m;
       })().catch((err) => {
@@ -370,6 +431,41 @@ function getProvider(): EmbeddingProvider | null {
 /** Reset cached provider — called when config changes. */
 export function resetProvider(): void {
   cachedProvider = undefined;
+  remoteFallbackLogged = false;
+}
+
+/** True once we've logged an auto-fallback notice this process — keeps the
+ *  one-line warning from spamming on every fire-and-forget embed call. */
+let remoteFallbackLogged = false;
+
+/**
+ * Build a remote `EmbeddingProvider` from whichever API key is in env.
+ * Returns `null` when neither `VOYAGE_API_KEY` nor `OPENAI_API_KEY` is set,
+ * which is the signal for callers to fall through to FTS-only behaviour.
+ *
+ * Voyage wins ties because it's the higher-quality option for code search;
+ * users who want OpenAI specifically can pin `search.embeddings.provider`
+ * in `.lore.json` and skip the fallback path entirely.
+ */
+export function pickRemoteFallback(): {
+  name: "voyage" | "openai";
+  provider: EmbeddingProvider;
+} | null {
+  if (process.env.VOYAGE_API_KEY) {
+    const d = PROVIDER_DEFAULTS.voyage;
+    return {
+      name: "voyage",
+      provider: new VoyageProvider(process.env.VOYAGE_API_KEY, d.model, d.dimensions),
+    };
+  }
+  if (process.env.OPENAI_API_KEY) {
+    const d = PROVIDER_DEFAULTS.openai;
+    return {
+      name: "openai",
+      provider: new OpenAIProvider(process.env.OPENAI_API_KEY, d.model, d.dimensions),
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -397,10 +493,18 @@ export function isAvailable(): boolean {
 /**
  * Generate embeddings for the given texts using the configured provider.
  *
+ * If the configured provider is `local` and `fastembed` turns out to be
+ * unavailable at runtime (failed install, vendor extraction blocked, etc.),
+ * automatically swap to a remote provider when `VOYAGE_API_KEY` or
+ * `OPENAI_API_KEY` is set in env. The swap is permanent for the rest of
+ * the process — `cachedProvider` is replaced so subsequent calls skip the
+ * local-then-fail path.
+ *
  * @param texts     Array of texts to embed
  * @param inputType "document" for storage, "query" for search
  * @returns         Float32Array per input text
- * @throws          On API errors or missing provider
+ * @throws          On API errors or when no provider (local or remote) is
+ *                  available
  */
 export async function embed(
   texts: string[],
@@ -408,7 +512,26 @@ export async function embed(
 ): Promise<Float32Array[]> {
   const provider = getProvider();
   if (!provider) throw new Error("No embedding provider available");
-  return provider.embed(texts, inputType);
+
+  try {
+    return await provider.embed(texts, inputType);
+  } catch (err) {
+    if (!(err instanceof LocalProviderUnavailableError)) throw err;
+
+    const fallback = pickRemoteFallback();
+    if (!fallback) throw err;
+
+    if (!remoteFallbackLogged) {
+      remoteFallbackLogged = true;
+      log.info(
+        `fastembed unavailable; auto-switching to ${fallback.name} ` +
+          `(set search.embeddings.provider in .lore.json to silence this)`,
+      );
+    }
+
+    cachedProvider = fallback.provider;
+    return fallback.provider.embed(texts, inputType);
+  }
 }
 
 // ---------------------------------------------------------------------------

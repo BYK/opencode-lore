@@ -25,6 +25,8 @@
  */
 import * as esbuild from "esbuild";
 import {
+  copyFileSync,
+  existsSync,
   rmSync,
   mkdirSync,
   readFileSync,
@@ -32,21 +34,42 @@ import {
   renameSync,
   unlinkSync,
 } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { processBinary } from "binpunch";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
+import {
+  MODEL_DIR_NAME,
+  MODEL_FILE_NAME,
+  MODEL_FILES,
+  sideLoadLibBasename,
+  sideLoadLibRelPath,
+  type VendorTarget,
+} from "./vendor-paths";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
+const repoRoot = dirname(dirname(packageDir));
 const distDir = join(packageDir, "dist");
 
 const pkg = JSON.parse(
   readFileSync(join(packageDir, "package.json"), "utf8"),
 ) as { version: string };
+
+/** Targets we vendor fastembed for. linux-arm64 is intentionally absent —
+ *  see packages/gateway/script/vendor-paths.ts for the reason
+ *  (@anush008/tokenizers has no published native package for it). Binaries
+ *  for that target ship without an embedded fastembed and rely on the
+ *  auto-fallback to a remote provider at runtime. */
+const VENDORED_TARGETS = new Set<string>([
+  "darwin-arm64",
+  "darwin-x64",
+  "linux-x64",
+  "windows-x64",
+]);
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -58,6 +81,11 @@ const { values: flags } = parseArgs({
     binary: { type: "boolean", default: false },
     target: { type: "string" },
     release: { type: "boolean", default: false },
+    /** Skip embedding fastembed even for targets that support it.
+     *  Produces a smaller binary (~120 MB lighter) but local embeddings
+     *  won't work out-of-the-box; users must set a remote API key.
+     *  Useful for iteration speed during local dev. */
+    "no-vendor": { type: "boolean", default: false },
   },
   allowPositionals: false,
   strict: true,
@@ -95,6 +123,71 @@ function currentTarget(): CompileTarget {
   return `${os}-${arch}` as CompileTarget;
 }
 
+/**
+ * Prepare the per-target vendor staging tree (a real `node_modules/`
+ * tree on disk that Bun's bundler walks at compile time) and the shared
+ * model cache. Auto-runs `vendor-embeddings.ts` if either is missing.
+ * Returns the absolute path to the staging dir, or `null` if vendoring
+ * is disabled / unsupported for this target.
+ */
+function prepareVendorStaging(target: CompileTarget): string | null {
+  if (flags["no-vendor"]) {
+    console.log(`  Vendor: skipped (--no-vendor)`);
+    return null;
+  }
+  if (!VENDORED_TARGETS.has(target)) {
+    console.log(
+      `  Vendor: skipped (${target} unsupported by @anush008/tokenizers — ` +
+        `runtime falls back to remote provider)`,
+    );
+    return null;
+  }
+
+  const stagingDir = join(repoRoot, ".vendor-build", target);
+  const sharedModelCache = join(repoRoot, ".vendor-build", ".model-cache");
+  const sideLoadAbs = join(stagingDir, sideLoadLibRelPath(target as VendorTarget));
+  const modelDir = join(sharedModelCache, MODEL_DIR_NAME);
+
+  // Required artefacts are: target's fastembed + native bindings, the
+  // target-specific side-load lib, and every file fastembed reads from
+  // the model dir at runtime. If all are present, skip the vendor run.
+  const requiredArtifacts = [
+    join(stagingDir, "node_modules", "fastembed", "package.json"),
+    sideLoadAbs,
+    ...MODEL_FILES.map((f) => join(modelDir, f)),
+  ];
+  if (requiredArtifacts.every((p) => existsSync(p))) {
+    console.log(`  Vendor: cache hit — ${target} staging + shared model ready`);
+    return stagingDir;
+  }
+
+  // Auto-build. The vendor script is fast (~3s warm) and idempotent.
+  console.log(
+    `  Vendor: missing artefacts for ${target} — running vendor-embeddings.ts --target ${target}`,
+  );
+  const result = spawnSync(
+    "bun",
+    [
+      "run",
+      join(packageDir, "script/vendor-embeddings.ts"),
+      "--target",
+      target,
+    ],
+    { stdio: "inherit", cwd: repoRoot },
+  );
+  if (result.status !== 0) {
+    console.error(`✗ vendor-embeddings.ts failed (exit ${result.status})`);
+    process.exit(1);
+  }
+  for (const p of requiredArtifacts) {
+    if (!existsSync(p)) {
+      console.error(`✗ vendor run succeeded but artefact still missing: ${p}`);
+      process.exit(1);
+    }
+  }
+  return stagingDir;
+}
+
 async function buildBinary() {
   const target = (flags.target ?? currentTarget()) as CompileTarget;
 
@@ -106,6 +199,11 @@ async function buildBinary() {
 
   const distBinDir = join(packageDir, "dist-bin");
   mkdirSync(distBinDir, { recursive: true });
+
+  // Step 0: prepare the per-target vendor staging tree (auto-builds if
+  // missing). May return null for targets that don't support vendoring
+  // or when --no-vendor is set.
+  const stagingDir = prepareVendorStaging(target);
 
   // Step 1: esbuild bundle — single ESM file with everything inlined
   const bundlePath = join(distBinDir, "bin.js");
@@ -165,6 +263,151 @@ async function buildBinary() {
     }
   }
 
+  // Step 2.5: For vendored targets, generate a wrapper.ts inside the
+  // per-target staging dir that:
+  //
+  //   (a) Pre-loads the side-load `libonnxruntime.so.1` / .dylib / .dll
+  //       via `bun:ffi.dlopen` BEFORE fastembed evaluates, so the
+  //       bundled `onnxruntime_binding.node`'s runtime dlopen finds the
+  //       cached handle in the process's address space.
+  //   (b) Materialises the bge-small model files from Bun assets to a
+  //       stable on-disk dir (`~/.lore/embeddings-vendored/v{ver}-{tgt}/`)
+  //       — fastembed in CUSTOM mode reads them via @anush008/tokenizers
+  //       Rust code, which uses raw libc fs and can't see Bun's $bunfs.
+  //   (c) Sets `globalThis.__LORE_VENDOR_MODEL__` so the LocalProvider
+  //       knows where the model dir is.
+  //   (d) Dynamically imports bin.js so its module body runs after (a-c).
+  //
+  // The wrapper lives IN the staging dir (not dist-bin/) because Bun's
+  // bundler resolves bare specifiers like "fastembed" relative to the
+  // entry's location — putting wrapper.ts next to the staging's
+  // node_modules/ is what gets the per-target native bindings into the
+  // bundle. We also copy bin.js into the staging dir so the wrapper's
+  // `await import("./bin.js")` resolves cleanly.
+  //
+  // For unvendored targets (linux-arm64, --no-vendor), we skip the
+  // wrapper and feed bin.js straight to `bun --compile`. The runtime
+  // then sees no registration, `import("fastembed")` resolves to the
+  // bundled module (which is the host platform's, since esbuild ran on
+  // this host) — so embed() throws and auto-switches to remote provider.
+  let wrapperPath: string | null = null;
+  let copiedBinPath: string | null = null;
+  if (stagingDir) {
+    // (a) Side-load lib: keep the lib at its existing relative path
+    //     inside the staging tree so the wrapper imports it directly
+    //     from `./node_modules/...` — no copy needed.
+    const sideLoadRel = sideLoadLibRelPath(target as VendorTarget);
+    const sideLoadBasename = sideLoadLibBasename(target as VendorTarget);
+
+    // (b) Model files: imported directly from the shared, platform-
+    //     independent cache via a `../` relative path. Bun's bundler
+    //     happily resolves `with { type: "file" }` imports across the
+    //     staging boundary, so we don't need to copy the 33 MB model
+    //     into each per-target staging dir.
+
+    // (c) bin.js + sourcemap. We bring the sourcemap along because Bun's
+    //     `--sourcemap=linked` references it by sibling filename; if it
+    //     can't find bin.js.map next to bin.js the embedded map is empty.
+    copiedBinPath = join(stagingDir, "bin.js");
+    copyFileSync(bundlePath, copiedBinPath);
+    copyFileSync(mapPath, `${copiedBinPath}.map`);
+
+    // (d) The wrapper itself.
+    wrapperPath = join(stagingDir, "wrapper.ts");
+    // Path from staging/wrapper.ts to the shared per-version model cache:
+    // .vendor-build/<target>/wrapper.ts → .vendor-build/.model-cache/<dir>/<file>.
+    const modelImportPrefix = `../.model-cache/${MODEL_DIR_NAME}`;
+    const modelImports = MODEL_FILES.map(
+      (f, i) => `import _model_${i} from ${JSON.stringify(`${modelImportPrefix}/${f}`)} with { type: "file" };`,
+    ).join("\n");
+    const modelEntries = MODEL_FILES.map(
+      (f, i) => `  [${JSON.stringify(f)}, _model_${i}],`,
+    ).join("\n");
+    const wrapperSrc = [
+      `// AUTO-GENERATED by packages/gateway/script/build.ts. Do not commit.`,
+      `// Embeds the side-load onnxruntime lib and bge-small model files`,
+      `// as Bun assets, materialises them at process start, and hands off`,
+      `// to bin.js. See the (a-d) notes in build.ts for the rationale.`,
+      ``,
+      `import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";`,
+      `import { homedir } from "node:os";`,
+      `import { dirname, join } from "node:path";`,
+      `import { dlopen, FFIType } from "bun:ffi";`,
+      ``,
+      `// Race-safe materialisation: write to a per-pid tmp then rename.`,
+      `// renameSync is atomic on POSIX (overwrites if dest exists, but we`,
+      `// guard with existsSync first), and on Windows it errors EEXIST —`,
+      `// we drop our tmp in that case since the other process won.`,
+      `function materialize(src: string, dest: string): void {`,
+      `  if (existsSync(dest)) return;`,
+      `  const tmp = \`\${dest}.tmp.\${process.pid}\`;`,
+      `  writeFileSync(tmp, readFileSync(src));`,
+      `  try {`,
+      `    renameSync(tmp, dest);`,
+      `  } catch {`,
+      `    // Another process beat us. Drop our tmp.`,
+      `    try { unlinkSync(tmp); } catch { /* ignore */ }`,
+      `  }`,
+      `}`,
+      ``,
+      `import _libOnnx from "./${sideLoadRel}" with { type: "file" };`,
+      modelImports,
+      ``,
+      `const TARGET = ${JSON.stringify(target)};`,
+      `const VERSION = ${JSON.stringify(pkg.version)};`,
+      ``,
+      `// (a) Materialise the side-load lib next to the binary's per-user`,
+      `// data dir, then dlopen it to seat it in the process's address`,
+      `// space. Once cached, onnxruntime_binding.node's runtime`,
+      `// dlopen("${sideLoadBasename}") finds the same handle.`,
+      `const vendorRoot = join(homedir(), ".lore", "embeddings-vendored", \`v\${VERSION}-\${TARGET}\`);`,
+      `const libDir = join(vendorRoot, "lib");`,
+      `mkdirSync(libDir, { recursive: true });`,
+      `const libPath = join(libDir, ${JSON.stringify(sideLoadBasename)});`,
+      `materialize(_libOnnx, libPath);`,
+      `// OrtGetApiBase is exported by libonnxruntime across all`,
+      `// platforms we ship; we don't call it — the symbol entry is just`,
+      `// here because bun:ffi rejects an empty symbols set. If`,
+      `// onnxruntime ever drops/renames it (or the dylib install_name`,
+      `// doesn't match what we wrote), let fastembed's later init`,
+      `// produce the user-facing error rather than crashing here.`,
+      `try {`,
+      `  dlopen(libPath, { OrtGetApiBase: { args: [], returns: FFIType.ptr } });`,
+      `} catch {`,
+      `  // Lib loaded into address space anyway via a previous dlopen,`,
+      `  // or we'll fail downstream with a clearer diagnostic.`,
+      `}`,
+      ``,
+      `// (b) Materialise the model files. fastembed CUSTOM mode reads`,
+      `// these from the dir via libc fs (through native code), so they`,
+      `// must be at a real disk path — Bun's $bunfs only works for our`,
+      `// own JS-side fs calls.`,
+      `const modelDir = join(vendorRoot, ${JSON.stringify(MODEL_DIR_NAME)});`,
+      `mkdirSync(modelDir, { recursive: true });`,
+      `const modelEntries: Array<[string, string]> = [`,
+      modelEntries,
+      `];`,
+      `for (const [name, src] of modelEntries) {`,
+      `  materialize(src, join(modelDir, name));`,
+      `}`,
+      ``,
+      `// (c) Register for the LocalProvider.`,
+      `(globalThis as Record<string, unknown>).__LORE_VENDOR_MODEL__ = {`,
+      `  modelAbsoluteDirPath: modelDir,`,
+      `  modelName: ${JSON.stringify(MODEL_FILE_NAME)},`,
+      `  target: TARGET,`,
+      `  version: VERSION,`,
+      `};`,
+      ``,
+      `// (d) Hand off. Dynamic import so bin.js's module body evaluates`,
+      `// after the registration above (static imports get hoisted).`,
+      `await import("./bin.js");`,
+      ``,
+    ].join("\n");
+    writeFileSync(wrapperPath, wrapperSrc);
+    console.log(`✓ vendor wrapper: ${wrapperPath}`);
+  }
+
   // Step 3: bun build --compile — produce native binary
   // Rename the esbuild map out of the way before Bun.build — when using
   // sourcemap: "linked", Bun writes its own map to bin.js.map. The esbuild
@@ -179,6 +422,13 @@ async function buildBinary() {
   const binaryName = `lore-${target}${ext}`;
   const binaryPath = join(distBinDir, binaryName);
 
+  // The compile entry is the wrapper when vendoring (which lives inside
+  // the staging dir, so Bun resolves "fastembed" + transitive deps from
+  // the per-target node_modules), otherwise the esbuild bundle directly.
+  // No `--external` flags: we WANT Bun to bundle fastembed + onnxruntime
+  // -node + @anush008/tokenizers — including their .node addons — into
+  // the binary.
+  const compileEntry = wrapperPath ?? bundlePath;
   const compileCmd = [
     "bun", "build", "--compile",
     "--target", `bun-${target}`,
@@ -186,11 +436,8 @@ async function buildBinary() {
     // auto-resolves Error.stack positions through this embedded map back to
     // the esbuild output's coordinate space.
     "--sourcemap=linked",
-    "--external", "fastembed",
-    "--external", "onnxruntime-*",
-    "--external", "@anush008/*",
     "--outfile", binaryPath,
-    bundlePath,
+    compileEntry,
   ].join(" ");
 
   try {
@@ -198,12 +445,27 @@ async function buildBinary() {
   } catch {
     // Restore the esbuild map even on failure
     renameSync(esbuildMapBackup, mapPath);
+    // Wrapper + copied bin.js stay in the staging dir — they're cheap
+    // to recreate on the next attempt and helpful for debugging the
+    // failure. The staging dir itself is gitignored.
     console.error("Bun compile failed");
     process.exit(1);
   }
 
   // Restore the esbuild sourcemap (Bun.build wrote its own map)
   renameSync(esbuildMapBackup, mapPath);
+
+  // Bun --compile of wrapper.ts also produces wrapper.js.map (its own
+  // external map; same data as the embedded map, named after the entry).
+  // We don't want to upload it to Sentry — it has no debug ID matching our
+  // app code, just noise in the project's release. Delete it.
+  if (wrapperPath) {
+    try {
+      unlinkSync(`${wrapperPath.replace(/\.ts$/, ".js")}.map`);
+    } catch {
+      /* not all Bun versions emit this — ignore if missing */
+    }
+  }
 
   console.log(`✓ Bun compile: ${binaryPath}`);
 
@@ -256,12 +518,22 @@ async function buildBinary() {
     console.log("  No SENTRY_AUTH_TOKEN — skipping sourcemap upload");
   }
 
-  // Clean up intermediate files (only the binary is the artifact)
+  // Clean up intermediate files (only the binary is the artifact). The
+  // staging dir itself stays in `.vendor-build/<target>/` because
+  // re-running compile will reuse the per-target node_modules and the
+  // model cache; deleting it would force a re-install on the next run.
+  // We do delete the per-build copies of bin.js and wrapper.ts inside
+  // the staging dir though — they're regenerated every run.
   try {
     unlinkSync(bundlePath);
     if (uploaded) {
       unlinkSync(mapPath);
       console.log("✓ Sourcemap deleted (uploaded to Sentry)");
+    }
+    if (wrapperPath) unlinkSync(wrapperPath);
+    if (copiedBinPath) {
+      unlinkSync(copiedBinPath);
+      try { unlinkSync(`${copiedBinPath}.map`); } catch { /* ignore */ }
     }
   } catch {
     // Ignore

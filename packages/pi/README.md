@@ -20,21 +20,28 @@ Then run `pi install` once. The extension auto-loads on every Pi session.
 
 ## Local embeddings (optional)
 
-By default, recall uses `fastembed` (bge-small-en-v1.5, ~33MB) for on-device vector search — no API key required. `fastembed` ships native bindings via `onnxruntime-node`, which has known install issues on some configurations (e.g. CUDA 13 on Linux/x64 — see [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)). It's declared as an `optionalDependencies` of `@loreai/core`, so install will succeed regardless: if `fastembed` doesn't build, recall transparently falls back to FTS-only search.
+By default, recall uses `fastembed` (bge-small-en-v1.5, ~33MB) for on-device vector search — no API key required. `fastembed` ships native bindings via `onnxruntime-node`, which has known install issues on some configurations (e.g. CUDA 13 on Linux/x64 — see [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)). It's declared as an `optionalDependencies` of `@loreai/core`, so install will succeed regardless.
 
-If you want local embeddings on a system where `fastembed`'s postinstall fails, skip the CUDA EP download — the bundled CPU EP is sufficient for `bge-small-en-v1.5`:
+When fastembed isn't usable, recall has graceful fallbacks (cheapest first):
 
-```bash
-ONNXRUNTIME_NODE_INSTALL_CUDA=skip pi install
-```
+1. **Auto-fallback to a hosted provider** — set `VOYAGE_API_KEY` or `OPENAI_API_KEY` in your env. The first `embed()` call detects the missing local provider and swaps over for the rest of the process. No config changes needed.
+2. **Force the local install** — skip the CUDA EP download (the CPU EP is sufficient for `bge-small-en-v1.5`):
 
-Or configure a hosted provider in `.lore.json`:
+   ```bash
+   ONNXRUNTIME_NODE_INSTALL_CUDA=skip pi install
+   ```
 
-```json
-{ "search": { "embeddings": { "provider": "voyage" } } }
-```
+3. **Pin a hosted provider explicitly** in `.lore.json`:
 
-(also supports `"openai"`; reads `VOYAGE_API_KEY` / `OPENAI_API_KEY` from env).
+   ```json
+   { "search": { "embeddings": { "provider": "voyage" } } }
+   ```
+
+   (also supports `"openai"`; reads `VOYAGE_API_KEY` / `OPENAI_API_KEY` from env).
+
+If none apply, recall transparently falls back to FTS-only search.
+
+> Note: `@anush008/tokenizers` (a fastembed dep) has no native package for `linux-arm64`, so local embeddings are unsupported on that platform regardless of the install path. Use the auto-fallback or pin a hosted provider.
 
 ## Companion packages
 
