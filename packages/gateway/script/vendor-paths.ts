@@ -13,16 +13,17 @@
  */
 
 /** Targets we vendor fastembed for.
- *  - `linux-arm64` absent: `@anush008/tokenizers` has no native pkg.
  *  - `darwin-x64` absent: Apple Silicon-only macOS support (Intel Macs
  *    aren't worth the build/test surface). */
 export type VendorTarget =
   | "darwin-arm64"
+  | "linux-arm64"
   | "linux-x64"
   | "windows-x64";
 
 export const VENDOR_TARGETS: VendorTarget[] = [
   "darwin-arm64",
+  "linux-arm64",
   "linux-x64",
   "windows-x64",
 ];
@@ -75,6 +76,8 @@ export const MODEL_FILES = [
 export function sideLoadLibRelPath(target: VendorTarget): string {
   const base = "node_modules/onnxruntime-node/bin/napi-v3";
   switch (target) {
+    case "linux-arm64":
+      return `${base}/linux/arm64/libonnxruntime.so.1`;
     case "linux-x64":
       return `${base}/linux/x64/libonnxruntime.so.1`;
     case "darwin-arm64":

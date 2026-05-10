@@ -25,17 +25,17 @@
  * resolves to a per-target subpackage which Bun selects via the override
  * flags.
  *
- * **linux-arm64 is unsupported by fastembed.** `@anush008/tokenizers` only
- * ships native packages for `linux-x64-gnu`, `darwin-universal`, and
- * `win32-x64-msvc`. linux-arm64 builds therefore ship without embedded
- * fastembed; users on that platform fall through to the remote-provider
- * auto-fallback (or FTS-only if no API key).
+ * **`@anush008/tokenizers` override.** fastembed 2.1.0 pins tokenizers to
+ * `^0.0.0` (= exactly `0.0.0`), but linux-arm64 prebuilds only landed in
+ * v0.5.0.  The fastembed-js repo is archived, so we override via the
+ * staging package.json.  fastembed only uses `Tokenizer.fromFile()` and
+ * `new AddedToken()` — stable NAPI exports across versions.
  *
  * Usage:
  *   bun run packages/gateway/script/vendor-embeddings.ts --target <target>
  *
- *   --target  One of: darwin-arm64, linux-x64, windows-x64.
- *             Defaults to the current host. linux-arm64 is rejected.
+ *   --target  One of: darwin-arm64, linux-arm64, linux-x64, windows-x64.
+ *             Defaults to the current host.
  *   --all     Prepare staging for all supported targets (ignores --target).
  */
 
@@ -68,11 +68,6 @@ const repoRoot = dirname(dirname(packageDir));
 // CLI
 // ---------------------------------------------------------------------------
 
-/** Targets fastembed can be vendored for. linux-arm64 is excluded —
- *  `@anush008/tokenizers` doesn't publish a native package for that platform
- *  (only linux-x64-gnu, darwin-universal, win32-x64-msvc), so a tarball
- *  produced for it would be missing the tokenizer .node and would fail
- *  at runtime. linux-arm64 binaries ship without an embedded tarball. */
 /** Set of targets we support. Aliased for backwards-compat with the
  *  previous local `SUPPORTED_TARGETS` export name. */
 const SUPPORTED_TARGETS = VENDOR_TARGETS;
@@ -117,13 +112,6 @@ function currentTarget(): string {
 const requestedTargets: Target[] = (() => {
   if (flags.all) return [...SUPPORTED_TARGETS];
   const t = flags.target ?? currentTarget();
-  if (t === "linux-arm64") {
-    bail(
-      `target "linux-arm64" is unsupported — @anush008/tokenizers does not ` +
-        `publish a native package for it. linux-arm64 binaries ship without ` +
-        `embedded fastembed and rely on remote-provider fallback at runtime.`,
-    );
-  }
   if (!SUPPORTED_TARGETS.includes(t as Target)) {
     bail(
       `invalid target "${t}". Valid: ${SUPPORTED_TARGETS.join(", ")} (or pass --all).`,
@@ -286,6 +274,12 @@ async function prepareStaging(target: Target): Promise<void> {
         version: "0.0.0",
         private: true,
         dependencies: { fastembed: fastembedVersion },
+        // fastembed 2.1.0 pins @anush008/tokenizers to ^0.0.0 (= exactly
+        // 0.0.0), but linux-arm64 prebuilds only landed in 0.5.0+.  The
+        // fastembed-js repo is archived with no new release expected, so we
+        // override globally. fastembed only uses Tokenizer.fromFile() and
+        // new AddedToken() — stable NAPI exports across versions.
+        overrides: { "@anush008/tokenizers": "0.6.0" },
       },
       null,
       2,
