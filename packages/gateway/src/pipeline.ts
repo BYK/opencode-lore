@@ -53,6 +53,9 @@ import {
   generateSessionID,
   fingerprintMessages,
   MESSAGE_COUNT_PROXIMITY_THRESHOLD,
+  extractKnownSessionHeader,
+  extractParentSessionId,
+  learnHeaders,
 } from "./session";
 import {
   isCompactionRequest,
@@ -180,6 +183,15 @@ let cachedProjectPath: string | null = null;
 
 /** Per-session state tracked across requests. */
 const sessions = new Map<string, SessionState>();
+
+/**
+ * Reverse lookup: maps header-based session ID values to internal session IDs.
+ * Key: `headerName:headerValue` (e.g. `x-claude-code-session-id:uuid-1234`).
+ * Value: internal session ID (the key in `sessions`).
+ *
+ * Populated for both Tier 1 (known headers) and Tier 2 (learned headers).
+ */
+const headerSessionIndex = new Map<string, string>();
 
 /**
  * Per-session LTM cache for byte-stability.
@@ -390,24 +402,71 @@ function getOrCreateSession(
 }
 
 /**
- * Identify or create a session from the incoming request messages.
+ * Identify or create a session from the incoming request.
  *
- * Uses a fingerprint of the first user message combined with
- * message-count proximity to correlate requests to sessions.
- * Forked sessions (which share the same first message) are
- * disambiguated by a significant drop in message count.
+ * Uses a 3-tier strategy:
+ *  1. **Known headers** — `x-claude-code-session-id`, `x-session-affinity`,
+ *     `x-parent-session-id`. Immediate match, survives compaction & model changes.
+ *  2. **Learned headers** — `x-` headers discovered via fingerprint-bootstrapped
+ *     learning. Promoted after 3 stable turns + cross-session uniqueness.
+ *  3. **Fingerprint fallback** — SHA-256 of first user message + auth suffix
+ *     (no model). Message-count proximity for fork disambiguation.
+ *
+ * Priority: Tier 1 > Tier 2 > Tier 3.
  */
 async function identifySession(
   req: GatewayRequest,
   _projectPath: string,
-): Promise<{ sessionID: string; isNew: boolean }> {
+): Promise<{ sessionID: string; isNew: boolean; tier: 1 | 2 | 3 }> {
+  const headers = req.rawHeaders;
+
+  // --- Tier 1: Known headers ---
+
+  // Check for parent session header first (sub-agent → parent merge).
+  const parentId = extractParentSessionId(headers);
+  if (parentId) {
+    // Look up the parent session by its header value across all known headers.
+    for (const [indexKey, sid] of headerSessionIndex) {
+      if (indexKey.endsWith(`:${parentId}`)) {
+        return { sessionID: sid, isNew: false, tier: 1 };
+      }
+    }
+    // Parent not found — fall through to check if this request also carries
+    // its own session header (some clients send both).
+  }
+
+  const known = extractKnownSessionHeader(headers);
+  if (known) {
+    const indexKey = `${known.headerName}:${known.sessionId}`;
+    const existingSid = headerSessionIndex.get(indexKey);
+    if (existingSid && sessions.has(existingSid)) {
+      return { sessionID: existingSid, isNew: false, tier: 1 };
+    }
+
+    // New session with a known header — create and index it.
+    const sessionID = generateSessionID();
+    headerSessionIndex.set(indexKey, sessionID);
+    return { sessionID, isNew: true, tier: 1 };
+  }
+
+  // --- Tier 2: Learned headers ---
+  // Check if any existing session has a promoted header that matches
+  // a header value in the current request.
+  for (const [sid, state] of sessions) {
+    if (!state.headerSessionId || !state.headerName) continue;
+    const currentValue = headers[state.headerName];
+    if (currentValue && currentValue === state.headerSessionId) {
+      return { sessionID: sid, isNew: false, tier: 2 };
+    }
+  }
+
+  // --- Tier 3: Fingerprint fallback ---
   const rawMessages = req.messages.map((m) => ({
     role: m.role,
     content: m.content,
   }));
   const cred = extractAuth(req.rawHeaders);
   const fingerprint = await fingerprintMessages(rawMessages, {
-    model: req.model,
     authSuffix: cred ? authFingerprint(cred) : "",
   });
   const msgCount = req.messages.length;
@@ -432,12 +491,28 @@ async function identifySession(
   }
 
   if (bestMatch) {
-    return { sessionID: bestMatch.sid, isNew: false };
+    // Run header learning on the matched session (Tier 2 bootstrap).
+    const state = sessions.get(bestMatch.sid);
+    if (state && !state.headerSessionId) {
+      const result = learnHeaders(state.candidateHeaders, headers);
+      state.candidateHeaders = result.updatedCandidates;
+      if (result.promoted) {
+        state.headerSessionId = result.promoted.value;
+        state.headerName = result.promoted.name;
+        // Index the promoted header for future Tier 2 lookups.
+        const indexKey = `${result.promoted.name}:${result.promoted.value}`;
+        headerSessionIndex.set(indexKey, bestMatch.sid);
+        log.info(
+          `session ${bestMatch.sid.slice(0, 16)}: promoted header ${result.promoted.name} for Tier 2 identification`,
+        );
+      }
+    }
+    return { sessionID: bestMatch.sid, isNew: false, tier: 3 };
   }
 
-  // No matching session → create new
+  // No matching session → create new.
   const sessionID = generateSessionID();
-  return { sessionID, isNew: true };
+  return { sessionID, isNew: true, tier: 3 };
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,7 +1339,7 @@ async function handleConversationTurn(
   }
 
   // --- 3. Session identification ---
-  const { sessionID, isNew } = await identifySession(req, projectPath);
+  const { sessionID, isNew, tier } = await identifySession(req, projectPath);
   const sessionState = getOrCreateSession(sessionID, projectPath);
 
   // Bind auth credential to this session for background workers
@@ -1284,11 +1359,19 @@ async function handleConversationTurn(
     const fingerprint = await fingerprintMessages(
       req.messages.map((m) => ({ role: m.role, content: m.content })),
       {
-        model: req.model,
         authSuffix: cred ? authFingerprint(cred) : "",
       },
     );
     sessionState.fingerprint = fingerprint;
+
+    // Seed header learning for new sessions (Tier 2 bootstrap).
+    // Even Tier 1 sessions don't need this, but it's harmless and
+    // avoids branching. For Tier 3 (fingerprinted) new sessions,
+    // this seeds the first round of candidate collection.
+    if (!sessionState.headerSessionId) {
+      const result = learnHeaders(sessionState.candidateHeaders, req.rawHeaders);
+      sessionState.candidateHeaders = result.updatedCandidates;
+    }
   }
 
   // Always update message count for proximity matching
@@ -1323,7 +1406,7 @@ async function handleConversationTurn(
 
   log.info(
     `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
-      `model=${req.model} stream=${req.stream} new=${isNew}`,
+      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier}`,
   );
 
   // --- 4. Set model limits ---

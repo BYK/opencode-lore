@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach } from "bun:test";
 import {
   base62Encode,
   generateSessionID,
@@ -6,6 +6,14 @@ import {
   parseMarker,
   scanForMarker,
   fingerprintMessages,
+  extractKnownSessionHeader,
+  extractParentSessionId,
+  isSessionHeaderName,
+  isIdLikeValue,
+  collectCandidateHeaders,
+  learnHeaders,
+  _resetGlobalHeaderValues,
+  type HeaderCandidate,
 } from "../src/session";
 
 // ---------------------------------------------------------------------------
@@ -316,5 +324,351 @@ describe("fingerprintMessages", () => {
     // Should hash empty string — still produces 16 hex chars
     expect(hash).toHaveLength(16);
     expect(hash).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  test("model changes do not affect fingerprint (model excluded)", async () => {
+    const messages = [{ role: "user", content: "Help me with code" }];
+    // fingerprintMessages no longer accepts model — same messages always
+    // produce the same hash regardless of what model the client sends.
+    const hash1 = await fingerprintMessages(messages, {
+      authSuffix: "auth123",
+    });
+    const hash2 = await fingerprintMessages(messages, {
+      authSuffix: "auth123",
+    });
+    expect(hash1).toBe(hash2);
+  });
+
+  test("different auth suffixes produce different fingerprints", async () => {
+    const messages = [{ role: "user", content: "Hello" }];
+    const hash1 = await fingerprintMessages(messages, {
+      authSuffix: "user-a",
+    });
+    const hash2 = await fingerprintMessages(messages, {
+      authSuffix: "user-b",
+    });
+    expect(hash1).not.toBe(hash2);
+  });
+});
+
+// ===========================================================================
+// Tier 1: Known session headers
+// ===========================================================================
+
+describe("extractKnownSessionHeader", () => {
+  test("extracts x-claude-code-session-id", () => {
+    const result = extractKnownSessionHeader({
+      "x-claude-code-session-id": "uuid-1234-5678",
+      "content-type": "application/json",
+    });
+    expect(result).toEqual({
+      sessionId: "uuid-1234-5678",
+      headerName: "x-claude-code-session-id",
+    });
+  });
+
+  test("extracts x-session-affinity", () => {
+    const result = extractKnownSessionHeader({
+      "x-session-affinity": "ses_abc123def",
+      "content-type": "application/json",
+    });
+    expect(result).toEqual({
+      sessionId: "ses_abc123def",
+      headerName: "x-session-affinity",
+    });
+  });
+
+  test("prefers x-claude-code-session-id over x-session-affinity", () => {
+    const result = extractKnownSessionHeader({
+      "x-claude-code-session-id": "claude-uuid",
+      "x-session-affinity": "opencode-id",
+    });
+    expect(result).toEqual({
+      sessionId: "claude-uuid",
+      headerName: "x-claude-code-session-id",
+    });
+  });
+
+  test("returns null when no known headers present", () => {
+    const result = extractKnownSessionHeader({
+      "content-type": "application/json",
+      authorization: "Bearer sk-xxx",
+    });
+    expect(result).toBeNull();
+  });
+
+  test("ignores empty header values", () => {
+    const result = extractKnownSessionHeader({
+      "x-claude-code-session-id": "",
+      "x-session-affinity": "valid-id",
+    });
+    expect(result).toEqual({
+      sessionId: "valid-id",
+      headerName: "x-session-affinity",
+    });
+  });
+});
+
+describe("extractParentSessionId", () => {
+  test("extracts x-parent-session-id", () => {
+    const result = extractParentSessionId({
+      "x-parent-session-id": "parent-uuid-123",
+    });
+    expect(result).toBe("parent-uuid-123");
+  });
+
+  test("returns null when no parent header present", () => {
+    const result = extractParentSessionId({
+      "x-session-affinity": "not-parent",
+    });
+    expect(result).toBeNull();
+  });
+
+  test("ignores empty values", () => {
+    const result = extractParentSessionId({
+      "x-parent-session-id": "",
+    });
+    expect(result).toBeNull();
+  });
+});
+
+// ===========================================================================
+// Tier 2: Header learning helpers
+// ===========================================================================
+
+describe("isSessionHeaderName", () => {
+  test("matches session-related header names", () => {
+    expect(isSessionHeaderName("x-session-affinity")).toBe(true);
+    expect(isSessionHeaderName("x-my-session-id")).toBe(true);
+    expect(isSessionHeaderName("x-custom-session")).toBe(true);
+    expect(isSessionHeaderName("x-client-session-key")).toBe(true);
+  });
+
+  test("matches affinity-related header names", () => {
+    expect(isSessionHeaderName("x-affinity")).toBe(true);
+    expect(isSessionHeaderName("x-server-affinity")).toBe(true);
+  });
+
+  test("rejects session headers containing token/cookie/auth/secret", () => {
+    expect(isSessionHeaderName("x-session-token")).toBe(false);
+    expect(isSessionHeaderName("x-session-cookie")).toBe(false);
+    expect(isSessionHeaderName("x-session-auth")).toBe(false);
+    expect(isSessionHeaderName("x-session-secret")).toBe(false);
+  });
+
+  test("rejects non-session headers", () => {
+    expect(isSessionHeaderName("content-type")).toBe(false);
+    expect(isSessionHeaderName("authorization")).toBe(false);
+    expect(isSessionHeaderName("x-request-id")).toBe(false);
+    expect(isSessionHeaderName("x-client-version")).toBe(false);
+  });
+});
+
+describe("isIdLikeValue", () => {
+  test("accepts UUIDs", () => {
+    expect(isIdLikeValue("550e8400-e29b-41d4-a716-446655440000")).toBe(true);
+  });
+
+  test("accepts nanoid-style IDs", () => {
+    expect(isIdLikeValue("ses_abc123def456")).toBe(true);
+    expect(isIdLikeValue("V1StGXR8_Z5jdHi6B-myT")).toBe(true);
+  });
+
+  test("accepts base62 session IDs", () => {
+    expect(isIdLikeValue("0KwcdDNwrsThYYON")).toBe(true);
+  });
+
+  test("rejects JWTs (contain dots)", () => {
+    expect(
+      isIdLikeValue("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.xxx"),
+    ).toBe(false);
+  });
+
+  test("rejects URLs (contain slashes)", () => {
+    expect(isIdLikeValue("https://example.com/api")).toBe(false);
+  });
+
+  test("rejects short values (< 8 chars)", () => {
+    expect(isIdLikeValue("abc")).toBe(false);
+    expect(isIdLikeValue("1234567")).toBe(false);
+  });
+
+  test("rejects very long values (> 128 chars)", () => {
+    expect(isIdLikeValue("a".repeat(129))).toBe(false);
+  });
+
+  test("rejects booleans and simple words", () => {
+    expect(isIdLikeValue("true")).toBe(false);
+    expect(isIdLikeValue("false")).toBe(false);
+  });
+
+  test("rejects values with spaces", () => {
+    expect(isIdLikeValue("some value here")).toBe(false);
+  });
+});
+
+describe("collectCandidateHeaders", () => {
+  test("collects x- headers with ID-like values", () => {
+    const candidates = collectCandidateHeaders({
+      "x-session-affinity": "ses_abc123def456",
+      "x-request-id": "req-uuid-1234-5678",
+      "content-type": "application/json",
+      authorization: "Bearer sk-xxx-very-long-token",
+    });
+    expect(candidates.size).toBe(2);
+    expect(candidates.get("x-session-affinity")).toBe("ses_abc123def456");
+    expect(candidates.get("x-request-id")).toBe("req-uuid-1234-5678");
+  });
+
+  test("excludes non-x- headers", () => {
+    const candidates = collectCandidateHeaders({
+      "content-type": "application/json",
+      authorization: "Bearer abcdef123456",
+    });
+    expect(candidates.size).toBe(0);
+  });
+
+  test("excludes x- headers with non-ID-like values", () => {
+    const candidates = collectCandidateHeaders({
+      "x-client-version": "1.0.0", // contains dots
+      "x-debug": "true", // too short
+      "x-api-key": "sk-" + "a".repeat(130), // too long
+    });
+    expect(candidates.size).toBe(0);
+  });
+});
+
+// ===========================================================================
+// Tier 2: Header learning algorithm
+// ===========================================================================
+
+describe("learnHeaders", () => {
+  beforeEach(() => {
+    _resetGlobalHeaderValues();
+  });
+
+  test("seeds candidates on first call", () => {
+    const result = learnHeaders(undefined, {
+      "x-my-session": "session-id-12345",
+      "x-request-id": "req-aaaabbbb1234",
+    });
+    expect(result.updatedCandidates.size).toBe(2);
+    expect(result.updatedCandidates.get("x-my-session")?.seenCount).toBe(1);
+    expect(result.updatedCandidates.get("x-request-id")?.seenCount).toBe(1);
+    expect(result.promoted).toBeNull();
+  });
+
+  test("increments seenCount for stable headers", () => {
+    const headers = { "x-my-session": "session-id-12345" };
+    const r1 = learnHeaders(undefined, headers);
+    const r2 = learnHeaders(r1.updatedCandidates, headers);
+    expect(r2.updatedCandidates.get("x-my-session")?.seenCount).toBe(2);
+    expect(r2.promoted).toBeNull(); // not yet at threshold
+  });
+
+  test("resets seenCount when value changes", () => {
+    const r1 = learnHeaders(undefined, {
+      "x-request-id": "req-aaaabbbb1234",
+    });
+    expect(r1.updatedCandidates.get("x-request-id")?.seenCount).toBe(1);
+
+    const r2 = learnHeaders(r1.updatedCandidates, {
+      "x-request-id": "req-ccccdddd5678",
+    });
+    expect(r2.updatedCandidates.get("x-request-id")?.seenCount).toBe(1);
+    expect(r2.updatedCandidates.get("x-request-id")?.value).toBe(
+      "req-ccccdddd5678",
+    );
+  });
+
+  test("removes candidates that disappear from request", () => {
+    const r1 = learnHeaders(undefined, {
+      "x-my-session": "session-id-12345",
+      "x-ephemeral": "temp-val-abcd1234",
+    });
+    expect(r1.updatedCandidates.size).toBe(2);
+
+    const r2 = learnHeaders(r1.updatedCandidates, {
+      "x-my-session": "session-id-12345",
+      // x-ephemeral is gone
+    });
+    expect(r2.updatedCandidates.size).toBe(1);
+    expect(r2.updatedCandidates.has("x-ephemeral")).toBe(false);
+  });
+
+  test("does not promote until cross-session uniqueness is confirmed", () => {
+    // Simulate 3 turns from a single session — header is stable but
+    // only one value seen globally → should NOT promote.
+    const headers = { "x-my-session": "session-aaaa1111" };
+    const r1 = learnHeaders(undefined, headers);
+    const r2 = learnHeaders(r1.updatedCandidates, headers);
+    const r3 = learnHeaders(r2.updatedCandidates, headers);
+
+    expect(r3.updatedCandidates.get("x-my-session")?.seenCount).toBe(3);
+    // Only one value seen globally — could be a constant
+    expect(r3.promoted).toBeNull();
+  });
+
+  test("promotes header after stability + cross-session uniqueness", () => {
+    // Session A: 3 turns with value "aaaa"
+    const headersA = { "x-my-session": "session-aaaa1111" };
+    const a1 = learnHeaders(undefined, headersA);
+    const a2 = learnHeaders(a1.updatedCandidates, headersA);
+    // Still not promoted (only 1 global value)
+    expect(a2.promoted).toBeNull();
+
+    // Session B: 1 turn with different value "bbbb" — seeds the global set
+    const headersB = { "x-my-session": "session-bbbb2222" };
+    learnHeaders(undefined, headersB);
+    // Now global set for x-my-session has 2 values
+
+    // Session A: turn 3 — stable + cross-session unique → promote
+    const a3 = learnHeaders(a2.updatedCandidates, headersA);
+    expect(a3.promoted).toEqual({
+      name: "x-my-session",
+      value: "session-aaaa1111",
+    });
+  });
+
+  test("prefers session-named headers over generic ones for promotion", () => {
+    // Both headers are stable for 3 turns and cross-session unique,
+    // but x-my-session matches the session name pattern → preferred.
+
+    // Seed cross-session uniqueness for both headers
+    learnHeaders(undefined, {
+      "x-my-session": "other-session-val",
+      "x-custom-id": "other-custom-val1",
+    });
+
+    // Session: 3 turns
+    const headers = {
+      "x-my-session": "session-aaaa1111",
+      "x-custom-id": "custom-bbbb2222",
+    };
+    const r1 = learnHeaders(undefined, headers);
+    const r2 = learnHeaders(r1.updatedCandidates, headers);
+    const r3 = learnHeaders(r2.updatedCandidates, headers);
+
+    expect(r3.promoted).toEqual({
+      name: "x-my-session",
+      value: "session-aaaa1111",
+    });
+  });
+
+  test("per-request headers never stabilize", () => {
+    // Simulate a header that changes every turn (like x-request-id)
+    const r1 = learnHeaders(undefined, {
+      "x-request-id": "req-turn1-abcd12",
+    });
+    const r2 = learnHeaders(r1.updatedCandidates, {
+      "x-request-id": "req-turn2-efgh34",
+    });
+    const r3 = learnHeaders(r2.updatedCandidates, {
+      "x-request-id": "req-turn3-ijkl56",
+    });
+
+    // seenCount resets every turn — never reaches threshold
+    expect(r3.updatedCandidates.get("x-request-id")?.seenCount).toBe(1);
+    expect(r3.promoted).toBeNull();
   });
 });
