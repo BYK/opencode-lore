@@ -3,8 +3,12 @@ import {
   signBody,
   captureBillingPrefix,
   buildBillingBlock,
+  deleteBillingPrefix,
   _resetForTest,
 } from "../src/cch";
+
+const SID_A = "sess-a";
+const SID_B = "sess-b";
 
 beforeEach(() => {
   _resetForTest();
@@ -29,7 +33,6 @@ describe("signBody", () => {
 
     const signed = signBody(body);
     expect(signed).not.toContain("cch=00000");
-    // cch= followed by exactly 5 hex chars and a semicolon
     expect(signed).toMatch(/cch=[0-9a-f]{5};/);
   });
 
@@ -37,11 +40,8 @@ describe("signBody", () => {
     const body1 = '{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":"hello"}]}';
     const body2 = '{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":"world"}]}';
 
-    const signed1 = signBody(body1);
-    const signed2 = signBody(body2);
-
-    const cch1 = signed1.match(/cch=([0-9a-f]{5})/)?.[1];
-    const cch2 = signed2.match(/cch=([0-9a-f]{5})/)?.[1];
+    const cch1 = signBody(body1).match(/cch=([0-9a-f]{5})/)?.[1];
+    const cch2 = signBody(body2).match(/cch=([0-9a-f]{5})/)?.[1];
 
     expect(cch1).toBeDefined();
     expect(cch2).toBeDefined();
@@ -54,11 +54,9 @@ describe("signBody", () => {
   });
 
   test("zero-pads short hashes to 5 chars", () => {
-    // We can't force a specific hash, but we verify format on multiple inputs
     for (let i = 0; i < 20; i++) {
       const body = `{"text":"cch=00000;","i":${i}}`;
-      const signed = signBody(body);
-      const match = signed.match(/cch=([0-9a-f]+);/);
+      const match = signBody(body).match(/cch=([0-9a-f]+);/);
       expect(match).not.toBeNull();
       expect(match![1]).toHaveLength(5);
     }
@@ -66,52 +64,67 @@ describe("signBody", () => {
 });
 
 // ---------------------------------------------------------------------------
-// captureBillingPrefix
+// captureBillingPrefix (per-session)
 // ---------------------------------------------------------------------------
 
 describe("captureBillingPrefix", () => {
   test("extracts prefix from a real Claude Code system prompt", () => {
     const system =
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;\nYou are Claude Code...";
-    expect(captureBillingPrefix(system)).toBe(true);
+    expect(captureBillingPrefix(SID_A, system)).toBe(true);
   });
 
   test("extracts prefix with different version and hash values", () => {
     const system =
       "x-anthropic-billing-header: cc_version=2.1.37.abc; cc_entrypoint=cli; cch=00000;";
-    expect(captureBillingPrefix(system)).toBe(true);
+    expect(captureBillingPrefix(SID_A, system)).toBe(true);
   });
 
   test("returns false when no billing header is present", () => {
-    const system = "You are Claude Code, Anthropic's official CLI for Claude.";
-    expect(captureBillingPrefix(system)).toBe(false);
+    expect(
+      captureBillingPrefix(SID_A, "You are Claude Code, Anthropic's official CLI."),
+    ).toBe(false);
   });
 
   test("returns false for empty system prompt", () => {
-    expect(captureBillingPrefix("")).toBe(false);
+    expect(captureBillingPrefix(SID_A, "")).toBe(false);
   });
 
   test("returns false when billing header is not at the start", () => {
     const system =
       "Some prefix\nx-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;";
-    expect(captureBillingPrefix(system)).toBe(false);
+    expect(captureBillingPrefix(SID_A, system)).toBe(false);
+  });
+
+  test("non-matching turn does not erase a previously captured prefix", () => {
+    captureBillingPrefix(
+      SID_A,
+      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+    );
+    captureBillingPrefix(SID_A, "later turn with no header");
+    expect(buildBillingBlock(SID_A)).not.toBeNull();
   });
 });
 
 // ---------------------------------------------------------------------------
-// buildBillingBlock
+// buildBillingBlock (per-session)
 // ---------------------------------------------------------------------------
 
 describe("buildBillingBlock", () => {
-  test("returns null before any prefix is captured", () => {
-    expect(buildBillingBlock()).toBeNull();
+  test("returns null for an unknown session", () => {
+    expect(buildBillingBlock(SID_A)).toBeNull();
+  });
+
+  test("returns null when sessionID is undefined", () => {
+    expect(buildBillingBlock(undefined)).toBeNull();
   });
 
   test("returns block with cch=00000 placeholder after capture", () => {
     captureBillingPrefix(
+      SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
-    const block = buildBillingBlock();
+    const block = buildBillingBlock(SID_A);
     expect(block).not.toBeNull();
     expect(block!.type).toBe("text");
     expect(block!.text).toContain("cch=00000;");
@@ -122,22 +135,86 @@ describe("buildBillingBlock", () => {
 
   test("does not include the original cch hash value", () => {
     captureBillingPrefix(
+      SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
-    const block = buildBillingBlock();
-    expect(block!.text).not.toContain("a39d0");
+    expect(buildBillingBlock(SID_A)!.text).not.toContain("a39d0");
   });
 
-  test("updates when a new prefix is captured", () => {
+  test("updates when a new prefix is captured for the same session", () => {
     captureBillingPrefix(
+      SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
     captureBillingPrefix(
+      SID_A,
       "x-anthropic-billing-header: cc_version=2.2.0.abc; cc_entrypoint=cli; cch=b1234;",
     );
-    const block = buildBillingBlock();
+    const block = buildBillingBlock(SID_A);
     expect(block!.text).toContain("cc_version=2.2.0.abc");
     expect(block!.text).not.toContain("cc_version=2.1.138.fbe");
+  });
+
+  test("does not leak a prefix from session A into session B", () => {
+    // The bug this regression-tests: a Claude Code 2.1.x and 2.0.x session
+    // sharing one gateway process previously overwrote each other's prefix
+    // through the module-level singleton. Workers for session A would sign
+    // with session B's cc_version → 429 from the upstream signing check.
+    captureBillingPrefix(
+      SID_A,
+      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+    );
+    captureBillingPrefix(
+      SID_B,
+      "x-anthropic-billing-header: cc_version=2.0.0.xyz; cc_entrypoint=cli; cch=b9999;",
+    );
+
+    expect(buildBillingBlock(SID_A)!.text).toContain("cc_version=2.1.138.fbe");
+    expect(buildBillingBlock(SID_A)!.text).not.toContain("cc_version=2.0.0.xyz");
+
+    expect(buildBillingBlock(SID_B)!.text).toContain("cc_version=2.0.0.xyz");
+    expect(buildBillingBlock(SID_B)!.text).not.toContain("cc_version=2.1.138.fbe");
+  });
+
+  test("an API-key session that never captures a prefix returns null", () => {
+    captureBillingPrefix(
+      SID_A,
+      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+    );
+    captureBillingPrefix(SID_B, "You are a helpful assistant."); // no header
+
+    expect(buildBillingBlock(SID_A)).not.toBeNull();
+    expect(buildBillingBlock(SID_B)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deleteBillingPrefix
+// ---------------------------------------------------------------------------
+
+describe("deleteBillingPrefix", () => {
+  test("removes the prefix for the given session", () => {
+    captureBillingPrefix(
+      SID_A,
+      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+    );
+    expect(buildBillingBlock(SID_A)).not.toBeNull();
+    deleteBillingPrefix(SID_A);
+    expect(buildBillingBlock(SID_A)).toBeNull();
+  });
+
+  test("does not affect other sessions", () => {
+    captureBillingPrefix(
+      SID_A,
+      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+    );
+    captureBillingPrefix(
+      SID_B,
+      "x-anthropic-billing-header: cc_version=2.0.0.xyz; cc_entrypoint=cli; cch=b9999;",
+    );
+    deleteBillingPrefix(SID_A);
+    expect(buildBillingBlock(SID_A)).toBeNull();
+    expect(buildBillingBlock(SID_B)).not.toBeNull();
   });
 });
 
@@ -147,16 +224,14 @@ describe("buildBillingBlock", () => {
 
 describe("round-trip", () => {
   test("capture → build → sign produces a valid signed body", () => {
-    // 1. Capture from a conversation system prompt
     captureBillingPrefix(
+      SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
 
-    // 2. Build billing block for worker
-    const block = buildBillingBlock();
+    const block = buildBillingBlock(SID_A);
     expect(block).not.toBeNull();
 
-    // 3. Build body with placeholder
     const body = JSON.stringify({
       model: "claude-sonnet-4-20250514",
       max_tokens: 8192,
@@ -166,12 +241,10 @@ describe("round-trip", () => {
 
     expect(body).toContain("cch=00000");
 
-    // 4. Sign
     const signed = signBody(body);
     expect(signed).not.toContain("cch=00000");
     expect(signed).toMatch(/cch=[0-9a-f]{5};/);
 
-    // 5. Parse the signed body — should be valid JSON
     const parsed = JSON.parse(signed);
     expect(parsed.system[0].text).toMatch(/cch=[0-9a-f]{5};/);
     expect(parsed.system[0].text).toContain("cc_version=2.1.138.fbe");

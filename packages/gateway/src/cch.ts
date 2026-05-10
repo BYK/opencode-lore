@@ -15,6 +15,13 @@
  *   3. Replace `cch=00000` with computed value
  *
  * Seed: 0x6E52736AC806831E (baked into Claude Code's custom Bun binary)
+ *
+ * Per-session state: each conversation turn captures its own prefix into the
+ * session registry. Worker calls look up the prefix by `sessionID` so a
+ * Claude Code 2.1.x session and a 2.0.x session running on the same gateway
+ * process don't sign each other's worker calls. Mirrors the per-session
+ * `sessionAuth` registry in `auth.ts`. See LOREAI-CCH-1 for the singleton
+ * cross-contamination bug this replaces.
  */
 
 const CCH_SEED = 0x6E52736AC806831En; // BigInt for Bun.hash.xxHash64
@@ -34,7 +41,7 @@ export function signBody(bodyWithPlaceholder: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Billing header prefix extraction from conversation system prompts
+// Per-session billing prefix registry
 // ---------------------------------------------------------------------------
 
 /**
@@ -50,33 +57,51 @@ export function signBody(bodyWithPlaceholder: string): string {
 const BILLING_PREFIX_RE =
   /^(x-anthropic-billing-header:\s*cc_version=[^;]+;\s*cc_entrypoint=[^;]+;\s*)cch=[0-9a-fA-F]+;/;
 
-/** Extracted billing header prefix (without cch). Null if no CC client seen. */
-let billingPrefix: string | null = null;
+/** Per-session billing prefix. Keyed by sessionID; populated by
+ *  `captureBillingPrefix()` on each conversation turn. */
+const sessionBillingPrefix = new Map<string, string>();
 
 /**
- * Extract and store the billing header prefix from a system prompt string.
- * Called on each conversation turn. Returns true if a prefix was found.
+ * Extract and store the billing header prefix from a system prompt string
+ * for a specific session. Called on each conversation turn. Returns true if
+ * a prefix was found and stored.
+ *
+ * Sessions whose system prompts do not match the regex (API-key clients,
+ * non-Claude-Code clients) leave their slot untouched — `getBillingPrefix`
+ * returns null for them.
  */
-export function captureBillingPrefix(system: string): boolean {
+export function captureBillingPrefix(
+  sessionID: string,
+  system: string,
+): boolean {
   const match = BILLING_PREFIX_RE.exec(system);
   if (match) {
-    billingPrefix = match[1];
+    sessionBillingPrefix.set(sessionID, match[1]);
     return true;
   }
   return false;
 }
 
 /**
- * Build a billing header system block for worker requests.
- * Uses the captured prefix from conversation turns + `cch=00000` placeholder.
- * Returns null if no billing prefix has been captured yet.
+ * Build a billing header system block for a worker request belonging to
+ * `sessionID`. Returns null if the session never captured a prefix
+ * (non-Claude-Code clients, or worker fired before the first turn).
  */
-export function buildBillingBlock(): { type: string; text: string } | null {
-  if (!billingPrefix) return null;
+export function buildBillingBlock(
+  sessionID: string | undefined,
+): { type: string; text: string } | null {
+  if (!sessionID) return null;
+  const prefix = sessionBillingPrefix.get(sessionID);
+  if (!prefix) return null;
   return {
     type: "text",
-    text: `${billingPrefix}${CCH_PLACEHOLDER};`,
+    text: `${prefix}${CCH_PLACEHOLDER};`,
   };
+}
+
+/** Drop the billing prefix for a session (used by session eviction). */
+export function deleteBillingPrefix(sessionID: string): void {
+  sessionBillingPrefix.delete(sessionID);
 }
 
 // ---------------------------------------------------------------------------
@@ -85,5 +110,5 @@ export function buildBillingBlock(): { type: string; text: string } | null {
 
 /** @internal Reset module state for tests. */
 export function _resetForTest(): void {
-  billingPrefix = null;
+  sessionBillingPrefix.clear();
 }

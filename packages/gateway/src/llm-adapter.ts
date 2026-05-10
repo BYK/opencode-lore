@@ -30,11 +30,30 @@ export const activeWorkerCalls = new Set<string>();
 /** HTTP status codes that are transient and worth retrying. */
 const TRANSIENT_CODES = new Set([429, 500, 502, 503, 529]);
 
-/** Max retries by error category. */
+/** Max retries by error category for **background** (non-urgent) calls. */
 const MAX_RETRIES_RATE_LIMIT = 5; // 429s: ~2-3 min with server-guided backoff
 const MAX_RETRIES_SERVER = 3; // 5xx: fast retries
 
-export function maxRetriesFor(status: number | null): number {
+/**
+ * Max retries for **urgent** calls — synchronous worker work that the
+ * client is awaiting (compaction, query expansion, overflow distillation).
+ * Tight budget so a 429 storm cannot turn the SSE response into a multi-
+ * minute hang. The user-visible "Lore made OpenCode hang" symptom that
+ * motivated splitting these budgets came from urgent calls inheriting the
+ * background-worker retry timing. 2 retries × ~3s max = ~6s ceiling.
+ */
+const MAX_RETRIES_URGENT = 2;
+
+/** Cap Retry-After server hints separately for urgent vs background calls.
+ *  Urgent paths cannot afford a 60-120s pause even if the server asks. */
+const RETRY_AFTER_CAP_URGENT_MS = 8_000;
+const RETRY_AFTER_CAP_BACKGROUND_MS = 120_000;
+
+export function maxRetriesFor(
+  status: number | null,
+  urgent: boolean = false,
+): number {
+  if (urgent) return MAX_RETRIES_URGENT;
   if (status === 429) return MAX_RETRIES_RATE_LIMIT;
   return MAX_RETRIES_SERVER;
 }
@@ -52,17 +71,26 @@ export function parseRetryAfter(response: Response): number | null {
 
 /**
  * Compute delay for a retry attempt.
- * - Always honor Retry-After when present (capped at 120s)
- * - 429 without Retry-After: conservative 15s, 30s, 45s, 60s, 60s
- * - 5xx: aggressive 1s, 2s, 4s (capped 8s)
+ * - Always honor Retry-After when present, capped per-mode (urgent: 8s, bg: 120s)
+ * - 429 without Retry-After:
+ *    - urgent: 1s, 2s, 4s (capped 4s)
+ *    - background: 30s, 45s, 60s, 60s, 60s
+ * - 5xx: aggressive 1s, 2s, 4s (capped 8s) — same for urgent and background
  */
 export function backoffMs(
   attempt: number,
   retryAfterMs: number | null,
   status: number | null,
+  urgent: boolean = false,
 ): number {
-  // Always honor Retry-After from server (any attempt, any status)
-  if (retryAfterMs != null) return Math.min(retryAfterMs, 120_000);
+  // Always honor Retry-After from server, but cap tighter for urgent calls
+  if (retryAfterMs != null) {
+    const cap = urgent ? RETRY_AFTER_CAP_URGENT_MS : RETRY_AFTER_CAP_BACKGROUND_MS;
+    return Math.min(retryAfterMs, cap);
+  }
+
+  // Urgent path: aggressive exponential regardless of status
+  if (urgent) return Math.min(1000 * 2 ** attempt, 4000);
 
   // 429 without Retry-After: conservative delays
   if (status === 429) return Math.min(15_000 + (attempt + 1) * 15_000, 60_000);
@@ -106,13 +134,17 @@ export function createGatewayLLMClient(
       const callID = `gw-worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       activeWorkerCalls.add(callID);
 
+      const urgent = opts?.urgent === true;
+
       try {
         // --- Build system payload ---
         // For bearer tokens (Claude Code OAuth), inject the billing header
         // as the first system block with a cch=00000 placeholder that gets
-        // signed after JSON serialization.
+        // signed after JSON serialization. The prefix is looked up by the
+        // *originating* sessionID so workers for session A never sign with
+        // session B's cc_version.
         const billingBlock =
-          cred.scheme === "bearer" ? buildBillingBlock() : null;
+          cred.scheme === "bearer" ? buildBillingBlock(opts?.sessionID) : null;
 
         // System prompt caching for workers: send as block array with 1h TTL.
         // Worker calls come in bursts (distillation, curation) separated by
@@ -169,6 +201,7 @@ export function createGatewayLLMClient(
               "gen_ai.provider.name": "anthropic",
               "lore.worker_id": opts?.workerID ?? "unknown",
               "lore.call_type": "direct",
+              "lore.urgent": urgent,
             },
           },
           async (span) => {
@@ -192,9 +225,9 @@ export function createGatewayLLMClient(
                 });
               } catch (e) {
                 // Network/fetch error — retry if attempts remain
-                const maxRetries = maxRetriesFor(null);
+                const maxRetries = maxRetriesFor(null, urgent);
                 if (attempt < maxRetries) {
-                  const delay = backoffMs(attempt, null, null);
+                  const delay = backoffMs(attempt, null, null, urgent);
                   retryCount++;
                   totalDelayMs += delay;
                   log.warn(
@@ -257,10 +290,10 @@ export function createGatewayLLMClient(
               }
 
               // Transient error — retry if attempts remain
-              const maxRetries = maxRetriesFor(response.status);
+              const maxRetries = maxRetriesFor(response.status, urgent);
               if (attempt < maxRetries) {
                 const retryAfter = parseRetryAfter(response);
-                const delay = backoffMs(attempt, retryAfter, response.status);
+                const delay = backoffMs(attempt, retryAfter, response.status, urgent);
                 retryCount++;
                 totalDelayMs += delay;
                 if (retryAfter != null) lastRetryAfterMs = retryAfter;

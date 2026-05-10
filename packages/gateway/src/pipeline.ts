@@ -1247,11 +1247,6 @@ async function handleConversationTurn(
     setLastSeenAuth(cred);
   }
 
-  // Capture billing header prefix for worker cch computation.
-  // Bearer tokens (Claude Code OAuth) embed an x-anthropic-billing-header in
-  // the system prompt; we extract the prefix so workers can build their own.
-  captureBillingPrefix(req.system);
-
   // --- 3. Session identification ---
   const { sessionID, isNew } = await identifySession(req, projectPath);
   const sessionState = getOrCreateSession(sessionID, projectPath);
@@ -1260,6 +1255,13 @@ async function handleConversationTurn(
   if (cred) {
     setSessionAuth(sessionID, cred);
   }
+
+  // Capture billing header prefix for worker cch computation, scoped to
+  // this session. Bearer tokens (Claude Code OAuth) embed an
+  // x-anthropic-billing-header in the system prompt; we extract the prefix
+  // so workers can rebuild it. Per-session storage prevents cross-session
+  // contamination when multiple Claude Code versions share one process.
+  captureBillingPrefix(sessionID, req.system);
 
   // Track fingerprint for future correlation
   if (isNew) {
