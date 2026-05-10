@@ -57,6 +57,7 @@ export {
   isFirstRun,
   projectId,
   projectName,
+  mergeProjectInternal,
   loadForceMinLayer,
   saveForceMinLayer,
   getMeta,
@@ -64,6 +65,7 @@ export {
   getInstanceId,
   close,
 } from "./db";
+export { normalizeRemoteUrl, getGitRemote, clearGitRemoteCache } from "./git";
 export {
   transform,
   setModelLimits,

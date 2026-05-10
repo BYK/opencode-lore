@@ -13,6 +13,7 @@ import {
 import {
   ltm,
   db,
+  ensureProject,
   getLtmTokens,
   setModelLimits,
   calibrate,
@@ -2053,9 +2054,7 @@ describe("experimental.session.compacting", () => {
     const { hooks, tmpDir, cleanup } = await initPlugin();
     try {
       const sessionID = "ses_compact_context_001";
-      const pid = db()
-        .query("SELECT id FROM projects WHERE path = ?")
-        .get(tmpDir) as { id: string };
+      const projectId = ensureProject(tmpDir);
       // Seed a gen-0 distillation directly so the hook sees it.
       db()
         .query(
@@ -2064,7 +2063,7 @@ describe("experimental.session.compacting", () => {
         )
         .run(
           crypto.randomUUID(),
-          pid.id,
+          projectId,
           sessionID,
           "",
           "[]",

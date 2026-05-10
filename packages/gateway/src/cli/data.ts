@@ -89,16 +89,17 @@ async function cmdList(
         return;
       }
       printTable(
-        ["Name", "Path", "ID", "Knowledge", "Sessions", "Created"],
+        ["Name", "Path", "Git Remote", "ID", "Knowledge", "Sessions", "Created"],
         projects.map((p) => [
           p.name ?? "(unnamed)",
-          truncate(p.path, 40),
+          truncate(p.path, 35),
+          truncate(p.git_remote ?? "-", 30),
           p.id.slice(0, 8),
           String(p.knowledge_count),
           String(p.session_count),
           formatDate(p.created_at),
         ]),
-        [20, 40, 10, 10, 10, 20],
+        [16, 35, 30, 10, 10, 10, 20],
       );
       break;
     }
@@ -500,6 +501,70 @@ async function cmdDelete(
   }
 }
 
+async function cmdMerge(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const { data } = await import("@loreai/core");
+  const skipConfirm = !!flags.yes;
+  const asJson = !!flags.json;
+
+  // Dry run first: show what would be merged
+  const projects = data.listProjects();
+  const withoutRemote = projects.filter((p) => !p.git_remote);
+
+  if (withoutRemote.length === 0) {
+    console.log("All projects already have git remote information.");
+    console.log("No merges needed.");
+    return;
+  }
+
+  console.log(
+    `Found ${withoutRemote.length} project(s) without git remote information.`,
+  );
+  console.log("Scanning git remotes...\n");
+
+  if (!skipConfirm) {
+    const confirmed = await confirm(
+      `This will:\n` +
+        `  1. Scan ${withoutRemote.length} project paths for git remote URLs\n` +
+        `  2. Set git_remote on projects that are git repositories\n` +
+        `  3. Merge projects that share the same git remote\n\n` +
+        `Merged projects will have their data (knowledge, messages,\n` +
+        `distillations) consolidated into a single project entry.`,
+    );
+    if (!confirmed) {
+      console.log("Cancelled.");
+      return;
+    }
+  }
+
+  const result = data.backfillGitRemotes();
+
+  if (asJson) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log(`\nResults:`);
+  console.log(`  Updated: ${result.updated} project(s) with git remote info`);
+  console.log(`  Merged:  ${result.merged} duplicate project(s)`);
+
+  if (result.mergeDetails.length > 0) {
+    console.log(`\nMerge details:`);
+    for (const detail of result.mergeDetails) {
+      console.log(`  ${detail.sourcePath}`);
+      console.log(`    → merged into: ${detail.targetPath}`);
+      console.log(`    git remote:    ${detail.gitRemote}`);
+      console.log(
+        `    moved: ${detail.result.knowledge_moved} knowledge, ` +
+          `${detail.result.messages_moved} messages, ` +
+          `${detail.result.distillations_moved} distillations`,
+      );
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main dispatch
 // ---------------------------------------------------------------------------
@@ -515,6 +580,7 @@ Subcommands:
   show <type> <id>      Show full detail for an entry
   clear [options]       Clear data for a project or wipe the database
   delete <type> <id>    Delete a single entry
+  merge                 Scan git remotes and merge duplicate projects
 
 Options:
   --project <path>      Target project directory (default: current directory)
@@ -537,6 +603,8 @@ Examples:
   lore data clear --all
   lore data delete knowledge abc12345
   lore data delete session abc12345-6789
+  lore data merge                          # scan & merge git duplicates
+  lore data merge --yes                    # skip confirmation
 `.trimStart();
 
 export async function commandData(
@@ -558,6 +626,9 @@ export async function commandData(
       break;
     case "delete":
       await cmdDelete(subArgs, values);
+      break;
+    case "merge":
+      await cmdMerge(subArgs, values);
       break;
     case "help":
     case undefined:

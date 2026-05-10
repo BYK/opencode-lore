@@ -217,11 +217,12 @@ function pageDashboard(): string {
     body += `<p class="empty">No projects found. Start using Lore with an AI agent to create data.</p>`;
   } else {
     body += `<h2>Projects</h2><table>
-      <tr><th>Name</th><th>Path</th><th>Knowledge</th><th>Sessions</th><th>Messages</th><th>Created</th></tr>`;
+      <tr><th>Name</th><th>Path</th><th>Git Remote</th><th>Knowledge</th><th>Sessions</th><th>Messages</th><th>Created</th></tr>`;
     for (const p of projects) {
       body += `<tr>
         <td><a href="/ui/projects/${esc(p.id)}">${esc(p.name ?? "(unnamed)")}</a></td>
         <td style="font-family:var(--mono);font-size:0.85em">${esc(truncate(p.path, 50))}</td>
+        <td style="font-family:var(--mono);font-size:0.85em">${esc(p.git_remote ? truncate(p.git_remote, 40) : "-")}</td>
         <td>${p.knowledge_count}</td>
         <td>${p.session_count}</td>
         <td>${p.message_count}</td>
@@ -249,6 +250,9 @@ function pageProject(projectId: string): string | null {
   ]);
   body += `<h1>${esc(project.name ?? "(unnamed)")}</h1>`;
   body += `<p style="font-family:var(--mono);font-size:0.85em;color:var(--fg2)">${esc(project.path)}</p>`;
+  if (project.git_remote) {
+    body += `<p style="font-family:var(--mono);font-size:0.85em;color:var(--fg2)">Git: ${esc(project.git_remote)}</p>`;
+  }
 
   // Knowledge section
   body += `<h2>Knowledge (${knowledge.length})</h2>`;
