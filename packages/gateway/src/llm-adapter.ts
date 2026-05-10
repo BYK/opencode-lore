@@ -136,15 +136,16 @@ export function createGatewayLLMClient(
 
       const urgent = opts?.urgent === true;
 
-      try {
+       try {
         // --- Build system payload ---
         // For bearer tokens (Claude Code OAuth), inject the billing header
         // as the first system block with a cch=00000 placeholder that gets
-        // signed after JSON serialization. The prefix is looked up by the
-        // *originating* sessionID so workers for session A never sign with
-        // session B's cc_version.
+        // signed after JSON serialization. The billing header is pinned to
+        // a version with a known xxHash64 seed (see cch.ts VERSION_SEEDS).
         const billingBlock =
-          cred.scheme === "bearer" ? buildBillingBlock(opts?.sessionID) : null;
+          cred.scheme === "bearer"
+            ? buildBillingBlock(opts?.sessionID, user)
+            : null;
 
         // System prompt caching for workers: send as block array with 1h TTL.
         // Worker calls come in bursts (distillation, curation) separated by

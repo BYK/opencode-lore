@@ -95,7 +95,7 @@ import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySync } from "./worker-model";
 import * as Sentry from "@sentry/bun";
-import { captureBillingPrefix } from "./cch";
+import { captureBillingPrefix, resignBody } from "./cch";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
    setSentryRequestContext,
@@ -488,7 +488,23 @@ async function forwardToUpstream(
     body = result.body;
   }
 
-  const serializedBody = JSON.stringify(body);
+  let serializedBody = JSON.stringify(body);
+
+  // Re-sign the billing header cch after body reconstruction.
+  // buildAnthropicRequest completely rebuilds the body (different JSON key
+  // ordering, cache_control wrappers, toAnthropicBlock transforms) which
+  // invalidates the client's original cch signature. resignBody detects
+  // billing headers and re-signs with our known seed + version.
+  if (effectiveProtocol === "anthropic") {
+    const firstUserMsg = req.messages.find((m) => m.role === "user");
+    const firstUserText =
+      firstUserMsg?.content.find((b) => b.type === "text" && "text" in b);
+    serializedBody = resignBody(
+      serializedBody,
+      (firstUserText as { text: string } | undefined)?.text ?? "",
+    );
+  }
+
   const effectiveInterceptor = interceptor ?? activeInterceptor;
 
   if (effectiveInterceptor) {

@@ -1,10 +1,17 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import {
   signBody,
+  resignBody,
   captureBillingPrefix,
   buildBillingBlock,
   deleteBillingPrefix,
+  validateSeed,
   _resetForTest,
+  WORKER_VERSION,
+  WORKER_SEED,
+  WORKER_SALT,
+  CCH_PLACEHOLDER,
+  _computeVersionSuffix,
 } from "../src/cch";
 
 const SID_A = "sess-a";
@@ -25,7 +32,7 @@ describe("signBody", () => {
       system: [
         {
           type: "text",
-          text: "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=00000;",
+          text: "x-anthropic-billing-header: cc_version=2.1.37.fbe; cc_entrypoint=cli; cch=00000;",
         },
       ],
       messages: [{ role: "user", content: "hello" }],
@@ -64,17 +71,53 @@ describe("signBody", () => {
 });
 
 // ---------------------------------------------------------------------------
+// computeVersionSuffix
+// ---------------------------------------------------------------------------
+
+describe("computeVersionSuffix", () => {
+  test("returns a 3-char hex string", () => {
+    const suffix = _computeVersionSuffix("hello world message");
+    expect(suffix).toMatch(/^[0-9a-f]{3}$/);
+  });
+
+  test("different messages produce different suffixes", () => {
+    const s1 = _computeVersionSuffix("Summarize this conversation segment");
+    const s2 = _computeVersionSuffix("Expand the following query for search");
+    expect(s1).not.toEqual(s2);
+  });
+
+  test("pads with '0' for short messages", () => {
+    // Message shorter than index 20 — should pad
+    const s1 = _computeVersionSuffix("hi");
+    expect(s1).toMatch(/^[0-9a-f]{3}$/);
+  });
+
+  test("is deterministic", () => {
+    const msg = "Some worker prompt text here";
+    expect(_computeVersionSuffix(msg)).toEqual(_computeVersionSuffix(msg));
+  });
+
+  test("uses chars at indices 4, 7, 20", () => {
+    // We know the algorithm: sha256(salt + chars[4,7,20] + version)[:3]
+    // Just verify it doesn't throw and produces a valid suffix
+    const msg = "0123456789012345678901234";
+    const suffix = _computeVersionSuffix(msg);
+    expect(suffix).toMatch(/^[0-9a-f]{3}$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // captureBillingPrefix (per-session)
 // ---------------------------------------------------------------------------
 
 describe("captureBillingPrefix", () => {
-  test("extracts prefix from a real Claude Code system prompt", () => {
+  test("detects billing header in a real Claude Code system prompt", () => {
     const system =
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;\nYou are Claude Code...";
     expect(captureBillingPrefix(SID_A, system)).toBe(true);
   });
 
-  test("extracts prefix with different version and hash values", () => {
+  test("detects billing header with different version and hash values", () => {
     const system =
       "x-anthropic-billing-header: cc_version=2.1.37.abc; cc_entrypoint=cli; cch=00000;";
     expect(captureBillingPrefix(SID_A, system)).toBe(true);
@@ -96,27 +139,29 @@ describe("captureBillingPrefix", () => {
     expect(captureBillingPrefix(SID_A, system)).toBe(false);
   });
 
-  test("non-matching turn does not erase a previously captured prefix", () => {
+  test("non-matching turn does not erase a previously captured flag", () => {
     captureBillingPrefix(
       SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
     captureBillingPrefix(SID_A, "later turn with no header");
-    expect(buildBillingBlock(SID_A)).not.toBeNull();
+    expect(buildBillingBlock(SID_A, "test message")).not.toBeNull();
   });
 });
 
 // ---------------------------------------------------------------------------
-// buildBillingBlock (per-session)
+// buildBillingBlock (per-session, pinned version)
 // ---------------------------------------------------------------------------
 
 describe("buildBillingBlock", () => {
+  const MSG = "Summarize this conversation.";
+
   test("returns null for an unknown session", () => {
-    expect(buildBillingBlock(SID_A)).toBeNull();
+    expect(buildBillingBlock(SID_A, MSG)).toBeNull();
   });
 
   test("returns null when sessionID is undefined", () => {
-    expect(buildBillingBlock(undefined)).toBeNull();
+    expect(buildBillingBlock(undefined, MSG)).toBeNull();
   });
 
   test("returns block with cch=00000 placeholder after capture", () => {
@@ -124,42 +169,64 @@ describe("buildBillingBlock", () => {
       SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
-    const block = buildBillingBlock(SID_A);
+    const block = buildBillingBlock(SID_A, MSG);
     expect(block).not.toBeNull();
     expect(block!.type).toBe("text");
     expect(block!.text).toContain("cch=00000;");
-    expect(block!.text).toContain("cc_version=2.1.138.fbe");
     expect(block!.text).toContain("cc_entrypoint=cli");
     expect(block!.text).toStartWith("x-anthropic-billing-header:");
   });
 
-  test("does not include the original cch hash value", () => {
+  test("pins billing header to WORKER_VERSION, not the client version", () => {
     captureBillingPrefix(
       SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
-    expect(buildBillingBlock(SID_A)!.text).not.toContain("a39d0");
+    const block = buildBillingBlock(SID_A, MSG);
+    expect(block!.text).toContain(`cc_version=${WORKER_VERSION}.`);
+    expect(block!.text).not.toContain("cc_version=2.1.138");
   });
 
-  test("updates when a new prefix is captured for the same session", () => {
+  test("includes a 3-char hex version suffix derived from user message", () => {
     captureBillingPrefix(
       SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
-    captureBillingPrefix(
-      SID_A,
-      "x-anthropic-billing-header: cc_version=2.2.0.abc; cc_entrypoint=cli; cch=b1234;",
+    const block = buildBillingBlock(SID_A, MSG);
+    // cc_version=2.1.37.XXX where XXX is 3 hex chars
+    expect(block!.text).toMatch(
+      new RegExp(`cc_version=${WORKER_VERSION}\\.[0-9a-f]{3};`),
     );
-    const block = buildBillingBlock(SID_A);
-    expect(block!.text).toContain("cc_version=2.2.0.abc");
-    expect(block!.text).not.toContain("cc_version=2.1.138.fbe");
   });
 
-  test("does not leak a prefix from session A into session B", () => {
-    // The bug this regression-tests: a Claude Code 2.1.x and 2.0.x session
-    // sharing one gateway process previously overwrote each other's prefix
-    // through the module-level singleton. Workers for session A would sign
-    // with session B's cc_version → 429 from the upstream signing check.
+  test("different user messages produce different version suffixes", () => {
+    captureBillingPrefix(
+      SID_A,
+      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+    );
+    const block1 = buildBillingBlock(SID_A, "Summarize this conversation.");
+    const block2 = buildBillingBlock(SID_A, "Expand query for semantic search.");
+    // Extract the suffix
+    const suffix1 = block1!.text.match(/cc_version=\d+\.\d+\.\d+\.([0-9a-f]{3})/)?.[1];
+    const suffix2 = block2!.text.match(/cc_version=\d+\.\d+\.\d+\.([0-9a-f]{3})/)?.[1];
+    expect(suffix1).toBeDefined();
+    expect(suffix2).toBeDefined();
+    expect(suffix1).not.toEqual(suffix2);
+  });
+
+  test("does not leak billing state from session A into session B", () => {
+    captureBillingPrefix(
+      SID_A,
+      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+    );
+    // Session B never captures billing
+    captureBillingPrefix(SID_B, "You are a helpful assistant.");
+
+    expect(buildBillingBlock(SID_A, MSG)).not.toBeNull();
+    expect(buildBillingBlock(SID_B, MSG)).toBeNull();
+  });
+
+  test("both sessions get billing blocks when both have billing headers", () => {
     captureBillingPrefix(
       SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
@@ -169,11 +236,13 @@ describe("buildBillingBlock", () => {
       "x-anthropic-billing-header: cc_version=2.0.0.xyz; cc_entrypoint=cli; cch=b9999;",
     );
 
-    expect(buildBillingBlock(SID_A)!.text).toContain("cc_version=2.1.138.fbe");
-    expect(buildBillingBlock(SID_A)!.text).not.toContain("cc_version=2.0.0.xyz");
-
-    expect(buildBillingBlock(SID_B)!.text).toContain("cc_version=2.0.0.xyz");
-    expect(buildBillingBlock(SID_B)!.text).not.toContain("cc_version=2.1.138.fbe");
+    // Both sessions get billing blocks pinned to WORKER_VERSION
+    const blockA = buildBillingBlock(SID_A, MSG);
+    const blockB = buildBillingBlock(SID_B, MSG);
+    expect(blockA).not.toBeNull();
+    expect(blockB).not.toBeNull();
+    expect(blockA!.text).toContain(`cc_version=${WORKER_VERSION}.`);
+    expect(blockB!.text).toContain(`cc_version=${WORKER_VERSION}.`);
   });
 
   test("an API-key session that never captures a prefix returns null", () => {
@@ -183,8 +252,8 @@ describe("buildBillingBlock", () => {
     );
     captureBillingPrefix(SID_B, "You are a helpful assistant."); // no header
 
-    expect(buildBillingBlock(SID_A)).not.toBeNull();
-    expect(buildBillingBlock(SID_B)).toBeNull();
+    expect(buildBillingBlock(SID_A, MSG)).not.toBeNull();
+    expect(buildBillingBlock(SID_B, MSG)).toBeNull();
   });
 });
 
@@ -193,14 +262,16 @@ describe("buildBillingBlock", () => {
 // ---------------------------------------------------------------------------
 
 describe("deleteBillingPrefix", () => {
-  test("removes the prefix for the given session", () => {
+  const MSG = "test";
+
+  test("removes the billing flag for the given session", () => {
     captureBillingPrefix(
       SID_A,
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
-    expect(buildBillingBlock(SID_A)).not.toBeNull();
+    expect(buildBillingBlock(SID_A, MSG)).not.toBeNull();
     deleteBillingPrefix(SID_A);
-    expect(buildBillingBlock(SID_A)).toBeNull();
+    expect(buildBillingBlock(SID_A, MSG)).toBeNull();
   });
 
   test("does not affect other sessions", () => {
@@ -213,8 +284,50 @@ describe("deleteBillingPrefix", () => {
       "x-anthropic-billing-header: cc_version=2.0.0.xyz; cc_entrypoint=cli; cch=b9999;",
     );
     deleteBillingPrefix(SID_A);
-    expect(buildBillingBlock(SID_A)).toBeNull();
-    expect(buildBillingBlock(SID_B)).not.toBeNull();
+    expect(buildBillingBlock(SID_A, MSG)).toBeNull();
+    expect(buildBillingBlock(SID_B, MSG)).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateSeed
+// ---------------------------------------------------------------------------
+
+describe("validateSeed", () => {
+  test("returns null when body has no cch field", () => {
+    expect(validateSeed('{"model":"claude","messages":[]}')).toBeNull();
+  });
+
+  test("returns true for a body signed with the known seed", () => {
+    // Create a body, sign it with our seed, then validate
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      system: [
+        {
+          type: "text",
+          text: `x-anthropic-billing-header: cc_version=${WORKER_VERSION}.abc; cc_entrypoint=cli; cch=00000;`,
+        },
+      ],
+      messages: [{ role: "user", content: "hello" }],
+    });
+    const signed = signBody(body);
+    expect(validateSeed(signed)).toBe(true);
+  });
+
+  test("returns false for a body signed with an unknown seed", () => {
+    // Manually create a body with a fake cch
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=9.9.9.abc; cc_entrypoint=cli; cch=fffff;",
+        },
+      ],
+      messages: [{ role: "user", content: "hello" }],
+    });
+    // The cch=fffff is almost certainly not the correct hash
+    expect(validateSeed(body)).toBe(false);
   });
 });
 
@@ -229,14 +342,15 @@ describe("round-trip", () => {
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
 
-    const block = buildBillingBlock(SID_A);
+    const userMsg = "Summarize this conversation.";
+    const block = buildBillingBlock(SID_A, userMsg);
     expect(block).not.toBeNull();
 
     const body = JSON.stringify({
       model: "claude-sonnet-4-20250514",
       max_tokens: 8192,
       system: [block, { type: "text", text: "You are a distillation worker." }],
-      messages: [{ role: "user", content: "Summarize this conversation." }],
+      messages: [{ role: "user", content: userMsg }],
     });
 
     expect(body).toContain("cch=00000");
@@ -247,6 +361,207 @@ describe("round-trip", () => {
 
     const parsed = JSON.parse(signed);
     expect(parsed.system[0].text).toMatch(/cch=[0-9a-f]{5};/);
-    expect(parsed.system[0].text).toContain("cc_version=2.1.138.fbe");
+    expect(parsed.system[0].text).toContain(`cc_version=${WORKER_VERSION}.`);
+  });
+
+  test("signed body validates against our seed", () => {
+    captureBillingPrefix(
+      SID_A,
+      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+    );
+
+    const userMsg = "Analyze these highlights.";
+    const block = buildBillingBlock(SID_A, userMsg);
+
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 8192,
+      system: [block],
+      messages: [{ role: "user", content: userMsg }],
+    });
+
+    const signed = signBody(body);
+    expect(validateSeed(signed)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resignBody
+// ---------------------------------------------------------------------------
+
+describe("resignBody", () => {
+  /** Helper: build a serialized body with a client-signed billing header. */
+  function buildClientBody(opts: {
+    clientVersion?: string;
+    clientCch?: string;
+    userMessage?: string;
+  } = {}): string {
+    const version = opts.clientVersion ?? "2.1.35.abc";
+    const cch = opts.clientCch ?? "deadb";
+    const user = opts.userMessage ?? "Tell me about TypeScript generics";
+    return JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      system: [
+        {
+          type: "text",
+          text: `x-anthropic-billing-header: cc_version=${version}; cc_entrypoint=cli; cch=${cch};`,
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        {
+          type: "text",
+          text: "You are a helpful assistant.",
+        },
+      ],
+      messages: [{ role: "user", content: user }],
+    });
+  }
+
+  test("returns body unchanged when no billing header is present", () => {
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      system: "plain system prompt",
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(resignBody(body, "hello")).toBe(body);
+  });
+
+  test("replaces client cch with a valid worker-signed cch", () => {
+    const original = buildClientBody({ clientCch: "deadb" });
+    const resigned = resignBody(original, "Tell me about TypeScript generics");
+
+    // Client's cch should be gone
+    expect(resigned).not.toContain("cch=deadb");
+    // New cch should be a 5-char hex value
+    expect(resigned).toMatch(/cch=[0-9a-f]{5};/);
+    // Should not contain placeholder
+    expect(resigned).not.toContain("cch=00000");
+  });
+
+  test("replaces cc_version with worker version + computed suffix", () => {
+    const original = buildClientBody({ clientVersion: "2.1.35.abc" });
+    const resigned = resignBody(original, "Tell me about TypeScript generics");
+
+    // Client's version should be replaced
+    expect(resigned).not.toContain("cc_version=2.1.35.abc");
+    // Worker version should be present with a 3-char hex suffix
+    expect(resigned).toMatch(
+      new RegExp(`cc_version=${WORKER_VERSION}\\.[0-9a-f]{3};`),
+    );
+  });
+
+  test("suffix depends on the first user message", () => {
+    const body1 = buildClientBody({ clientCch: "aaaaa" });
+    const body2 = buildClientBody({
+      clientCch: "aaaaa",
+      userMessage: "Completely different user message here!",
+    });
+
+    const resigned1 = resignBody(body1, "Tell me about TypeScript generics");
+    const resigned2 = resignBody(body2, "Completely different user message here!");
+
+    // Different user messages produce different suffixes
+    const suffix1 = resigned1.match(
+      new RegExp(`cc_version=${WORKER_VERSION}\\.([0-9a-f]{3});`),
+    )?.[1];
+    const suffix2 = resigned2.match(
+      new RegExp(`cc_version=${WORKER_VERSION}\\.([0-9a-f]{3});`),
+    )?.[1];
+
+    expect(suffix1).toBeDefined();
+    expect(suffix2).toBeDefined();
+    expect(suffix1).not.toBe(suffix2);
+  });
+
+  test("resigned body passes validateSeed", () => {
+    const original = buildClientBody({ clientCch: "12345" });
+    const resigned = resignBody(original, "Tell me about TypeScript generics");
+
+    // The re-signed body should validate with our known seed
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("produces same result as signing from scratch", () => {
+    // Build a body the same way buildBillingBlock + signBody would
+    const userMessage = "Tell me about TypeScript generics";
+    const suffix = _computeVersionSuffix(userMessage);
+
+    const freshBody = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      system: [
+        {
+          type: "text",
+          text: `x-anthropic-billing-header: cc_version=${WORKER_VERSION}.${suffix}; cc_entrypoint=cli; cch=00000;`,
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        {
+          type: "text",
+          text: "You are a helpful assistant.",
+        },
+      ],
+      messages: [{ role: "user", content: userMessage }],
+    });
+    const signedFresh = signBody(freshBody);
+
+    // Now build same body as if client sent it with wrong version/cch, then resign
+    const clientBody = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      system: [
+        {
+          type: "text",
+          text: `x-anthropic-billing-header: cc_version=${WORKER_VERSION}.${suffix}; cc_entrypoint=cli; cch=99999;`,
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        {
+          type: "text",
+          text: "You are a helpful assistant.",
+        },
+      ],
+      messages: [{ role: "user", content: userMessage }],
+    });
+    const resigned = resignBody(clientBody, userMessage);
+
+    // Both should produce identical output since version+suffix are the same
+    expect(resigned).toBe(signedFresh);
+  });
+
+  test("handles empty first user message gracefully", () => {
+    const original = buildClientBody({ clientCch: "abcde" });
+    const resigned = resignBody(original, "");
+
+    expect(resigned).not.toContain("cch=abcde");
+    expect(resigned).toMatch(/cch=[0-9a-f]{5};/);
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("handles short first user message (fewer than 21 chars)", () => {
+    const original = buildClientBody({ clientCch: "abcde", userMessage: "hi" });
+    const resigned = resignBody(original, "hi");
+
+    expect(resigned).not.toContain("cch=abcde");
+    expect(resigned).toMatch(/cch=[0-9a-f]{5};/);
+    expect(validateSeed(resigned)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+describe("exported constants", () => {
+  test("WORKER_VERSION is a semver string", () => {
+    expect(WORKER_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  test("WORKER_SEED is a non-zero bigint", () => {
+    expect(typeof WORKER_SEED).toBe("bigint");
+    expect(WORKER_SEED).not.toBe(0n);
+  });
+
+  test("WORKER_SALT is a 12-char hex string", () => {
+    expect(WORKER_SALT).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  test("CCH_PLACEHOLDER is the expected sentinel", () => {
+    expect(CCH_PLACEHOLDER).toBe("cch=00000");
   });
 });

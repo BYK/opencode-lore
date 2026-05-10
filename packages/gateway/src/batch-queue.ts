@@ -53,6 +53,8 @@ interface PendingRequest {
   enqueuedAt: number;
   /** Auth credential snapshotted at enqueue time for per-session isolation. */
   auth: AuthCredential;
+  /** Session ID for billing header injection on fallback to individual requests. */
+  sessionID?: string;
 }
 
 /** A batch that has been submitted and is being polled for results. */
@@ -99,10 +101,18 @@ function generateCustomId(): string {
   return `lore-${ts}-${seq}-${rand}`;
 }
 
-/** Produce a grouping key for an auth credential. */
+/**
+ * Produce a grouping key for an auth credential.
+ *
+ * Uses the raw credential value so each distinct token/key gets its own
+ * batch submission (required by the Anthropic API — different credentials
+ * can't share a batch).
+ */
 function authKey(cred: AuthCredential): string {
   return `${cred.scheme}:${cred.value}`;
 }
+
+// authDisableKey removed — batch disable tracking is now per-session, not per-credential.
 
 // ---------------------------------------------------------------------------
 // BatchLLMClient
@@ -141,8 +151,15 @@ export function createBatchLLMClient(
   let flushTimer: ReturnType<typeof setInterval> | null = null;
   let shuttingDown = false;
 
-  /** Credentials whose batch API access has been permanently disabled (401/403). */
-  const disabledBatchAuth = new Set<string>();
+  /**
+   * Session IDs whose batch API access has been permanently disabled (401/403).
+   *
+   * Tracked per-session rather than per-credential-scheme because future OAuth
+   * tokens may gain batch scope. A 403 from one session's token should only
+   * block that session, not all bearer-token sessions. Session IDs are stable
+   * for the lifetime of a connection, so token refresh doesn't bypass this.
+   */
+  const disabledBatchSessions = new Set<string>();
 
   // Stats
   let totalQueued = 0;
@@ -178,14 +195,19 @@ export function createBatchLLMClient(
 
       if (!response.ok) {
         const text = await response.text().catch(() => "(no body)");
-        // Permanent auth errors — disable batch API for this credential
+        // Permanent auth errors — disable batch API for every session in this batch.
+        // Tracked per-session (not per-scheme) so future OAuth tokens with batch
+        // scope won't be blocked. Session IDs are stable across token refresh.
         if (response.status === 401 || response.status === 403) {
-          const key = authKey(auth);
-          if (!disabledBatchAuth.has(key)) {
-            disabledBatchAuth.add(key);
+          const sessionIDs = new Set(items.map((i) => i.sessionID).filter(Boolean) as string[]);
+          for (const sid of sessionIDs) {
+            disabledBatchSessions.add(sid);
+          }
+          if (sessionIDs.size > 0) {
             log.warn(
-              `batch API disabled for this credential (${response.status}): ${text}. ` +
-                `Future worker calls will use individual requests.`,
+              `batch API disabled for sessions [${[...sessionIDs].join(", ")}] ` +
+                `(${response.status}): ${text}. ` +
+                `Future worker calls for these sessions will use individual requests.`,
             );
           }
         } else {
@@ -252,12 +274,23 @@ export function createBatchLLMClient(
     }
 
     for (const { auth, items } of byAuth.values()) {
-      // Skip batch API for credentials with permanent auth failures
-      if (disabledBatchAuth.has(authKey(auth))) {
-        await fallbackAll(items);
-        continue;
+      // Split items: disabled sessions fall back, others go to batch.
+      // A session is disabled when a prior batch 403'd for that session's credential.
+      const batchable: PendingRequest[] = [];
+      const fallbacks: PendingRequest[] = [];
+      for (const item of items) {
+        if (item.sessionID && disabledBatchSessions.has(item.sessionID)) {
+          fallbacks.push(item);
+        } else {
+          batchable.push(item);
+        }
       }
-      await submitBatch(auth, items);
+      if (fallbacks.length > 0) {
+        await fallbackAll(fallbacks);
+      }
+      if (batchable.length > 0) {
+        await submitBatch(auth, batchable);
+      }
     }
   }
 
@@ -447,7 +480,16 @@ export function createBatchLLMClient(
                     .map((b) => b.text)
                     .join("\n");
             const user = item.params.messages[0]?.content ?? "";
-            const result = await inner.prompt(system, user, { urgent: true });
+            // Pass sessionID so inner.prompt can resolve the correct auth
+            // credential and inject the billing header for bearer-token
+            // sessions. Without this, getAuth(undefined) would fall back
+            // to arbitrary credential selection and buildBillingBlock would
+            // return null for bearer tokens — causing Anthropic to reject
+            // the request with 429.
+            const result = await inner.prompt(system, user, {
+              urgent: true,
+              sessionID: item.sessionID,
+            });
             item.resolve(result);
           } catch (e) {
             log.error(`batch fallback error for ${item.customId}:`, e);
@@ -517,6 +559,7 @@ export function createBatchLLMClient(
           reject,
           enqueuedAt: Date.now(),
           auth: cred,
+          sessionID: opts?.sessionID,
         });
       });
 
