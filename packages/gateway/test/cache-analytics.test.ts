@@ -493,7 +493,7 @@ describe("normalizeBodyForComparison", () => {
       '{"model":"claude-sonnet-4-20250514","max_tokens":16000,"stream":true}';
     const normalized = normalizeBodyForComparison(body);
     expect(normalized).toBe(
-      '{"model":"claude-sonnet-4-20250514","max_tokens":_,"stream":true}',
+      '{"model":"claude-sonnet-4-20250514","max_tokens":0,"stream":true}',
     );
   });
 
@@ -502,7 +502,7 @@ describe("normalizeBodyForComparison", () => {
       '{"model":"claude-sonnet-4-20250514","max_tokens":8192,"stream":true,"messages":[{"content":"set max_tokens to 16000"}]}';
     const normalized = normalizeBodyForComparison(body);
     // Top-level normalized, but content preserved
-    expect(normalized).toContain('"max_tokens":_,');
+    expect(normalized).toContain('"max_tokens":0,');
     expect(normalized).toContain("set max_tokens to 16000");
   });
 
