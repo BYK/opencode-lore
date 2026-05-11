@@ -294,6 +294,16 @@ form.inline { display: inline; }
 .md th, .md td { text-align: left; padding: 6px 8px; border: 1px solid var(--border); }
 .md th { background: var(--bg2); font-weight: 600; }
 .md img { max-width: 100%; }
+th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+th[data-sort]:hover { color: var(--accent); }
+th[data-sort]::after { content: " \\21C5"; font-size: 0.7em; opacity: 0.3; }
+th[data-sort].asc::after { content: " \\25B2"; opacity: 0.8; }
+th[data-sort].desc::after { content: " \\25BC"; opacity: 0.8; }
+.table-filter { margin: 8px 0 4px; display: flex; gap: 8px; align-items: center; }
+.table-filter input { padding: 6px 10px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--bg); color: var(--fg);
+  font-size: 0.85em; width: 260px; }
+.table-filter .count { font-size: 0.8em; color: var(--fg3); }
 `;
 
 function layout(title: string, body: string): string {
@@ -315,6 +325,67 @@ function layout(title: string, body: string): string {
 <div class="container">
 ${body}
 </div>
+<script>
+document.addEventListener("DOMContentLoaded",function(){
+  function parseNum(s){
+    s=s.replace(/[$,]/g,"");
+    var m=s.match(/([-\\d.]+)\\s*([KMB])?/i);
+    if(!m)return 0;
+    var n=parseFloat(m[1])||0;
+    if(m[2])n*={K:1e3,M:1e6,B:1e9}[m[2].toUpperCase()]||1;
+    return n;
+  }
+  function parseDateVal(s){
+    s=s.trim();
+    if(s==="just now")return 0;
+    var m=s.match(/^(\\d+)([mhd])\\s+ago$/);
+    if(m){var n=parseInt(m[1]);return n*({m:1,h:60,d:1440}[m[2]]||1);}
+    var ts=Date.parse(s);
+    return isNaN(ts)?Infinity:(Date.now()-ts)/60000;
+  }
+  // Sorting
+  document.querySelectorAll("th[data-sort]").forEach(function(th){
+    th.addEventListener("click",function(){
+      var table=th.closest("table");
+      var tbody=table.querySelector("tbody")||table;
+      var idx=Array.from(th.parentNode.children).indexOf(th);
+      var type=th.dataset.sort;
+      var isAsc=th.classList.contains("asc");
+      th.parentNode.querySelectorAll("th").forEach(function(h){h.classList.remove("asc","desc");});
+      th.classList.add(isAsc?"desc":"asc");
+      var rows=Array.from(tbody.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
+      rows.sort(function(a,b){
+        var aT=(a.children[idx]||{textContent:""}).textContent.trim();
+        var bT=(b.children[idx]||{textContent:""}).textContent.trim();
+        var cmp=0;
+        if(type==="num"){cmp=parseNum(aT)-parseNum(bT);}
+        else if(type==="date"){cmp=parseDateVal(aT)-parseDateVal(bT);}
+        else{cmp=aT.localeCompare(bT,undefined,{sensitivity:"base"});}
+        return isAsc?-cmp:cmp;
+      });
+      rows.forEach(function(r){tbody.appendChild(r);});
+    });
+  });
+  // Filtering
+  document.querySelectorAll(".table-filter input").forEach(function(input){
+    var wrapper=input.closest(".table-filter");
+    var table=wrapper.nextElementSibling;
+    if(!table||table.tagName!=="TABLE")return;
+    var countEl=wrapper.querySelector(".count");
+    var allRows=Array.from(table.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
+    input.addEventListener("input",function(){
+      var q=input.value.toLowerCase();
+      var shown=0;
+      allRows.forEach(function(r){
+        var match=!q||r.textContent.toLowerCase().indexOf(q)!==-1;
+        r.style.display=match?"":"none";
+        if(match)shown++;
+      });
+      if(countEl)countEl.textContent=q?shown+"/"+allRows.length:"";
+    });
+  });
+});
+</script>
 </body>
 </html>`;
 }
@@ -390,8 +461,10 @@ function pageDashboard(): string {
   if (!projects.length) {
     body += `<p class="empty">No projects found. Start using Lore with an AI agent to create data.</p>`;
   } else {
-    body += `<h2>Projects</h2><table>
-      <tr><th>Name</th><th>Path</th><th>Git Remote</th><th>Knowledge</th><th>Sessions</th><th>Messages</th><th>Created</th></tr>`;
+    body += `<h2>Projects</h2>
+    <div class="table-filter"><input type="text" placeholder="Filter projects\u2026"><span class="count"></span></div>
+    <table>
+      <tr><th data-sort="text">Name</th><th data-sort="text">Path</th><th data-sort="text">Git Remote</th><th data-sort="num">Knowledge</th><th data-sort="num">Sessions</th><th data-sort="num">Messages</th><th data-sort="date">Created</th></tr>`;
     for (const p of projects) {
       body += `<tr>
         <td><a href="/ui/projects/${esc(p.id)}">${esc(p.name ?? "(unnamed)")}</a></td>
@@ -436,8 +509,9 @@ function pageProject(projectId: string): string | null {
   // Knowledge section
   body += `<h2>Knowledge (${knowledge.length})</h2>`;
   if (knowledge.length) {
-    body += `<table>
-      <tr><th>Category</th><th>Title</th><th>Confidence</th><th>Updated</th></tr>`;
+    body += `<div class="table-filter"><input type="text" placeholder="Filter knowledge\u2026"><span class="count"></span></div>
+    <table>
+      <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="num">Confidence</th><th data-sort="date">Updated</th></tr>`;
     for (const e of knowledge) {
       body += `<tr>
         <td>${badge(e.category)}</td>
@@ -455,7 +529,7 @@ function pageProject(projectId: string): string | null {
   body += `<h2>Sessions (${sessions.length})</h2>`;
   if (sessions.length) {
     body += `<table>
-      <tr><th>Session</th><th>Messages</th><th>Distilled</th><th>Distillations</th><th>Last Activity</th></tr>`;
+      <tr><th>Session</th><th data-sort="num">Messages</th><th data-sort="num">Distilled</th><th data-sort="num">Distillations</th><th data-sort="date">Last Activity</th></tr>`;
     for (const s of sessions) {
       body += `<tr>
         <td><a href="/ui/sessions/${esc(projectId)}/${esc(s.session_id)}">${esc(s.session_id.slice(0, 12))}</a></td>
@@ -474,7 +548,7 @@ function pageProject(projectId: string): string | null {
   body += `<h2>Distillations (${distillations.length})</h2>`;
   if (distillations.length) {
     body += `<table>
-      <tr><th>Session</th><th>Gen</th><th>Tokens</th><th>R_comp</th><th>C_norm</th><th>Created</th></tr>`;
+      <tr><th>Session</th><th data-sort="num">Gen</th><th data-sort="num">Tokens</th><th data-sort="num">R_comp</th><th data-sort="num">C_norm</th><th data-sort="date">Created</th></tr>`;
     for (const d of distillations) {
       body += `<tr>
         <td><a href="/ui/distillations/${esc(d.id)}">${esc(d.session_id.slice(0, 12))}</a></td>
@@ -885,7 +959,7 @@ function pageCosts(): string {
 
     // Per-session table
     body += `<h3>Per Session</h3><table>
-      <tr><th>Session</th><th>Turns</th><th>Conversation</th><th>Worker</th><th>Total</th><th>Savings</th></tr>`;
+      <tr><th>Session</th><th data-sort="num">Turns</th><th data-sort="num">Conversation</th><th data-sort="num">Worker</th><th data-sort="num">Total</th><th data-sort="num">Savings</th></tr>`;
     for (const [sid, c] of allCosts) {
       const actual = totalActualCost(c);
       const saved = totalSavings(c);
@@ -926,8 +1000,10 @@ function pageCosts(): string {
 
     // Per-session historical table (top 50)
     const displayed = historical.sessions.slice(0, 50);
-    body += `<h3>Per Session (top ${displayed.length} by recency)</h3><table>
-      <tr><th>Project</th><th>Session</th><th>Messages</th><th>Model</th><th>Distill Cost</th><th>Avoided Compactions</th><th>Last Active</th></tr>`;
+    body += `<h3>Per Session (top ${displayed.length} by recency)</h3>
+    <div class="table-filter"><input type="text" placeholder="Filter sessions\u2026"><span class="count"></span></div>
+    <table>
+      <tr><th data-sort="text">Project</th><th>Session</th><th data-sort="num">Messages</th><th data-sort="text">Model</th><th data-sort="num">Distill Cost</th><th data-sort="num">Avoided Compactions</th><th data-sort="date">Last Active</th></tr>`;
     for (const s of displayed) {
       body += `<tr>
         <td><a href="/ui/projects/${esc(s.projectId)}">${esc(s.projectName ?? "(unnamed)")}</a></td>
