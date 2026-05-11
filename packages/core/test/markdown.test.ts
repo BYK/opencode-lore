@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import fc from "fast-check";
 import { remark } from "remark";
-import { normalize, unescapeMarkdown, sanitizeSurrogates, inline } from "../src/markdown";
+import { normalize, unescapeMarkdown, sanitizeSurrogates, inline, renderMarkdown } from "../src/markdown";
 import { formatDistillations, formatKnowledge } from "../src/prompt";
 
 const proc = remark();
@@ -324,5 +324,70 @@ describe("inline sanitizes surrogates", () => {
     expect(result).toBe("line one \uFFFDmiddle end");
     // Must be JSON-safe
     expect(() => JSON.stringify(result)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderMarkdown
+// ---------------------------------------------------------------------------
+
+describe("renderMarkdown", () => {
+  test("renders headings", () => {
+    expect(renderMarkdown("# Hello")).toContain("<h1>Hello</h1>");
+  });
+
+  test("renders bold and italic", () => {
+    const result = renderMarkdown("**bold** and *italic*");
+    expect(result).toContain("<strong>bold</strong>");
+    expect(result).toContain("<em>italic</em>");
+  });
+
+  test("renders unordered lists", () => {
+    const result = renderMarkdown("- item 1\n- item 2");
+    expect(result).toContain("<li>item 1</li>");
+    expect(result).toContain("<li>item 2</li>");
+  });
+
+  test("renders code blocks", () => {
+    const result = renderMarkdown("```\nconst x = 1;\n```");
+    expect(result).toContain("<code>");
+    expect(result).toContain("const x = 1;");
+  });
+
+  test("renders inline code", () => {
+    const result = renderMarkdown("use `foo()` here");
+    expect(result).toContain("<code>foo()</code>");
+  });
+
+  test("renders links", () => {
+    const result = renderMarkdown("[click](https://example.com)");
+    expect(result).toContain('<a href="https://example.com">click</a>');
+  });
+
+  test("escapes raw HTML in input (XSS safety)", () => {
+    const result = renderMarkdown('<script>alert("xss")</script>');
+    expect(result).not.toContain("<script>");
+    expect(result).toContain("&lt;script&gt;");
+  });
+
+  test("escapes img onerror XSS", () => {
+    const result = renderMarkdown('<img onerror="alert(1)" src="x">');
+    expect(result).not.toContain("<img");
+    expect(result).toContain("&lt;img");
+  });
+
+  test("sanitizes javascript: protocol in links", () => {
+    const result = renderMarkdown("[click](javascript:alert(1))");
+    expect(result).not.toContain("javascript:");
+  });
+
+  test("handles empty string", () => {
+    expect(renderMarkdown("")).toBe("");
+  });
+
+  test("renders blockquotes", () => {
+    const result = renderMarkdown("> quoted text");
+    expect(result).toContain("<blockquote>");
+    expect(result).toContain("quoted text");
   });
 });

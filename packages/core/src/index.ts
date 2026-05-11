@@ -22,12 +22,15 @@ export * as log from "./log";
 
 export {
   runRecall,
+  searchRecall,
   RECALL_TOOL_DESCRIPTION,
   RECALL_PARAM_DESCRIPTIONS,
   type RecallInput,
   type RecallResult,
   type RecallScope,
   type ScoredDistillation,
+  type TaggedResult,
+  type ScoredTaggedResult,
 } from "./recall";
 
 export type {
@@ -142,4 +145,5 @@ export {
   normalize,
   sanitizeSurrogates,
   unescapeMarkdown,
+  renderMarkdown,
 } from "./markdown";
