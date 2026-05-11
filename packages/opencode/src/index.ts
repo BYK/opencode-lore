@@ -635,11 +635,6 @@ export const LorePlugin: Plugin = async (ctx) => {
   // System prompt hash per session — for cache-bust diagnostics (LORE_DEBUG)
 
 
-  // Sessions currently in auto-recovery — prevents infinite loop when
-  // the recovery prompt itself triggers another "prompt too long" error.
-  // Without this guard: overflow → recovery prompt → overflow → recovery → ...
-  const recoveringSessions = new Set<string>();
-
   // Sessions to skip for temporal storage and distillation. Includes worker sessions
   // (distillation, curator) and child sessions (eval, any other children).
   // Checked once per session ID and cached to avoid repeated API calls.
@@ -868,92 +863,6 @@ export const LorePlugin: Plugin = async (ctx) => {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Detached overflow recovery — same fire-and-forget pattern as handleIdle.
-  // The recovery path creates child sessions (backgroundDistill, session.prompt)
-  // that generate events, causing the same re-entrant deadlock risk.
-  // ---------------------------------------------------------------------------
-
-  async function handleOverflowRecovery(errorSessionID: string) {
-    log.info(
-      `detected context overflow — auto-recovering (session: ${errorSessionID.substring(0, 16)})`,
-    );
-
-    // 1. Force layer 2 on next transform (persisted to DB — survives restarts).
-    setForceMinLayer(2, errorSessionID);
-
-    // 2. Distill all undistilled messages so nothing is lost.
-    await backgroundDistill(errorSessionID, true);
-
-    // 3. Auto-recover: inject a synthetic message that goes through the normal
-    //    chat path. The gradient transform fires with forceMinLayer=2, compressing
-    //    the context to fit. The model receives the distilled summaries and
-    //    continues where it left off — no user intervention needed.
-    recoveringSessions.add(errorSessionID);
-    try {
-      const summaries = distillation
-        .loadForSession(projectPath, errorSessionID)
-        .map((s) => ({
-          observations: s.observations,
-          generation: s.generation,
-        }));
-
-      // Walk back to the last real user message and check whether it
-      // carried media attachments. If yes, route through the
-      // media-aware recovery path so the user's text question + a
-      // list of dropped attachments survive into the synthetic
-      // recovery prompt. Failure of session.messages falls through
-      // to plain recovery.
-      const lastUser = await getLastRealUserMessage(
-        ctx.client,
-        errorSessionID,
-      );
-      const strippedAttachments: string[] = [];
-      const userText: string[] = [];
-      if (lastUser) {
-        for (const part of lastUser.parts) {
-          if (part.type === "text" && typeof part.text === "string") {
-            userText.push(part.text);
-          } else {
-            const stub = stripMediaPart(part);
-            if (stub) strippedAttachments.push(stub);
-          }
-        }
-      }
-
-      const recoveryText =
-        strippedAttachments.length > 0
-          ? buildMediaAwareRecoveryMessage({
-              summaries,
-              strippedAttachments,
-              userText,
-            })
-          : buildRecoveryMessage(summaries);
-
-      log.info(
-        `sending auto-recovery message to session ${errorSessionID.substring(0, 16)}${strippedAttachments.length > 0 ? ` (media-aware: ${strippedAttachments.length} attachment(s) stripped)` : ""}`,
-      );
-      await ctx.client.session.prompt({
-        path: { id: errorSessionID },
-        body: {
-          parts: [{ type: "text", text: recoveryText, synthetic: true }],
-        },
-      });
-      log.info(
-        `auto-recovery message sent successfully`,
-      );
-    } catch (recoveryError) {
-      // Recovery is best-effort — don't let it crash the event handler.
-      // The persisted forceMinLayer will still help on the user's next message.
-      log.error(
-        `auto-recovery failed (forceMinLayer still persisted):`,
-        recoveryError,
-      );
-    } finally {
-      recoveringSessions.delete(errorSessionID);
-    }
-  }
-
   const hooks: Hooks = {
     // Disable built-in compaction and register hidden worker agents.
     // When the gateway is active, also redirect all provider baseURLs through it.
@@ -1052,17 +961,23 @@ export const LorePlugin: Plugin = async (ctx) => {
         log.info("session.error received:", JSON.stringify(rawError, null, 2));
 
         if (isContextOverflow(rawError) && errorSessionID) {
-          if (recoveringSessions.has(errorSessionID)) {
-            log.warn(
-              `recovery for ${errorSessionID.substring(0, 16)} also overflowed — giving up (forceMinLayer still persisted)`,
-            );
-            recoveringSessions.delete(errorSessionID);
-            return;
-          }
-
-          handleOverflowRecovery(errorSessionID).catch((e) =>
-            log.error("overflow recovery error:", e),
+          // OpenCode's reactive compaction handles context overflow natively:
+          // halt() sets needsCompaction → compaction.create(auto:true, overflow:true)
+          // → compaction.process() (gateway intercepts with lore-enhanced summary)
+          // → autocontinue injects synthetic user message → loop continues.
+          //
+          // handleOverflowRecovery was a plugin-only fallback that races with
+          // the built-in path (both fire on the same overflow event). The race
+          // causes the recovery's client.session.prompt() to inject a second
+          // message that produces a summary-like response the model stops on,
+          // making it look like the session is waiting for user input.
+          //
+          // We still force layer 2 so the gradient system compresses context
+          // on the next turn (after compaction reloads messages).
+          log.info(
+            `context overflow detected — deferring to OpenCode built-in compaction (session: ${errorSessionID.substring(0, 16)})`,
           );
+          setForceMinLayer(2, errorSessionID);
         }
       }
 
