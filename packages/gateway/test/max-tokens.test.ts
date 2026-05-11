@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { computeMaxTokens } from "../src/pipeline";
-import { detectClientType } from "../src/session";
+import { detectClientType, extractParentSessionId } from "../src/session";
 import { hasBillingHeader } from "../src/cch";
 
 // ---------------------------------------------------------------------------
@@ -104,6 +104,17 @@ describe("computeMaxTokens", () => {
       computeMaxTokens(16_000, 200_000, 3000, "end_turn", 50_000),
     ).toBe(9000);
   });
+
+  test("floor (8192) is too small for comprehensive planning responses", () => {
+    // This documents the sub-agent EMA pollution scenario:
+    // After many sub-agent tool-call turns with small outputs (e.g. 200 tokens),
+    // the EMA drops low → 3 × 200 = 600 → clamped to floor 8192.
+    // 8192 is insufficient for comprehensive planning responses that need 15-30K.
+    // The fix: skip EMA updates for sub-agent turns entirely.
+    const subagentEMA = 200; // typical short tool-call output
+    const result = computeMaxTokens(128_000, 200_000, subagentEMA, "tool_use", 50_000);
+    expect(result).toBe(8192); // floor — too small for parent conversation
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -163,5 +174,30 @@ describe("hasBillingHeader", () => {
       "You are a helpful assistant.\n" +
       "x-anthropic-billing-header: cc_version=2.1.37.abc; cc_entrypoint=cli; cch=a75d0;";
     expect(hasBillingHeader(system)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractParentSessionId — sub-agent detection
+// ---------------------------------------------------------------------------
+
+describe("extractParentSessionId", () => {
+  test("returns parent session ID when x-parent-session-id is present", () => {
+    expect(
+      extractParentSessionId({ "x-parent-session-id": "parent-abc-123" }),
+    ).toBe("parent-abc-123");
+  });
+
+  test("returns null when no parent header is present", () => {
+    expect(extractParentSessionId({})).toBeNull();
+    expect(
+      extractParentSessionId({ "x-session-affinity": "my-session" }),
+    ).toBeNull();
+  });
+
+  test("returns null for empty parent header value", () => {
+    expect(
+      extractParentSessionId({ "x-parent-session-id": "" }),
+    ).toBeNull();
   });
 });

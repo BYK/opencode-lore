@@ -1100,6 +1100,8 @@ function postResponse(
   requestBody?: string,
   /** Active gen_ai.chat span to finalize with usage attributes. */
   genAiSpan?: Sentry.Span,
+  /** When true, skip output EMA / max_tokens state updates (sub-agent turn). */
+  isSubagentTurn = false,
 ): void {
   const { sessionID, projectPath } = sessionState;
 
@@ -1211,21 +1213,27 @@ function postResponse(
       (sessionState.turnsSinceCuration ?? 0) + 1;
 
     // --- Output tracking for dynamic max_tokens sizing ---
-    sessionState.lastStopReason = resp.stopReason;
-    sessionState.lastInputTokens =
-      (resp.usage.inputTokens ?? 0) +
-      (resp.usage.cacheReadInputTokens ?? 0) +
-      (resp.usage.cacheCreationInputTokens ?? 0);
-    const outputTokens = resp.usage.outputTokens;
-    if (outputTokens > 0) {
-      const EMA_ALPHA = 0.3;
-      sessionState.outputTokensEMA =
-        sessionState.outputTokensEMA == null
-          ? outputTokens
-          : Math.round(
-              sessionState.outputTokensEMA * (1 - EMA_ALPHA) +
-                outputTokens * EMA_ALPHA,
-            );
+    // Sub-agent turns are excluded: their short tool-call responses would
+    // contaminate the parent session's EMA, causing the next parent turn to
+    // receive an artificially low max_tokens (floor of 8192) which truncates
+    // comprehensive planning responses.
+    if (!isSubagentTurn) {
+      sessionState.lastStopReason = resp.stopReason;
+      sessionState.lastInputTokens =
+        (resp.usage.inputTokens ?? 0) +
+        (resp.usage.cacheReadInputTokens ?? 0) +
+        (resp.usage.cacheCreationInputTokens ?? 0);
+      const outputTokens = resp.usage.outputTokens;
+      if (outputTokens > 0) {
+        const EMA_ALPHA = 0.3;
+        sessionState.outputTokensEMA =
+          sessionState.outputTokensEMA == null
+            ? outputTokens
+            : Math.round(
+                sessionState.outputTokensEMA * (1 - EMA_ALPHA) +
+                  outputTokens * EMA_ALPHA,
+              );
+      }
     }
 
     // --- Schedule background work (fire-and-forget) ---
@@ -1456,6 +1464,11 @@ async function handleConversationTurn(
   const { sessionID, isNew, tier } = await identifySession(req, projectPath);
   const sessionState = getOrCreateSession(sessionID, projectPath);
 
+  // Detect sub-agent turns (e.g. OpenCode explore/general agents) that were
+  // merged into the parent session via x-parent-session-id.  These turns
+  // must NOT pollute the parent's output EMA or max_tokens state.
+  const isSubagentTurn = extractParentSessionId(req.rawHeaders) != null;
+
   // Bind auth credential to this session for background workers
   if (cred) {
     setSessionAuth(sessionID, cred);
@@ -1533,7 +1546,8 @@ async function handleConversationTurn(
 
   log.info(
     `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
-      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier}`,
+      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier}` +
+      (isSubagentTurn ? ` subagent=true` : ``),
   );
 
   // --- 4. Set model limits ---
@@ -1568,9 +1582,14 @@ async function handleConversationTurn(
   // clients (OpenCode, generic) often send low/missing values (defaults to
   // 4096 in ingress parsing). Apply a hybrid headroom + history algorithm
   // that tightens from the 32K ceiling based on actual output patterns.
+  //
+  // Sub-agent turns are excluded: their output patterns differ wildly from
+  // the parent conversation (many short tool-call responses) and would
+  // contaminate the EMA, causing the parent's next turn to receive an
+  // artificially low max_tokens.
   const clientType = detectClientType(req.rawHeaders);
   const isCC = clientType === "claude-code" || hasBillingHeader(req.system);
-  if (!isCC) {
+  if (!isCC && !isSubagentTurn) {
     const computed = computeMaxTokens(
       modelSpec.output,
       modelSpec.context,
@@ -1820,7 +1839,7 @@ async function handleConversationTurn(
     );
     return buildStreamingResponse(
       upstreamResponse,
-      (resp) => postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
+      (resp) => postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn),
       hasRecallTool
         ? { modifiedReq, config, sessionState, cacheOptions }
         : undefined,
@@ -1857,7 +1876,7 @@ async function handleConversationTurn(
       log.info(
         `recall (non-stream, mixed): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
       );
-      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
+      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
       return nonStreamHttpResponse(markerResp);
     }
 
@@ -1880,7 +1899,7 @@ async function handleConversationTurn(
         `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
       );
       // Fall back to response with marker (no continuation)
-      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
+      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
       return nonStreamHttpResponse(markerResp);
     }
 
@@ -1900,11 +1919,11 @@ async function handleConversationTurn(
         resp.usage.cacheCreationInputTokens;
     }
 
-    postResponse(req, continuationResp, sessionState, config, requestBody, genAiSpan);
+    postResponse(req, continuationResp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
     return nonStreamHttpResponse(continuationResp);
   }
 
-  postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
+  postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
   return nonStreamHttpResponse(resp);
 }
 
