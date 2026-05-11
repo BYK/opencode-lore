@@ -2,8 +2,8 @@
  * Worker model resolution.
  *
  * Background workers (distillation, curation, query expansion) default to
- * sonnet-4 when the session model is more expensive ($5+/M input, i.e. opus).
- * Sonnet produces equivalent-quality distillations at ~60% lower cost.
+ * sonnet-4-6 when the session model is more expensive ($1.50+/M input).
+ * Sonnet-4-6 produces equivalent-quality distillations at lower cost.
  * An explicit `workerModel` config override takes priority over this default.
  *
  * Resolution order:

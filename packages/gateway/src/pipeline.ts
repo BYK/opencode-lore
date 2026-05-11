@@ -393,7 +393,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     const cfg = loreConfig();
     const defaultModel = cfg.model ?? {
       providerID: "anthropic",
-      modelID: "claude-sonnet-4-20250514",
+      modelID: "claude-sonnet-4-6",
     };
     const inner = createGatewayLLMClient(
       config.upstreamAnthropic,
@@ -1457,7 +1457,7 @@ async function handleCompaction(
   const compactInputTokens = Math.ceil(userContent.length / 3);
   const compactMaxTokens = Math.max(2048, Math.min(Math.ceil(compactInputTokens * 0.5), 20_000));
   const summaryText = await llm.prompt(compactPrompt, userContent, {
-    model: cfg.model,
+    model: getWorkerModel(),
     workerID: "lore-compact",
     urgent: true, // Client is blocking on this response
     maxTokens: compactMaxTokens,

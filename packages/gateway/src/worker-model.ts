@@ -313,10 +313,15 @@ export function getWorkerModel(): { providerID: string; modelID: string } | unde
     }
   }
 
+  // When no session model is configured (no .lore.json or no model field),
+  // use the Anthropic worker default rather than returning undefined — which
+  // would cascade to the LLM client's defaultModel fallback.
+  const fallback = cfg.model ?? WORKER_DEFAULTS["anthropic"];
+
   return workerModel.resolveWorkerModel(
     cfg.model?.providerID ?? "anthropic",
     cfg.workerModel,
-    cfg.model,
+    fallback,
     costAwareDefault,
   );
 }
