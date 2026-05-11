@@ -55,6 +55,10 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
         enum: ["all", "session", "project", "knowledge"],
         description: RECALL_PARAM_DESCRIPTIONS.scope,
       },
+      id: {
+        type: "string",
+        description: RECALL_PARAM_DESCRIPTIONS.id,
+      },
     },
     required: ["query"],
   },
@@ -303,11 +307,13 @@ export function clientHasRecallTool(tools: GatewayTool[]): boolean {
 function parseRecallInput(block: GatewayToolUseBlock): {
   query: string;
   scope: RecallScope;
+  id?: string;
 } {
   const input = block.input as Record<string, unknown>;
   return {
     query: typeof input.query === "string" ? input.query : "",
     scope: (input.scope as RecallScope) ?? "all",
+    ...(typeof input.id === "string" && input.id ? { id: input.id } : {}),
   };
 }
 
@@ -321,26 +327,27 @@ export async function executeRecall(
   block: GatewayToolUseBlock,
   projectPath: string,
   sessionID: string,
-): Promise<{ result: string; input: { query: string; scope?: RecallScope } }> {
-  const { query, scope } = parseRecallInput(block);
+): Promise<{ result: string; input: { query: string; scope?: RecallScope; id?: string } }> {
+  const { query, scope, id } = parseRecallInput(block);
   const cfg = loreConfig();
 
   try {
     const result = await runRecall({
       query,
       scope,
+      id,
       projectPath,
       sessionID,
       knowledgeEnabled: cfg.knowledge?.enabled ?? true,
       searchConfig: cfg.search,
     });
 
-    return { result, input: { query, scope } };
+    return { result, input: { query, scope, id } };
   } catch (e) {
     log.error("gateway recall execution failed:", e);
     return {
       result: "Recall search failed. The memory system encountered an error.",
-      input: { query, scope },
+      input: { query, scope, id },
     };
   }
 }

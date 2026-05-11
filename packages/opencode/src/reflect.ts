@@ -38,12 +38,17 @@ export function createRecallTool(
         .enum(["all", "session", "project", "knowledge"])
         .optional()
         .describe(RECALL_PARAM_DESCRIPTIONS.scope),
+      id: tool.schema
+        .string()
+        .optional()
+        .describe(RECALL_PARAM_DESCRIPTIONS.id),
     },
     async execute(args, context) {
       const sid = context.sessionID;
       return runRecall({
         query: args.query,
         scope: args.scope ?? "all",
+        id: args.id,
         projectPath,
         sessionID: sid,
         knowledgeEnabled,

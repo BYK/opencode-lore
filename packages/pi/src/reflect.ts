@@ -27,6 +27,11 @@ const RecallParams = Type.Object({
       description: RECALL_PARAM_DESCRIPTIONS.scope,
     }),
   ),
+  id: Type.Optional(
+    Type.String({
+      description: RECALL_PARAM_DESCRIPTIONS.id,
+    }),
+  ),
 });
 
 export function registerRecallTool(
@@ -57,6 +62,7 @@ export function registerRecallTool(
       const result = await runRecall({
         query: params.query,
         scope: params.scope ?? "all",
+        id: params.id,
         projectPath: input.projectPath,
         sessionID: input.sessionID,
         knowledgeEnabled: input.knowledgeEnabled,

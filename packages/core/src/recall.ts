@@ -26,7 +26,7 @@ import {
   ftsQueryOr,
   reciprocalRankFusion,
 } from "./search";
-import { h, inline, lip, liph, p, root, serialize, t, ul } from "./markdown";
+import { inline } from "./markdown";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,6 +49,8 @@ export type RecallInput = {
   query: string;
   /** Narrow the search surface. Defaults to `"all"`. */
   scope?: RecallScope;
+  /** Fetch full content of a specific result by its source-prefixed ID (e.g. "k:xxx", "d:xxx"). */
+  id?: string;
   /** Project root — used by all scoring paths. */
   projectPath: string;
   /** Current session ID — required when `scope === "session"`. */
@@ -197,61 +199,249 @@ function searchDistillationsScored(input: {
 // Result formatting
 // ---------------------------------------------------------------------------
 
+/** Default formatting config used when no overrides are provided. */
+const DEFAULT_FORMAT_CONFIG = {
+  charBudget: 8000,
+  relevanceFloor: 0.15,
+  maxResults: 15,
+};
+
+type FormatConfig = typeof DEFAULT_FORMAT_CONFIG;
+
+/**
+ * Truncate text at a sentence boundary within maxChars.
+ *
+ * Walks backwards from the budget limit looking for sentence-ending
+ * punctuation (. ! ?) followed by whitespace or end-of-string.
+ * Only searches the back half of the budget to avoid cutting too short.
+ * Falls back to word boundary if no sentence end is found.
+ */
+function truncateAtSentence(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+
+  // Search backwards from maxChars for a sentence boundary
+  const minPos = Math.floor(maxChars * 0.5);
+  for (let i = maxChars - 1; i >= minPos; i--) {
+    if (
+      (text[i] === "." || text[i] === "!" || text[i] === "?") &&
+      (i + 1 >= text.length || /\s/.test(text[i + 1]))
+    ) {
+      return text.slice(0, i + 1);
+    }
+  }
+
+  // No sentence boundary — fall back to word boundary
+  const slice = text.slice(0, maxChars);
+  const lastSpace = slice.lastIndexOf(" ");
+  if (lastSpace > minPos) return text.slice(0, lastSpace) + "...";
+  return slice + "...";
+}
+
+/** Source-type weights for budget allocation. Higher = more space. */
+const SOURCE_WEIGHT: Record<TaggedResult["source"], number> = {
+  knowledge: 1.0,
+  "cross-knowledge": 1.0,
+  "lat-section": 0.9,
+  distillation: 0.8,
+  temporal: 0.5,
+};
+
+/** Tier multipliers for budget allocation. */
+const TIER_MULTIPLIERS = [3.0, 1.5, 0.7] as const;
+
+/** Human-readable tier labels. */
+const TIER_NAMES = ["Strong Matches", "Supporting", "Peripheral"] as const;
+
+/** Source display order within a tier. */
+const SOURCE_ORDER: Record<TaggedResult["source"], number> = {
+  knowledge: 0,
+  "cross-knowledge": 1,
+  "lat-section": 2,
+  distillation: 3,
+  temporal: 4,
+};
+
+/** Human-readable source group labels for sub-headers. */
+const SOURCE_LABELS: Record<TaggedResult["source"], string> = {
+  knowledge: "Knowledge",
+  "cross-knowledge": "Cross-Project",
+  "lat-section": "Reference",
+  distillation: "Distilled",
+  temporal: "Conversation",
+};
+
+/** Format a relative age string from a timestamp. */
+function relativeAge(createdAt: number): string {
+  const diffMs = Date.now() - createdAt;
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+type TieredResult = ScoredTaggedResult & {
+  tier: 0 | 1 | 2;
+  charBudget: number;
+};
+
 function formatFusedResults(
-  results: Array<{ item: TaggedResult; score: number }>,
-  maxResults: number,
+  results: ScoredTaggedResult[],
+  config: FormatConfig,
 ): string {
   if (!results.length) return "No results found for this query.";
 
-  const items = results.slice(0, maxResults).map(({ item: tagged }) => {
-    switch (tagged.source) {
-      case "knowledge": {
-        const k = tagged.item;
-        return liph(
-          t(
-            `**[knowledge/${k.category}]** ${inline(k.title)}: ${inline(k.content)}`,
-          ),
-        );
-      }
-      case "cross-knowledge": {
-        const k = tagged.item;
-        return liph(
-          t(
-            `**[knowledge/${k.category} from: ${tagged.projectLabel}]** ${inline(k.title)}: ${inline(k.content)}`,
-          ),
-        );
-      }
-      case "distillation": {
-        const d = tagged.item;
-        const preview =
-          d.observations.length > 500
-            ? d.observations.slice(0, 500) + "..."
-            : d.observations;
-        return lip(`**[distilled]** ${inline(preview)}`);
-      }
-      case "temporal": {
-        const m = tagged.item;
-        const preview =
-          m.content.length > 500 ? m.content.slice(0, 500) + "..." : m.content;
-        return lip(
-          `**[temporal/${m.role}]** (session: ${m.session_id.slice(0, 8)}...) ${inline(preview)}`,
-        );
-      }
-      case "lat-section": {
-        const s = tagged.item;
-        const preview = s.first_paragraph
-          ? inline(s.first_paragraph)
-          : inline(
-              s.content.length > 300 ? s.content.slice(0, 300) + "..." : s.content,
-            );
-        return liph(
-          t(`**[lat.md/${s.file}]** ${inline(s.heading)}: ${preview}`),
-        );
-      }
-    }
-  });
+  const totalFound = results.length;
+  const topScore = results[0].score;
+  const scoreFloor = topScore * config.relevanceFloor;
 
-  return serialize(root(h(2, "Recall Results"), ul(items)));
+  // Step 1: Score-based cutoff + hard cap. Always keep at least 3.
+  let kept = results.filter((r) => r.score >= scoreFloor);
+  kept = kept.slice(0, config.maxResults);
+  if (kept.length < 3) kept = results.slice(0, Math.min(3, results.length));
+
+  // Step 2: Assign tiers based on relative score.
+  const tiered: TieredResult[] = kept.map((r) => ({
+    ...r,
+    tier:
+      r.score >= topScore * 0.6 ? 0 : r.score >= topScore * 0.3 ? 1 : 2,
+    charBudget: 0, // computed next
+  }));
+
+  // Step 3: Compute per-result char budgets proportional to weight.
+  const rawWeights = tiered.map(
+    (r) => SOURCE_WEIGHT[r.item.source] * TIER_MULTIPLIERS[r.tier],
+  );
+  const totalWeight = rawWeights.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < tiered.length; i++) {
+    tiered[i].charBudget = Math.max(
+      80,
+      Math.min(
+        1200,
+        Math.floor((config.charBudget * rawWeights[i]) / totalWeight),
+      ),
+    );
+  }
+
+  // Step 4+5: Build markdown output grouped by tier, then by source.
+  const lowScore = kept[kept.length - 1].score;
+  const lines: string[] = [];
+
+  lines.push(`## Recall Results`);
+  lines.push(``);
+  lines.push(
+    `Found ${totalFound} results, showing top ${kept.length} (score range: ${topScore.toFixed(3)}–${lowScore.toFixed(3)}).`,
+  );
+
+  for (const tierIdx of [0, 1, 2] as const) {
+    const tierResults = tiered.filter((r) => r.tier === tierIdx);
+    if (!tierResults.length) continue;
+
+    // Sort by source order within tier
+    tierResults.sort(
+      (a, b) => SOURCE_ORDER[a.item.source] - SOURCE_ORDER[b.item.source],
+    );
+
+    lines.push(``);
+    lines.push(`### ${TIER_NAMES[tierIdx]}`);
+
+    // Group by source type for sub-headers
+    let currentSource: TaggedResult["source"] | null = null;
+
+    for (const r of tierResults) {
+      if (r.item.source !== currentSource) {
+        currentSource = r.item.source;
+        lines.push(``);
+        lines.push(`#### ${SOURCE_LABELS[currentSource]}`);
+      }
+
+      const line = renderResultLine(r.item, r.charBudget);
+      lines.push(line);
+    }
+  }
+
+  // Footer
+  const anyTruncated = tiered.some(
+    (r) => getFullContentLength(r.item) > r.charBudget,
+  );
+  lines.push(``);
+  lines.push(`---`);
+  if (anyTruncated) {
+    lines.push(
+      `*${kept.length} of ${totalFound} results shown. Use recall with id parameter to see full content of truncated results.*`,
+    );
+  } else {
+    lines.push(`*${kept.length} of ${totalFound} results shown.*`);
+  }
+
+  return lines.join("\n");
+}
+
+/** Get the full content length of a tagged result (before truncation). */
+function getFullContentLength(tagged: TaggedResult): number {
+  switch (tagged.source) {
+    case "knowledge":
+    case "cross-knowledge":
+      return tagged.item.title.length + tagged.item.content.length + 4; // **: :
+    case "distillation":
+      return tagged.item.observations.length;
+    case "temporal":
+      return tagged.item.content.length;
+    case "lat-section":
+      return tagged.item.heading.length + tagged.item.content.length;
+  }
+}
+
+/** Render a single result as a markdown list item line. */
+function renderResultLine(tagged: TaggedResult, charBudget: number): string {
+  const id = taggedResultKey(tagged);
+
+  switch (tagged.source) {
+    case "knowledge": {
+      const k = tagged.item;
+      const titlePart = `**${inline(k.title)}**: `;
+      const contentBudget = Math.max(40, charBudget - titlePart.length);
+      const content = truncateAtSentence(inline(k.content), contentBudget);
+      const wasTruncated = inline(k.content).length > contentBudget;
+      return `- ${titlePart}${content}${wasTruncated ? ` (${id})` : ""}`;
+    }
+    case "cross-knowledge": {
+      const k = tagged.item;
+      const titlePart = `**${inline(k.title)}** (from: ${tagged.projectLabel}): `;
+      const contentBudget = Math.max(40, charBudget - titlePart.length);
+      const content = truncateAtSentence(inline(k.content), contentBudget);
+      const wasTruncated = inline(k.content).length > contentBudget;
+      return `- ${titlePart}${content}${wasTruncated ? ` (${id})` : ""}`;
+    }
+    case "distillation": {
+      const d = tagged.item;
+      const fullText = inline(d.observations);
+      const content = truncateAtSentence(fullText, charBudget);
+      const wasTruncated = fullText.length > charBudget;
+      return `- ${content}${wasTruncated ? ` (${id})` : ""}`;
+    }
+    case "temporal": {
+      const m = tagged.item;
+      const prefix = `(${m.role}, ${relativeAge(m.created_at)}) `;
+      const contentBudget = Math.max(40, charBudget - prefix.length);
+      const fullText = inline(m.content);
+      const content = truncateAtSentence(fullText, contentBudget);
+      const wasTruncated = fullText.length > contentBudget;
+      return `- ${prefix}${content}${wasTruncated ? ` (${id})` : ""}`;
+    }
+    case "lat-section": {
+      const s = tagged.item;
+      const heading = `**${inline(s.file)} \u00A7 ${inline(s.heading)}**: `;
+      const contentBudget = Math.max(40, charBudget - heading.length);
+      const fullText = s.first_paragraph
+        ? inline(s.first_paragraph)
+        : inline(s.content);
+      const content = truncateAtSentence(fullText, contentBudget);
+      const wasTruncated = fullText.length > contentBudget;
+      return `- ${heading}${content}${wasTruncated ? ` (${id})` : ""}`;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -578,15 +768,107 @@ export async function searchRecall(
   return reciprocalRankFusion<TaggedResult>(allRrfLists);
 }
 
+// ---------------------------------------------------------------------------
+// Recall by ID — fetch full untruncated content of a specific result
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch the full content of a single result by its source-prefixed ID.
+ *
+ * IDs use the format `prefix:uuid` where prefix is one of:
+ *   k: (knowledge), xk: (cross-knowledge), d: (distillation),
+ *   t: (temporal), lat: (lat-section).
+ */
+function recallById(id: string): string {
+  const colonIdx = id.indexOf(":");
+  if (colonIdx < 1) return `No entry found for id: ${id}`;
+
+  const prefix = id.slice(0, colonIdx);
+  const rawId = id.slice(colonIdx + 1);
+
+  switch (prefix) {
+    case "k":
+    case "xk": {
+      const entry = ltm.get(rawId);
+      if (!entry) return `No entry found for id: ${id}`;
+      return [
+        `## Recall Detail: ${id}`,
+        ``,
+        `#### Knowledge`,
+        `- **${inline(entry.title)}** (${entry.category}): ${inline(entry.content)}`,
+      ].join("\n");
+    }
+    case "d": {
+      const row = db()
+        .query(
+          "SELECT id, observations, generation, created_at, session_id, c_norm FROM distillations WHERE id = ?",
+        )
+        .get(rawId) as Distillation | null;
+      if (!row) return `No entry found for id: ${id}`;
+      return [
+        `## Recall Detail: ${id}`,
+        ``,
+        `#### Distilled`,
+        `${inline(row.observations)}`,
+      ].join("\n");
+    }
+    case "t": {
+      const row = db()
+        .query(
+          "SELECT id, project_id, session_id, role, content, tokens, distilled, created_at, metadata FROM temporal_messages WHERE id = ?",
+        )
+        .get(rawId) as temporal.TemporalMessage | null;
+      if (!row) return `No entry found for id: ${id}`;
+      return [
+        `## Recall Detail: ${id}`,
+        ``,
+        `#### Conversation`,
+        `(${row.role}, ${relativeAge(row.created_at)}, session: ${row.session_id.slice(0, 8)})`,
+        ``,
+        `${inline(row.content)}`,
+      ].join("\n");
+    }
+    case "lat": {
+      const row = db()
+        .query(
+          "SELECT id, project_id, file, heading, depth, content, content_hash, first_paragraph, updated_at FROM lat_sections WHERE id = ?",
+        )
+        .get(rawId) as latReader.LatSection | null;
+      if (!row) return `No entry found for id: ${id}`;
+      return [
+        `## Recall Detail: ${id}`,
+        ``,
+        `#### Reference`,
+        `**${inline(row.file)} \u00A7 ${inline(row.heading)}**`,
+        ``,
+        `${inline(row.content)}`,
+      ].join("\n");
+    }
+    default:
+      return `Unknown source prefix "${prefix}" in id: ${id}`;
+  }
+}
+
 /** Full recall run: search every relevant source, fuse with RRF, format as markdown. */
 export async function runRecall(input: RecallInput): Promise<RecallResult> {
+  // ID-based detail retrieval — bypass search entirely.
+  if (input.id) {
+    return recallById(input.id);
+  }
+
   // Short-circuit vague queries — stopwords-only would match everything.
   if (ftsQuery(input.query) === EMPTY_QUERY) {
     return "Query too vague — try using specific keywords, file names, or technical terms.";
   }
 
   const fused = await searchRecall(input);
-  return formatFusedResults(fused, 20);
+  const recallCfg = input.searchConfig?.recall;
+  return formatFusedResults(fused, {
+    charBudget: recallCfg?.charBudget ?? DEFAULT_FORMAT_CONFIG.charBudget,
+    relevanceFloor:
+      recallCfg?.relevanceFloor ?? DEFAULT_FORMAT_CONFIG.relevanceFloor,
+    maxResults: recallCfg?.maxResults ?? DEFAULT_FORMAT_CONFIG.maxResults,
+  });
 }
 
 /** Standard tool description reused verbatim by each host adapter. */
@@ -598,4 +880,5 @@ export const RECALL_PARAM_DESCRIPTIONS = {
   query: "What to search for — be specific. Include keywords, file names, or concepts.",
   scope:
     "Search scope: 'all' (default) searches everything, 'session' searches current session only, 'project' searches all sessions in this project, 'knowledge' searches only long-term knowledge.",
+  id: "Fetch full content of a specific result by its source-prefixed ID (e.g. 'k:abc123', 'd:abc123'). IDs are shown on truncated results in recall output. When id is provided, query is ignored.",
 };

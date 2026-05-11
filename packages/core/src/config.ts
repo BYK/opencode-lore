@@ -168,12 +168,27 @@ export const LoreConfig = z.object({
           model: "BGESmallENV15",
           dimensions: 384,
         }),
+      /** Recall output formatting — controls how search results are presented to the agent. */
+      recall: z
+        .object({
+          /** Total character budget for recall output. Controls how much context the
+           *  recall results consume. ~2K tokens at 8000 chars. Default: 8000. */
+          charBudget: z.number().min(2000).max(20000).default(8000),
+          /** Minimum RRF score relative to top result. Results below
+           *  topScore * relevanceFloor are dropped. Default: 0.15.
+           *  Set to 0 to disable score-based cutoff. */
+          relevanceFloor: z.number().min(0).max(1).default(0.15),
+          /** Max results to show in recall output. Default: 15. */
+          maxResults: z.number().min(3).max(30).default(15),
+        })
+        .default({ charBudget: 8000, relevanceFloor: 0.15, maxResults: 15 }),
     })
     .default({
       ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
       recallLimit: 10,
       queryExpansion: false,
       embeddings: { enabled: true, provider: "local" as const, model: "BGESmallENV15", dimensions: 384 },
+      recall: { charBudget: 8000, relevanceFloor: 0.15, maxResults: 15 },
     }),
   cache: z
     .object({
