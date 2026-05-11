@@ -76,7 +76,7 @@ export const AGENTS: AgentDef[] = [
     displayName: "Pi",
     binary: "pi",
     detect: () => which("pi"),
-    envVars: (url) => ({ ANTHROPIC_BASE_URL: url }),
+    envVars: (url) => ({ ANTHROPIC_BASE_URL: url, LORE_GATEWAY_URL: url }),
   },
   {
     name: "opencode",

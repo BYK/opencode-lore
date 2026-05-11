@@ -1,10 +1,15 @@
 /**
  * @loreai/pi — Lore memory engine as a Pi coding-agent extension.
  *
- * Wires Lore's core memory hooks (LTM injection, gradient context management,
- * distillation, curation, recall, AGENTS.md sync) into Pi's extension API.
- * All the heavy lifting lives in `@loreai/core`; this module is the adapter
- * layer that converts between Pi's types and Lore's host-agnostic types.
+ * Gateway-only mode: the extension detects the Lore gateway, redirects
+ * compatible provider URLs through it, and registers a single Pi-specific
+ * hook (session_before_compact) that the gateway cannot handle via HTTP
+ * interception. All other memory features (LTM injection, gradient
+ * transforms, temporal capture, recall, idle work) are handled
+ * exclusively by the gateway pipeline.
+ *
+ * If the gateway is not running, the extension logs an error and becomes
+ * inert — no hooks are registered and Pi runs without memory features.
  *
  * Installation (in user's `~/.pi/agent/extensions/`):
  *   import lore from "@loreai/pi";
@@ -14,62 +19,15 @@
  *   pi install npm:@loreai/pi
  */
 import { createHash } from "node:crypto";
-import { join } from "node:path";
 import type {
-  BeforeAgentStartEvent,
-  BeforeAgentStartEventResult,
-  ContextEvent,
   ExtensionAPI,
-  ExtensionContext,
   SessionBeforeCompactEvent,
   SessionStartEvent,
-  TurnEndEvent,
 } from "@mariozechner/pi-coding-agent";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { Message as PiMessage } from "@mariozechner/pi-ai";
-import {
-  config,
-  consumeCameOutOfIdle,
-  curator,
-  distillation,
-  embedding,
-  ensureProject,
-  exportToFile,
-  exportLoreFile,
-  formatKnowledge,
-  getLtmBudget,
-  importFromFile,
-  importLoreFile,
-  isFirstRun,
-  load,
-  log,
-  loreFileExists,
-  ltm,
-  latReader,
-  onIdleResume,
-  setLtmTokens,
-  setModelLimits,
-  shouldImport,
-  shouldImportLoreFile,
-  temporal,
-  transform,
-  workerSessionIDs,
-} from "@loreai/core";
-
-import { piMessageToLore, piMessagesToLore } from "./adapter";
-import { createPiLLMClient } from "./llm-adapter";
-import { registerRecallTool } from "./reflect";
+import { distillation, log } from "@loreai/core";
 
 // Pi doesn't re-export these event result types at the top level — inline their
 // minimal shape here to avoid depending on an internal package path.
-
-type ContextEventResult = { messages?: AgentMessage[] };
-
-type MessageEndEvent = {
-  type: "message_end";
-  message: AgentMessage;
-};
-
 type SessionBeforeCompactResult = {
   cancel?: boolean;
   compaction?: {
@@ -81,11 +39,46 @@ type SessionBeforeCompactResult = {
 };
 
 /**
- * Derive a stable session identifier from Pi's current session file path.
+ * Providers whose wire protocol the Lore gateway can proxy.
  *
- * Pi's session state is already saved to disk; we use a hash of that path so
- * the same persistent session produces the same ID across Pi restarts. When
- * no session file is active (ephemeral mode), we use a process-level UUID.
+ * - anthropic-messages API → gateway POST /v1/messages
+ * - openai-completions API → gateway POST /v1/chat/completions
+ *
+ * Providers using other protocols (Google SDK, AWS Bedrock SDK, OpenAI
+ * responses API, Mistral conversations) are not redirected.
+ */
+const GATEWAY_PROVIDERS = [
+  // anthropic-messages API
+  "anthropic",
+  "fireworks",
+  "github-copilot",
+  // openai-completions API
+  "deepseek",
+  "xai",
+  "groq",
+  "cerebras",
+  "openrouter",
+  "huggingface",
+];
+
+/**
+ * Check if the Lore gateway is reachable at the given base URL.
+ * Short timeout so this doesn't delay Pi startup noticeably.
+ */
+async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(`${baseURL}/health`, { signal: controller.signal });
+    clearTimeout(timer);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Derive a stable session identifier from Pi's current session file path.
  */
 function sessionIDFor(sessionFile: string | undefined): string {
   if (!sessionFile) return `pi-ephemeral-${process.pid}`;
@@ -96,377 +89,59 @@ function sessionIDFor(sessionFile: string | undefined): string {
  * Pi extension entry point.
  *
  * Pi calls this function when loading the extension — either via `pi -e`
- * or after `pi install`. All per-instance state lives in closure.
+ * or after `pi install`. Detects the Lore gateway and, if available,
+ * redirects provider URLs and registers compaction override.
  */
-export default function lorePiExtension(pi: ExtensionAPI): void {
-  /** Current session's stable ID (set in session_start). */
-  let currentSessionID: string = sessionIDFor(undefined);
+export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
+  const gatewayBase =
+    (process.env.LORE_GATEWAY_URL ?? "http://127.0.0.1:6969").replace(/\/$/, "");
 
-  /** Project root for this Pi instance — stable for a session. */
-  let projectPath: string = process.cwd();
+  let gatewayActive = false;
+  const inTestEnv =
+    process.env.NODE_ENV === "test" ||
+    process.env.LORE_GATEWAY_MODE === "test";
 
-  /** Monotonic counter for synthesized message IDs within a session. */
-  let messageCounter = 0;
-
-  /** Whether the core config has been loaded yet. */
-  let loaded = false;
-
-  /**
-   * Per-session LTM cache — reuse formatted bytes across turns to preserve
-   * the Anthropic prompt cache prefix. Same pattern as the OpenCode adapter.
-   */
-  const ltmSessionCache = new Map<string, string>();
-  function invalidateLtmCache() {
-    ltmSessionCache.clear();
+  if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
+    gatewayActive = await probeGateway(gatewayBase);
   }
 
-  /** Turns since last curation run — triggers curator when threshold reached. */
-  let turnsSinceCuration = 0;
+  if (!gatewayActive && !inTestEnv && process.env.LORE_GATEWAY_MODE !== "0") {
+    const msg =
+      "Lore gateway not detected — memory features are unavailable. " +
+      "Run Pi through the gateway with `lore run pi`, or start the gateway separately.";
+    log.error("pi:", msg);
+    return;
+  }
 
-  // -------------------------------------------------------------------------
-  // Session lifecycle
-  // -------------------------------------------------------------------------
+  if (!gatewayActive) return;
+
+  log.info(`pi: gateway active — routing providers through ${gatewayBase}`);
+
+  // Redirect all gateway-compatible providers through the proxy.
+  for (const provider of GATEWAY_PROVIDERS) {
+    pi.registerProvider(provider, { baseUrl: gatewayBase });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Minimal session tracking — only needed by session_before_compact below.
+  // ---------------------------------------------------------------------------
+
+  let projectPath = process.cwd();
+  let currentSessionID = sessionIDFor(undefined);
 
   pi.on("session_start", async (_event: SessionStartEvent, ctx) => {
     projectPath = ctx.cwd;
     currentSessionID = sessionIDFor(ctx.sessionManager.getSessionFile());
-    messageCounter = 0;
-    turnsSinceCuration = 0;
-
-    if (!loaded) {
-      try {
-        await load(projectPath);
-      } catch (err) {
-        log.error("pi: config load failed:", err);
-      }
-      loaded = true;
-    }
-
-    try {
-      const firstRun = isFirstRun();
-      ensureProject(projectPath);
-      if (firstRun) {
-        ctx.ui.notify(
-          "Lore is active — your agent will get smarter every session",
-          "info",
-        );
-      }
-    } catch (err) {
-      log.error("pi: project init failed:", err);
-      return;
-    }
-
-    // Import knowledge at startup — .lore.md takes precedence, falls back
-    // to agents file (AGENTS.md/CLAUDE.md) for backward compat / migration.
-    const cfg = config();
-    if (cfg.knowledge.enabled) {
-      try {
-        if (loreFileExists(projectPath)) {
-          if (shouldImportLoreFile(projectPath)) {
-            importLoreFile(projectPath);
-            log.info("pi: imported knowledge from .lore.md");
-            invalidateLtmCache();
-          }
-        } else if (cfg.agentsFile.enabled) {
-          const filePath = join(projectPath, cfg.agentsFile.path);
-          if (shouldImport({ projectPath, filePath })) {
-            importFromFile({ projectPath, filePath });
-            log.info("pi: imported knowledge from", cfg.agentsFile.path, "(migrating to .lore.md)");
-            invalidateLtmCache();
-          }
-        }
-      } catch (err) {
-        log.error("pi: knowledge import error:", err);
-      }
-    }
-
-    // Prune corrupted/oversized knowledge entries.
-    if (cfg.knowledge.enabled) {
-      try {
-        const pruned = ltm.pruneOversized(1200);
-        if (pruned > 0) {
-          log.info(
-            `pi: pruned ${pruned} oversized knowledge entries (confidence → 0)`,
-          );
-          invalidateLtmCache();
-        }
-      } catch (err) {
-        log.error("pi: pruneOversized failed:", err);
-      }
-    }
-
-    // Refresh lat.md directory if present.
-    try {
-      latReader.refresh(projectPath);
-    } catch (err) {
-      log.error("pi: lat-reader refresh error:", err);
-    }
-
-    // Startup backfills — run once, idempotent.
-
-    // Retroactive metric backfill: compute r_compression and c_norm for
-    // distillations created before these diagnostics were added (pre-v12).
-    // Synchronous, DB-only — no API calls.
-    try {
-      distillation.backfillMetrics();
-    } catch (err) {
-      log.error("pi: metric backfill failed:", err);
-    }
-
-    // Background: backfill embeddings for entries that don't have one yet.
-    embedding.runStartupBackfill().catch((err) => {
-      log.error("pi: embedding backfill failed:", err);
-    });
-
-    // Register the recall tool.
-    registerRecallTool(pi, {
-      projectPath,
-      knowledgeEnabled: cfg.knowledge.enabled,
-      llmFactory: (ctx2) => createPiLLMClient(ctx2, ctx2.model),
-      searchConfig: cfg.search,
-      sessionID: currentSessionID,
-    });
   });
 
-  // -------------------------------------------------------------------------
-  // LTM injection — before_agent_start
-  // -------------------------------------------------------------------------
-
-  pi.on(
-    "before_agent_start",
-    async (
-      event: BeforeAgentStartEvent,
-      ctx,
-    ): Promise<BeforeAgentStartEventResult | undefined> => {
-      const cfg = config();
-      if (!cfg.knowledge.enabled) return undefined;
-
-      try {
-        const contextLimit = ctx.model?.contextWindow ?? 200_000;
-        const outputReserved = ctx.model?.maxTokens ?? 16_384;
-        setModelLimits({ context: contextLimit, output: outputReserved });
-        const budget = getLtmBudget(cfg.budget.ltm);
-
-        // Cold-cache idle-resume: when the gap since this session's last turn
-        // exceeds the configured threshold, the provider's prompt cache has
-        // already evicted our prefix bytes. Refresh Lore's byte-identity caches
-        // (gradient prefix/raw window) and the per-session LTM cache before
-        // they're consulted on this turn. Reasoning blocks are NOT touched
-        // (Anthropic's April 23 postmortem identified that as the root cause
-        // of forgetfulness/repetition).
-        const thresholdMs = cfg.idleResumeMinutes * 60_000;
-        const idleResult = onIdleResume(currentSessionID, thresholdMs);
-        if (idleResult.triggered) {
-          ltmSessionCache.delete(currentSessionID);
-          log.info(
-            `pi: session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches on cold prompt cache`,
-          );
-        }
-        // Pi has no LTM-degraded recovery branch (no fallback note path), so
-        // cameOutOfIdle isn't actionable here — clear it for hygiene.
-        consumeCameOutOfIdle(currentSessionID);
-
-        // Per-session cache: reuse formatted string across turns for prompt caching.
-        let formatted = ltmSessionCache.get(currentSessionID);
-        if (!formatted) {
-          const entries = ltm.forSession(projectPath, currentSessionID, budget);
-          if (!entries.length) {
-            setLtmTokens(0, currentSessionID);
-            return undefined;
-          }
-          formatted = formatKnowledge(
-            entries.map((e) => ({
-              category: e.category,
-              title: e.title,
-              content: e.content,
-            })),
-            budget,
-          );
-          ltmSessionCache.set(currentSessionID, formatted);
-        }
-
-        // Account for LTM tokens in the gradient budget.
-        setLtmTokens(Math.ceil(formatted.length / 3), currentSessionID);
-
-        return {
-          systemPrompt: `${event.systemPrompt}\n\n${formatted}`,
-        };
-      } catch (err) {
-        log.error("pi: LTM injection failed:", err);
-        return undefined;
-      }
-    },
-  );
-
-  // -------------------------------------------------------------------------
-  // Gradient context management — context event
-  //
-  // Pi's `context` event fires before each LLM call with an `AgentMessage[]`.
-  // For layer 0 (passthrough), we no-op. Layers 1-4 would require synthesizing
-  // back to Pi's message shape; that's deferred pending real usage data —
-  // Pi has its own compaction, so overflow recovery already works.
-  // -------------------------------------------------------------------------
-
-  pi.on(
-    "context",
-    async (event: ContextEvent, _ctx): Promise<ContextEventResult | undefined> => {
-      try {
-        const llmMessages: PiMessage[] = [];
-        event.messages.forEach((m) => {
-          if (
-            m.role === "user" ||
-            m.role === "assistant" ||
-            m.role === "toolResult"
-          ) {
-            llmMessages.push(m as PiMessage);
-          }
-        });
-
-        const loreMessages = piMessagesToLore(llmMessages, currentSessionID);
-        const result = transform({
-          messages: loreMessages,
-          projectPath,
-          sessionID: currentSessionID,
-        });
-
-        if (result.layer === 0) return undefined;
-
-        log.info(
-          `pi: gradient layer ${result.layer} triggered — passthrough (layer-1+ synthesis TBD)`,
-        );
-        return undefined;
-      } catch (err) {
-        log.error("pi: gradient transform failed:", err);
-        return undefined;
-      }
-    },
-  );
-
-  // -------------------------------------------------------------------------
-  // Message capture — message_end
-  // -------------------------------------------------------------------------
-
-  pi.on("message_end", async (event: MessageEndEvent, _ctx) => {
-    const m = event.message;
-    if (
-      m.role !== "user" &&
-      m.role !== "assistant" &&
-      m.role !== "toolResult"
-    ) {
-      return;
-    }
-    if (workerSessionIDs.has(currentSessionID)) return;
-
-    try {
-      const converted = piMessageToLore(
-        m as PiMessage,
-        currentSessionID,
-        messageCounter++,
-      );
-      if (converted) {
-        temporal.store({
-          projectPath,
-          info: converted.info,
-          parts: converted.parts,
-        });
-      }
-    } catch (err) {
-      log.error("pi: temporal.store failed:", err);
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // Idle triggers — turn_end
-  //
-  // Pi doesn't have a dedicated idle event, but turn_end fires after the
-  // assistant finishes (including tool execution). That's the natural point
-  // to run distillation + curation + pruning.
-  // -------------------------------------------------------------------------
-
-  pi.on("turn_end", async (_event: TurnEndEvent, ctx) => {
-    if (workerSessionIDs.has(currentSessionID)) return;
-
-    const cfg = config();
-    turnsSinceCuration++;
-
-    // Background distillation.
-    try {
-      const pending = temporal.undistilledCount(projectPath, currentSessionID);
-      if (pending >= cfg.distillation.minMessages) {
-        const llm = createPiLLMClient(ctx, ctx.model);
-        await distillation.run({
-          llm,
-          projectPath,
-          sessionID: currentSessionID,
-          model: cfg.model,
-        });
-      }
-    } catch (err) {
-      log.error("pi: distillation failed:", err);
-    }
-
-    // Background curation.
-    if (cfg.curator.enabled && cfg.curator.onIdle) {
-      try {
-        if (turnsSinceCuration >= cfg.curator.afterTurns) {
-          turnsSinceCuration = 0;
-          const llm = createPiLLMClient(ctx, ctx.model);
-          const { created, updated, deleted } = await curator.run({
-            llm,
-            projectPath,
-            sessionID: currentSessionID,
-            model: cfg.model,
-          });
-          // Consolidation when entry count exceeds threshold.
-          const entries = ltm.forProject(projectPath, false);
-          if (entries.length > cfg.curator.maxEntries) {
-            await curator.consolidate({
-              llm,
-              projectPath,
-              sessionID: currentSessionID,
-              model: cfg.model,
-            });
-          }
-        }
-      } catch (err) {
-        log.error("pi: curation failed:", err);
-      }
-    }
-
-    // Temporal pruning.
-    try {
-      temporal.prune({
-        projectPath,
-        retentionDays: cfg.pruning.retention,
-        maxStorageMB: cfg.pruning.maxStorage,
-      });
-    } catch (err) {
-      log.error("pi: temporal.prune failed:", err);
-    }
-
-    // Knowledge export (.lore.md + optional agents file pointer).
-    if (cfg.knowledge.enabled) {
-      try {
-        if (cfg.agentsFile.enabled) {
-          const filePath = join(projectPath, cfg.agentsFile.path);
-          exportToFile({ projectPath, filePath });
-        } else {
-          exportLoreFile(projectPath);
-        }
-      } catch (err) {
-        log.error("pi: knowledge export error:", err);
-      }
-    }
-  });
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Compaction override — session_before_compact
   //
-  // Lore replaces Pi's default compaction with a distillation-aware summary.
-  // If we have distillations for this session, use those as the summary text
-  // directly — Lore already pre-summarized history. Otherwise fall through
-  // to Pi's default.
-  // -------------------------------------------------------------------------
+  // Pi's compaction goes through its extension API, not HTTP. The gateway
+  // intercepts compaction via HTTP request patterns (Claude Code-specific),
+  // which don't match Pi's internal compaction flow. The extension provides
+  // Lore's distillation-aware summaries directly.
+  // ---------------------------------------------------------------------------
 
   pi.on(
     "session_before_compact",

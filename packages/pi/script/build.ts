@@ -14,10 +14,6 @@
  *   inline a copy in our bundle, code that depends on module identity
  *   (extension type checks, event bus registrations) sees two different
  *   instances and silently fails to register.
- * - `typebox` — Pi bundles this via the same virtualModules mechanism.
- *   Pi's docs explicitly require pi-package authors to mark it as a
- *   peerDependency. We inlined it previously, which is why our v0.10.1
- *   extension silently didn't register in real Pi installs.
  */
 import * as esbuild from "esbuild";
 import { rmSync, mkdirSync, cpSync, existsSync } from "node:fs";
@@ -36,10 +32,7 @@ const external = [
   "node:*",
   "@loreai/core",
   "@mariozechner/pi-coding-agent",
-  "@mariozechner/pi-ai",
-  "@mariozechner/pi-agent-core",
   "@mariozechner/pi-tui",
-  "typebox",
 ];
 
 await esbuild.build({
@@ -62,18 +55,14 @@ execSync("tsc -p tsconfig.build.json", {
   stdio: "inherit",
 });
 
-// Copy the full types tree (peer module .d.ts files) into dist/ so the
-// top-level re-exports in index.d.ts resolve for downstream consumers.
+// Copy type declarations into dist/ so the top-level index.d.ts resolves
+// for downstream consumers.
 const typesDir = join(distDir, "types");
 if (existsSync(join(typesDir, "index.d.ts"))) {
-  // Keep a flat dist/*.d.ts layout rather than dist/{node,bun}/ since Pi
-  // only targets Node.
   for (const name of ["index.d.ts", "index.d.ts.map"]) {
     const src = join(typesDir, name);
     if (existsSync(src)) cpSync(src, join(distDir, name));
   }
-  // Copy peer module declarations (adapter.d.ts, llm-adapter.d.ts, reflect.d.ts).
-  cpSync(typesDir, distDir, { recursive: true });
 }
 
 console.log("✓ @loreai/pi build complete");

@@ -1,6 +1,6 @@
 {
   "name": "@loreai/pi",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "description": "Lore memory engine as a Pi (@mariozechner/pi-coding-agent) extension",
@@ -25,30 +25,15 @@
     "@loreai/core": "workspace:*"
   },
   "peerDependencies": {
-    "@mariozechner/pi-agent-core": "*",
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-coding-agent": "*",
-    "typebox": "*"
+    "@mariozechner/pi-coding-agent": "*"
   },
   "peerDependenciesMeta": {
-    "@mariozechner/pi-agent-core": {
-      "optional": true
-    },
-    "@mariozechner/pi-ai": {
-      "optional": true
-    },
     "@mariozechner/pi-coding-agent": {
-      "optional": true
-    },
-    "typebox": {
       "optional": true
     }
   },
   "devDependencies": {
-    "@mariozechner/pi-agent-core": "^0.73.1",
-    "@mariozechner/pi-ai": "^0.73.1",
-    "@mariozechner/pi-coding-agent": "^0.73.1",
-    "typebox": "^1.1.24"
+    "@mariozechner/pi-coding-agent": "^0.73.1"
   },
   "files": [
     "src/",

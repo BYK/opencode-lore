@@ -1,4 +1,85 @@
 # Changelog
+## 0.17.0
+
+### New Features ✨
+
+#### Gateway
+
+- 3-tier session identification via client headers by @BYK in [#203](https://github.com/BYK/loreai/pull/203)
+- Vendor fastembed for linux-arm64 binaries by @BYK in [#200](https://github.com/BYK/loreai/pull/200)
+- Pin worker cch to known version/seed and re-sign conversation turns by @BYK in [#199](https://github.com/BYK/loreai/pull/199)
+- Direct-bundle fastembed via bun --compile by @BYK in [#197](https://github.com/BYK/loreai/pull/197)
+
+#### Other
+
+- (cch) Add 2.1.138 seed, version fallback, and automated extraction pipeline by @BYK in [#212](https://github.com/BYK/loreai/pull/212)
+- (ui) Add markdown rendering to web dashboard by @BYK in [#217](https://github.com/BYK/loreai/pull/217)
+- Persist live session cost data (warmup, TTL, batch savings) across restarts by @BYK in [50685ede](https://github.com/BYK/loreai/commit/50685ede4a3a91a073ef17a089ccc49ba4720512)
+- Add column sorting and filtering to web UI tables by @BYK in [#233](https://github.com/BYK/loreai/pull/233)
+- Reduce distillation overhead with meta-distill separation, sliding expansion guard, and batch tracking by @BYK in [#229](https://github.com/BYK/loreai/pull/229)
+- Improve project naming from git remote and add project delete/rename by @BYK in [#224](https://github.com/BYK/loreai/pull/224)
+- Cost intelligence dashboard with per-session tracking and historical backdating by @BYK in [#222](https://github.com/BYK/loreai/pull/222)
+- Speculative cache warming with survival analysis and user controls by @BYK in [#214](https://github.com/BYK/loreai/pull/214)
+- Token-based distillation segmentation, √N budget, and expansion guard by @BYK in [#213](https://github.com/BYK/loreai/pull/213)
+- Dynamic max_tokens sizing for workers and conversation passthrough by @BYK in [#211](https://github.com/BYK/loreai/pull/211)
+- Prevent Claude Code auto-compaction with defense-in-depth by @BYK in [#210](https://github.com/BYK/loreai/pull/210)
+- Identify projects by git remote to unify worktrees and clones by @BYK in [#208](https://github.com/BYK/loreai/pull/208)
+- Data management CLI, recall command, web dashboard, and multi-host binding by @BYK in [#201](https://github.com/BYK/loreai/pull/201)
+- Provider-aware worker model selection with multi-provider pricing by @BYK in [#186](https://github.com/BYK/loreai/pull/186)
+- Cost-aware worker model, accurate cache pricing, and human-friendly invalidation reasons by @BYK in [#182](https://github.com/BYK/loreai/pull/182)
+- Cost-aware cache optimization to reduce opus-4-6 write costs by @BYK in [#181](https://github.com/BYK/loreai/pull/181)
+
+### Bug Fixes 🐛
+
+#### Gateway
+
+- Normalize cc_version suffix and max_tokens in cache analytics by @BYK in [#209](https://github.com/BYK/loreai/pull/209)
+- Compute cch billing hash for worker requests using bearer tokens by @BYK in [#193](https://github.com/BYK/loreai/pull/193)
+- Catch port-in-use errors and memoize gateway init (LOREAI-GATEWAY-2) by @BYK in [#191](https://github.com/BYK/loreai/pull/191)
+- Suppress verbose startup banner in embedded mode by @BYK in [#190](https://github.com/BYK/loreai/pull/190)
+
+#### Other
+
+- (core) Make fastembed optional to survive CUDA 13 install failures by @BYK in [#192](https://github.com/BYK/loreai/pull/192)
+- Prevent compaction summary leaking as subagent task_result to parent session by @BYK in [#236](https://github.com/BYK/loreai/pull/236)
+- Increase flaky perf test threshold from 1s to 2s by @BYK in [#235](https://github.com/BYK/loreai/pull/235)
+- Recover missing call_type column on distillations table by @BYK in [#232](https://github.com/BYK/loreai/pull/232)
+- Update historical estimates note to reflect batch API tracking by @BYK in [357bd93c](https://github.com/BYK/loreai/commit/357bd93c83f97bad925828489eab1525175923d1)
+- Remap @sentry/bun to @sentry/node in CJS npm bundle by @BYK in [#231](https://github.com/BYK/loreai/pull/231)
+- Guard against test runs polluting the production database by @BYK in [#230](https://github.com/BYK/loreai/pull/230)
+- Improve search quality with progressive FTS relaxation, temporal vector search, and UI overhaul by @BYK in [#228](https://github.com/BYK/loreai/pull/228)
+- Binary smoke tests on macOS/Windows — isMainThread re-entry for worker thread by @BYK in [#227](https://github.com/BYK/loreai/pull/227)
+- Scope test DELETE to project, add cache invalidation and recovery CLI by @BYK in [#226](https://github.com/BYK/loreai/pull/226)
+- Use valid JSON placeholder in max_tokens normalization (LOREAI-GATEWAY-5) by @BYK in [#223](https://github.com/BYK/loreai/pull/223)
+- Remove handleOverflowRecovery to stop race with built-in compaction by @BYK in [#220](https://github.com/BYK/loreai/pull/220)
+- Worker calls falling back to stale Sonnet 4 instead of Sonnet 4.6 by @BYK in [#218](https://github.com/BYK/loreai/pull/218)
+- Prevent subagent turns from polluting parent session's temporal history by @BYK in [#216](https://github.com/BYK/loreai/pull/216)
+- Isolate subagent turns from parent session's dynamic max_tokens EMA by @BYK in [#215](https://github.com/BYK/loreai/pull/215)
+- Per-session urgentDistillation and layer 1 distillation trigger by @BYK in [#204](https://github.com/BYK/loreai/pull/204)
+- Per-session cch + split retry budget + unblock fastembed backfill by @BYK in [#195](https://github.com/BYK/loreai/pull/195)
+- Increase Bun.serve idleTimeout for LLM streaming responses by @BYK in [#189](https://github.com/BYK/loreai/pull/189)
+- Handle client disconnect in streaming pipeline (LOREAI-GATEWAY-3) by @BYK in [#188](https://github.com/BYK/loreai/pull/188)
+- Normalize Claude CLI cch= hash in cache analytics by @BYK in [#187](https://github.com/BYK/loreai/pull/187)
+- Use claude-sonnet-4-6 for worker model default (same price, latest version) by @BYK in [06353151](https://github.com/BYK/loreai/commit/0635315124d07b23cc128954231131cdc51ac2fc)
+- Prevent ReadableStream controller double-close in streaming pipeline by @BYK in [#183](https://github.com/BYK/loreai/pull/183)
+
+### Documentation 📚
+
+- Add codebase overview to AGENTS.md to eliminate redundant explore runs by @BYK in [#234](https://github.com/BYK/loreai/pull/234)
+
+### Internal Changes 🔧
+
+- Strip Pi plugin to gateway-only mode by @BYK in [#238](https://github.com/BYK/loreai/pull/238)
+- Strip OpenCode plugin to gateway-only mode by @BYK in [#237](https://github.com/BYK/loreai/pull/237)
+- Move fastembed ONNX inference to worker thread (#196) by @BYK in [#225](https://github.com/BYK/loreai/pull/225)
+- Skip redundant .lore.md import/export via mtime + content hash cache by @BYK in [#219](https://github.com/BYK/loreai/pull/219)
+- Drop darwin-x64 (Intel macOS) target by @BYK in [#198](https://github.com/BYK/loreai/pull/198)
+
+### Other
+
+- debug: verify worker file exists before compile by @BYK in [25bd12fd](https://github.com/BYK/loreai/commit/25bd12fda775d2fa05c6e4736616ddb6fcc0c364)
+- debug: log compile command to diagnose CI binary smoke test failure by @BYK in [c954862c](https://github.com/BYK/loreai/commit/c954862cc5c5aea63937828c2bc907fa5baa7935)
+
 ## 0.16.0
 
 ### New Features ✨
