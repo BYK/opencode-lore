@@ -336,8 +336,10 @@ describe("vectorSearch", () => {
   const PROJECT = "/test/embedding/vectorsearch";
 
   beforeEach(() => {
-    // vectorSearch has no project filter — clean ALL knowledge to avoid cross-test leaks
-    db().query("DELETE FROM knowledge").run();
+    // Clean test project's knowledge to avoid cross-test leaks.
+    // IMPORTANT: scope to project_id — unscoped DELETE wipes ALL projects' entries.
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
   });
 
   test("returns entries sorted by similarity descending", () => {
@@ -451,7 +453,10 @@ describe("LocalProvider integration", () => {
   const PROJECT = "/test/embedding/local";
 
   beforeEach(() => {
-    db().query("DELETE FROM knowledge").run();
+    // Clean test project's knowledge to avoid cross-test leaks.
+    // IMPORTANT: scope to project_id — unscoped DELETE wipes ALL projects' entries.
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     // Don't resetProvider() between tests — reuse the worker across the suite.
     // Respawning a worker that loaded NAPI modules (fastembed/onnxruntime)
     // triggers a Bun segfault. The worker is shut down in afterAll instead.

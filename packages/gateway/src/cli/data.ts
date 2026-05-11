@@ -501,6 +501,109 @@ async function cmdDelete(
   }
 }
 
+async function cmdRecover(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const { existsSync } = await import("fs");
+  const { join } = await import("path");
+  const { data, importLoreFile, importFromFile, loreFileExists, clearLoreFileCache, LORE_FILE } =
+    await import("@loreai/core");
+  const skipConfirm = !!flags.yes;
+  const asJson = !!flags.json;
+
+  const projects = data.listProjects();
+  const recoverable: Array<{
+    name: string | null;
+    path: string;
+    source: string; // ".lore.md" | "AGENTS.md" | "CLAUDE.md"
+  }> = [];
+
+  // Scan for recoverable files
+  for (const project of projects) {
+    if (!existsSync(project.path)) continue;
+
+    if (loreFileExists(project.path)) {
+      recoverable.push({ name: project.name, path: project.path, source: LORE_FILE });
+    } else {
+      // Check AGENTS.md, then CLAUDE.md
+      for (const filename of ["AGENTS.md", "CLAUDE.md"]) {
+        const filePath = join(project.path, filename);
+        if (existsSync(filePath)) {
+          recoverable.push({ name: project.name, path: project.path, source: filename });
+          break; // prefer AGENTS.md over CLAUDE.md
+        }
+      }
+    }
+  }
+
+  if (recoverable.length === 0) {
+    console.log("No recoverable files found in any project directory.");
+    return;
+  }
+
+  console.log(`Found ${recoverable.length} project(s) with recoverable knowledge files:\n`);
+  for (const r of recoverable) {
+    console.log(`  ${r.name ?? r.path}  ← ${r.source}`);
+  }
+  console.log();
+
+  if (!skipConfirm) {
+    const confirmed = await confirm(
+      `This will re-import knowledge entries from the files listed above.\n` +
+        `Entries with existing UUIDs will be updated if changed.\n` +
+        `New entries (unknown UUIDs or hand-written) will be created.`,
+    );
+    if (!confirmed) {
+      console.log("Cancelled.");
+      return;
+    }
+  }
+
+  const results: Array<{
+    name: string | null;
+    path: string;
+    source: string;
+    before: number;
+    after: number;
+  }> = [];
+
+  for (const r of recoverable) {
+    const before = data.countForProject(r.path).knowledge;
+
+    // Clear the file cache to ensure shouldImportLoreFile won't short-circuit
+    clearLoreFileCache(r.path);
+
+    if (r.source === LORE_FILE) {
+      importLoreFile(r.path);
+    } else {
+      importFromFile({ projectPath: r.path, filePath: join(r.path, r.source) });
+    }
+
+    const after = data.countForProject(r.path).knowledge;
+    results.push({ name: r.name, path: r.path, source: r.source, before, after });
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify(results, null, 2));
+    return;
+  }
+
+  console.log(`\nRecovery results:`);
+  let totalImported = 0;
+  for (const r of results) {
+    const imported = r.after - r.before;
+    totalImported += imported;
+    const label = r.name ?? r.path;
+    if (imported > 0) {
+      console.log(`  ${padRight(label, 30)}  +${imported} entries (${r.before} → ${r.after}) from ${r.source}`);
+    } else {
+      console.log(`  ${padRight(label, 30)}  no change (${r.after} entries) from ${r.source}`);
+    }
+  }
+  console.log(`\nTotal: ${totalImported} entries recovered across ${results.length} project(s).`);
+}
+
 async function cmdMerge(
   _args: string[],
   flags: Record<string, unknown>,
@@ -582,6 +685,7 @@ Subcommands:
   clear [options]       Clear data for a project or wipe the database
   delete <type> <id>    Delete a single entry
   merge                 Scan git remotes and merge duplicate projects
+  recover               Re-import knowledge from .lore.md / AGENTS.md files
 
 Options:
   --project <path>      Target project directory (default: current directory)
@@ -606,6 +710,8 @@ Examples:
   lore data delete session abc12345-6789
   lore data merge                          # scan & merge git duplicates
   lore data merge --yes                    # skip confirmation
+  lore data recover                        # re-import from .lore.md / AGENTS.md
+  lore data recover --yes                  # skip confirmation
 `.trimStart();
 
 export async function commandData(
@@ -630,6 +736,9 @@ export async function commandData(
       break;
     case "merge":
       await cmdMerge(subArgs, values);
+      break;
+    case "recover":
+      await cmdRecover(subArgs, values);
       break;
     case "help":
     case undefined:

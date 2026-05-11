@@ -348,11 +348,19 @@ export function clearProject(projectPath: string): ClearResult {
 export function deleteProject(projectId: string): ClearResult | null {
   const database = db();
 
-  // Verify the project exists
+  // Verify the project exists and collect all paths BEFORE deleting.
+  // We need these to invalidate the .lore.md file cache (kv_meta) after
+  // deletion — otherwise shouldImportLoreFile() sees the stale cache,
+  // skips re-import, and the curator overwrites .lore.md with junk.
   const project = database
-    .query("SELECT id FROM projects WHERE id = ?")
-    .get(projectId) as { id: string } | null;
+    .query("SELECT id, path FROM projects WHERE id = ?")
+    .get(projectId) as { id: string; path: string } | null;
   if (!project) return null;
+
+  const aliasPaths = database
+    .query("SELECT path FROM project_path_aliases WHERE project_id = ?")
+    .all(projectId) as { path: string }[];
+  const allPaths = [project.path, ...aliasPaths.map((r) => r.path)];
 
   // Count before deleting
   const counts = {
@@ -422,6 +430,15 @@ export function deleteProject(projectId: string): ClearResult | null {
   } catch (e) {
     database.exec("ROLLBACK");
     throw e;
+  }
+
+  // Invalidate the .lore.md file cache for all known paths so that
+  // shouldImportLoreFile() re-checks the file if this project path
+  // is reused. Without this, the stale cache causes the import to be
+  // skipped, the curator creates junk entries, and exportLoreFile()
+  // overwrites the good .lore.md with garbage.
+  for (const p of allPaths) {
+    agentsFile.clearLoreFileCache(p);
   }
 
   return {
