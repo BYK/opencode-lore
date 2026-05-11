@@ -1,4 +1,4 @@
-import { afterEach, describe, test, expect, beforeEach, mock } from "bun:test";
+import { afterAll, afterEach, describe, test, expect, beforeEach, mock } from "bun:test";
 import { db, ensureProject } from "../src/db";
 import {
   cosineSimilarity,
@@ -453,7 +453,9 @@ describe("LocalProvider integration", () => {
 
   beforeEach(() => {
     db().query("DELETE FROM knowledge").run();
-    resetProvider();
+    // Don't resetProvider() between tests — reuse the worker across the suite.
+    // Respawning a worker that loaded NAPI modules (fastembed/onnxruntime)
+    // triggers a Bun segfault. The worker is shut down in afterAll instead.
   });
 
   // Model init can take ~350ms (cached) + ~150ms per embed.
@@ -523,6 +525,85 @@ describe("LocalProvider integration", () => {
     },
     15_000,
   );
+});
+
+describe("LocalProvider worker thread", () => {
+  // These tests exercise the worker-backed LocalProvider end-to-end.
+  // They require fastembed to be installed (same as the integration tests above).
+  // Model init can take ~350ms (cached) — timeouts are generous for CI.
+  //
+  // We reuse a single worker across the whole suite — Bun has a bug where
+  // respawning a worker that loaded NAPI modules (fastembed/onnxruntime)
+  // triggers a segfault. The worker is shut down once in afterAll.
+
+  test(
+    "embed produces Float32Array vectors with 384 dimensions through worker",
+    async () => {
+      const [vec] = await embed(["test query via worker"], "query");
+      expect(vec).toBeInstanceOf(Float32Array);
+      expect(vec.length).toBe(384);
+      // Vector should not be all zeros
+      const norm = Array.from(vec).reduce((sum, v) => sum + v * v, 0);
+      expect(norm).toBeGreaterThan(0);
+    },
+    15_000,
+  );
+
+  test(
+    "concurrent embed() calls are serialized correctly",
+    async () => {
+      // Fire 5 embed calls concurrently — all should resolve with correct vectors.
+      const promises = Array.from({ length: 5 }, (_, i) =>
+        embed([`concurrent test ${i}`], "document"),
+      );
+      const results = await Promise.all(promises);
+      expect(results).toHaveLength(5);
+      for (const [vec] of results) {
+        expect(vec).toBeInstanceOf(Float32Array);
+        expect(vec.length).toBe(384);
+      }
+    },
+    30_000,
+  );
+
+  test(
+    "query embed interleaved with document batch resolves correctly",
+    async () => {
+      // Fire a document batch and a query embed concurrently.
+      // The query should get priority but both must resolve correctly.
+      const docPromise = embed(
+        Array.from({ length: 5 }, (_, i) => `document text ${i}`),
+        "document",
+      );
+      const queryPromise = embed(["urgent query"], "query");
+
+      const [docs, [queryVec]] = await Promise.all([docPromise, queryPromise]);
+      expect(docs).toHaveLength(5);
+      for (const vec of docs) {
+        expect(vec).toBeInstanceOf(Float32Array);
+        expect(vec.length).toBe(384);
+      }
+      expect(queryVec).toBeInstanceOf(Float32Array);
+      expect(queryVec.length).toBe(384);
+    },
+    30_000,
+  );
+
+  // NOTE: The "fastembed unavailable → no worker spawned" case is already
+  // covered in the "fastembed unavailable fallback (#185)" suite above,
+  // which uses _markFastembedUnavailable() before any worker is created.
+  //
+  // The "resetProvider() + respawn" test is intentionally omitted.
+  // Bun 1.3.x has a bug where respawning a worker that loaded NAPI modules
+  // (fastembed/onnxruntime) triggers a segfault during the second worker's
+  // init. The shutdown path itself works correctly — verified manually and
+  // exercised in afterAll below.
+
+  afterAll(async () => {
+    // Await shutdown so the worker fully exits before Bun's test runner
+    // tears down the process — prevents NAPI segfault during cleanup.
+    await resetProvider();
+  });
 });
 
 describe("checkConfigChange", () => {

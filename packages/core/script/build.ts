@@ -46,7 +46,6 @@ const external = ["node:*", "bun:*", "fastembed", "onnxruntime-*", "@anush008/*"
 
 /** @type {esbuild.BuildOptions} */
 const commonOptions: esbuild.BuildOptions = {
-  entryPoints: [join(packageDir, "src/index.ts")],
   bundle: true,
   format: "esm",
   target: "esnext",
@@ -59,7 +58,8 @@ const commonOptions: esbuild.BuildOptions = {
 async function buildTarget(target: "node" | "bun") {
   const outdir = join(distDir, target);
   mkdirSync(outdir, { recursive: true });
-  await esbuild.build({
+
+  const targetOptions: esbuild.BuildOptions = {
     ...commonOptions,
     // conditions: selects which branch of the `imports` map to follow for
     // subpath imports like `#db/driver`. "node" → driver.node.ts, "bun" → driver.bun.ts.
@@ -69,9 +69,25 @@ async function buildTarget(target: "node" | "bun") {
     // runtimes. Using `platform: "neutral"` for the bun target would require
     // us to list every built-in explicitly in `external`.
     platform: "node",
+  };
+
+  // Main bundle.
+  await esbuild.build({
+    ...targetOptions,
+    entryPoints: [join(packageDir, "src/index.ts")],
     outfile: join(outdir, "index.js"),
   });
-  console.log(`✓ built dist/${target}/index.js`);
+
+  // Embedding worker bundle — separate file loaded via `new Worker(url)` at
+  // runtime. Must be a standalone bundle because the worker runs in its own
+  // thread with its own module scope.
+  await esbuild.build({
+    ...targetOptions,
+    entryPoints: [join(packageDir, "src/embedding-worker.ts")],
+    outfile: join(outdir, "embedding-worker.js"),
+  });
+
+  console.log(`✓ built dist/${target}/index.js + embedding-worker.js`);
 }
 
 console.log("Building @loreai/core (node + bun targets)...");

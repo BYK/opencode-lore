@@ -12,6 +12,11 @@ import { db } from "./db";
 import { config } from "./config";
 import * as log from "./log";
 import { isVendoredBinary, vendorModelInfo } from "./embedding-vendor";
+import type {
+  WorkerInbound,
+  WorkerOutbound,
+  WorkerInitData,
+} from "./embedding-worker-types";
 
 /** Timeout for embedding API fetch calls (ms). Prevents a hanging API from
  *  blocking the recall tool indefinitely. 10s is generous for typical 100-500ms
@@ -257,102 +262,191 @@ function fastembedKnownUnavailable(): boolean {
  * Model files are downloaded on first use (~33MB) and cached in
  * `~/.cache/fastembed`. Subsequent inits load from disk in ~350ms.
  *
+ * ONNX inference runs in a dedicated `node:worker_threads` Worker so the
+ * main thread's event loop stays free. This class is a thin RPC client —
+ * it posts `{ texts, inputType }` to the worker and awaits a reply.
+ * The worker owns the `FlagEmbedding` model and processes requests
+ * sequentially from a priority queue (recall queries jump ahead of
+ * backfill batches).
+ *
  * Uses dynamic import so the module is only loaded when the "local"
  * provider is actually selected — avoids startup cost and allows
  * graceful fallback when the optional `fastembed` peer isn't installed
  * (its native onnxruntime-node may fail to build, e.g. on CUDA 13).
  */
 class LocalProvider implements EmbeddingProvider {
-  // Small batch size: each fastembed `passageEmbed` call is a NAPI/ONNX
-  // synchronous inference that holds the JS thread for its full duration —
-  // a 256-doc batch pegs the event loop for tens of seconds and stalls the
-  // host's HTTP server (web UI, opencode session-connect). Keeping batches
-  // small bounds the worst-case event-loop block to ~1-2s on commodity CPU
-  // at the cost of more roundtrips through the loop. The startup-backfill
-  // loop also yields between batches, so a long backfill no longer means a
-  // long unresponsive window.
-  readonly maxBatchSize = 16;
-  private model: unknown | null = null;
-  private initPromise: Promise<unknown> | null = null;
+  // With inference off the main thread, large batches no longer block
+  // the event loop. 256 maximises throughput per round-trip to the
+  // worker. Backfill callers use a smaller BACKFILL_CHUNK_SIZE to give
+  // the worker's priority queue breathing room for recall queries.
+  readonly maxBatchSize = 256;
+
+  private worker: import("node:worker_threads").Worker | null = null;
+  private workerReady = false;
+  private workerInitError: string | null = null;
+  private pendingRequests = new Map<
+    number,
+    { resolve: (vectors: Float32Array[]) => void; reject: (error: Error) => void }
+  >();
+  private nextRequestId = 0;
+  private initPromise: Promise<void> | null = null;
   private modelName: string;
 
   constructor(modelName: string) {
     this.modelName = modelName;
   }
 
-  private async getModel(): Promise<unknown> {
-    if (this.model) return this.model;
-    if (!this.initPromise) {
-      this.initPromise = (async () => {
-        const fastembed = await tryLoadFastembed();
-        if (!fastembed) throw new LocalProviderUnavailableError();
-        const { EmbeddingModel, FlagEmbedding } = fastembed;
-        // Map config model string to EmbeddingModel enum value.
-        // If the configured model matches an enum key, use it; otherwise try
-        // the raw string as a model name (CUSTOM model support in fastembed).
-        // In vendored binary mode we ship the model files as Bun assets
-        // bundled into the binary by `bun build --compile`; the wrapper
-        // materialises them to ~/.lore/embeddings-vendored/v{ver}-{tgt}/
-        // on first run and points fastembed at that dir via its CUSTOM-
-        // mode init. Skips the Hugging Face Hub download on first use,
-        // so the binary works fully offline. We use the Xenova INT8
-        // mirror (~17 MB) instead of fastembed's default Qdrant FP32
-        // (~127 MB) — see vendor-embeddings.ts for rationale.
-        //
-        // Outside vendored mode we fall back to fastembed's stock model
-        // resolution (Qdrant repo + ~/.cache/fastembed download), so the
-        // npm consumers (@loreai/opencode, @loreai/pi) keep working
-        // unchanged.
-        const vendor = vendorModelInfo();
-        let m: unknown;
-        if (vendor) {
-          m = await FlagEmbedding.init({
-            model: EmbeddingModel.CUSTOM,
-            modelAbsoluteDirPath: vendor.modelAbsoluteDirPath,
-            modelName: vendor.modelName,
-          });
-        } else {
-          // fastembed's init() has overloaded signatures expecting specific
-          // enum members, but we resolve the model dynamically from config.
-          // The enum lookup guarantees a valid value at runtime; cast to
-          // satisfy the type.
-          const enumValue = (EmbeddingModel as Record<string, string>)[this.modelName];
-          m = await FlagEmbedding.init({
-            model: enumValue ?? this.modelName,
-          } as { model: typeof EmbeddingModel.BGESmallENV15 });
+  /**
+   * Ensure the worker thread is running. Probes fastembed on the main
+   * thread first (fast, cached) as a fast-fail gate — the worker is only
+   * spawned if the module is known-loadable. Worker startup failure is
+   * surfaced as `LocalProviderUnavailableError` to trigger the existing
+   * auto-fallback to remote providers.
+   */
+  private async ensureWorker(): Promise<void> {
+    if (this.workerReady) return;
+    if (this.workerInitError) throw new LocalProviderUnavailableError(this.workerInitError);
+    if (this.initPromise) return this.initPromise;
+
+    this.initPromise = (async () => {
+      // Fast-fail: probe fastembed on the main thread. This is cached
+      // after the first call and preserves the existing error flow.
+      const fastembed = await tryLoadFastembed();
+      if (!fastembed) throw new LocalProviderUnavailableError();
+
+      const { Worker } = await import("node:worker_threads");
+
+      // Resolve the worker script path relative to this module.
+      // In dev (Bun running .ts directly): embedding-worker.ts
+      // In dist (esbuild bundle): embedding-worker.js
+      const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
+      const workerUrl = new URL(`./embedding-worker${ext}`, import.meta.url);
+
+      const vendor = vendorModelInfo();
+      const workerInitData: WorkerInitData = {
+        modelName: this.modelName,
+        vendorModel: vendor
+          ? { modelAbsoluteDirPath: vendor.modelAbsoluteDirPath, modelName: vendor.modelName }
+          : null,
+      };
+
+      this.worker = new Worker(workerUrl, { workerData: workerInitData });
+
+      // Don't let the worker prevent process exit.
+      this.worker.unref();
+
+      // Wire up response handler.
+      this.worker.on("message", (msg: WorkerOutbound) => {
+        switch (msg.type) {
+          case "result": {
+            const pending = this.pendingRequests.get(msg.id);
+            if (pending) {
+              this.pendingRequests.delete(msg.id);
+              pending.resolve(msg.vectors);
+            }
+            break;
+          }
+          case "error": {
+            const pending = this.pendingRequests.get(msg.id);
+            if (pending) {
+              this.pendingRequests.delete(msg.id);
+              pending.reject(new Error(`Worker embedding failed: ${msg.error}`));
+            }
+            break;
+          }
+          case "init-error": {
+            // Model init failed inside the worker — surface as
+            // LocalProviderUnavailableError on all pending + future requests.
+            this.workerInitError = msg.error;
+            this.workerReady = false;
+            for (const [, p] of this.pendingRequests) {
+              p.reject(new LocalProviderUnavailableError(msg.error));
+            }
+            this.pendingRequests.clear();
+            break;
+          }
         }
-        this.model = m;
-        return m;
-      })().catch((err) => {
-        // Don't cache a rejected init — let a later call retry if the user
-        // installs fastembed in-process. (For LocalProviderUnavailableError
-        // the probe cache short-circuits anyway, so retries are cheap.)
-        this.initPromise = null;
-        throw err;
       });
-    }
+
+      // Worker crash / exit — reject all in-flight requests.
+      this.worker.on("error", (err: Error) => {
+        this.workerInitError = err.message;
+        this.workerReady = false;
+        for (const [, p] of this.pendingRequests) {
+          p.reject(new LocalProviderUnavailableError(err));
+        }
+        this.pendingRequests.clear();
+      });
+
+      this.worker.on("exit", (code) => {
+        if (code !== 0 && !this.workerInitError) {
+          this.workerInitError = `embedding worker exited with code ${code}`;
+        }
+        this.workerReady = false;
+        for (const [, p] of this.pendingRequests) {
+          p.reject(
+            new LocalProviderUnavailableError(this.workerInitError ?? "embedding worker exited"),
+          );
+        }
+        this.pendingRequests.clear();
+      });
+
+      this.workerReady = true;
+    })().catch((err) => {
+      this.initPromise = null; // allow retry
+      throw err;
+    });
+
     return this.initPromise;
   }
 
   async embed(texts: string[], inputType: "document" | "query"): Promise<Float32Array[]> {
-    const model = (await this.getModel()) as {
-      queryEmbed(text: string): Promise<number[]>;
-      passageEmbed(texts: string[], batchSize?: number): AsyncGenerator<number[][]>;
-    };
+    await this.ensureWorker();
 
-    if (inputType === "query" && texts.length === 1) {
-      const vec = await model.queryEmbed(texts[0]);
-      return [new Float32Array(vec)];
-    }
+    const id = this.nextRequestId++;
+    // Recall queries (single query-type texts) get high priority so they
+    // jump ahead of any queued backfill batches in the worker.
+    const priority = inputType === "query" && texts.length === 1 ? "high" : "normal";
 
-    // passageEmbed returns an async generator of batches
-    const results: Float32Array[] = [];
-    for await (const batch of model.passageEmbed(texts)) {
-      for (const vec of batch) {
-        results.push(new Float32Array(vec));
-      }
+    return new Promise<Float32Array[]>((resolve, reject) => {
+      this.pendingRequests.set(id, { resolve, reject });
+      this.worker!.postMessage({
+        type: "embed",
+        id,
+        texts,
+        inputType,
+        priority,
+      } satisfies WorkerInbound);
+    });
+  }
+
+  /** Shut down the worker thread. Called by `resetProvider()` on config change.
+   *  Sends a shutdown message so the worker calls `process.exit(0)` internally.
+   *  We avoid `worker.terminate()` because Bun's forced termination triggers a
+   *  NAPI fatal error when tearing down onnxruntime's native bindings.
+   *
+   *  Returns a promise that resolves once the worker has fully exited. Callers
+   *  that need a clean teardown (tests, config change) should await the result.
+   *  Fire-and-forget callers (process exit) can ignore it. */
+  shutdown(): Promise<void> {
+    if (!this.worker) return Promise.resolve();
+
+    const worker = this.worker;
+    this.worker = null;
+    this.workerReady = false;
+    this.workerInitError = null;
+    this.initPromise = null;
+
+    // Reject any in-flight requests.
+    for (const [, p] of this.pendingRequests) {
+      p.reject(new Error("embedding worker shut down"));
     }
-    return results;
+    this.pendingRequests.clear();
+
+    return new Promise<void>((resolve) => {
+      worker.on("exit", () => resolve());
+      worker.postMessage({ type: "shutdown" } satisfies WorkerInbound);
+    });
   }
 }
 
@@ -428,10 +522,18 @@ function getProvider(): EmbeddingProvider | null {
   return cachedProvider;
 }
 
-/** Reset cached provider — called when config changes. */
-export function resetProvider(): void {
+/** Reset cached provider — called when config changes.
+ *  Shuts down the worker thread if the current provider is a LocalProvider.
+ *  Returns a promise that resolves once any worker has fully exited.
+ *  Callers that need clean teardown (tests) should await the result. */
+export function resetProvider(): Promise<void> {
+  let shutdownPromise: Promise<void> = Promise.resolve();
+  if (cachedProvider instanceof LocalProvider) {
+    shutdownPromise = cachedProvider.shutdown();
+  }
   cachedProvider = undefined;
   remoteFallbackLogged = false;
+  return shutdownPromise;
 }
 
 /** True once we've logged an auto-fallback notice this process — keeps the
@@ -747,11 +849,12 @@ export function checkConfigChange(): boolean {
 /**
  * Delay before the startup backfill begins, so the host's HTTP server has
  * a clear window to answer the first wave of requests (web UI shell load,
- * terminal session-connect handshake) before we start pegging CPU on
- * fastembed inference. Without this, the first user-visible action after
- * a restart races against a thousand-document catch-up backfill.
+ * terminal session-connect handshake) before the embedding worker starts
+ * competing for CPU. With inference off the main thread the event loop
+ * isn't blocked, but the worker still consumes a CPU core — a short delay
+ * avoids contention during the first-connect burst.
  */
-const STARTUP_BACKFILL_DELAY_MS = 5_000;
+const STARTUP_BACKFILL_DELAY_MS = 2_000;
 
 /**
  * Run all embedding backfills and log coverage stats.
@@ -844,6 +947,16 @@ export async function runStartupBackfill(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Chunk size for backfill embed requests. Each chunk becomes a separate
+ * message to the embedding worker. Keeping chunks small (32) gives the
+ * worker's priority queue natural gaps to interleave high-priority recall
+ * queries between backfill batches. The provider's `maxBatchSize` (256)
+ * is the upper limit for any single embed call; this is intentionally
+ * smaller for backfill-vs-live interleaving.
+ */
+const BACKFILL_CHUNK_SIZE = 32;
+
+/**
  * Embed all knowledge entries that are missing embeddings.
  * Called by `runStartupBackfill()`.
  * Also handles config changes: if provider/model/dimensions changed, clears
@@ -863,11 +976,10 @@ export async function backfillEmbeddings(): Promise<number> {
 
   if (!rows.length) return 0;
 
-  const batchSize = provider.maxBatchSize;
   let embedded = 0;
 
-  for (let i = 0; i < rows.length; i += batchSize) {
-    const batch = rows.slice(i, i + batchSize);
+  for (let i = 0; i < rows.length; i += BACKFILL_CHUNK_SIZE) {
+    const batch = rows.slice(i, i + BACKFILL_CHUNK_SIZE);
     const texts = batch.map((r) => `${r.title}\n${r.content}`);
 
     try {
@@ -883,23 +995,13 @@ export async function backfillEmbeddings(): Promise<number> {
     } catch (err) {
       log.info(`embedding backfill batch ${i}-${i + batch.length} failed:`, err);
     }
-
-    // Yield to the event loop between batches. Local fastembed inference
-    // is sync NAPI work that blocks the JS thread for the full batch; this
-    // gives the host's HTTP server a chance to answer requests in between.
-    await yieldToEventLoop();
+    // No yieldToEventLoop() needed — embed() is truly async (worker thread).
   }
 
   if (embedded > 0) {
     log.info(`embedded ${embedded} knowledge entries`);
   }
   return embedded;
-}
-
-/** Yield control to the event loop so HTTP handlers can run between
- *  CPU-bound embedding batches. setImmediate fires after I/O callbacks. */
-function yieldToEventLoop(): Promise<void> {
-  return new Promise((r) => setImmediate(r));
 }
 
 // ---------------------------------------------------------------------------
@@ -923,7 +1025,6 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
 
   if (!rows.length) return 0;
 
-  const batchSize = provider.maxBatchSize;
   let embedded = 0;
 
   // Progress logging: heartbeat every PROGRESS_INTERVAL embedded so a long
@@ -932,8 +1033,8 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
   const PROGRESS_INTERVAL = 256;
   let nextProgressAt = PROGRESS_INTERVAL;
 
-  for (let i = 0; i < rows.length; i += batchSize) {
-    const batch = rows.slice(i, i + batchSize);
+  for (let i = 0; i < rows.length; i += BACKFILL_CHUNK_SIZE) {
+    const batch = rows.slice(i, i + BACKFILL_CHUNK_SIZE);
     const texts = batch.map((r) => r.observations);
 
     try {
@@ -954,9 +1055,7 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
       log.info(`embedding distillations: ${embedded}/${rows.length}…`);
       nextProgressAt = embedded + PROGRESS_INTERVAL;
     }
-
-    // Yield to the event loop between batches — see backfillEmbeddings.
-    await yieldToEventLoop();
+    // No yieldToEventLoop() needed — embed() is truly async (worker thread).
   }
 
   if (embedded > 0) {
