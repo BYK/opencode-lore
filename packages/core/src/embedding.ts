@@ -322,11 +322,38 @@ class LocalProvider implements EmbeddingProvider {
 
       const { Worker } = await import("node:worker_threads");
 
-      // Resolve the worker script path relative to this module.
+      // Resolve the worker script path.
+      //
+      // In vendored binary mode: the compiled binary's wrapper.ts detects
+      // `!isMainThread` and runs the embedding worker code path. We spawn
+      // the Worker with the wrapper's own `import.meta.url` (registered as
+      // __LORE_VENDOR_WORKER_URL__). This avoids needing a separate worker
+      // entrypoint — Bun's --compile silently drops additional entrypoints
+      // on macOS and Windows.
+      //
       // In dev (Bun running .ts directly): embedding-worker.ts
       // In dist (esbuild bundle): embedding-worker.js
-      const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
-      const workerUrl = new URL(`./embedding-worker${ext}`, import.meta.url);
+      const vendorWorkerUrl = (globalThis as Record<string, unknown>).__LORE_VENDOR_WORKER_URL__ as string | undefined;
+      // On Windows, new Worker() with a file:// URL pointing to $bunfs
+      // fails with ENOENT. Pass the raw path instead (B:\~BUN\root\...).
+      // On macOS/Linux the file:// URL works fine with $bunfs paths.
+      let workerUrl: string | URL;
+      if (vendorWorkerUrl) {
+        if (process.platform === "win32") {
+          // On Windows, new Worker() with a file:// URL pointing to $bunfs
+          // fails with ENOENT (Bun bug). Extract the raw path instead.
+          // URL.pathname keeps %7E encoded; decodeURIComponent restores ~.
+          workerUrl = decodeURIComponent(new URL(vendorWorkerUrl).pathname);
+          // URL.pathname on Windows: /B:/~BUN/root/wrapper.js → strip leading /
+          if (/^\/[A-Za-z]:/.test(workerUrl)) {
+            workerUrl = workerUrl.slice(1);
+          }
+        } else {
+          workerUrl = vendorWorkerUrl;
+        }
+      } else {
+        workerUrl = new URL(`./embedding-worker${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url);
+      }
 
       const vendor = vendorModelInfo();
       const workerInitData: WorkerInitData = {

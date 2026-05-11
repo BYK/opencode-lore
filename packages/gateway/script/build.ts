@@ -246,6 +246,16 @@ async function buildBinary() {
   const workerSrc = join(repoRoot, "packages/core/src/embedding-worker.ts");
   const workerBundlePath = join(distBinDir, "embedding-worker.js");
 
+  // For the binary build, we produce TWO worker bundles:
+  //   (1) A "slim" worker for the npm dist (fastembed external) — this is
+  //       the standard one used in dev/dist where fastembed is in node_modules.
+  //   (2) A "fat" worker for the binary (fastembed bundled in, only native
+  //       addons external) — this is embedded as a Bun file asset in the
+  //       wrapper. It must be self-contained because Bun's $bunfs doesn't
+  //       support bare specifier resolution from embedded assets.
+  //
+  // Both are produced by esbuild; the slim one is used by the npm build
+  // (core package build.ts handles that), the fat one is only for the binary.
   await esbuild.build({
     entryPoints: [workerSrc],
     bundle: true,
@@ -261,6 +271,8 @@ async function buildBinary() {
   });
 
   console.log(`✓ esbuild worker: ${workerBundlePath}`);
+
+
 
   // Step 2: Inject debug IDs into the JS and sourcemap
   // skipSnippet: true — the IIFE snippet breaks ESM (placed before import
@@ -359,79 +371,96 @@ async function buildBinary() {
       `// as Bun assets, materialises them at process start, and hands off`,
       `// to bin.js. See the (a-d) notes in build.ts for the rationale.`,
       ``,
+      `// --- Static imports (must be top-level in ESM) ---`,
       `import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";`,
       `import { homedir } from "node:os";`,
       `import { dirname, join } from "node:path";`,
       `import { dlopen, FFIType } from "bun:ffi";`,
-      ``,
-      `// Race-safe materialisation: write to a per-pid tmp then rename.`,
-      `// renameSync is atomic on POSIX (overwrites if dest exists, but we`,
-      `// guard with existsSync first), and on Windows it errors EEXIST —`,
-      `// we drop our tmp in that case since the other process won.`,
-      `function materialize(src: string, dest: string): void {`,
-      `  if (existsSync(dest)) return;`,
-      `  const tmp = \`\${dest}.tmp.\${process.pid}\`;`,
-      `  writeFileSync(tmp, readFileSync(src));`,
-      `  try {`,
-      `    renameSync(tmp, dest);`,
-      `  } catch {`,
-      `    // Another process beat us. Drop our tmp.`,
-      `    try { unlinkSync(tmp); } catch { /* ignore */ }`,
-      `  }`,
-      `}`,
-      ``,
+      `import { isMainThread } from "node:worker_threads";`,
       `import _libOnnx from "./${sideLoadRel}" with { type: "file" };`,
       modelImports,
       ``,
-      `const TARGET = ${JSON.stringify(target)};`,
-      `const VERSION = ${JSON.stringify(pkg.version)};`,
+      `// --- Worker thread shortcut ---`,
+      `// When spawned as a worker thread, run the embedding worker code path`,
+      `// directly. The worker's import("fastembed") resolves from $bunfs where`,
+      `// Bun bundled it as part of this entrypoint's module graph. This avoids`,
+      `// needing a separate worker entrypoint — Bun's --compile silently drops`,
+      `// additional entrypoints on macOS and Windows.`,
+      `if (!isMainThread) {`,
+      `  await import("./embedding-worker.js");`,
+      `} else {`,
+      `  // --- Main thread: materialise vendor assets and hand off ---`,
       ``,
-      `// (a) Materialise the side-load lib next to the binary's per-user`,
-      `// data dir, then dlopen it to seat it in the process's address`,
-      `// space. Once cached, onnxruntime_binding.node's runtime`,
-      `// dlopen("${sideLoadBasename}") finds the same handle.`,
-      `const vendorRoot = join(homedir(), ".lore", "embeddings-vendored", \`v\${VERSION}-\${TARGET}\`);`,
-      `const libDir = join(vendorRoot, "lib");`,
-      `mkdirSync(libDir, { recursive: true });`,
-      `const libPath = join(libDir, ${JSON.stringify(sideLoadBasename)});`,
-      `materialize(_libOnnx, libPath);`,
-      `// OrtGetApiBase is exported by libonnxruntime across all`,
-      `// platforms we ship; we don't call it — the symbol entry is just`,
-      `// here because bun:ffi rejects an empty symbols set. If`,
-      `// onnxruntime ever drops/renames it (or the dylib install_name`,
-      `// doesn't match what we wrote), let fastembed's later init`,
-      `// produce the user-facing error rather than crashing here.`,
-      `try {`,
-      `  dlopen(libPath, { OrtGetApiBase: { args: [], returns: FFIType.ptr } });`,
-      `} catch {`,
-      `  // Lib loaded into address space anyway via a previous dlopen,`,
-      `  // or we'll fail downstream with a clearer diagnostic.`,
-      `}`,
+      `  // Race-safe materialisation: write to a per-pid tmp then rename.`,
+      `  // renameSync is atomic on POSIX (overwrites if dest exists, but we`,
+      `  // guard with existsSync first), and on Windows it errors EEXIST —`,
+      `  // we drop our tmp in that case since the other process won.`,
+      `  const materialize = (src: string, dest: string): void => {`,
+      `    if (existsSync(dest)) return;`,
+      `    const tmp = \`\${dest}.tmp.\${process.pid}\`;`,
+      `    writeFileSync(tmp, readFileSync(src));`,
+      `    try {`,
+      `      renameSync(tmp, dest);`,
+      `    } catch {`,
+      `      // Another process beat us. Drop our tmp.`,
+      `      try { unlinkSync(tmp); } catch { /* ignore */ }`,
+      `    }`,
+      `  };`,
       ``,
-      `// (b) Materialise the model files. fastembed CUSTOM mode reads`,
-      `// these from the dir via libc fs (through native code), so they`,
-      `// must be at a real disk path — Bun's $bunfs only works for our`,
-      `// own JS-side fs calls.`,
-      `const modelDir = join(vendorRoot, ${JSON.stringify(MODEL_DIR_NAME)});`,
-      `mkdirSync(modelDir, { recursive: true });`,
-      `const modelEntries: Array<[string, string]> = [`,
+      `  const TARGET = ${JSON.stringify(target)};`,
+      `  const VERSION = ${JSON.stringify(pkg.version)};`,
+      ``,
+      `  // (a) Materialise the side-load lib next to the binary's per-user`,
+      `  // data dir, then dlopen it to seat it in the process's address`,
+      `  // space. Once cached, onnxruntime_binding.node's runtime`,
+      `  // dlopen("${sideLoadBasename}") finds the same handle.`,
+      `  const vendorRoot = join(homedir(), ".lore", "embeddings-vendored", \`v\${VERSION}-\${TARGET}\`);`,
+      `  const libDir = join(vendorRoot, "lib");`,
+      `  mkdirSync(libDir, { recursive: true });`,
+      `  const libPath = join(libDir, ${JSON.stringify(sideLoadBasename)});`,
+      `  materialize(_libOnnx, libPath);`,
+      `  // OrtGetApiBase is exported by libonnxruntime across all`,
+      `  // platforms we ship; we don't call it — the symbol entry is just`,
+      `  // here because bun:ffi rejects an empty symbols set. If`,
+      `  // onnxruntime ever drops/renames it (or the dylib install_name`,
+      `  // doesn't match what we wrote), let fastembed's later init`,
+      `  // produce the user-facing error rather than crashing here.`,
+      `  try {`,
+      `    dlopen(libPath, { OrtGetApiBase: { args: [], returns: FFIType.ptr } });`,
+      `  } catch {`,
+      `    // Lib loaded into address space anyway via a previous dlopen,`,
+      `    // or we'll fail downstream with a clearer diagnostic.`,
+      `  }`,
+      ``,
+      `  // (b) Materialise the model files. fastembed CUSTOM mode reads`,
+      `  // these from the dir via libc fs (through native code), so they`,
+      `  // must be at a real disk path — Bun's $bunfs only works for our`,
+      `  // own JS-side fs calls.`,
+      `  const modelDir = join(vendorRoot, ${JSON.stringify(MODEL_DIR_NAME)});`,
+      `  mkdirSync(modelDir, { recursive: true });`,
+      `  const modelEntries: Array<[string, string]> = [`,
       modelEntries,
-      `];`,
-      `for (const [name, src] of modelEntries) {`,
-      `  materialize(src, join(modelDir, name));`,
+      `  ];`,
+      `  for (const [name, src] of modelEntries) {`,
+      `    materialize(src, join(modelDir, name));`,
+      `  }`,
+      ``,
+      `  // (c) Register for the LocalProvider.`,
+      `  (globalThis as Record<string, unknown>).__LORE_VENDOR_MODEL__ = {`,
+      `    modelAbsoluteDirPath: modelDir,`,
+      `    modelName: ${JSON.stringify(MODEL_FILE_NAME)},`,
+      `    target: TARGET,`,
+      `    version: VERSION,`,
+      `  };`,
+      `  // Register the wrapper's import.meta.url so embedding.ts can spawn`,
+      `  // workers using the binary entrypoint itself — the isMainThread guard`,
+      `  // above routes worker threads to embedding-worker.js automatically.`,
+      `  (globalThis as Record<string, unknown>).__LORE_VENDOR_WORKER_URL__ = import.meta.url;`,
+      ``,
+      `  // (d) Hand off. Dynamic import so bin.js's module body evaluates`,
+      `  // after the registration above (static imports get hoisted).`,
+      `  await import("./bin.js");`,
       `}`,
-      ``,
-      `// (c) Register for the LocalProvider.`,
-      `(globalThis as Record<string, unknown>).__LORE_VENDOR_MODEL__ = {`,
-      `  modelAbsoluteDirPath: modelDir,`,
-      `  modelName: ${JSON.stringify(MODEL_FILE_NAME)},`,
-      `  target: TARGET,`,
-      `  version: VERSION,`,
-      `};`,
-      ``,
-      `// (d) Hand off. Dynamic import so bin.js's module body evaluates`,
-      `// after the registration above (static imports get hoisted).`,
-      `await import("./bin.js");`,
       ``,
     ].join("\n");
     writeFileSync(wrapperPath, wrapperSrc);
@@ -467,50 +496,37 @@ async function buildBinary() {
   // dynamic import fails, the try/catch in embedding.ts catches it, and
   // the auto-fallback to a remote provider kicks in.
   const compileEntry = wrapperPath ?? bundlePath;
-  // The worker entrypoint must live next to the main entry so Bun bundles
-  // it into the binary's $bunfs at the right relative path (the main
-  // bundle resolves `./embedding-worker.js` via import.meta.url).
-  // For vendored targets it was already copied into the staging dir;
-  // for unvendored targets it sits in dist-bin/ alongside bin.js.
-  const workerCompileEntry = stagingDir
-    ? join(stagingDir, "embedding-worker.js")
-    : workerBundlePath;
-  const compileArgs = [
-    "bun", "build", "--compile",
-    "--target", `bun-${target}`,
-    // "linked" embeds a sourcemap in the binary. At runtime, Bun's engine
-    // auto-resolves Error.stack positions through this embedded map back to
-    // the esbuild output's coordinate space.
-    "--sourcemap=linked",
-    "--outfile", binaryPath,
-    // For unvendored targets, keep native embedding packages external so
-    // the compile step doesn't fail trying to resolve them from dist-bin/.
-    ...(!stagingDir
-      ? ["--external", "fastembed", "--external", "onnxruntime-*", "--external", "@anush008/*"]
-      : []),
-    compileEntry,
-    workerCompileEntry,
-  ];
-  const compileCmd = compileArgs.join(" ");
-  console.log(`Compile command: ${compileCmd}`);
-  // Debug: verify worker file exists at compile time
-  try {
-    const { statSync } = await import("node:fs");
-    const wstat = statSync(workerCompileEntry);
-    console.log(`Worker file exists: ${workerCompileEntry} (${wstat.size} bytes)`);
-  } catch (e) {
-    console.error(`Worker file MISSING: ${workerCompileEntry}`, e);
-  }
+  // Use Bun.build() JS API instead of the CLI for reliable cross-platform
+  // builds. We use a SINGLE entrypoint because Bun silently drops additional
+  // entrypoints on macOS and Windows (both CLI and JS API). The worker file
+  // is instead embedded as a Bun asset via `import ... with { type: "file" }`
+  // in the wrapper and materialised to disk at runtime.
+  const externals = !stagingDir
+    ? ["fastembed", "onnxruntime-*", "@anush008/*"]
+    : [];
 
   try {
-    execSync(compileCmd, { stdio: "inherit", cwd: packageDir });
-  } catch {
+    const result = await Bun.build({
+      entrypoints: [compileEntry],
+      compile: {
+        target: `bun-${target}` as any,
+        outfile: binaryPath,
+      },
+      sourcemap: "linked",
+      external: externals,
+    });
+    if (!result.success) {
+      console.error("Bun compile failed:", result.logs);
+      renameSync(esbuildMapBackup, mapPath);
+      process.exit(1);
+    }
+  } catch (e) {
     // Restore the esbuild map even on failure
     renameSync(esbuildMapBackup, mapPath);
     // Wrapper + copied bin.js stay in the staging dir — they're cheap
     // to recreate on the next attempt and helpful for debugging the
     // failure. The staging dir itself is gitignored.
-    console.error("Bun compile failed");
+    console.error("Bun compile failed", e);
     process.exit(1);
   }
 
