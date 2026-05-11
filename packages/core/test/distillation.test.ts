@@ -7,6 +7,8 @@ import {
   metaDistill,
   detectSegments,
   workerTokenBudget,
+  distillTokenBudget,
+  run,
   type Distillation,
 } from "../src/distillation";
 import * as temporal from "../src/temporal";
@@ -827,74 +829,93 @@ describe("metaDistill — anchored second round", () => {
   });
 });
 
-// ─── detectSegments (time-gap-aware splitting) ──────────────────────────────
+// ─── detectSegments (token-aware splitting) ─────────────────────────────────
 
 describe("detectSegments", () => {
-  function msgs(n: number, timestamps?: number[]): temporal.TemporalMessage[] {
+  /** Create n messages, each with `tokensEach` tokens (via padded content). */
+  function msgs(
+    n: number,
+    tokensEach: number = 100,
+    timestamps?: number[],
+  ): temporal.TemporalMessage[] {
+    // tokens = Math.ceil(content.length / 3), so content.length = tokensEach * 3
+    const pad = "x".repeat(tokensEach * 3);
     return Array.from({ length: n }, (_, i) =>
-      msg("user", `message ${i}`, {
+      msg("user", pad, {
         id: `seg-msg-${i}`,
+        tokens: tokensEach,
         created_at: timestamps ? timestamps[i] : T + i * 1000,
       }),
     );
   }
 
-  test("returns single segment when under maxSegment", () => {
-    const result = detectSegments(msgs(10), 30);
+  test("returns single segment when total tokens under maxTokens", () => {
+    // 10 messages × 100 tokens = 1000 tokens, maxTokens = 2000
+    const result = detectSegments(msgs(10, 100), 2000);
     expect(result).toHaveLength(1);
     expect(result[0]).toHaveLength(10);
   });
 
-  test("count-based split with uniform timestamps", () => {
-    // 40 messages at 1-second intervals → no significant time gap
-    // Should split at maxSegment=30 boundary
-    const result = detectSegments(msgs(40), 30);
+  test("token-boundary split with uniform timestamps", () => {
+    // 40 messages × 100 tokens = 4000 tokens, maxTokens = 3000
+    // Token boundary at index 30 (3000 tokens), leaving 10 messages
+    const result = detectSegments(msgs(40, 100), 3000);
     expect(result).toHaveLength(2);
     expect(result[0]).toHaveLength(30);
     expect(result[1]).toHaveLength(10);
   });
 
   test("time-gap split when a large gap exists", () => {
-    // 20 messages: first 10 at 1s intervals, then a 1-hour gap, then 10 more
+    // 20 messages × 100 tokens = 2000 tokens, maxTokens = 1500
+    // First 10 at 1s intervals, then a 1-hour gap, then 10 more
+    // Time gap at index 10 should be preferred over token boundary
     const timestamps = [
       ...Array.from({ length: 10 }, (_, i) => T + i * 1000),
       ...Array.from({ length: 10 }, (_, i) => T + 3_600_000 + i * 1000),
     ];
-    // maxSegment=15, so count-based would split at 15
-    // but the time gap at index 10 is 3,599,000ms vs median ~1000ms → should split at 10
-    const result = detectSegments(msgs(20, timestamps), 15);
+    const result = detectSegments(msgs(20, 100, timestamps), 1500);
     expect(result).toHaveLength(2);
     expect(result[0]).toHaveLength(10);
     expect(result[1]).toHaveLength(10);
   });
 
   test("merges tiny trailing segment into previous", () => {
-    // 32 messages with uniform timestamps, maxSegment=30
-    // First split at 30, leaving 2 → merged into first segment
-    const result = detectSegments(msgs(32), 30);
+    // 32 messages × 100 tokens = 3200, maxTokens = 3000
+    // Token boundary splits at 30, leaving 2 msgs (200 tokens < MIN_SEGMENT_TOKENS=64)
+    // Wait — 200 > 64, so it WON'T merge. Use tiny tokens instead.
+    // 32 messages: first 30 × 100 tokens = 3000, last 2 × 10 tokens = 20
+    // Total = 3020, maxTokens = 3000. Split leaves right=20 tokens < 64 → merge.
+    const messages = [
+      ...msgs(30, 100),
+      ...msgs(2, 10).map((m, i) => ({
+        ...m,
+        id: `seg-msg-${30 + i}`,
+        created_at: T + (30 + i) * 1000,
+      })),
+    ];
+    const result = detectSegments(messages, 3000);
     expect(result).toHaveLength(1);
     expect(result[0]).toHaveLength(32);
   });
 
-  test("does not merge trailing segment with ≥ 3 messages", () => {
-    // 33 messages with uniform timestamps, maxSegment=30
-    // First split at 30, leaving 3 → NOT merged (≥ MIN_SEGMENT)
-    const result = detectSegments(msgs(33), 30);
+  test("does not merge trailing segment above MIN_SEGMENT_TOKENS", () => {
+    // 32 messages × 100 tokens = 3200, maxTokens = 3000
+    // Token boundary at 30, leaving 2 msgs × 100 = 200 tokens ≥ 64 → NOT merged
+    const result = detectSegments(msgs(32, 100), 3000);
     expect(result).toHaveLength(2);
     expect(result[0]).toHaveLength(30);
-    expect(result[1]).toHaveLength(3);
+    expect(result[1]).toHaveLength(2);
   });
 
   test("multiple time-gap splits in large message set", () => {
-    // 46 messages in 3 bursts of ~15, separated by 1-hour gaps
-    // With maxSegment=29, the right half (31 msgs) exceeds maxSegment
-    // and triggers a second split at the next time gap
+    // 46 messages × 100 tokens = 4600, maxTokens = 1600
+    // 3 bursts of ~15 separated by 1-hour gaps
     const timestamps = [
       ...Array.from({ length: 15 }, (_, i) => T + i * 1000),
       ...Array.from({ length: 15 }, (_, i) => T + 3_600_000 + i * 1000),
       ...Array.from({ length: 16 }, (_, i) => T + 7_200_000 + i * 1000),
     ];
-    const result = detectSegments(msgs(46, timestamps), 29);
+    const result = detectSegments(msgs(46, 100, timestamps), 1600);
     expect(result).toHaveLength(3);
     expect(result[0]).toHaveLength(15);
     expect(result[1]).toHaveLength(15);
@@ -902,31 +923,34 @@ describe("detectSegments", () => {
   });
 
   test("preserves original message references", () => {
-    const messages = msgs(20);
-    const result = detectSegments(messages, 10);
+    // 20 messages × 100 = 2000, maxTokens = 1000 → split
+    const messages = msgs(20, 100);
+    const result = detectSegments(messages, 1000);
     const flat = result.flat();
     expect(flat).toHaveLength(20);
-    // Check all original messages are present
     for (const m of messages) {
       expect(flat.find((f) => f.id === m.id)).toBeDefined();
     }
   });
 
-  test("ignores time gap if it would create segment < MIN_SEGMENT", () => {
-    // 20 messages: first 2 at t=0, then a huge gap, then 18 more
-    // The gap at index 2 creates a left segment of only 2 (< MIN_SEGMENT=3)
-    // so it should NOT split there → falls back to count-based
+  test("ignores time gap if it would create segment below MIN_SEGMENT_TOKENS", () => {
+    // 20 messages × 100 tokens = 2000, maxTokens = 1500
+    // First 2 at t=0, then a huge gap, then 18 more
+    // The gap at index 2 creates a left segment of only 200 tokens.
+    // Use 10-token messages so left = 20 tokens < 64 MIN_SEGMENT_TOKENS → skip gap
     const timestamps = [
       T,
       T + 1000,
       T + 10_000_000,
       ...Array.from({ length: 17 }, (_, i) => T + 10_000_000 + (i + 1) * 1000),
     ];
-    const result = detectSegments(msgs(20, timestamps), 15);
-    // Should use count-based split at 15, not time-gap at 2
+    const messages = msgs(20, 10, timestamps);
+    // Total = 200 tokens, maxTokens = 100. Token boundary at index 10.
+    // Gap at index 2 has left=20 tokens < 64 → falls back to token boundary
+    const result = detectSegments(messages, 100);
     expect(result).toHaveLength(2);
-    expect(result[0]).toHaveLength(15);
-    expect(result[1]).toHaveLength(5);
+    expect(result[0]).toHaveLength(10);
+    expect(result[1]).toHaveLength(10);
   });
 });
 
@@ -1018,5 +1042,254 @@ describe("workerTokenBudget", () => {
   test("ceil rounds up fractional tokens", () => {
     // 10001 * 0.25 = 2500.25 → ceil = 2501
     expect(workerTokenBudget(10001, 0.25, 1024, 8192)).toBe(2501);
+  });
+});
+
+// ─── run(): expansion guard & tiny-segment absorb ───────────────────────────
+
+describe("run() expansion guard and tiny-segment handling", () => {
+  const RUN_PROJECT = "/test/distillation/run-guard";
+  const RUN_SESSION = "run-guard-sess";
+
+  /** Insert temporal messages directly into the DB. */
+  function insertTemporalMessages(
+    n: number,
+    tokensEach: number,
+  ): string[] {
+    const pid = ensureProject(RUN_PROJECT);
+    const ids: string[] = [];
+    const content = "x".repeat(tokensEach * 3);
+    for (let i = 0; i < n; i++) {
+      const id = `run-msg-${crypto.randomUUID()}`;
+      ids.push(id);
+      db()
+        .query(
+          `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+           VALUES (?, ?, ?, 'user', ?, ?, 0, ?, '{}')`,
+        )
+        .run(id, pid, RUN_SESSION, content, tokensEach, T + i * 1000);
+    }
+    return ids;
+  }
+
+  /** Check if messages are marked as distilled. */
+  function areDistilled(ids: string[]): boolean[] {
+    return ids.map((id) => {
+      const row = db()
+        .query("SELECT distilled FROM temporal_messages WHERE id = ?")
+        .get(id) as { distilled: number } | null;
+      return row?.distilled === 1;
+    });
+  }
+
+  /** Count distillation rows for the session. */
+  function distillationCount(): number {
+    const pid = ensureProject(RUN_PROJECT);
+    return (
+      db()
+        .query(
+          "SELECT COUNT(*) as count FROM distillations WHERE project_id = ? AND session_id = ?",
+        )
+        .get(pid, RUN_SESSION) as { count: number }
+    ).count;
+  }
+
+  beforeEach(() => {
+    const pid = ensureProject(RUN_PROJECT);
+    db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("expansion guard: discards distillation when output >= input tokens, marks messages distilled", async () => {
+    // Insert 6 messages × 200 tokens = 1200 tokens (above minSegmentTokens=64)
+    const ids = insertTemporalMessages(6, 200);
+
+    // LLM returns observations whose char count / 3 >= 1200 tokens (expansion)
+    // 1200 tokens × 3 chars = 3600 chars needed
+    const expandedObs = "x".repeat(3600);
+    const llm = makeStubLLM(`<observations>\n${expandedObs}\n</observations>`);
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+      force: true,
+    });
+
+    // LLM was called (not skipped)
+    expect(llm.prompts).toHaveLength(1);
+    // But no distillation was stored (expansion discarded)
+    expect(distillationCount()).toBe(0);
+    expect(result.distilled).toBe(0);
+    // Messages still marked as distilled to prevent retry loops
+    expect(areDistilled(ids)).toEqual(ids.map(() => true));
+  });
+
+  test("expansion guard: stores distillation when output < input tokens", async () => {
+    // Insert 6 messages × 200 tokens = 1200 tokens
+    const ids = insertTemporalMessages(6, 200);
+
+    // LLM returns small observations: 100 tokens = 300 chars
+    const compressedObs = "x".repeat(300);
+    const llm = makeStubLLM(`<observations>\n${compressedObs}\n</observations>`);
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+      force: true,
+    });
+
+    expect(llm.prompts).toHaveLength(1);
+    // Distillation was stored (compression succeeded)
+    expect(distillationCount()).toBe(1);
+    expect(result.distilled).toBe(6);
+    expect(areDistilled(ids)).toEqual(ids.map(() => true));
+  });
+
+  test("expansion guard: exact equal size is discarded", async () => {
+    // Insert 6 messages × 200 tokens = 1200 tokens
+    const ids = insertTemporalMessages(6, 200);
+
+    // LLM returns observations of exactly 1200 tokens = 3600 chars
+    // But observations text includes the content between <observations> tags
+    // ceil(3597/3) = 1199 < 1200... need to be precise.
+    // We want ceil(obsLen / 3) >= 1200. obsLen = 3600 → ceil(3600/3) = 1200 = sourceTokens → discarded
+    const exactObs = "x".repeat(3600);
+    const llm = makeStubLLM(`<observations>\n${exactObs}\n</observations>`);
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+      force: true,
+    });
+
+    expect(distillationCount()).toBe(0);
+    expect(result.distilled).toBe(0);
+    expect(areDistilled(ids)).toEqual(ids.map(() => true));
+  });
+
+  test("expansion guard: barely-smaller output passes through", async () => {
+    // Insert 6 messages × 200 tokens = 1200 tokens
+    const ids = insertTemporalMessages(6, 200);
+
+    // 1199 tokens = 3597 chars → ceil(3597/3) = 1199 < 1200 → stored
+    const barelySmaller = "x".repeat(3597);
+    const llm = makeStubLLM(`<observations>\n${barelySmaller}\n</observations>`);
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+      force: true,
+    });
+
+    expect(distillationCount()).toBe(1);
+    expect(result.distilled).toBe(6);
+  });
+
+  test("tiny segment: absorbed (mark distilled) in force mode without LLM call", async () => {
+    // Insert 2 messages × 10 tokens = 20 tokens (below minSegmentTokens=64)
+    const ids = insertTemporalMessages(2, 10);
+
+    const llm = makeStubLLM("should not be called");
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+      force: true,
+    });
+
+    // No LLM call made
+    expect(llm.prompts).toHaveLength(0);
+    // No distillation stored
+    expect(distillationCount()).toBe(0);
+    expect(result.distilled).toBe(0);
+    // Messages marked as distilled (absorbed)
+    expect(areDistilled(ids)).toEqual([true, true]);
+  });
+
+  test("tiny segment: deferred (left undistilled) in normal mode", async () => {
+    // Insert 2 messages × 10 tokens = 20 tokens (below minSegmentTokens=64)
+    // Also below minMessages=5 and not forced → skipped entirely by run()
+    const ids = insertTemporalMessages(2, 10);
+
+    const llm = makeStubLLM("should not be called");
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+    });
+
+    expect(llm.prompts).toHaveLength(0);
+    expect(distillationCount()).toBe(0);
+    // Messages left undistilled
+    expect(areDistilled(ids)).toEqual([false, false]);
+  });
+
+  test("tiny segment deferred in normal mode even with enough messages", async () => {
+    // Insert 6 messages × 10 tokens = 60 tokens (below minSegmentTokens=64)
+    // Above minMessages=5 but below token floor → deferred
+    const ids = insertTemporalMessages(6, 10);
+
+    const llm = makeStubLLM("should not be called");
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+    });
+
+    expect(llm.prompts).toHaveLength(0);
+    expect(distillationCount()).toBe(0);
+    // Messages left undistilled to accumulate
+    expect(areDistilled(ids)).toEqual(ids.map(() => false));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// distillTokenBudget — √N-based budget for gen-0 distillation
+// ---------------------------------------------------------------------------
+
+describe("distillTokenBudget", () => {
+  test("returns floor (256) for small inputs", () => {
+    // 8 * √64 = 64 → below floor
+    expect(distillTokenBudget(64)).toBe(256);
+    expect(distillTokenBudget(100)).toBe(256);
+    expect(distillTokenBudget(0)).toBe(256);
+  });
+
+  test("returns √N-based value for medium inputs", () => {
+    // 8 * √2000 = 8 * 44.72 = 358
+    expect(distillTokenBudget(2000)).toBe(358);
+    // 8 * √4000 = 8 * 63.25 = 506
+    expect(distillTokenBudget(4000)).toBe(506);
+  });
+
+  test("returns cap (4096) for very large inputs", () => {
+    // 8 * √(300000) = 8 * 547.7 = 4382 → above cap
+    expect(distillTokenBudget(300000)).toBe(4096);
+  });
+
+  test("grows sub-linearly (√N) not linearly", () => {
+    const budget1k = distillTokenBudget(1000);
+    const budget4k = distillTokenBudget(4000);
+    // 4× input should produce ~2× budget (√4 = 2), not 4×
+    const ratio = budget4k / budget1k;
+    expect(ratio).toBeGreaterThan(1.5);
+    expect(ratio).toBeLessThan(2.5);
+  });
+
+  test("is much smaller than old linear budget for typical segments", () => {
+    // Old: workerTokenBudget(2000, 0.25, 1024, 8192) = 1024 (floor)
+    // New: distillTokenBudget(2000) = 358
+    expect(distillTokenBudget(2000)).toBeLessThan(workerTokenBudget(2000, 0.25, 1024, 8192));
+
+    // Old: workerTokenBudget(8192, 0.25, 1024, 8192) = 2048
+    // New: distillTokenBudget(8192) = 724
+    expect(distillTokenBudget(8192)).toBeLessThan(workerTokenBudget(8192, 0.25, 1024, 8192));
   });
 });

@@ -74,7 +74,14 @@ export const LoreConfig = z.object({
   distillation: z
     .object({
       minMessages: z.number().min(3).default(5),
-      maxSegment: z.number().min(5).default(30),
+      /** Minimum total tokens for a segment to be worth distilling.
+       *  Segments below this are deferred (normal mode) or absorbed without
+       *  an LLM call (force/urgent mode). Default: 64. */
+      minSegmentTokens: z.number().min(16).default(64),
+      /** Maximum total tokens per distillation segment. Segments exceeding
+       *  this are split at time-gap or token boundaries. Replaces the former
+       *  message-count-based maxSegment. Default: 8192. */
+      maxSegmentTokens: z.number().min(256).default(8192),
       metaThreshold: z.number().min(3).default(10),
       /** Max chars per tool output when rendering temporal messages for distillation input.
        *  Outputs longer than this are replaced with a compact annotation preserving line
@@ -84,7 +91,8 @@ export const LoreConfig = z.object({
     })
     .default({
       minMessages: 5,
-      maxSegment: 30,
+      minSegmentTokens: 64,
+      maxSegmentTokens: 8192,
       metaThreshold: 10,
       toolOutputMaxChars: 2_000,
     }),

@@ -170,8 +170,9 @@ Create a `.lore.json` file in your project root to customize behavior. All field
 
   // Distillation thresholds.
   "distillation": {
-    "minMessages": 8,       // min undistilled messages before distilling
-    "maxSegment": 50        // max messages per distillation chunk
+    "minMessages": 8,          // min undistilled messages before distilling
+    "minSegmentTokens": 64,    // min tokens per segment (below = skip/absorb)
+    "maxSegmentTokens": 8192   // max tokens per distillation segment
   },
 
   // Temporal message pruning.

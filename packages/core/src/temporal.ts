@@ -348,6 +348,23 @@ export function undistilledCount(
   ).count;
 }
 
+/** Sum of estimated tokens across undistilled messages for a project/session. */
+export function undistilledTokens(
+  projectPath: string,
+  sessionID?: string,
+): number {
+  const pid = ensureProject(projectPath);
+  const query = sessionID
+    ? "SELECT COALESCE(SUM(tokens), 0) as total FROM temporal_messages WHERE project_id = ? AND session_id = ? AND distilled = 0"
+    : "SELECT COALESCE(SUM(tokens), 0) as total FROM temporal_messages WHERE project_id = ? AND distilled = 0";
+  const params = sessionID ? [pid, sessionID] : [pid];
+  return (
+    db()
+      .query(query)
+      .get(...params) as { total: number }
+  ).total;
+}
+
 export type PruneResult = {
   /** Rows deleted by the TTL pass (distilled=1 AND older than retention period). */
   ttlDeleted: number;

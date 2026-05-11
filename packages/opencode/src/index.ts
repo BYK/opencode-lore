@@ -1016,10 +1016,10 @@ export const LorePlugin: Plugin = async (ctx) => {
               if (msg.role === "user") turnsSinceCuration++;
 
               if (msg.role === "user") {
-                const pending = temporal.undistilledCount(projectPath, msg.sessionID);
-                if (pending >= config().distillation.maxSegment) {
+                const pendingTokens = temporal.undistilledTokens(projectPath, msg.sessionID);
+                if (pendingTokens >= config().distillation.maxSegmentTokens) {
                   log.info(
-                    `incremental distillation (turn boundary): ${pending} undistilled messages in ${msg.sessionID.substring(0, 16)}`,
+                    `incremental distillation (turn boundary): ${pendingTokens} undistilled tokens in ${msg.sessionID.substring(0, 16)}`,
                   );
                   backgroundDistill(msg.sessionID);
                 }

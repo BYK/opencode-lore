@@ -1263,11 +1263,11 @@ function scheduleBackgroundWork(
       .catch((e) => log.error("background distillation failed:", e));
   }
 
-  // Check if pending messages exceed maxSegment threshold
-  const pending = temporal.undistilledCount(projectPath, sessionID);
-  if (pending >= cfg.distillation.maxSegment) {
+  // Check if pending tokens exceed maxSegmentTokens threshold
+  const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
+  if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
     log.info(
-      `incremental distillation: ${pending} undistilled messages in ${sessionID.slice(0, 16)}`,
+      `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
     );
     distillation
       .run({ llm, projectPath, sessionID, model })

@@ -43,22 +43,24 @@ export function compressionRatio(
 /**
  * Segment detection: group related messages into distillation-sized chunks.
  *
- * When the message count exceeds `maxSegment`, prefers splitting at the
+ * When the total token count exceeds `maxTokens`, prefers splitting at the
  * largest inter-message time gap (if it's ≥ 3× the median gap) to respect
- * natural conversation boundaries. Falls back to count-based splitting at
- * `maxSegment` when timestamps are uniform.
+ * natural conversation boundaries. Falls back to token-boundary splitting
+ * when timestamps are uniform.
  *
- * Trailing segments with < 3 messages are merged into the previous segment
- * to avoid tiny distillation inputs with too little context.
+ * Trailing segments whose token sum is below {@link MIN_SEGMENT_TOKENS}
+ * are merged into the previous segment to avoid tiny distillation inputs
+ * with too little context.
  *
  * Exported for testing; `run()` is the production caller.
  */
 export function detectSegments(
   messages: TemporalMessage[],
-  maxSegment: number,
+  maxTokens: number,
 ): TemporalMessage[][] {
-  if (messages.length <= maxSegment) return [messages];
-  return splitSegments(messages, maxSegment);
+  const totalTokens = messages.reduce((s, m) => s + m.tokens, 0);
+  if (totalTokens <= maxTokens) return [messages];
+  return splitSegments(messages, maxTokens);
 }
 
 /**
@@ -78,8 +80,35 @@ export function workerTokenBudget(
   return Math.max(floor, Math.min(Math.ceil(inputTokens * ratio), cap));
 }
 
-/** Minimum segment size — segments smaller than this get merged. */
-const MIN_SEGMENT = 3;
+/**
+ * Compute the max_tokens budget for gen-0 distillation of raw messages.
+ *
+ * Uses a √N-based formula (8 × √N) instead of a linear ratio so that the
+ * budget grows sub-linearly with input size. This naturally constrains the
+ * LLM to produce output at ~R ≈ 2–4 (the square-root boundary) and avoids
+ * expansion on small segments where a linear 0.25 ratio + 1024 floor gave
+ * the model far too much room.
+ *
+ * The multiplier (8) gives ~4× headroom above the R=2.0 target, accounting
+ * for the detailed observation format (emoji markers, timestamps, entity
+ * tags, exact numbers) required by the distillation prompt.
+ *
+ * @param sourceTokens  Estimated source token count from raw messages
+ * @returns             Token budget clamped to [256, 4096]
+ */
+export function distillTokenBudget(sourceTokens: number): number {
+  const MULTIPLIER = 8;
+  const FLOOR = 256;
+  const CAP = 4096;
+  return Math.max(FLOOR, Math.min(Math.ceil(MULTIPLIER * Math.sqrt(sourceTokens)), CAP));
+}
+
+/**
+ * Minimum segment token count — trailing segments smaller than this get
+ * merged into the previous segment during splitting to avoid producing
+ * segments too small to compress meaningfully.
+ */
+const MIN_SEGMENT_TOKENS = 64;
 
 /**
  * Multiplier for the median gap threshold: a time gap must be at least
@@ -87,26 +116,35 @@ const MIN_SEGMENT = 3;
  */
 const GAP_THRESHOLD_MULTIPLIER = 3;
 
+/** Sum tokens for a slice of messages. */
+function sliceTokens(messages: TemporalMessage[], start: number, end: number): number {
+  let sum = 0;
+  for (let i = start; i < end; i++) sum += messages[i].tokens;
+  return sum;
+}
+
 function splitSegments(
   messages: TemporalMessage[],
-  maxSegment: number,
+  maxTokens: number,
 ): TemporalMessage[][] {
-  if (messages.length <= maxSegment) return [messages];
+  const totalTokens = messages.reduce((s, m) => s + m.tokens, 0);
+  if (totalTokens <= maxTokens) return [messages];
 
   // Find the split point: prefer the largest time gap if it's significant
-  const splitIdx = findSplitIndex(messages, maxSegment);
+  const splitIdx = findSplitIndex(messages, maxTokens);
 
   const left = messages.slice(0, splitIdx);
   const right = messages.slice(splitIdx);
 
   // Recurse on both halves
-  const result = splitSegments(left, maxSegment);
+  const result = splitSegments(left, maxTokens);
 
-  if (right.length < MIN_SEGMENT) {
+  const rightTokens = right.reduce((s, m) => s + m.tokens, 0);
+  if (rightTokens < MIN_SEGMENT_TOKENS) {
     // Merge tiny trailing segment into the last segment
     result[result.length - 1].push(...right);
   } else {
-    result.push(...splitSegments(right, maxSegment));
+    result.push(...splitSegments(right, maxTokens));
   }
 
   return result;
@@ -116,12 +154,13 @@ function splitSegments(
  * Choose where to split an oversized message array.
  *
  * If there's a time gap ≥ 3× the median gap AND it falls within a range
- * that would produce segments of at least MIN_SEGMENT size, use it.
- * Otherwise fall back to the count-based boundary at `maxSegment`.
+ * that would produce segments of at least MIN_SEGMENT_TOKENS on each side,
+ * use it. Otherwise fall back to the token-boundary split point (the index
+ * where cumulative tokens first exceed `maxTokens`).
  */
 function findSplitIndex(
   messages: TemporalMessage[],
-  maxSegment: number,
+  maxTokens: number,
 ): number {
   // Compute consecutive time gaps
   const gaps: Array<{ index: number; gap: number }> = [];
@@ -132,19 +171,35 @@ function findSplitIndex(
     });
   }
 
-  if (gaps.length === 0) return maxSegment;
+  // Compute the token-boundary fallback: first index where cumulative tokens exceed maxTokens
+  let cumulative = 0;
+  let tokenBoundary = messages.length; // fallback if all messages fit (shouldn't happen)
+  for (let i = 0; i < messages.length; i++) {
+    cumulative += messages[i].tokens;
+    if (cumulative > maxTokens) {
+      // Split so left half has indices [0, i), right half starts at i.
+      // Ensure at least 1 message on each side.
+      tokenBoundary = Math.max(1, i);
+      break;
+    }
+  }
+
+  if (gaps.length === 0) return tokenBoundary;
 
   // Find median gap
   const sortedGaps = gaps.map((g) => g.gap).sort((a, b) => a - b);
   const medianGap = sortedGaps[Math.floor(sortedGaps.length / 2)];
 
-  // Find the largest gap that would produce viable segments (≥ MIN_SEGMENT on each side)
+  // Find the largest gap that would produce viable segments
+  // (≥ MIN_SEGMENT_TOKENS on each side)
   let bestGap = { index: -1, gap: 0 };
   for (const g of gaps) {
+    const leftTokens = sliceTokens(messages, 0, g.index);
+    const rightTokens = sliceTokens(messages, g.index, messages.length);
     if (
       g.gap > bestGap.gap &&
-      g.index >= MIN_SEGMENT &&
-      messages.length - g.index >= MIN_SEGMENT
+      leftTokens >= MIN_SEGMENT_TOKENS &&
+      rightTokens >= MIN_SEGMENT_TOKENS
     ) {
       bestGap = g;
     }
@@ -155,8 +210,8 @@ function findSplitIndex(
     return bestGap.index;
   }
 
-  // Fall back to count-based splitting
-  return maxSegment;
+  // Fall back to token-boundary splitting
+  return tokenBoundary;
 }
 
 function formatTime(ms: number): string {
@@ -581,8 +636,22 @@ export async function run(input: {
       break;
 
     if (pending.length > 0) {
-      const segments = detectSegments(pending, cfg.distillation.maxSegment);
+      const segments = detectSegments(pending, cfg.distillation.maxSegmentTokens);
       for (const segment of segments) {
+        const segTokens = segment.reduce((s, m) => s + m.tokens, 0);
+        if (segTokens < cfg.distillation.minSegmentTokens) {
+          if (input.force) {
+            // Absorb: mark distilled without LLM call to avoid blocking
+            // the caller on useless work. Messages remain searchable via
+            // BM25/vector recall on the temporal table.
+            temporal.markDistilled(segment.map((m) => m.id));
+            log.info(
+              `absorb tiny segment: ${segment.length} msgs, ${segTokens} tokens (below min ${cfg.distillation.minSegmentTokens})`,
+            );
+          }
+          // else: leave undistilled to accumulate with future messages
+          continue;
+        }
         const result = await distillSegment({
           llm: input.llm,
           projectPath: input.projectPath,
@@ -652,7 +721,7 @@ async function distillSegment(input: {
 
   const model = input.model ?? config().model;
   const sourceTokens = input.messages.reduce((sum, m) => sum + m.tokens, 0);
-  const maxTokens = workerTokenBudget(sourceTokens, 0.25, 1024, 8192);
+  const maxTokens = distillTokenBudget(sourceTokens);
   const responseText = await input.llm.prompt(
     DISTILLATION_SYSTEM,
     userContent,
@@ -667,6 +736,19 @@ async function distillSegment(input: {
   const distilledTokens = Math.ceil(result.observations.length / 3);
   const rComp = compressionRatio(distilledTokens, sourceTokens);
   const cNorm = temporal.temporalCnorm(input.messages.map((m) => m.created_at));
+
+  // Expansion guard: if the distillation output is at least as large as the
+  // input, the LLM failed to compress. Discard the output but still mark
+  // source messages as distilled to prevent infinite retry loops. The messages
+  // remain searchable via BM25/vector recall on the temporal table.
+  if (distilledTokens >= sourceTokens) {
+    temporal.markDistilled(input.messages.map((m) => m.id));
+    log.warn(
+      `distill expansion discarded: ${input.messages.length} msgs, ` +
+        `${sourceTokens}→${distilledTokens} tokens (no compression)`,
+    );
+    return null;
+  }
 
   const distillId = storeDistillation({
     projectPath: input.projectPath,
@@ -684,6 +766,16 @@ async function distillSegment(input: {
       `${sourceTokens}→${distilledTokens} tokens, ` +
       `R=${rComp.toFixed(2)}, C_norm=${cNorm.toFixed(3)}`,
   );
+
+  // Soft quality warning: R < 1.0 means the distillation is below the √N
+  // boundary, suggesting potentially lossy compression. Stored for
+  // monitoring — not a hard gate.
+  if (rComp < 1.0) {
+    log.warn(
+      `distill quality low: R=${rComp.toFixed(2)} (<1.0) on ${input.messages.length} msgs, ` +
+        `${sourceTokens}→${distilledTokens} tokens — may have lost detail`,
+    );
+  }
 
   // Fire-and-forget: embed the distillation for vector search
   if (embedding.isAvailable()) {
