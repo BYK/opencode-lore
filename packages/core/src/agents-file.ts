@@ -8,8 +8,9 @@
  * without duplication.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { dirname, join } from "path";
+import { db } from "./db";
 import * as ltm from "./ltm";
 import { serialize, inline, h, ul, liph, strong, t, root, unescapeMarkdown } from "./markdown";
 
@@ -49,6 +50,51 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** Matches `<!-- lore:UUID -->` tracking markers. */
 const MARKER_RE = /^<!--\s*lore:([0-9a-f-]+)\s*-->$/;
+
+// ---------------------------------------------------------------------------
+// File cache (kv_meta) — skip redundant import/export work
+// ---------------------------------------------------------------------------
+
+type LoreFileCache = {
+  /** File mtime (milliseconds) at last processing. */
+  mtimeMs: number;
+  /** hashSection() of file content at that time. */
+  hash: string;
+};
+
+const CACHE_PREFIX = "lore_file_cache:";
+
+function getCache(fp: string): LoreFileCache | null {
+  const row = db()
+    .query("SELECT value FROM kv_meta WHERE key = ?")
+    .get(CACHE_PREFIX + fp) as { value: string } | null;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value);
+  } catch {
+    return null;
+  }
+}
+
+function setCache(fp: string, entry: LoreFileCache): void {
+  const key = CACHE_PREFIX + fp;
+  const value = JSON.stringify(entry);
+  db()
+    .query(
+      "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+    )
+    .run(key, value, value);
+}
+
+/**
+ * Clear the cached mtime/hash for a project's `.lore.md`.
+ * Useful in tests or after data wipes to force a full re-check.
+ */
+export function clearLoreFileCache(projectPath: string): void {
+  db()
+    .query("DELETE FROM kv_meta WHERE key = ?")
+    .run(CACHE_PREFIX + join(projectPath, LORE_FILE));
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -453,24 +499,61 @@ export function loreFileExists(projectPath: string): boolean {
 /**
  * Export current knowledge entries to `.lore.md` in the project root.
  * The entire file is lore-owned — no section markers, no content to preserve.
+ *
+ * Skips the write if the content hash matches the cached hash (DB state
+ * unchanged since last export), avoiding unnecessary filesystem writes
+ * and mtime bumps.
  */
 export function exportLoreFile(projectPath: string): void {
   const sectionBody = buildSection(projectPath);
   const content = LORE_FILE_HEADER + "\n" + sectionBody;
-  writeFileSync(join(projectPath, LORE_FILE), content, "utf8");
+  const contentHash = hashSection(content);
+
+  const fp = join(projectPath, LORE_FILE);
+
+  // Skip write if content hash matches cached hash (DB state unchanged).
+  const cached = getCache(fp);
+  if (cached && cached.hash === contentHash) {
+    return;
+  }
+
+  // Content changed — write and update cache.
+  writeFileSync(fp, content, "utf8");
+  const { mtimeMs } = statSync(fp);
+  setCache(fp, { mtimeMs, hash: contentHash });
 }
 
 /**
  * Returns true if `.lore.md` needs to be imported:
- * - File exists and its content differs from what lore would currently produce
+ * - File exists and its content differs from what lore would currently produce.
+ *
+ * Uses an mtime + content-hash cache to skip the expensive buildSection()
+ * call when the file hasn't been touched since we last processed it.
  */
 export function shouldImportLoreFile(projectPath: string): boolean {
   const fp = join(projectPath, LORE_FILE);
   if (!existsSync(fp)) return false;
 
+  // Fast path: if mtime hasn't changed since last processing, skip entirely.
+  const { mtimeMs } = statSync(fp);
+  const cached = getCache(fp);
+  if (cached && cached.mtimeMs === mtimeMs) {
+    return false;
+  }
+
+  // Slow path: mtime changed (or first check) — read file and compare content.
   const fileContent = readFileSync(fp, "utf8");
+  const fileHash = hashSection(fileContent);
   const expected = LORE_FILE_HEADER + "\n" + buildSection(projectPath);
-  return hashSection(fileContent) !== hashSection(expected);
+  const expectedHash = hashSection(expected);
+
+  if (fileHash === expectedHash) {
+    // File matches DB — update cache so next call fast-paths.
+    setCache(fp, { mtimeMs, hash: fileHash });
+    return false;
+  }
+
+  return true;
 }
 
 /**

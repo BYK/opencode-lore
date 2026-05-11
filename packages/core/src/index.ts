@@ -118,6 +118,7 @@ export {
   importLoreFile,
   shouldImportLoreFile,
   loreFileExists,
+  clearLoreFileCache,
   LORE_FILE,
 } from "./agents-file";
 export { workerSessionIDs, isWorkerSession } from "./worker";

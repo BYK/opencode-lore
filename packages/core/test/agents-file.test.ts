@@ -5,7 +5,7 @@ import {
   beforeEach,
   afterAll,
 } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from "fs";
 import { join } from "path";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
@@ -20,6 +20,7 @@ import {
   shouldImport,
   shouldImportLoreFile,
   loreFileExists,
+  clearLoreFileCache,
   parseEntriesFromSection,
   type ParsedFileEntry,
 } from "../src/agents-file";
@@ -106,6 +107,8 @@ beforeEach(() => {
   for (const id of TEST_UUIDS) {
     db().query("DELETE FROM knowledge WHERE id = ?").run(id);
   }
+  // Clear lore file cache entries to ensure test isolation
+  db().query("DELETE FROM kv_meta WHERE key LIKE 'lore_file_cache:%'").run();
   // Reset the agents file and .lore.md
   if (existsSync(AGENTS_FILE)) rmSync(AGENTS_FILE);
   if (existsSync(LORE_FILE_PATH)) rmSync(LORE_FILE_PATH);
@@ -1339,6 +1342,171 @@ describe("migration from AGENTS.md to .lore.md", () => {
 
     // No new entries created — pointer text has no bullet entries
     expect(after).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lore file cache optimization
+// ---------------------------------------------------------------------------
+
+describe("lore file cache optimization", () => {
+  test("shouldImportLoreFile fast-paths on unchanged mtime", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT); // writes file + sets cache
+
+    // Delete the DB entry — if slow path runs, it would see file≠DB and return true
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+
+    // Fast path: mtime unchanged → returns false without checking DB
+    expect(shouldImportLoreFile(PROJECT)).toBe(false);
+  });
+
+  test("shouldImportLoreFile detects external edits via mtime change", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    // Simulate external edit (changes both mtime and content)
+    const fp = join(PROJECT, LORE_FILE);
+    const content = readFileSync(fp, "utf8");
+    writeFileSync(fp, content + "\n* **New**: Added externally\n", "utf8");
+
+    expect(shouldImportLoreFile(PROJECT)).toBe(true);
+  });
+
+  test("shouldImportLoreFile updates cache on mtime change with same content", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    // Rewrite identical content to bump mtime
+    const fp = join(PROJECT, LORE_FILE);
+    const content = readFileSync(fp, "utf8");
+    writeFileSync(fp, content, "utf8");
+
+    // Slow path runs, finds hash match, updates cache — returns false
+    expect(shouldImportLoreFile(PROJECT)).toBe(false);
+
+    // Now delete DB entry — if cache was updated, fast path returns false
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    expect(shouldImportLoreFile(PROJECT)).toBe(false);
+  });
+
+  test("exportLoreFile skips write when content hash unchanged", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    const fp = join(PROJECT, LORE_FILE);
+    const mtimeAfterFirst = statSync(fp).mtimeMs;
+
+    // Small delay to ensure mtime would differ if file were rewritten
+    Bun.sleepSync(50);
+
+    exportLoreFile(PROJECT); // should skip — hash unchanged
+
+    const mtimeAfterSecond = statSync(fp).mtimeMs;
+    expect(mtimeAfterSecond).toBe(mtimeAfterFirst);
+  });
+
+  test("exportLoreFile writes when DB state changes", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Watch this",
+      content: "Something tricky",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    const content = readFileSync(join(PROJECT, LORE_FILE), "utf8");
+    expect(content).toContain("Watch this");
+    expect(content).toContain("Something tricky");
+  });
+
+  test("shouldImportLoreFile returns false when file deleted despite stale cache", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT); // sets cache
+
+    rmSync(join(PROJECT, LORE_FILE));
+
+    expect(shouldImportLoreFile(PROJECT)).toBe(false);
+  });
+
+  test("export after import sets cache so next shouldImport fast-paths", () => {
+    // Simulate externally-created .lore.md
+    const fp = join(PROJECT, LORE_FILE);
+    writeFileSync(
+      fp,
+      `<!-- Managed by lore -->\n\n## Long-term Knowledge\n\n### Decision\n\n<!-- lore:${TEST_UUIDS[0]} -->\n* **Auth**: OAuth2\n`,
+      "utf8",
+    );
+
+    importLoreFile(PROJECT);
+    exportLoreFile(PROJECT);
+
+    // Delete DB entry — fast path should still return false
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    expect(shouldImportLoreFile(PROJECT)).toBe(false);
+  });
+
+  test("clearLoreFileCache invalidates cache so shouldImport re-checks", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Auth strategy",
+      content: "OAuth2 with PKCE",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT);
+
+    // Cache is set — fast path works even after DB wipe
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    expect(shouldImportLoreFile(PROJECT)).toBe(false); // fast path
+
+    // Clear cache — forces slow path which sees file≠DB
+    clearLoreFileCache(PROJECT);
+    expect(shouldImportLoreFile(PROJECT)).toBe(true); // slow path: file has entries, DB empty
   });
 });
 
