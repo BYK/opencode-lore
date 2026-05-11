@@ -755,7 +755,7 @@ function buildStreamingResponse(
             const scope = input.scope ?? "all";
 
             // Store recall result for marker round-trip expansion
-            const storeKey = recallStoreKey(input.query, scope);
+            const storeKey = recallStoreKey(input.query, scope, input.id);
             const position = resp.content.indexOf(recallBlock);
             recallContext.sessionState.recallStore.set(storeKey, {
               toolUseId: recallBlock.id,
@@ -765,7 +765,7 @@ function buildStreamingResponse(
             });
 
             // Emit marker text block in place of the suppressed recall block
-            const markerText = buildRecallMarker(input.query, scope);
+            const markerText = buildRecallMarker(input.query, scope, input.id);
             const markerIdx = recallAccum.clientBlockCount();
             const syntheticMarker = [
               formatSSEEvent("content_block_start", JSON.stringify({
@@ -1955,7 +1955,7 @@ async function handleConversationTurn(
     );
 
     // Store recall result for marker round-trip expansion
-    const storeKey = recallStoreKey(input.query, input.scope ?? "all");
+    const storeKey = recallStoreKey(input.query, input.scope ?? "all", input.id);
     const position = resp.content.indexOf(recallBlock);
     sessionState.recallStore.set(storeKey, {
       toolUseId: recallBlock.id,

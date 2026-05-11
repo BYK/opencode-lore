@@ -872,6 +872,71 @@ export function embedDistillation(
     });
 }
 
+/**
+ * Embed a temporal message and store the result in the DB.
+ * Fire-and-forget — errors are logged, never thrown.
+ * Only called for undistilled messages; once distilled, the embedding
+ * is NULLed (semantic content captured by distillation embedding).
+ */
+export function embedTemporalMessage(
+  id: string,
+  content: string,
+): void {
+  // Skip very short messages — they don't carry enough semantic signal
+  // to be useful in vector search and would waste embedding capacity.
+  if (content.length < 50) return;
+
+  embed([content], "document")
+    .then(([vec]) => {
+      db()
+        .query("UPDATE temporal_messages SET embedding = ? WHERE id = ?")
+        .run(toBlob(vec), id);
+    })
+    .catch((err) => {
+      log.info("embedding failed for temporal message", id, ":", err);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Vector search — temporal messages (undistilled only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Search undistilled temporal messages with embeddings by cosine similarity.
+ * Returns top-k entries sorted by similarity descending.
+ *
+ * Only scans undistilled messages (distilled=0) — once a message is
+ * distilled, its semantic content is captured by the distillation
+ * embedding and the temporal embedding is cleared.
+ *
+ * Scoped to a single project. Optionally scoped to a single session.
+ */
+export function vectorSearchTemporal(
+  queryEmbedding: Float32Array,
+  projectId: string,
+  limit = 10,
+  sessionId?: string,
+): VectorHit[] {
+  const sql = sessionId
+    ? "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND distilled = 0 AND project_id = ? AND session_id = ?"
+    : "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND distilled = 0 AND project_id = ?";
+  const params = sessionId ? [projectId, sessionId] : [projectId];
+
+  const rows = db()
+    .query(sql)
+    .all(...params) as Array<{ id: string; embedding: Buffer }>;
+
+  const scored: VectorHit[] = [];
+  for (const row of rows) {
+    const vec = fromBlob(row.embedding);
+    const sim = cosineSimilarity(queryEmbedding, vec);
+    scored.push({ id: row.id, similarity: sim });
+  }
+
+  scored.sort((a, b) => b.similarity - a.similarity);
+  return scored.slice(0, limit);
+}
+
 // ---------------------------------------------------------------------------
 // Config change detection
 // ---------------------------------------------------------------------------
@@ -905,7 +970,7 @@ export function checkConfigChange(): boolean {
 
   if (stored && stored.value === current) return false;
 
-  // Config changed (or first run) — clear all embeddings in both tables
+  // Config changed (or first run) — clear all embeddings in all tables
   if (stored) {
     const knowledgeCount = db()
       .query("SELECT COUNT(*) as n FROM knowledge WHERE embedding IS NOT NULL")
@@ -913,10 +978,14 @@ export function checkConfigChange(): boolean {
     const distillCount = db()
       .query("SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL")
       .get() as { n: number };
-    const total = knowledgeCount.n + distillCount.n;
+    const temporalCount = db()
+      .query("SELECT COUNT(*) as n FROM temporal_messages WHERE embedding IS NOT NULL")
+      .get() as { n: number };
+    const total = knowledgeCount.n + distillCount.n + temporalCount.n;
     if (total > 0) {
       db().query("UPDATE knowledge SET embedding = NULL").run();
       db().query("UPDATE distillations SET embedding = NULL").run();
+      db().query("UPDATE temporal_messages SET embedding = NULL").run();
       log.info(
         `embedding config changed (${stored.value} → ${current}), cleared ${total} stale embeddings`,
       );

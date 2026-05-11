@@ -23,6 +23,7 @@ export * as log from "./log";
 export {
   runRecall,
   searchRecall,
+  recallById,
   RECALL_TOOL_DESCRIPTION,
   RECALL_PARAM_DESCRIPTIONS,
   type RecallInput,
@@ -126,6 +127,7 @@ export * as workerModel from "./worker-model";
 export {
   ftsQuery,
   ftsQueryOr,
+  ftsQueryRelaxed,
   EMPTY_QUERY,
   reciprocalRankFusion,
   expandQuery,

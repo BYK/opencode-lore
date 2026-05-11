@@ -1,6 +1,7 @@
 import { db, ensureProject } from "./db";
-import { ftsQuery, ftsQueryOr, EMPTY_QUERY } from "./search";
+import { ftsQuery, EMPTY_QUERY, runRelaxedSearch } from "./search";
 import { sanitizeSurrogates } from "./markdown";
+import * as embedding from "./embedding";
 import type { LoreMessage, LorePart } from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
 
@@ -93,6 +94,10 @@ export function store(input: {
         messageMetadata(input.info, input.parts),
         input.info.id,
       );
+    // Re-embed on content update (fire-and-forget)
+    if (embedding.isAvailable()) {
+      embedding.embedTemporalMessage(input.info.id, content);
+    }
     return;
   }
 
@@ -111,6 +116,11 @@ export function store(input: {
       input.info.time.created,
       messageMetadata(input.info, input.parts),
     );
+
+  // Embed new message for vector search (fire-and-forget)
+  if (embedding.isAvailable()) {
+    embedding.embedTemporalMessage(input.info.id, content);
+  }
 }
 
 export type TemporalMessage = {
@@ -156,7 +166,7 @@ export function markDistilled(ids: string[]) {
   const placeholders = ids.map(() => "?").join(",");
   db()
     .query(
-      `UPDATE temporal_messages SET distilled = 1 WHERE id IN (${placeholders})`,
+      `UPDATE temporal_messages SET distilled = 1, embedding = NULL WHERE id IN (${placeholders})`,
     )
     .run(...ids);
 }
@@ -194,8 +204,6 @@ export function search(input: {
 }): TemporalMessage[] {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 20;
-  const q = ftsQuery(input.query);
-  if (q === EMPTY_QUERY) return [];
 
   const ftsSQL = input.sessionID
     ? `SELECT m.* FROM temporal_fts f
@@ -206,24 +214,14 @@ export function search(input: {
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ?
        ORDER BY rank LIMIT ?`;
-  const params = input.sessionID
-    ? [q, pid, input.sessionID, limit]
-    : [q, pid, limit];
-  try {
-    const results = db()
-      .query(ftsSQL)
-      .all(...params) as TemporalMessage[];
-    if (results.length) return results;
 
-    // AND returned nothing — try OR fallback for broader recall
-    const qOr = ftsQueryOr(input.query);
-    if (qOr === EMPTY_QUERY) return [];
-    const paramsOr = input.sessionID
-      ? [qOr, pid, input.sessionID, limit]
-      : [qOr, pid, limit];
-    return db()
-      .query(ftsSQL)
-      .all(...paramsOr) as TemporalMessage[];
+  try {
+    return runRelaxedSearch(input.query, (matchExpr) => {
+      const params = input.sessionID
+        ? [matchExpr, pid, input.sessionID, limit]
+        : [matchExpr, pid, limit];
+      return db().query(ftsSQL).all(...params) as TemporalMessage[];
+    });
   } catch {
     // FTS5 still choked (edge case) — fall back to LIKE search
     return searchLike({
@@ -249,8 +247,6 @@ export function searchScored(input: {
 }): ScoredTemporalMessage[] {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 20;
-  const q = ftsQuery(input.query);
-  if (q === EMPTY_QUERY) return [];
 
   const ftsSQL = input.sessionID
     ? `SELECT m.*, rank FROM temporal_fts f
@@ -261,20 +257,14 @@ export function searchScored(input: {
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ?
        ORDER BY rank LIMIT ?`;
-  const params = input.sessionID
-    ? [q, pid, input.sessionID, limit]
-    : [q, pid, limit];
 
   try {
-    const results = db().query(ftsSQL).all(...params) as ScoredTemporalMessage[];
-    if (results.length) return results;
-
-    const qOr = ftsQueryOr(input.query);
-    if (qOr === EMPTY_QUERY) return [];
-    const paramsOr = input.sessionID
-      ? [qOr, pid, input.sessionID, limit]
-      : [qOr, pid, limit];
-    return db().query(ftsSQL).all(...paramsOr) as ScoredTemporalMessage[];
+    return runRelaxedSearch(input.query, (matchExpr) => {
+      const params = input.sessionID
+        ? [matchExpr, pid, input.sessionID, limit]
+        : [matchExpr, pid, limit];
+      return db().query(ftsSQL).all(...params) as ScoredTemporalMessage[];
+    });
   } catch {
     return [];
   }

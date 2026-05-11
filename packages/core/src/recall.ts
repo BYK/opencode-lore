@@ -23,8 +23,8 @@ import {
   expandQuery,
   filterTerms,
   ftsQuery,
-  ftsQueryOr,
   reciprocalRankFusion,
+  runRelaxedSearch,
 } from "./search";
 import { inline } from "./markdown";
 
@@ -153,8 +153,6 @@ function searchDistillationsScored(input: {
 }): ScoredDistillation[] {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 10;
-  const q = ftsQuery(input.query);
-  if (q === EMPTY_QUERY) return [];
 
   const ftsSQL = input.sessionID
     ? `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, d.c_norm, rank
@@ -169,21 +167,14 @@ function searchDistillationsScored(input: {
        WHERE distillation_fts MATCH ?
        AND d.project_id = ?
        ORDER BY rank LIMIT ?`;
-  const params = input.sessionID
-    ? [q, pid, input.sessionID, limit]
-    : [q, pid, limit];
 
   try {
-    const results = db().query(ftsSQL).all(...params) as ScoredDistillation[];
-    if (results.length) return results;
-
-    // AND returned nothing — try OR fallback
-    const qOr = ftsQueryOr(input.query);
-    if (qOr === EMPTY_QUERY) return [];
-    const paramsOr = input.sessionID
-      ? [qOr, pid, input.sessionID, limit]
-      : [qOr, pid, limit];
-    return db().query(ftsSQL).all(...paramsOr) as ScoredDistillation[];
+    return runRelaxedSearch(input.query, (matchExpr) => {
+      const params = input.sessionID
+        ? [matchExpr, pid, input.sessionID, limit]
+        : [matchExpr, pid, limit];
+      return db().query(ftsSQL).all(...params) as ScoredDistillation[];
+    });
   } catch {
     // FTS5 failed — fall back to LIKE search with synthetic rank
     return searchDistillationsLike({
@@ -630,6 +621,36 @@ export async function searchRecall(
           });
         }
       }
+
+      // Temporal vector search (undistilled messages only)
+      if (scope !== "knowledge") {
+        const pid = ensureProject(projectPath);
+        const temporalVectorHits = embedding.vectorSearchTemporal(
+          queryVec,
+          pid,
+          limit,
+        );
+        const temporalVectorTagged: TaggedResult[] = temporalVectorHits
+          .map((hit): TaggedResult | null => {
+            const row = db()
+              .query(
+                "SELECT id, project_id, session_id, role, content, tokens, distilled, created_at, metadata FROM temporal_messages WHERE id = ?",
+              )
+              .get(hit.id) as temporal.TemporalMessage | null;
+            if (!row) return null;
+            return {
+              source: "temporal",
+              item: { ...row, rank: -hit.similarity },
+            };
+          })
+          .filter((r): r is TaggedResult => r !== null);
+        if (temporalVectorTagged.length) {
+          allRrfLists.push({
+            items: temporalVectorTagged,
+            key: (r) => `t:${r.item.id}`,
+          });
+        }
+      }
     } catch (err) {
       log.info("recall: vector search failed:", err);
     }
@@ -765,7 +786,15 @@ export async function searchRecall(
     }
   }
 
-  return reciprocalRankFusion<TaggedResult>(allRrfLists);
+  const fused = reciprocalRankFusion<TaggedResult>(allRrfLists);
+
+  // Cap output: return at most 3x the per-source limit. With 7+ RRF sources
+  // each contributing up to `limit` items, uncapped output can be huge (89+
+  // results for broad OR fallbacks). The top-scoring items after RRF fusion
+  // are the ones that appeared in multiple lists — capping preserves those
+  // while dropping the long tail of single-list noise.
+  const maxResults = limit * 3;
+  return fused.slice(0, maxResults);
 }
 
 // ---------------------------------------------------------------------------
@@ -779,7 +808,7 @@ export async function searchRecall(
  *   k: (knowledge), xk: (cross-knowledge), d: (distillation),
  *   t: (temporal), lat: (lat-section).
  */
-function recallById(id: string): string {
+export function recallById(id: string): string {
   const colonIdx = id.indexOf(":");
   if (colonIdx < 1) return `No entry found for id: ${id}`;
 

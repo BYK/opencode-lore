@@ -1,7 +1,7 @@
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "./db";
 import { config } from "./config";
-import { ftsQuery, ftsQueryOr, EMPTY_QUERY, extractTopTerms } from "./search";
+import { ftsQuery, EMPTY_QUERY, extractTopTerms, runRelaxedSearch } from "./search";
 import * as embedding from "./embedding";
 import * as latReader from "./lat-reader";
 import * as log from "./log";
@@ -454,8 +454,6 @@ export function search(input: {
   limit?: number;
 }): KnowledgeEntry[] {
   const limit = input.limit ?? 20;
-  const q = ftsQuery(input.query);
-  if (q === EMPTY_QUERY) return [];
 
   const pid = input.projectPath ? ensureProject(input.projectPath) : null;
 
@@ -473,22 +471,14 @@ export function search(input: {
        ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`;
 
   const { title, content, category } = ftsWeights();
-  const ftsParams = pid
-    ? [q, pid, title, content, category, limit]
-    : [q, title, content, category, limit];
 
   try {
-    const results = db().query(ftsSQL).all(...ftsParams) as KnowledgeEntry[];
-    if (results.length) return results;
-
-    // AND returned nothing — try OR fallback for broader recall
-    const qOr = ftsQueryOr(input.query);
-    if (qOr === EMPTY_QUERY) return [];
-
-    const ftsParamsOr = pid
-      ? [qOr, pid, title, content, category, limit]
-      : [qOr, title, content, category, limit];
-    return db().query(ftsSQL).all(...ftsParamsOr) as KnowledgeEntry[];
+    return runRelaxedSearch(input.query, (matchExpr) => {
+      const params = pid
+        ? [matchExpr, pid, title, content, category, limit]
+        : [matchExpr, title, content, category, limit];
+      return db().query(ftsSQL).all(...params) as KnowledgeEntry[];
+    });
   } catch {
     return searchLike({
       query: input.query,
@@ -510,8 +500,6 @@ export function searchScored(input: {
   limit?: number;
 }): ScoredKnowledgeEntry[] {
   const limit = input.limit ?? 20;
-  const q = ftsQuery(input.query);
-  if (q === EMPTY_QUERY) return [];
 
   const pid = input.projectPath ? ensureProject(input.projectPath) : null;
   const { title, content, category } = ftsWeights();
@@ -529,20 +517,13 @@ export function searchScored(input: {
        AND k.confidence > 0.2
        ORDER BY rank LIMIT ?`;
 
-  const ftsParams = pid
-    ? [title, content, category, q, pid, limit]
-    : [title, content, category, q, limit];
-
   try {
-    const results = db().query(ftsSQL).all(...ftsParams) as ScoredKnowledgeEntry[];
-    if (results.length) return results;
-
-    const qOr = ftsQueryOr(input.query);
-    if (qOr === EMPTY_QUERY) return [];
-    const ftsParamsOr = pid
-      ? [title, content, category, qOr, pid, limit]
-      : [title, content, category, qOr, limit];
-    return db().query(ftsSQL).all(...ftsParamsOr) as ScoredKnowledgeEntry[];
+    return runRelaxedSearch(input.query, (matchExpr) => {
+      const params = pid
+        ? [title, content, category, matchExpr, pid, limit]
+        : [title, content, category, matchExpr, limit];
+      return db().query(ftsSQL).all(...params) as ScoredKnowledgeEntry[];
+    });
   } catch {
     return [];
   }
@@ -560,8 +541,6 @@ export function searchScoredOtherProjects(input: {
   limit?: number;
 }): ScoredKnowledgeEntry[] {
   const limit = input.limit ?? 10;
-  const q = ftsQuery(input.query);
-  if (q === EMPTY_QUERY) return [];
 
   const excludePid = ensureProject(input.excludeProjectPath);
   const { title, content, category } = ftsWeights();
@@ -578,17 +557,11 @@ export function searchScoredOtherProjects(input: {
      AND k.confidence > 0.2
      ORDER BY rank LIMIT ?`;
 
-  const ftsParams = [title, content, category, q, excludePid, limit];
-
   try {
-    const results = db().query(ftsSQL).all(...ftsParams) as ScoredKnowledgeEntry[];
-    if (results.length) return results;
-
-    // AND returned nothing — try OR fallback
-    const qOr = ftsQueryOr(input.query);
-    if (qOr === EMPTY_QUERY) return [];
-    const ftsParamsOr = [title, content, category, qOr, excludePid, limit];
-    return db().query(ftsSQL).all(...ftsParamsOr) as ScoredKnowledgeEntry[];
+    return runRelaxedSearch(input.query, (matchExpr) => {
+      const params = [title, content, category, matchExpr, excludePid, limit];
+      return db().query(ftsSQL).all(...params) as ScoredKnowledgeEntry[];
+    });
   } catch {
     return [];
   }

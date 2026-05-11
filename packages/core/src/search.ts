@@ -173,6 +173,76 @@ export function ftsQueryOr(raw: string): string {
   return terms.map((w) => `${w}*`).join(" OR ");
 }
 
+/**
+ * Build a cascade of progressively relaxed FTS5 queries.
+ *
+ * For N terms, produces up to (N - minTerms) queries, each dropping one more
+ * term (least significant first — shortest terms dropped first as a rough
+ * proxy for specificity). The final entry is always the full OR query.
+ *
+ * Example for 6 terms with minTerms=3:
+ *   [0] 5-of-6 AND (drop shortest term)
+ *   [1] 4-of-6 AND
+ *   [2] 3-of-6 AND
+ *   [3] full OR (all 6 terms)
+ *
+ * For ≤ minTerms terms, returns just the OR query (no intermediate steps).
+ * Callers should try each query in order, stopping at the first that returns
+ * results. This avoids the AND→OR cliff that produces massive low-quality
+ * result sets.
+ */
+export function ftsQueryRelaxed(raw: string, minTerms = 3): string[] {
+  const terms = filterTerms(raw);
+  if (!terms.length) return [EMPTY_QUERY];
+
+  const orQuery = terms.map((w) => `${w}*`).join(" OR ");
+
+  // Not enough terms for progressive relaxation — just OR.
+  if (terms.length <= minTerms) return [orQuery];
+
+  // Sort by length ascending — shortest (least specific) terms dropped first.
+  const ranked = [...terms].sort((a, b) => a.length - b.length);
+
+  const cascade: string[] = [];
+  for (let drop = 1; drop <= terms.length - minTerms; drop++) {
+    const kept = ranked.slice(drop);
+    cascade.push(kept.map((w) => `${w}*`).join(" "));
+  }
+  cascade.push(orQuery);
+  return cascade;
+}
+
+/**
+ * Run a search function through the relaxed cascade, stopping at the first
+ * query that produces results. Falls back through progressively looser AND
+ * queries before trying full OR.
+ *
+ * @param raw     The original query string
+ * @param runner  A function that takes an FTS5 MATCH expression and returns results
+ * @returns       The results from the first cascade step that produced matches
+ */
+export function runRelaxedSearch<T>(
+  raw: string,
+  runner: (matchExpr: string) => T[],
+): T[] {
+  // First try exact AND (all terms)
+  const q = ftsQuery(raw);
+  if (q === EMPTY_QUERY) return [];
+
+  const andResults = runner(q);
+  if (andResults.length) return andResults;
+
+  // Try progressively relaxed queries
+  const cascade = ftsQueryRelaxed(raw);
+  for (const relaxed of cascade) {
+    if (relaxed === EMPTY_QUERY) continue;
+    const results = runner(relaxed);
+    if (results.length) return results;
+  }
+
+  return [];
+}
+
 // ---------------------------------------------------------------------------
 // Term extraction (Phase 3)
 // ---------------------------------------------------------------------------

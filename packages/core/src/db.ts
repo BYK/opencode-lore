@@ -21,7 +21,7 @@ export function repoNameFromRemote(remote: string | null): string | null {
   return name.length > 0 ? name : null;
 }
 
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 
 const MIGRATIONS: string[] = [
   `
@@ -421,6 +421,15 @@ const MIGRATIONS: string[] = [
     updated_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, time_slot)
   );
+  `,
+  `
+  -- Version 16: Embedding BLOB column for temporal message vector search.
+  -- Same pattern as knowledge (v8) and distillation (v9) embeddings.
+  -- Only undistilled messages are embedded; the column is NULLed when
+  -- a message is marked as distilled (its semantic content is captured
+  -- by the distillation embedding at that point).
+  -- No backfill — new messages get embedded lazily at write time.
+  ALTER TABLE temporal_messages ADD COLUMN embedding BLOB;
   `,
 ];
 
