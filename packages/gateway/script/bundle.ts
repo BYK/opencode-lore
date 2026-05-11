@@ -54,6 +54,23 @@ const external = [
   "@anush008/*",
 ];
 
+// Remap @sentry/bun → @sentry/node so the CJS bundle gets Node-native
+// Sentry integrations (http server instrumentation via diagnostics_channel)
+// instead of @sentry/bun's BunServer integration which uses Bun-only APIs
+// (server.reload, headers.toJSON) that the Node.js polyfill doesn't provide.
+// Resolve @sentry/node via @sentry/bun (its direct dependency), since
+// @sentry/node is not a direct dependency of this package.
+const sentryBunEntry = Bun.resolveSync("@sentry/bun", packageDir);
+const sentryNodeEntry = Bun.resolveSync("@sentry/node", sentryBunEntry);
+const sentryNodePlugin: esbuild.Plugin = {
+  name: "sentry-bun-to-node",
+  setup(build) {
+    build.onResolve({ filter: /^@sentry\/bun$/ }, () => ({
+      path: sentryNodeEntry,
+    }));
+  },
+};
+
 await esbuild.build({
   entryPoints: [join(packageDir, "src/index.ts")],
   bundle: true,
@@ -68,6 +85,7 @@ await esbuild.build({
   minify: true,
   logLevel: "info",
   legalComments: "none",
+  plugins: [sentryNodePlugin],
   // Inject polyfills — provides Bun.serve(), Bun.zstd*, etc. under Node.js
   inject: [join(here, "node-polyfills.ts")],
   // Build-time constants
