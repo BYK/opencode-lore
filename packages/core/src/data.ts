@@ -58,6 +58,7 @@ export type DistillationSummary = {
   c_norm: number | null;
   archived: number;
   created_at: number;
+  call_type: string | null;
 };
 
 export type DistillationDetail = DistillationSummary & {
@@ -138,7 +139,7 @@ export function listDistillations(
   if (opts?.sessionId) {
     return db()
       .query(
-        `SELECT id, session_id, generation, token_count, r_compression, c_norm, archived, created_at
+        `SELECT id, session_id, generation, token_count, r_compression, c_norm, archived, created_at, call_type
          FROM distillations
          WHERE project_id = ? AND session_id = ?
          ORDER BY created_at DESC LIMIT ?`,
@@ -148,7 +149,7 @@ export function listDistillations(
 
   return db()
     .query(
-      `SELECT id, session_id, generation, token_count, r_compression, c_norm, archived, created_at
+      `SELECT id, session_id, generation, token_count, r_compression, c_norm, archived, created_at, call_type
        FROM distillations
        WHERE project_id = ?
        ORDER BY created_at DESC LIMIT ?`,

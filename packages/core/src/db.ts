@@ -431,6 +431,12 @@ const MIGRATIONS: string[] = [
   -- No backfill — new messages get embedded lazily at write time.
   ALTER TABLE temporal_messages ADD COLUMN embedding BLOB;
   `,
+  `
+  -- Version 17: Track whether distillation used batch API pricing.
+  -- NULL for pre-migration rows (treated as 'direct' for conservative estimates).
+  -- 'batch' = 50% discount on input+output, 'direct' = full price.
+  ALTER TABLE distillations ADD COLUMN call_type TEXT;
+  `,
 ];
 
 function dataDir() {

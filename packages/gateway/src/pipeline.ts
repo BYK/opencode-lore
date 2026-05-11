@@ -263,6 +263,8 @@ function textDiffRatio(a: string, b: string): number {
 
 /** Cached LLM client for background workers. */
 let llmClient: LLMClient | null = null;
+/** Whether the batch queue wrapper is active (set once in getLLMClient). */
+let batchQueueEnabled = false;
 
 /** Cleanup function for the idle scheduler timer. */
 let stopIdleScheduler: (() => void) | null = null;
@@ -415,6 +417,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     }
     if (batchDisabled) {
       llmClient = inner;
+      batchQueueEnabled = false;
     } else {
       llmClient = createBatchLLMClient(
         inner,
@@ -422,6 +425,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
         resolveAuth,
         defaultModel,
       );
+      batchQueueEnabled = true;
     }
   }
   return llmClient;
@@ -1363,6 +1367,7 @@ function scheduleBackgroundWork(
         model,
         force: true,
         urgent: true,
+        callType: "direct",
       })
       .catch((e) => log.error("background distillation failed:", e));
   }
@@ -1374,7 +1379,7 @@ function scheduleBackgroundWork(
       `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
     );
     distillation
-      .run({ llm, projectPath, sessionID, model })
+      .run({ llm, projectPath, sessionID, model, skipMeta: true, callType: batchQueueEnabled ? "batch" : "direct" })
       .catch((e) => log.error("background distillation failed:", e));
   }
 
@@ -1434,6 +1439,7 @@ async function handleCompaction(
     model,
     force: true,
     urgent: true,
+    callType: "direct",
   });
 
   // 2. Load distillation summaries

@@ -41,6 +41,22 @@ export function compressionRatio(
 }
 
 /**
+ * Maximum allowed expansion for distillation output.
+ *
+ * Tiny segments can't meaningfully compress — distillation adds metadata
+ * (timestamps, importance markers, cross-references) that necessarily
+ * exceeds the source. Allow generous expansion for small segments while
+ * still enforcing compression on large ones.
+ *
+ * @returns Maximum allowed distilled tokens for a given source token count.
+ */
+export function maxAllowedExpansion(sourceTokens: number): number {
+  if (sourceTokens < 100) return sourceTokens * 5; // tiny: 8→40 is fine
+  if (sourceTokens < 500) return sourceTokens * 2; // small: 2x headroom
+  return sourceTokens; // large: must compress
+}
+
+/**
  * Segment detection: group related messages into distillation-sized chunks.
  *
  * When the total token count exceeds `maxTokens`, prefers splitting at the
@@ -459,6 +475,7 @@ function storeDistillation(input: {
   generation: number;
   rCompression?: number;
   cNorm?: number;
+  callType?: "batch" | "direct";
 }): string {
   const pid = ensureProject(input.projectPath);
   const id = crypto.randomUUID();
@@ -466,8 +483,8 @@ function storeDistillation(input: {
   const tokens = Math.ceil(input.observations.length / 3);
   db()
     .query(
-      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -482,13 +499,14 @@ function storeDistillation(input: {
       Date.now(),
       input.rCompression ?? null,
       input.cNorm ?? null,
+      input.callType ?? null,
     );
   return id;
 }
 
 // Count non-archived gen-0 distillations — these are the ones awaiting
 // meta-distillation. Archived gen-0 entries have already been consolidated.
-function gen0Count(projectPath: string, sessionID: string): number {
+export function gen0Count(projectPath: string, sessionID: string): number {
   const pid = ensureProject(projectPath);
   return (
     db()
@@ -611,6 +629,9 @@ export async function run(input: {
    *  where the caller is blocking on the result. Background/idle distillation
    *  should leave this false to benefit from batch API 50% cost savings. */
   urgent?: boolean;
+  /** Whether the LLM call will use batch or direct pricing. Recorded on the
+   *  distillation row for accurate historical cost estimates. */
+  callType?: "batch" | "direct";
 }): Promise<{ rounds: number; distilled: number }> {
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
@@ -659,6 +680,7 @@ export async function run(input: {
           messages: segment,
           model: input.model,
           urgent: input.urgent,
+          callType: input.callType,
         });
         if (result) {
           distilled += segment.length;
@@ -681,6 +703,7 @@ export async function run(input: {
         sessionID: input.sessionID,
         model: input.model,
         urgent: input.urgent,
+        callType: input.callType,
       });
       rounds++;
     }
@@ -701,6 +724,7 @@ async function distillSegment(input: {
   messages: TemporalMessage[];
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
+  callType?: "batch" | "direct";
 }): Promise<DistillationResult | null> {
   const prior = latestObservations(input.projectPath, input.sessionID);
   const text = messagesToText(input.messages);
@@ -737,15 +761,17 @@ async function distillSegment(input: {
   const rComp = compressionRatio(distilledTokens, sourceTokens);
   const cNorm = temporal.temporalCnorm(input.messages.map((m) => m.created_at));
 
-  // Expansion guard: if the distillation output is at least as large as the
-  // input, the LLM failed to compress. Discard the output but still mark
-  // source messages as distilled to prevent infinite retry loops. The messages
-  // remain searchable via BM25/vector recall on the temporal table.
-  if (distilledTokens >= sourceTokens) {
+  // Expansion guard: discard distillation output that exceeds the allowed
+  // expansion limit. Tiny segments (< 100 tokens) get generous headroom
+  // because distillation necessarily adds metadata; large segments must
+  // actually compress. Still marks source messages as distilled to prevent
+  // infinite retry loops — they remain searchable via BM25/vector recall.
+  const expansionLimit = maxAllowedExpansion(sourceTokens);
+  if (distilledTokens > expansionLimit) {
     temporal.markDistilled(input.messages.map((m) => m.id));
     log.warn(
       `distill expansion discarded: ${input.messages.length} msgs, ` +
-        `${sourceTokens}→${distilledTokens} tokens (no compression)`,
+        `${sourceTokens}→${distilledTokens} tokens (exceeds ${expansionLimit} limit)`,
     );
     return null;
   }
@@ -758,6 +784,7 @@ async function distillSegment(input: {
     generation: 0,
     rCompression: rComp,
     cNorm,
+    callType: input.callType,
   });
   temporal.markDistilled(input.messages.map((m) => m.id));
 
@@ -817,6 +844,7 @@ export async function metaDistill(input: {
   sessionID: string;
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
+  callType?: "batch" | "direct";
 }): Promise<DistillationResult | null> {
   const existing = loadGen0(input.projectPath, input.sessionID);
 
@@ -881,6 +909,7 @@ export async function metaDistill(input: {
       observations: result.observations,
       sourceIDs: allSourceIDs,
       generation: maxGen + 1,
+      callType: input.callType,
     });
     // Archive the gen-0 distillations that were merged into gen-1+.
     // They remain searchable via BM25 recall but are excluded from the

@@ -168,15 +168,20 @@ export function buildIdleWorkHandler(
     // 1. Distillation — force-distill ALL pending messages on idle, even
     // below minMessages. The cache is going cold; aggressive distillation
     // now means a smaller context on the next turn via post-idle compact.
-    // Skip meta-distillation: it rewrites gen-0 row IDs → prefix cache
-    // invalidation. While the cache is cold *now*, the rewritten prefix
-    // would cause an additional bust on the next turn when the user returns
-    // (distilled prefix is byte-different from what it would have been).
-    // Meta will run on the next idle cycle after new content arrives.
+    // Skip meta-distillation in the run() call: we run it as a separate
+    // step below so gen-0 segments from the force-distill are counted.
     try {
+      const callType = process.env.LORE_BATCH_DISABLED === "1" ? "direct" as const : "batch" as const;
       const pending = temporal.undistilledCount(projectPath, sessionID);
       if (pending > 0) {
-        await distillation.run({ llm, projectPath, sessionID, model, force: true, skipMeta: true });
+        await distillation.run({ llm, projectPath, sessionID, model, force: true, skipMeta: true, callType });
+      }
+      // Meta consolidation: safe on idle because cache is already cold.
+      // Run as a separate step so gen-0 segments from the force-distill
+      // above are counted toward the threshold.
+      const g0 = distillation.gen0Count(projectPath, sessionID);
+      if (g0 >= cfg.distillation.metaThreshold) {
+        await distillation.metaDistill({ llm, projectPath, sessionID, model, callType });
       }
     } catch (e) {
       log.error("idle distillation error:", e);

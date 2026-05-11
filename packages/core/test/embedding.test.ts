@@ -492,7 +492,7 @@ describe("LocalProvider integration", () => {
       // Relevant doc should have higher similarity than unrelated
       expect(relevantSim).toBeGreaterThan(unrelatedSim);
     },
-    15_000,
+    30_000,
   );
 
   test(

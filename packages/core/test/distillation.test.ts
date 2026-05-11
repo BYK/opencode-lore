@@ -8,6 +8,7 @@ import {
   detectSegments,
   workerTokenBudget,
   distillTokenBudget,
+  maxAllowedExpansion,
   run,
   type Distillation,
 } from "../src/distillation";
@@ -1045,6 +1046,32 @@ describe("workerTokenBudget", () => {
   });
 });
 
+// ─── maxAllowedExpansion ─────────────────────────────────────────────────────
+
+describe("maxAllowedExpansion", () => {
+  test("tiny segments (< 100 tokens) allow 5x expansion", () => {
+    expect(maxAllowedExpansion(8)).toBe(40);
+    expect(maxAllowedExpansion(50)).toBe(250);
+    expect(maxAllowedExpansion(99)).toBe(495);
+  });
+
+  test("small segments (100-499 tokens) allow 2x expansion", () => {
+    expect(maxAllowedExpansion(100)).toBe(200);
+    expect(maxAllowedExpansion(300)).toBe(600);
+    expect(maxAllowedExpansion(499)).toBe(998);
+  });
+
+  test("large segments (>= 500 tokens) must compress (1x)", () => {
+    expect(maxAllowedExpansion(500)).toBe(500);
+    expect(maxAllowedExpansion(1200)).toBe(1200);
+    expect(maxAllowedExpansion(10000)).toBe(10000);
+  });
+
+  test("zero tokens returns zero", () => {
+    expect(maxAllowedExpansion(0)).toBe(0);
+  });
+});
+
 // ─── run(): expansion guard & tiny-segment absorb ───────────────────────────
 
 describe("run() expansion guard and tiny-segment handling", () => {
@@ -1100,13 +1127,13 @@ describe("run() expansion guard and tiny-segment handling", () => {
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
 
-  test("expansion guard: discards distillation when output >= input tokens, marks messages distilled", async () => {
+  test("expansion guard: discards distillation when output > expansion limit, marks messages distilled", async () => {
     // Insert 6 messages × 200 tokens = 1200 tokens (above minSegmentTokens=64)
     const ids = insertTemporalMessages(6, 200);
 
-    // LLM returns observations whose char count / 3 >= 1200 tokens (expansion)
-    // 1200 tokens × 3 chars = 3600 chars needed
-    const expandedObs = "x".repeat(3600);
+    // For large segments (>= 500 tokens), expansion limit = sourceTokens.
+    // LLM returns observations exceeding limit: 1201 tokens = 3603 chars
+    const expandedObs = "x".repeat(3603);
     const llm = makeStubLLM(`<observations>\n${expandedObs}\n</observations>`);
 
     const result = await run({
@@ -1147,14 +1174,13 @@ describe("run() expansion guard and tiny-segment handling", () => {
     expect(areDistilled(ids)).toEqual(ids.map(() => true));
   });
 
-  test("expansion guard: exact equal size is discarded", async () => {
+  test("expansion guard: exact equal size passes for large segments (limit = sourceTokens)", async () => {
     // Insert 6 messages × 200 tokens = 1200 tokens
     const ids = insertTemporalMessages(6, 200);
 
     // LLM returns observations of exactly 1200 tokens = 3600 chars
-    // But observations text includes the content between <observations> tags
-    // ceil(3597/3) = 1199 < 1200... need to be precise.
-    // We want ceil(obsLen / 3) >= 1200. obsLen = 3600 → ceil(3600/3) = 1200 = sourceTokens → discarded
+    // ceil(3600/3) = 1200 == sourceTokens == expansionLimit → NOT discarded
+    // (guard is strict >; equal is allowed)
     const exactObs = "x".repeat(3600);
     const llm = makeStubLLM(`<observations>\n${exactObs}\n</observations>`);
 
@@ -1165,8 +1191,8 @@ describe("run() expansion guard and tiny-segment handling", () => {
       force: true,
     });
 
-    expect(distillationCount()).toBe(0);
-    expect(result.distilled).toBe(0);
+    expect(distillationCount()).toBe(1);
+    expect(result.distilled).toBe(6);
     expect(areDistilled(ids)).toEqual(ids.map(() => true));
   });
 
@@ -1187,6 +1213,64 @@ describe("run() expansion guard and tiny-segment handling", () => {
 
     expect(distillationCount()).toBe(1);
     expect(result.distilled).toBe(6);
+  });
+
+  test("expansion guard: tiny segment (< 100 tokens) allows up to 5x expansion", async () => {
+    // Insert 1 message × 80 tokens (tiny segment, above minSegmentTokens=64)
+    const ids = insertTemporalMessages(1, 80);
+
+    // LLM returns 350 tokens = 1050 chars. Limit is 80 * 5 = 400, so 350 < 400 → stored
+    const expandedObs = "x".repeat(1050);
+    const llm = makeStubLLM(`<observations>\n${expandedObs}\n</observations>`);
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+      force: true,
+    });
+
+    expect(distillationCount()).toBe(1);
+    expect(result.distilled).toBe(1);
+  });
+
+  test("expansion guard: tiny segment (< 100 tokens) discards beyond 5x", async () => {
+    // Insert 1 message × 80 tokens (tiny segment)
+    const ids = insertTemporalMessages(1, 80);
+
+    // LLM returns 401 tokens = 1203 chars. Limit is 80 * 5 = 400, so 401 > 400 → discarded
+    const expandedObs = "x".repeat(1203);
+    const llm = makeStubLLM(`<observations>\n${expandedObs}\n</observations>`);
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+      force: true,
+    });
+
+    expect(distillationCount()).toBe(0);
+    expect(result.distilled).toBe(0);
+    expect(areDistilled(ids)).toEqual(ids.map(() => true));
+  });
+
+  test("expansion guard: small segment (100-499 tokens) allows up to 2x expansion", async () => {
+    // Insert 2 messages × 150 tokens = 300 tokens (small segment)
+    const ids = insertTemporalMessages(2, 150);
+
+    // LLM returns 550 tokens = 1650 chars. Limit is 300 * 2 = 600, so 550 < 600 → stored
+    const expandedObs = "x".repeat(1650);
+    const llm = makeStubLLM(`<observations>\n${expandedObs}\n</observations>`);
+
+    const result = await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+      force: true,
+    });
+
+    expect(distillationCount()).toBe(1);
+    expect(result.distilled).toBe(2);
   });
 
   test("tiny segment: absorbed (mark distilled) in force mode without LLM call", async () => {

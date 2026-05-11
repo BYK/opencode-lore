@@ -917,7 +917,7 @@ function pageCosts(): string {
     body += `<div class="card">
       <table class="cost-table">
         <tr class="section-header"><td colspan="2"><strong>Estimated Lore Overhead</strong></td></tr>
-        <tr><td>Distillation calls</td><td>${formatUSD(hist.distillationCost)} <span style="color:var(--fg3);font-size:0.85em">(${hist.distillationCalls} calls)</span></td></tr>
+        <tr><td>Distillation calls</td><td>${formatUSD(hist.distillationCost)} <span style="color:var(--fg3);font-size:0.85em">(${hist.distillationCalls} calls: ${hist.distillationBatchCalls} batched, ${hist.distillationDirectCalls} direct)</span></td></tr>
         <tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Estimated Savings</strong></td></tr>
         <tr><td>Avoided compactions</td><td>${formatUSD(hist.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${hist.avoidedCompactions})</span></td></tr>
         <tr style="border-top:1px solid var(--border)"><td><strong>Net estimated savings</strong></td><td><strong style="color:${hist.avoidedCompactionCost - hist.distillationCost >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(hist.avoidedCompactionCost - hist.distillationCost)}</strong></td></tr>

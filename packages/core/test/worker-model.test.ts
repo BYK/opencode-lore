@@ -153,8 +153,8 @@ describe("LoreConfig — updated distillation defaults", () => {
     expect(cfg.distillation.minSegmentTokens).toBe(64);
   });
 
-  test("distillation.maxSegmentTokens defaults to 8192", () => {
+  test("distillation.maxSegmentTokens defaults to 16384", () => {
     const cfg = LoreConfig.parse({});
-    expect(cfg.distillation.maxSegmentTokens).toBe(8192);
+    expect(cfg.distillation.maxSegmentTokens).toBe(16384);
   });
 });

@@ -81,8 +81,8 @@ export const LoreConfig = z.object({
       /** Maximum total tokens per distillation segment. Segments exceeding
        *  this are split at time-gap or token boundaries. Replaces the former
        *  message-count-based maxSegment. Default: 8192. */
-      maxSegmentTokens: z.number().min(256).default(8192),
-      metaThreshold: z.number().min(3).default(10),
+      maxSegmentTokens: z.number().min(256).default(16384),
+      metaThreshold: z.number().min(3).default(20),
       /** Max chars per tool output when rendering temporal messages for distillation input.
        *  Outputs longer than this are replaced with a compact annotation preserving line
        *  count, error signals, and file paths. Default: 2000 (matches upstream OpenCode's
@@ -92,8 +92,8 @@ export const LoreConfig = z.object({
     .default({
       minMessages: 5,
       minSegmentTokens: 64,
-      maxSegmentTokens: 8192,
-      metaThreshold: 10,
+      maxSegmentTokens: 16384,
+      metaThreshold: 20,
       toolOutputMaxChars: 2_000,
     }),
   knowledge: z

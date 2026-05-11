@@ -90,6 +90,8 @@ export type HistoricalEstimates = {
     /** Estimated distillation overhead from stored records. */
     distillationCost: number;
     distillationCalls: number;
+    distillationBatchCalls: number;
+    distillationDirectCalls: number;
     /** Estimated avoided compactions from shadow context simulation. */
     avoidedCompactions: number;
     avoidedCompactionCost: number;
@@ -100,6 +102,8 @@ export type HistoricalEstimates = {
   totals: {
     distillationCost: number;
     distillationCalls: number;
+    distillationBatchCalls: number;
+    distillationDirectCalls: number;
     avoidedCompactions: number;
     avoidedCompactionCost: number;
     sessionCount: number;
@@ -544,6 +548,8 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
   const totals: HistoricalEstimates["totals"] = {
     distillationCost: 0,
     distillationCalls: 0,
+    distillationBatchCalls: 0,
+    distillationDirectCalls: 0,
     avoidedCompactions: 0,
     avoidedCompactionCost: 0,
     sessionCount: 0,
@@ -599,13 +605,21 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
           // We use 3x the output token count as a rough input estimate
           const estInputTokens = d.token_count * 3;
           const estOutputTokens = d.token_count;
+          // Use recorded call_type for accurate pricing. Batch API gets 50%
+          // discount. Pre-migration rows (NULL call_type) default to 'direct'
+          // for conservative estimates.
+          const batchMultiplier = d.call_type === "batch" ? 0.5 : 1.0;
           const callCost =
-            (estInputTokens / 1_000_000) * workerPricing.input +
-            (estOutputTokens / 1_000_000) * workerPricing.output;
+            ((estInputTokens / 1_000_000) * workerPricing.input +
+            (estOutputTokens / 1_000_000) * workerPricing.output) * batchMultiplier;
           sessionDistillCost += callCost;
         }
+        const sessionBatchCalls = distillations.filter((d) => d.call_type === "batch").length;
+        const sessionDirectCalls = distillations.length - sessionBatchCalls;
         totals.distillationCost += sessionDistillCost;
         totals.distillationCalls += distillations.length;
+        totals.distillationBatchCalls += sessionBatchCalls;
+        totals.distillationDirectCalls += sessionDirectCalls;
 
         // --- 2. Simulate shadow context for avoided compactions ---
         let shadowContext = 0;
@@ -635,6 +649,8 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
           lastMessage: sess.last_message_at,
           distillationCost: sessionDistillCost,
           distillationCalls: distillations.length,
+          distillationBatchCalls: sessionBatchCalls,
+          distillationDirectCalls: sessionDirectCalls,
           avoidedCompactions,
           avoidedCompactionCost: sessionCompactionCost,
           model,
