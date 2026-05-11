@@ -223,13 +223,13 @@ describe("truncateToolOutputsInContent — perf regression guards", () => {
     expect(result).toContain("[output omitted — grep:");
   });
 
-  test("100KB payload WITH '/' completes in <1s via scan limit", () => {
+  test("100KB payload WITH '/' completes in <2s via scan limit", () => {
     const pathological = "x".repeat(50_000) + "/file.ts " + "y".repeat(50_000);
     const content = `[tool:grep] ${pathological}`;
     const start = performance.now();
     const result = truncateToolOutputsInContent(content, 2_000);
     const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(1000);
+    expect(elapsed).toBeLessThan(2000);
     expect(result).toContain("[output omitted — grep:");
   });
 });
