@@ -15,7 +15,7 @@ import { remark } from "remark";
 import type { Root, Heading, Paragraph, Text } from "mdast";
 import { db, ensureProject } from "./db";
 import { sha256 } from "#db/driver";
-import { ftsQuery, ftsQueryOr, extractTopTerms, EMPTY_QUERY } from "./search";
+import { ftsQuery, extractTopTerms, EMPTY_QUERY, runRelaxedSearch } from "./search";
 import * as log from "./log";
 
 const processor = remark();
@@ -274,7 +274,7 @@ export function refresh(projectPath: string): number {
 
 /**
  * Search lat sections by FTS5 with BM25 scoring.
- * Uses AND-then-OR fallback (same pattern as knowledge search).
+ * Uses progressive AND relaxation before falling back to OR.
  */
 export function searchScored(input: {
   query: string;
@@ -282,8 +282,6 @@ export function searchScored(input: {
   limit?: number;
 }): ScoredLatSection[] {
   const limit = input.limit ?? 10;
-  const q = ftsQuery(input.query);
-  if (q === EMPTY_QUERY) return [];
 
   const pid = ensureProject(input.projectPath);
 
@@ -297,13 +295,9 @@ export function searchScored(input: {
        ORDER BY rank LIMIT ?`;
 
   try {
-    const results = db().query(ftsSQL).all(q, pid, limit) as ScoredLatSection[];
-    if (results.length) return results;
-
-    // AND returned nothing — try OR fallback
-    const qOr = ftsQueryOr(input.query);
-    if (qOr === EMPTY_QUERY) return [];
-    return db().query(ftsSQL).all(qOr, pid, limit) as ScoredLatSection[];
+    return runRelaxedSearch(input.query, (matchExpr) =>
+      db().query(ftsSQL).all(matchExpr, pid, limit) as ScoredLatSection[],
+    );
   } catch {
     return [];
   }

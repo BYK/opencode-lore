@@ -97,13 +97,18 @@ export function labelToScope(label: string): RecallScope {
  * Build a marker text string for a recall tool call.
  *
  * Format: `📚 Searching <scope-label> for "<query>"…`
+ * When `id` is provided (detail lookup), uses: `📚 Fetching detail for <id>…`
  */
-export function buildRecallMarker(query: string, scope: string = "all"): string {
+export function buildRecallMarker(query: string, scope: string = "all", id?: string): string {
+  if (id) return `📚 Fetching detail for ${id}…`;
   return `📚 Searching ${scopeToLabel(scope)} for "${query}"…`;
 }
 
 /** Regex to parse a recall marker back into query + scope. */
 const MARKER_REGEX = /📚 Searching (.+?) for "(.+?)"…/;
+
+/** Regex to parse an id-based recall marker. */
+const ID_MARKER_REGEX = /📚 Fetching detail for (.+?)…/;
 
 /**
  * Parse a recall marker text block, returning query and scope if valid.
@@ -111,7 +116,12 @@ const MARKER_REGEX = /📚 Searching (.+?) for "(.+?)"…/;
  */
 export function parseRecallMarker(
   text: string,
-): { query: string; scope: RecallScope } | null {
+): { query: string; scope: RecallScope; id?: string } | null {
+  // Try id-based marker first
+  const idMatch = ID_MARKER_REGEX.exec(text);
+  if (idMatch) {
+    return { query: "", scope: "all", id: idMatch[1] };
+  }
   const match = MARKER_REGEX.exec(text);
   if (!match) return null;
   return {
@@ -120,8 +130,9 @@ export function parseRecallMarker(
   };
 }
 
-/** Derive a store key from query + scope. */
-export function recallStoreKey(query: string, scope: string = "all"): string {
+/** Derive a store key from query + scope, or from id for detail lookups. */
+export function recallStoreKey(query: string, scope: string = "all", id?: string): string {
+  if (id) return `id:${id}`;
   return `${scope}:${query}`;
 }
 
@@ -153,7 +164,7 @@ export function expandRecallMarkers(
     // We process one marker per assistant message per pass; the outer
     // loop will revisit if there's more than one (rare).
     let markerIdx = -1;
-    let parsed: { query: string; scope: RecallScope } | null = null;
+    let parsed: { query: string; scope: RecallScope; id?: string } | null = null;
     for (let j = 0; j < msg.content.length; j++) {
       const block = msg.content[j];
       if (block.type !== "text") continue;
@@ -166,7 +177,7 @@ export function expandRecallMarkers(
 
     if (markerIdx < 0 || !parsed) continue;
 
-    const key = recallStoreKey(parsed.query, parsed.scope);
+    const key = recallStoreKey(parsed.query, parsed.scope, parsed.id);
     const stored = store.get(key);
     if (!stored) continue; // No stored result — leave marker as-is
 
@@ -255,7 +266,7 @@ export function cleanupRecallStore(
       if (block.type !== "text") continue;
       const parsed = parseRecallMarker(block.text);
       if (parsed) {
-        activeKeys.add(recallStoreKey(parsed.query, parsed.scope));
+        activeKeys.add(recallStoreKey(parsed.query, parsed.scope, parsed.id));
       }
     }
   }
@@ -432,7 +443,8 @@ export function replaceRecallWithMarker(
         const input = b.input as Record<string, unknown>;
         const query = typeof input.query === "string" ? input.query : "";
         const scope = (input.scope as string) ?? "all";
-        return { type: "text" as const, text: buildRecallMarker(query, scope) };
+        const id = typeof input.id === "string" && input.id ? input.id : undefined;
+        return { type: "text" as const, text: buildRecallMarker(query, scope, id) };
       }
       return b;
     }),

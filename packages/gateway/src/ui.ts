@@ -10,6 +10,7 @@ import {
   ltm,
   temporal,
   searchRecall,
+  recallById,
   config,
   projectName,
   ensureProject,
@@ -65,6 +66,27 @@ function formatBytes(bytes: number): string {
 /** Render markdown to HTML, wrapped in a scoped container. */
 function md(markdown: string): string {
   return `<div class="md">${renderMarkdown(markdown)}</div>`;
+}
+
+/**
+ * Truncate text to maxChars, breaking at the last sentence boundary or
+ * whitespace before the limit. Appends "..." if truncated.
+ */
+function truncateText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const truncated = text.slice(0, maxChars);
+  // Try to break at last sentence boundary
+  const sentenceEnd = truncated.search(/[.!?]\s[^.!?]*$/);
+  if (sentenceEnd > maxChars * 0.5) return truncated.slice(0, sentenceEnd + 1) + " ...";
+  // Fall back to last whitespace
+  const lastSpace = truncated.lastIndexOf(" ");
+  if (lastSpace > maxChars * 0.5) return truncated.slice(0, lastSpace) + " ...";
+  return truncated + "...";
+}
+
+/** Render truncated markdown to HTML for search results. */
+function mdTruncated(markdown: string, maxChars = 500): string {
+  return md(truncateText(markdown, maxChars));
 }
 
 function formatUSD(amount: number): string {
@@ -242,6 +264,15 @@ form.inline { display: inline; }
 .msg { padding: 8px 12px; margin: 4px 0; border-radius: var(--radius); font-size: 0.85em; font-family: var(--mono); }
 .msg-user { background: var(--bg2); border-left: 3px solid var(--accent); }
 .msg-assistant { background: var(--bg2); border-left: 3px solid #10b981; }
+.result-list { list-style: none; padding: 0; margin: 0; }
+.result-item { padding: 8px 12px; margin: 4px 0; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); font-size: 0.9em; line-height: 1.5; }
+.result-item .score { float: right; font-size: 0.75em; color: var(--fg3); opacity: 0.6; font-family: var(--mono); }
+.result-item .meta { font-size: 0.8em; color: var(--fg3); }
+.result-item .id-link { font-size: 0.75em; color: var(--accent); font-family: var(--mono); opacity: 0.7;
+  text-decoration: none; margin-left: 4px; }
+.result-item .id-link:hover { opacity: 1; text-decoration: underline; }
+.result-summary { font-size: 0.9em; color: var(--fg3); margin: 8px 0; }
 .cost-table td { padding: 4px 10px; font-size: 0.9em; }
 .cost-table .section-header td { padding-top: 0.6em; }
 .actions { margin: 16px 0; display: flex; gap: 8px; }
@@ -592,41 +623,69 @@ function pageDistillation(id: string): string | null {
   return layout("Distillation", body);
 }
 
-function formatSearchResult(tagged: TaggedResult): string {
+/** Format a relative age string from a timestamp. */
+function relativeAge(createdAt: number): string {
+  const diffMs = Date.now() - createdAt;
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+/** Build an ID link for a search result. */
+function idLink(prefix: string, id: string): string {
+  const short = id.slice(0, 8);
+  return `<a href="/ui/search/detail/${esc(prefix)}:${esc(id)}" class="id-link" title="${esc(prefix)}:${esc(id)}">${esc(prefix)}:${esc(short)}</a>`;
+}
+
+/** Format a single search result as a compact snippet with ID link. */
+function formatSearchResult(tagged: TaggedResult, score?: number): string {
+  const scoreStr = score != null
+    ? `<span class="score" title="RRF score">${score.toFixed(4)}</span>`
+    : "";
   switch (tagged.source) {
     case "knowledge":
     case "cross-knowledge": {
       const k = tagged.item;
-      const from =
-        tagged.source === "cross-knowledge"
-          ? ` <span style="color:var(--fg3);font-size:0.8em">from: ${esc(tagged.projectLabel)}</span>`
-          : "";
-      return `<div class="card">
-        <h3>${badge(k.category)}${from} <a href="/ui/knowledge/${esc(k.id)}">${esc(k.title)}</a></h3>
-        ${md(k.content)}
-      </div>`;
+      const prefix = tagged.source === "cross-knowledge" ? "xk" : "k";
+      const from = tagged.source === "cross-knowledge"
+        ? ` <span class="meta">from: ${esc(tagged.projectLabel)}</span>`
+        : "";
+      return `<li class="result-item">
+        ${scoreStr}${badge(k.category)}${from}
+        <strong><a href="/ui/knowledge/${esc(k.id)}">${esc(k.title)}</a></strong>:
+        ${esc(truncateText(k.content, 200))}
+        ${idLink(prefix, k.id)}
+      </li>`;
     }
     case "distillation": {
       const d = tagged.item;
-      return `<div class="card">
-        <h3>${badge("distilled")} <span style="color:var(--fg3);font-size:0.8em">gen ${d.generation} &middot; session ${esc(d.session_id.slice(0, 12))} &middot; ${formatDate(d.created_at)}</span></h3>
-        ${md(d.observations)}
-      </div>`;
+      return `<li class="result-item">
+        ${scoreStr}${badge("distilled")}
+        <span class="meta">gen ${d.generation} &middot; ${relativeAge(d.created_at)}</span>
+        ${esc(truncateText(d.observations, 250))}
+        ${idLink("d", d.id)}
+      </li>`;
     }
     case "temporal": {
       const m = tagged.item;
-      const cls = m.role === "user" ? "msg-user" : "msg-assistant";
-      return `<div class="card">
-        <h3>${badge(m.role)} <span style="color:var(--fg3);font-size:0.8em">session ${esc(m.session_id.slice(0, 12))} &middot; ${formatDate(m.created_at)}</span></h3>
-        <div class="msg ${cls}">${md(m.content)}</div>
-      </div>`;
+      return `<li class="result-item">
+        ${scoreStr}${badge(m.role)}
+        <span class="meta">${relativeAge(m.created_at)} &middot; ${esc(m.session_id.slice(0, 8))}</span>
+        ${esc(truncateText(m.content, 200))}
+        ${idLink("t", m.id)}
+      </li>`;
     }
     case "lat-section": {
       const s = tagged.item;
-      return `<div class="card">
-        <h3>${badge("lat.md")} <span style="color:var(--fg3);font-size:0.8em">${esc(s.file)}</span> ${esc(s.heading)}</h3>
-        ${md(s.content)}
-      </div>`;
+      return `<li class="result-item">
+        ${scoreStr}${badge("lat.md")}
+        <strong>${esc(s.file)} &sect; ${esc(s.heading)}</strong>:
+        ${esc(truncateText(s.content, 200))}
+        ${idLink("lat", s.id)}
+      </li>`;
     }
   }
 }
@@ -662,18 +721,50 @@ async function pageSearch(url: URL): Promise<string> {
           recallLimit: 20,
           queryExpansion: false,
         };
-        const results = await searchRecall({
+        const rawResults = await searchRecall({
           query,
           scope,
           projectPath,
           searchConfig,
         });
-        body += `<h2>Results (${results.length})</h2>`;
-        if (!results.length) {
+
+        // Apply relevance floor: drop results below 15% of top score.
+        const topScore = rawResults[0]?.score ?? 0;
+        const floor = topScore * 0.15;
+        const results = topScore > 0
+          ? rawResults.filter((r) => r.score >= floor)
+          : rawResults;
+
+        const displayed = results.slice(0, 30);
+
+        if (!displayed.length) {
           body += `<p class="empty">No results found for this query.</p>`;
-        }
-        for (const { item: tagged } of results.slice(0, 20)) {
-          body += formatSearchResult(tagged);
+        } else {
+          const scoreRange = displayed.length > 1
+            ? `score: ${displayed[0].score.toFixed(4)}–${displayed[displayed.length - 1].score.toFixed(4)}`
+            : "";
+          body += `<p class="result-summary">Found ${rawResults.length} results, showing ${displayed.length}${scoreRange ? ` (${scoreRange})` : ""}.</p>`;
+
+          // Group into tiers by relative score (same thresholds as recall)
+          const strong = displayed.filter((r) => r.score >= topScore * 0.6);
+          const supporting = displayed.filter((r) => r.score >= topScore * 0.3 && r.score < topScore * 0.6);
+          const peripheral = displayed.filter((r) => r.score < topScore * 0.3);
+
+          if (strong.length) {
+            body += `<h3>Strong Matches</h3><ul class="result-list">`;
+            for (const { item: tagged, score } of strong) body += formatSearchResult(tagged, score);
+            body += `</ul>`;
+          }
+          if (supporting.length) {
+            body += `<h3>Supporting</h3><ul class="result-list">`;
+            for (const { item: tagged, score } of supporting) body += formatSearchResult(tagged, score);
+            body += `</ul>`;
+          }
+          if (peripheral.length) {
+            body += `<h3>Peripheral</h3><ul class="result-list">`;
+            for (const { item: tagged, score } of peripheral) body += formatSearchResult(tagged, score);
+            body += `</ul>`;
+          }
         }
       } catch (err) {
         body += `<p style="color:var(--danger)">Search error: ${esc(err instanceof Error ? err.message : String(err))}</p>`;
@@ -682,6 +773,24 @@ async function pageSearch(url: URL): Promise<string> {
   }
 
   return layout("Search", body);
+}
+
+/** Detail page for a search result by source-prefixed ID (e.g. k:019e..., d:019e...). */
+function pageSearchDetail(fullId: string): string | null {
+  const result = recallById(fullId);
+  if (result.startsWith("No entry found") || result.startsWith("Unknown source")) {
+    return null;
+  }
+
+  let body = breadcrumb([
+    { label: "Dashboard", href: "/ui" },
+    { label: "Search", href: "/ui/search" },
+    { label: fullId },
+  ]);
+
+  body += `<div class="card">${md(result)}</div>`;
+
+  return layout(`Detail: ${fullId}`, body);
 }
 
 
@@ -922,6 +1031,15 @@ export async function handleUIRequest(
     // Costs
     if (pathname === "/ui/costs") {
       return htmlResponse(pageCosts());
+    }
+
+    // Search detail (by source-prefixed ID)
+    const searchDetailMatch = matchRoute(pathname, "/ui/search/detail/:fullId");
+    if (searchDetailMatch) {
+      const html = pageSearchDetail(searchDetailMatch.fullId);
+      return html
+        ? htmlResponse(html)
+        : htmlResponse(layout("Not Found", `<h1>Entry not found</h1><p>No entry found for ID: ${esc(searchDetailMatch.fullId)}</p>`), 404);
     }
 
     // Search
