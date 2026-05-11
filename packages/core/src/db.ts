@@ -606,6 +606,16 @@ function recoverMissingObjects(database: Database) {
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
     );
   `);
+
+  // Recover missing columns from partial migration runs.
+  // Version 17 added call_type to distillations but the ALTER could have been
+  // skipped if the version was bumped without the column being created.
+  const cols = database
+    .query("PRAGMA table_info(distillations)")
+    .all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === "call_type")) {
+    database.exec("ALTER TABLE distillations ADD COLUMN call_type TEXT;");
+  }
 }
 
 /**
