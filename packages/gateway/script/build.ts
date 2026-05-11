@@ -232,6 +232,36 @@ async function buildBinary() {
 
   console.log(`✓ esbuild bundle: ${bundlePath}`);
 
+  // Step 1b: esbuild the embedding worker as a separate file.
+  //
+  // In the compiled binary, `new Worker("./embedding-worker.js", ...)`
+  // resolves against Bun's virtual $bunfs. Bun only includes files that
+  // are explicit entrypoints in `bun build --compile`, so we must:
+  //   (a) produce a standalone embedding-worker.js via esbuild (same
+  //       externals as the main bundle — fastembed is resolved by Bun),
+  //   (b) pass it as a second entrypoint to `bun build --compile`.
+  //
+  // The worker doesn't need Sentry debug IDs or external sourcemaps —
+  // it's a small leaf file that delegates to fastembed.
+  const workerSrc = join(repoRoot, "packages/core/src/embedding-worker.ts");
+  const workerBundlePath = join(distBinDir, "embedding-worker.js");
+
+  await esbuild.build({
+    entryPoints: [workerSrc],
+    bundle: true,
+    format: "esm",
+    target: "esnext",
+    platform: "node",
+    conditions: ["bun"],
+    external: ["bun:*", "fastembed", "onnxruntime-*", "@anush008/*"],
+    outfile: workerBundlePath,
+    minify: true,
+    logLevel: "info",
+    legalComments: "none",
+  });
+
+  console.log(`✓ esbuild worker: ${workerBundlePath}`);
+
   // Step 2: Inject debug IDs into the JS and sourcemap
   // skipSnippet: true — the IIFE snippet breaks ESM (placed before import
   // declarations). The debug ID is instead registered in instrument.ts via
@@ -303,12 +333,14 @@ async function buildBinary() {
     //     staging boundary, so we don't need to copy the 33 MB model
     //     into each per-target staging dir.
 
-    // (c) bin.js + sourcemap. We bring the sourcemap along because Bun's
-    //     `--sourcemap=linked` references it by sibling filename; if it
-    //     can't find bin.js.map next to bin.js the embedded map is empty.
+    // (c) bin.js, embedding-worker.js, + sourcemap. We bring the sourcemap
+    //     along because Bun's `--sourcemap=linked` references it by sibling
+    //     filename; if it can't find bin.js.map next to bin.js the embedded
+    //     map is empty.
     copiedBinPath = join(stagingDir, "bin.js");
     copyFileSync(bundlePath, copiedBinPath);
     copyFileSync(mapPath, `${copiedBinPath}.map`);
+    copyFileSync(workerBundlePath, join(stagingDir, "embedding-worker.js"));
 
     // (d) The wrapper itself.
     wrapperPath = join(stagingDir, "wrapper.ts");
@@ -435,6 +467,14 @@ async function buildBinary() {
   // dynamic import fails, the try/catch in embedding.ts catches it, and
   // the auto-fallback to a remote provider kicks in.
   const compileEntry = wrapperPath ?? bundlePath;
+  // The worker entrypoint must live next to the main entry so Bun bundles
+  // it into the binary's $bunfs at the right relative path (the main
+  // bundle resolves `./embedding-worker.js` via import.meta.url).
+  // For vendored targets it was already copied into the staging dir;
+  // for unvendored targets it sits in dist-bin/ alongside bin.js.
+  const workerCompileEntry = stagingDir
+    ? join(stagingDir, "embedding-worker.js")
+    : workerBundlePath;
   const compileArgs = [
     "bun", "build", "--compile",
     "--target", `bun-${target}`,
@@ -449,6 +489,7 @@ async function buildBinary() {
       ? ["--external", "fastembed", "--external", "onnxruntime-*", "--external", "@anush008/*"]
       : []),
     compileEntry,
+    workerCompileEntry,
   ];
   const compileCmd = compileArgs.join(" ");
 
@@ -534,10 +575,12 @@ async function buildBinary() {
   // staging dir itself stays in `.vendor-build/<target>/` because
   // re-running compile will reuse the per-target node_modules and the
   // model cache; deleting it would force a re-install on the next run.
-  // We do delete the per-build copies of bin.js and wrapper.ts inside
-  // the staging dir though — they're regenerated every run.
+  // We do delete the per-build copies of bin.js, embedding-worker.js,
+  // and wrapper.ts inside the staging dir though — they're regenerated
+  // every run.
   try {
     unlinkSync(bundlePath);
+    unlinkSync(workerBundlePath);
     if (uploaded) {
       unlinkSync(mapPath);
       console.log("✓ Sourcemap deleted (uploaded to Sentry)");
@@ -546,6 +589,7 @@ async function buildBinary() {
     if (copiedBinPath) {
       unlinkSync(copiedBinPath);
       try { unlinkSync(`${copiedBinPath}.map`); } catch { /* ignore */ }
+      try { unlinkSync(join(dirname(copiedBinPath), "embedding-worker.js")); } catch { /* ignore */ }
     }
   } catch {
     // Ignore

@@ -348,6 +348,7 @@ class LocalProvider implements EmbeddingProvider {
             const pending = this.pendingRequests.get(msg.id);
             if (pending) {
               this.pendingRequests.delete(msg.id);
+              this.updateWorkerRef();
               pending.resolve(msg.vectors);
             }
             break;
@@ -356,6 +357,7 @@ class LocalProvider implements EmbeddingProvider {
             const pending = this.pendingRequests.get(msg.id);
             if (pending) {
               this.pendingRequests.delete(msg.id);
+              this.updateWorkerRef();
               pending.reject(new Error(`Worker embedding failed: ${msg.error}`));
             }
             break;
@@ -369,6 +371,7 @@ class LocalProvider implements EmbeddingProvider {
               p.reject(new LocalProviderUnavailableError(msg.error));
             }
             this.pendingRequests.clear();
+            this.updateWorkerRef();
             break;
           }
         }
@@ -382,6 +385,7 @@ class LocalProvider implements EmbeddingProvider {
           p.reject(new LocalProviderUnavailableError(err));
         }
         this.pendingRequests.clear();
+        this.updateWorkerRef();
       });
 
       this.worker.on("exit", (code) => {
@@ -395,6 +399,7 @@ class LocalProvider implements EmbeddingProvider {
           );
         }
         this.pendingRequests.clear();
+        this.updateWorkerRef();
       });
 
       this.workerReady = true;
@@ -404,6 +409,18 @@ class LocalProvider implements EmbeddingProvider {
     });
 
     return this.initPromise;
+  }
+
+  /** Keep the worker ref'd while requests are in flight so the event loop
+   *  doesn't exit before responses arrive. When the pending map drains,
+   *  unref again so the worker doesn't prevent graceful process exit. */
+  private updateWorkerRef(): void {
+    if (!this.worker) return;
+    if (this.pendingRequests.size > 0) {
+      this.worker.ref();
+    } else {
+      this.worker.unref();
+    }
   }
 
   async embed(texts: string[], inputType: "document" | "query"): Promise<Float32Array[]> {
@@ -416,6 +433,7 @@ class LocalProvider implements EmbeddingProvider {
 
     return new Promise<Float32Array[]>((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject });
+      this.updateWorkerRef();
       this.worker!.postMessage({
         type: "embed",
         id,
