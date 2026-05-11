@@ -17,6 +17,7 @@ import {
   close,
   dbPath,
   mergeProjectInternal,
+  repoNameFromRemote,
 } from "./db";
 import { getGitRemote } from "./git";
 import * as ltm from "./ltm";
@@ -293,6 +294,13 @@ export function clearProject(projectPath: string): ClearResult {
   // Delete in dependency order
   database.exec("BEGIN IMMEDIATE");
   try {
+    // Delete session_state BEFORE temporal_messages (subquery needs the rows)
+    database
+      .query(
+        `DELETE FROM session_state WHERE session_id IN
+         (SELECT DISTINCT session_id FROM temporal_messages WHERE project_id = ?)`,
+      )
+      .run(pid);
     database
       .query("DELETE FROM knowledge WHERE project_id = ?")
       .run(pid);
@@ -302,13 +310,6 @@ export function clearProject(projectPath: string): ClearResult {
     database
       .query("DELETE FROM distillations WHERE project_id = ?")
       .run(pid);
-    database
-      .query(
-        `DELETE FROM session_state WHERE session_id IN
-         (SELECT DISTINCT session_id FROM temporal_messages WHERE project_id = ?)`,
-      )
-      .run(pid);
-    // Also clean lat_sections
     database
       .query("DELETE FROM lat_sections WHERE project_id = ?")
       .run(pid);
@@ -333,6 +334,110 @@ export function clearProject(projectPath: string): ClearResult {
     distillations_deleted: counts.distillations,
     sessions_cleared: counts.sessions,
   };
+}
+
+/**
+ * Fully delete a project: all associated data AND the project row itself.
+ * Also removes path aliases pointing to this project.
+ *
+ * Unlike clearProject(), this does NOT call ensureProject() (avoids
+ * re-creating the project) and does NOT regenerate .lore.md.
+ *
+ * Returns deletion counts, or null if the project ID doesn't exist.
+ */
+export function deleteProject(projectId: string): ClearResult | null {
+  const database = db();
+
+  // Verify the project exists
+  const project = database
+    .query("SELECT id FROM projects WHERE id = ?")
+    .get(projectId) as { id: string } | null;
+  if (!project) return null;
+
+  // Count before deleting
+  const counts = {
+    knowledge: (
+      database
+        .query(
+          "SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?",
+        )
+        .get(projectId) as { c: number }
+    ).c,
+    temporal: (
+      database
+        .query(
+          "SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?",
+        )
+        .get(projectId) as { c: number }
+    ).c,
+    distillations: (
+      database
+        .query(
+          "SELECT COUNT(*) as c FROM distillations WHERE project_id = ?",
+        )
+        .get(projectId) as { c: number }
+    ).c,
+    sessions: (
+      database
+        .query(
+          "SELECT COUNT(DISTINCT session_id) as c FROM temporal_messages WHERE project_id = ?",
+        )
+        .get(projectId) as { c: number }
+    ).c,
+  };
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    // Delete session_state BEFORE temporal_messages (subquery needs the rows)
+    database
+      .query(
+        `DELETE FROM session_state WHERE session_id IN
+         (SELECT DISTINCT session_id FROM temporal_messages WHERE project_id = ?)`,
+      )
+      .run(projectId);
+    database
+      .query("DELETE FROM knowledge WHERE project_id = ?")
+      .run(projectId);
+    database
+      .query("DELETE FROM temporal_messages WHERE project_id = ?")
+      .run(projectId);
+    database
+      .query("DELETE FROM distillations WHERE project_id = ?")
+      .run(projectId);
+    database
+      .query("DELETE FROM lat_sections WHERE project_id = ?")
+      .run(projectId);
+    // Explicit delete for safety (FK CASCADE depends on PRAGMA foreign_keys)
+    database
+      .query("DELETE FROM project_path_aliases WHERE project_id = ?")
+      .run(projectId);
+    database
+      .query("DELETE FROM warmup_histograms WHERE project_id = ?")
+      .run(projectId);
+    // Finally, delete the project row itself
+    database
+      .query("DELETE FROM projects WHERE id = ?")
+      .run(projectId);
+    database.exec("COMMIT");
+  } catch (e) {
+    database.exec("ROLLBACK");
+    throw e;
+  }
+
+  return {
+    knowledge_deleted: counts.knowledge,
+    temporal_deleted: counts.temporal,
+    distillations_deleted: counts.distillations,
+    sessions_cleared: counts.sessions,
+  };
+}
+
+/** Rename a project. Returns true if the project exists and was renamed. */
+export function renameProject(projectId: string, newName: string): boolean {
+  const result = db()
+    .query("UPDATE projects SET name = ? WHERE id = ?")
+    .run(newName.trim(), projectId);
+  return result.changes > 0;
 }
 
 /** Clear only knowledge entries for a project. Regenerates .lore.md. */
@@ -537,13 +642,19 @@ export function mergeProjects(sourceId: string, targetId: string): MergeResult {
 }
 
 /**
- * Backfill git_remote for existing projects and merge duplicates.
+ * Backfill git_remote for existing projects, merge duplicates, and
+ * update project names from git remote repo names where still using
+ * the directory-basename default.
  *
  * Iterates all projects that lack a git_remote value, runs `git remote -v`
  * on their stored path, and:
  *  - If no other project shares that remote: sets git_remote on the row.
  *  - If another project already has that remote: merges this project into
  *    the existing one (consolidating fragmented data).
+ *
+ * Also backfills project names: if a project's name matches the directory
+ * basename (the old default) or is null, and a git remote is available,
+ * the name is updated to the repo name from the remote URL.
  *
  * Skips projects whose path no longer exists on disk or is not a git repo.
  *
@@ -552,6 +663,7 @@ export function mergeProjects(sourceId: string, targetId: string): MergeResult {
 export function backfillGitRemotes(): {
   updated: number;
   merged: number;
+  namesBackfilled: number;
   mergeDetails: Array<{
     sourcePath: string;
     targetPath: string;
@@ -561,12 +673,18 @@ export function backfillGitRemotes(): {
 } {
   const projects = db()
     .query(
-      "SELECT id, path, git_remote FROM projects ORDER BY created_at ASC",
+      "SELECT id, path, name, git_remote FROM projects ORDER BY created_at ASC",
     )
-    .all() as Array<{ id: string; path: string; git_remote: string | null }>;
+    .all() as Array<{
+    id: string;
+    path: string;
+    name: string | null;
+    git_remote: string | null;
+  }>;
 
   let updated = 0;
   let merged = 0;
+  let namesBackfilled = 0;
   const mergeDetails: Array<{
     sourcePath: string;
     targetPath: string;
@@ -575,44 +693,58 @@ export function backfillGitRemotes(): {
   }> = [];
 
   for (const project of projects) {
-    // Skip if already has git_remote
-    if (project.git_remote) continue;
+    let gitRemote = project.git_remote;
 
-    // Skip if path doesn't exist
-    if (!existsSync(project.path)) continue;
+    if (!gitRemote) {
+      // Skip if path doesn't exist
+      if (!existsSync(project.path)) continue;
 
-    // Try to get git remote
-    const gitRemote = getGitRemote(project.path);
-    if (!gitRemote) continue;
+      // Try to get git remote
+      gitRemote = getGitRemote(project.path);
+      if (!gitRemote) continue;
 
-    // Check if another project already has this git_remote
-    const existing = db()
-      .query(
-        "SELECT id, path FROM projects WHERE git_remote = ? AND id != ? LIMIT 1",
-      )
-      .get(gitRemote, project.id) as {
-      id: string;
-      path: string;
-    } | null;
+      // Check if another project already has this git_remote
+      const existing = db()
+        .query(
+          "SELECT id, path FROM projects WHERE git_remote = ? AND id != ? LIMIT 1",
+        )
+        .get(gitRemote, project.id) as {
+        id: string;
+        path: string;
+      } | null;
 
-    if (existing) {
-      // Merge this project into the existing one
-      const result = mergeProjects(project.id, existing.id);
-      mergeDetails.push({
-        sourcePath: project.path,
-        targetPath: existing.path,
-        gitRemote,
-        result,
-      });
-      merged++;
-    } else {
-      // Just set the git_remote
+      if (existing) {
+        // Merge this project into the existing one
+        const result = mergeProjects(project.id, existing.id);
+        mergeDetails.push({
+          sourcePath: project.path,
+          targetPath: existing.path,
+          gitRemote,
+          result,
+        });
+        merged++;
+        continue; // project was merged away, skip name backfill
+      }
+
+      // Set the git_remote
       db()
         .query("UPDATE projects SET git_remote = ? WHERE id = ?")
         .run(gitRemote, project.id);
       updated++;
     }
+
+    // Backfill name from git remote if still using directory basename default
+    const dirBasename = project.path.split("/").pop();
+    if (project.name === dirBasename || !project.name) {
+      const repoName = repoNameFromRemote(gitRemote);
+      if (repoName && repoName !== project.name) {
+        db()
+          .query("UPDATE projects SET name = ? WHERE id = ?")
+          .run(repoName, project.id);
+        namesBackfilled++;
+      }
+    }
   }
 
-  return { updated, merged, mergeDetails };
+  return { updated, merged, namesBackfilled, mergeDetails };
 }

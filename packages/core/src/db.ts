@@ -4,6 +4,23 @@ import { mkdirSync } from "fs";
 import { homedir } from "os";
 import { getGitRemote } from "./git";
 
+/**
+ * Extract the repository name from a normalized git remote URL.
+ *
+ * Examples:
+ *   "github.com/BYK/LoreAI" → "LoreAI"
+ *   "github.com/org/repo"    → "repo"
+ *   "github.com"             → null (no path components)
+ *   null                     → null
+ */
+export function repoNameFromRemote(remote: string | null): string | null {
+  if (!remote) return null;
+  const lastSlash = remote.lastIndexOf("/");
+  if (lastSlash < 0) return null;
+  const name = remote.slice(lastSlash + 1);
+  return name.length > 0 ? name : null;
+}
+
 const SCHEMA_VERSION = 15;
 
 const MIGRATIONS: string[] = [
@@ -698,7 +715,7 @@ export function ensureProject(path: string, name?: string): string {
     .run(
       id,
       path,
-      name ?? path.split("/").pop() ?? "unknown",
+      name ?? repoNameFromRemote(gitRemote) ?? path.split("/").pop() ?? "unknown",
       gitRemote,
       Date.now(),
     );

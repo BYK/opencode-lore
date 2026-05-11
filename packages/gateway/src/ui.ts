@@ -392,6 +392,11 @@ function pageProject(projectId: string): string | null {
     { label: project.name ?? project.path },
   ]);
   body += `<h1>${esc(project.name ?? "(unnamed)")}</h1>`;
+  body += `<form method="POST" action="/ui/api/rename/project/${esc(projectId)}" style="margin:4px 0 12px;display:flex;gap:8px;align-items:center">
+    <input type="text" name="name" value="${esc(project.name ?? "")}" placeholder="Project name"
+      style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--fg);font-size:0.9em;width:300px">
+    <button type="submit" class="btn btn-primary">Rename</button>
+  </form>`;
   body += `<p style="font-family:var(--mono);font-size:0.85em;color:var(--fg2)">${esc(project.path)}</p>`;
   if (project.git_remote) {
     body += `<p style="font-family:var(--mono);font-size:0.85em;color:var(--fg2)">Git: ${esc(project.git_remote)}</p>`;
@@ -456,7 +461,8 @@ function pageProject(projectId: string): string | null {
 
   // Actions
   body += `<div class="actions">
-    ${deleteForm(`/ui/api/clear/project/${esc(projectId)}`, "Clear All Project Data", "This will permanently delete ALL data for this project. Continue?")}
+    ${deleteForm(`/ui/api/clear/project/${esc(projectId)}`, "Clear All Project Data", "This will permanently delete ALL data for this project but keep the project entry. Continue?")}
+    ${deleteForm(`/ui/api/delete/project/${esc(projectId)}`, "Delete Project", "This will PERMANENTLY DELETE this project and ALL its data. This cannot be undone. Continue?")}
   </div>`;
 
   return layout(project.name ?? "Project", body);
@@ -964,6 +970,24 @@ export async function handleUIRequest(
         data.clearProject(project.path);
       }
       return redirect("/ui");
+    }
+
+    // Delete project (full removal)
+    const delProject = matchRoute(pathname, "/ui/api/delete/project/:id");
+    if (delProject) {
+      data.deleteProject(delProject.id);
+      return redirect("/ui");
+    }
+
+    // Rename project
+    const renameProjectMatch = matchRoute(pathname, "/ui/api/rename/project/:id");
+    if (renameProjectMatch) {
+      const formData = await req.formData();
+      const newName = formData.get("name");
+      if (typeof newName === "string" && newName.trim()) {
+        data.renameProject(renameProjectMatch.id, newName);
+      }
+      return redirect(`/ui/projects/${renameProjectMatch.id}`);
     }
   }
 

@@ -549,6 +549,7 @@ async function cmdMerge(
   console.log(`\nResults:`);
   console.log(`  Updated: ${result.updated} project(s) with git remote info`);
   console.log(`  Merged:  ${result.merged} duplicate project(s)`);
+  console.log(`  Renamed: ${result.namesBackfilled} project(s) with repo name`);
 
   if (result.mergeDetails.length > 0) {
     console.log(`\nMerge details:`);
