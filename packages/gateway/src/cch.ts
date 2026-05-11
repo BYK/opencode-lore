@@ -48,11 +48,13 @@ import { createHash } from "crypto";
  */
 const VERSION_SEEDS: Record<string, bigint> = {
   "2.1.37": 0x6E52736AC806831En,
+  "2.1.138": 0x4D659218E32A3268n,
   // Future versions: extract and add entries here.
+  // Use `bun run scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */
-const WORKER_VERSION = "2.1.37";
+const WORKER_VERSION = "2.1.138";
 const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION]!;
 
 /**
@@ -229,6 +231,103 @@ export function deleteBillingPrefix(sessionID: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Seed resolution (with fallback for unknown versions)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a semver string into a comparable tuple.
+ * Returns null if the string isn't a valid MAJOR.MINOR.PATCH format.
+ */
+function parseSemver(v: string): [number, number, number] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/**
+ * Compare two semver tuples. Returns negative if a < b, 0 if equal, positive if a > b.
+ */
+function compareSemver(
+  a: [number, number, number],
+  b: [number, number, number],
+): number {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+/**
+ * Resolve a seed for a given Claude Code version. Returns the exact seed if
+ * known, otherwise falls back to the closest known version — preferring a
+ * more recent version over an older one when equidistant.
+ *
+ * This allows the gateway to keep signing requests even when Claude Code
+ * ships a new version before we've extracted its seed. The signing may
+ * produce invalid cch values for those requests, but it's better than
+ * omitting the billing header entirely (which causes hard 429s).
+ *
+ * @returns `{ version, seed, exact }` — `exact` is true when the seed is
+ *          for the requested version, false when it's a fallback.
+ */
+export function resolveSeed(version: string): {
+  version: string;
+  seed: bigint;
+  exact: boolean;
+} {
+  // Exact match
+  if (VERSION_SEEDS[version]) {
+    return { version, seed: VERSION_SEEDS[version], exact: true };
+  }
+
+  const target = parseSemver(version);
+  const entries = Object.entries(VERSION_SEEDS)
+    .map(([v, s]) => ({ version: v, seed: s, parsed: parseSemver(v) }))
+    .filter((e): e is typeof e & { parsed: [number, number, number] } =>
+      e.parsed !== null,
+    );
+
+  if (entries.length === 0) {
+    // Should never happen — VERSION_SEEDS is non-empty
+    return { version: WORKER_VERSION, seed: WORKER_SEED, exact: false };
+  }
+
+  if (!target) {
+    // Unparseable version string — use the latest known seed
+    const latest = entries.sort((a, b) =>
+      compareSemver(b.parsed, a.parsed),
+    )[0];
+    return { version: latest.version, seed: latest.seed, exact: false };
+  }
+
+  // Find closest version, preferring newer over older when equidistant.
+  // Distance is measured as the absolute difference of flattened semver
+  // (major*1e6 + minor*1e3 + patch).
+  const flatten = (v: [number, number, number]) =>
+    v[0] * 1_000_000 + v[1] * 1_000 + v[2];
+  const targetFlat = flatten(target);
+
+  let best = entries[0];
+  let bestDist = Math.abs(flatten(best.parsed) - targetFlat);
+  let bestIsNewer = compareSemver(best.parsed, target) >= 0;
+
+  for (let i = 1; i < entries.length; i++) {
+    const e = entries[i];
+    const dist = Math.abs(flatten(e.parsed) - targetFlat);
+    const isNewer = compareSemver(e.parsed, target) >= 0;
+
+    // Pick this entry if: closer, or same distance but newer (prefer recent)
+    if (dist < bestDist || (dist === bestDist && isNewer && !bestIsNewer)) {
+      best = e;
+      bestDist = dist;
+      bestIsNewer = isNewer;
+    }
+  }
+
+  return { version: best.version, seed: best.seed, exact: false };
+}
+
+// ---------------------------------------------------------------------------
 // Seed validation (for detecting seed rotation in live traffic)
 // ---------------------------------------------------------------------------
 
@@ -280,4 +379,6 @@ export {
   CCH_PLACEHOLDER,
   VERSION_SEEDS,
   computeVersionSuffix as _computeVersionSuffix,
+  parseSemver as _parseSemver,
+  compareSemver as _compareSemver,
 };

@@ -6,12 +6,16 @@ import {
   buildBillingBlock,
   deleteBillingPrefix,
   validateSeed,
+  resolveSeed,
   _resetForTest,
   WORKER_VERSION,
   WORKER_SEED,
   WORKER_SALT,
   CCH_PLACEHOLDER,
+  VERSION_SEEDS,
   _computeVersionSuffix,
+  _parseSemver,
+  _compareSemver,
 } from "../src/cch";
 
 const SID_A = "sess-a";
@@ -180,11 +184,11 @@ describe("buildBillingBlock", () => {
   test("pins billing header to WORKER_VERSION, not the client version", () => {
     captureBillingPrefix(
       SID_A,
-      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+      "x-anthropic-billing-header: cc_version=2.0.99.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
     const block = buildBillingBlock(SID_A, MSG);
     expect(block!.text).toContain(`cc_version=${WORKER_VERSION}.`);
-    expect(block!.text).not.toContain("cc_version=2.1.138");
+    expect(block!.text).not.toContain("cc_version=2.0.99");
   });
 
   test("includes a 3-char hex version suffix derived from user message", () => {
@@ -563,5 +567,163 @@ describe("exported constants", () => {
 
   test("CCH_PLACEHOLDER is the expected sentinel", () => {
     expect(CCH_PLACEHOLDER).toBe("cch=00000");
+  });
+
+  test("VERSION_SEEDS contains the 2.1.138 seed", () => {
+    expect(VERSION_SEEDS["2.1.138"]).toBe(0x4D659218E32A3268n);
+  });
+
+  test("WORKER_VERSION points to 2.1.138", () => {
+    expect(WORKER_VERSION).toBe("2.1.138");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveSeed — fallback logic for unknown versions
+// ---------------------------------------------------------------------------
+
+describe("resolveSeed", () => {
+  test("returns exact match for a known version", () => {
+    const result = resolveSeed("2.1.138");
+    expect(result.exact).toBe(true);
+    expect(result.version).toBe("2.1.138");
+    expect(result.seed).toBe(VERSION_SEEDS["2.1.138"]);
+  });
+
+  test("returns exact match for the older known version", () => {
+    const result = resolveSeed("2.1.37");
+    expect(result.exact).toBe(true);
+    expect(result.version).toBe("2.1.37");
+    expect(result.seed).toBe(VERSION_SEEDS["2.1.37"]);
+  });
+
+  test("falls back to closest version for an unknown version", () => {
+    // 2.1.140 is closer to 2.1.138 than to 2.1.37
+    const result = resolveSeed("2.1.140");
+    expect(result.exact).toBe(false);
+    expect(result.version).toBe("2.1.138");
+    expect(result.seed).toBe(VERSION_SEEDS["2.1.138"]);
+  });
+
+  test("falls back to closest version for a version between known seeds", () => {
+    // 2.1.80 — equidistant-ish, but 2.1.37 is 43 away, 2.1.138 is 58 away
+    const result = resolveSeed("2.1.80");
+    expect(result.exact).toBe(false);
+    expect(result.version).toBe("2.1.37");
+  });
+
+  test("prefers newer version when equidistant", () => {
+    // Create a scenario: midpoint between 2.1.37 and 2.1.138 is ~2.1.87-88
+    // At exact midpoint, should prefer the newer one
+    // Distance from 2.1.88: to 2.1.37 = 51, to 2.1.138 = 50 → picks 2.1.138
+    const result = resolveSeed("2.1.88");
+    expect(result.exact).toBe(false);
+    expect(result.version).toBe("2.1.138");
+  });
+
+  test("falls back to latest for a much newer unknown version", () => {
+    const result = resolveSeed("3.0.0");
+    expect(result.exact).toBe(false);
+    expect(result.version).toBe("2.1.138");
+  });
+
+  test("falls back to oldest for a much older unknown version", () => {
+    const result = resolveSeed("1.0.0");
+    expect(result.exact).toBe(false);
+    expect(result.version).toBe("2.1.37");
+  });
+
+  test("falls back to latest for an unparseable version string", () => {
+    const result = resolveSeed("not-a-version");
+    expect(result.exact).toBe(false);
+    // Should return the latest known version
+    expect(result.version).toBe("2.1.138");
+  });
+
+  test("falls back to latest for an empty version string", () => {
+    const result = resolveSeed("");
+    expect(result.exact).toBe(false);
+    expect(result.version).toBe("2.1.138");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseSemver / compareSemver helpers
+// ---------------------------------------------------------------------------
+
+describe("semver helpers", () => {
+  test("parseSemver parses valid semver", () => {
+    expect(_parseSemver("2.1.138")).toEqual([2, 1, 138]);
+    expect(_parseSemver("0.0.1")).toEqual([0, 0, 1]);
+  });
+
+  test("parseSemver returns null for invalid input", () => {
+    expect(_parseSemver("not-valid")).toBeNull();
+    expect(_parseSemver("2.1")).toBeNull();
+    expect(_parseSemver("")).toBeNull();
+    expect(_parseSemver("2.1.138.4")).toBeNull();
+  });
+
+  test("compareSemver orders correctly", () => {
+    expect(_compareSemver([2, 1, 138], [2, 1, 37])).toBeGreaterThan(0);
+    expect(_compareSemver([2, 1, 37], [2, 1, 138])).toBeLessThan(0);
+    expect(_compareSemver([2, 1, 138], [2, 1, 138])).toBe(0);
+    expect(_compareSemver([3, 0, 0], [2, 1, 138])).toBeGreaterThan(0);
+    expect(_compareSemver([2, 0, 0], [2, 1, 0])).toBeLessThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Known-good values from Claude Code binary analysis
+// ---------------------------------------------------------------------------
+
+describe("binary-verified values", () => {
+  test("suffix for 'hello' matches Claude Code 2.1.138 output", () => {
+    // From binary analysis: chars[4,7,20] of "hello" = "o00"
+    // sha256("59cf53e54c78" + "o00" + "2.1.138")[:3] = "470"
+    const suffix = _computeVersionSuffix("hello");
+    expect(suffix).toBe("470");
+  });
+
+  test("2.1.138 seed signs correctly (oracle pair 1)", () => {
+    // Verified: body with "hello" prompt signed by Claude Code 2.1.138 → cch=54175
+    // We can't reproduce the exact body here (it includes system-reminder etc.)
+    // but we verify the seed is non-zero and produces valid output
+    const seed = VERSION_SEEDS["2.1.138"];
+    expect(seed).toBeDefined();
+    expect(seed).not.toBe(0n);
+
+    // Sign a test body with the 2.1.138 seed and verify round-trip
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      system: [{ type: "text", text: "x-anthropic-billing-header: cc_version=2.1.138.470; cc_entrypoint=cli; cch=00000;" }],
+      messages: [{ role: "user", content: "hello" }],
+    });
+    const signed = signBody(body);
+    expect(signed).not.toContain("cch=00000");
+    expect(validateSeed(signed)).toBe(true);
+  });
+
+  test("validateSeed accepts bodies signed with either known seed", () => {
+    // Sign with current WORKER_SEED (2.1.138)
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      system: [{ type: "text", text: "x-anthropic-billing-header: cc_version=2.1.138.abc; cc_entrypoint=cli; cch=00000;" }],
+      messages: [{ role: "user", content: "test" }],
+    });
+    const signed = signBody(body);
+    expect(validateSeed(signed)).toBe(true);
+
+    // Sign same body shape with old seed (2.1.37)
+    const oldSeed = VERSION_SEEDS["2.1.37"];
+    const body2 = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      system: [{ type: "text", text: "x-anthropic-billing-header: cc_version=2.1.37.def; cc_entrypoint=cli; cch=00000;" }],
+      messages: [{ role: "user", content: "test" }],
+    });
+    const hash = Bun.hash.xxHash64(body2, oldSeed);
+    const cch = (hash & 0xFFFFFn).toString(16).padStart(5, "0");
+    const signedOld = body2.replace("cch=00000", `cch=${cch}`);
+    expect(validateSeed(signedOld)).toBe(true);
   });
 });

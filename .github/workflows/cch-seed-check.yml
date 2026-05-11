@@ -1,0 +1,156 @@
+name: CCH Seed Check
+
+on:
+  schedule:
+    # Check every 6 hours for new Claude Code versions
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force-version:
+        description: 'Force extraction for a specific version (e.g. 2.1.140)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      needs-extraction: ${{ steps.check.outputs.needs-extraction }}
+      cc-version: ${{ steps.check.outputs.cc-version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install
+
+      - name: Check for new Claude Code version
+        id: check
+        run: |
+          if [ -n "${{ inputs.force-version }}" ]; then
+            echo "needs-extraction=true" >> "$GITHUB_OUTPUT"
+            echo "cc-version=${{ inputs.force-version }}" >> "$GITHUB_OUTPUT"
+            echo "Force extraction for version: ${{ inputs.force-version }}"
+          else
+            # check-cc-version.ts exits 1 if extraction is needed
+            set +e
+            result=$(bun run scripts/check-cc-version.ts --json 2>&1)
+            exit_code=$?
+            set -e
+
+            echo "Raw output: $result"
+
+            if [ $exit_code -eq 0 ]; then
+              echo "needs-extraction=false" >> "$GITHUB_OUTPUT"
+              echo "cc-version=" >> "$GITHUB_OUTPUT"
+              echo "All versions have known seeds"
+            else
+              version=$(echo "$result" | jq -r '.latestVersion // empty')
+              if [ -n "$version" ]; then
+                echo "needs-extraction=true" >> "$GITHUB_OUTPUT"
+                echo "cc-version=$version" >> "$GITHUB_OUTPUT"
+                echo "New version needs extraction: $version"
+              else
+                echo "needs-extraction=false" >> "$GITHUB_OUTPUT"
+                echo "cc-version=" >> "$GITHUB_OUTPUT"
+                echo "Check failed but no version to extract"
+              fi
+            fi
+          fi
+
+  extract-seed:
+    needs: check-version
+    if: needs.check-version.outputs.needs-extraction == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: bun install
+
+      - name: Extract seed
+        id: extract
+        timeout-minutes: 15
+        run: |
+          VERSION="${{ needs.check-version.outputs.cc-version }}"
+          echo "Extracting seed for Claude Code v${VERSION}..."
+          bun run scripts/extract-cch-seed.ts \
+            --version "$VERSION" \
+            --output /tmp/seed-result.json
+
+          echo "=== Result ==="
+          cat /tmp/seed-result.json
+          echo
+
+          SEED=$(jq -r '.seed' /tmp/seed-result.json)
+          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+
+      - name: Apply seed to cch.ts
+        run: |
+          VERSION="${{ needs.check-version.outputs.cc-version }}"
+          SEED="${{ steps.extract.outputs.seed }}"
+          bun run scripts/extract-cch-seed.ts --apply "$VERSION" "$SEED"
+
+      - name: Verify tests pass
+        run: bun test packages/gateway/test/cch.test.ts
+
+      - name: Check for existing PR
+        id: check-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-version.outputs.cc-version }}"
+          BRANCH="cch-seed/${VERSION}"
+          existing=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+          if [ -n "$existing" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "PR #${existing} already exists for ${BRANCH}"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create PR
+        if: steps.check-pr.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-version.outputs.cc-version }}"
+          SEED="${{ steps.extract.outputs.seed }}"
+          BRANCH="cch-seed/${VERSION}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add packages/gateway/src/cch.ts
+          git commit -m "feat(cch): add seed for Claude Code ${VERSION}"
+          git push -u origin "$BRANCH"
+
+          gh pr create \
+            --title "feat(cch): add seed for Claude Code ${VERSION}" \
+            --body "$(cat <<'EOF'
+          ## Summary
+
+          Automated cch seed extraction for Claude Code v${VERSION}.
+
+          - **Seed:** \`${SEED}\`
+          - **Extracted by:** \`scripts/extract-cch-seed.ts\`
+          - **Method:** Oracle pair generation via local capture server + binary scan
+
+          This PR updates \`VERSION_SEEDS\` and \`WORKER_VERSION\` in \`packages/gateway/src/cch.ts\`
+          so the gateway can sign billing headers for the new Claude Code version.
+          EOF
+          )"
