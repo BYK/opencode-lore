@@ -37,6 +37,13 @@ import {
   needsUrgentDistillation,
   formatKnowledge,
   buildCompactPrompt,
+  shouldImportLoreFile,
+  importLoreFile,
+  loreFileExists,
+  shouldImport,
+  importFromFile,
+  latReader,
+  embedding,
 } from "@loreai/core";
 
 import type {
@@ -377,6 +384,52 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
   ensureProject(projectPath);
   initialized = true;
   cachedProjectPath = projectPath;
+
+  // Import knowledge from .lore.md at startup (picks up user/git edits
+  // since last session). Falls back to agents file for backward compat.
+  const cfg = loreConfig();
+  if (cfg.knowledge.enabled) {
+    try {
+      const { join } = await import("node:path");
+      if (loreFileExists(projectPath)) {
+        if (shouldImportLoreFile(projectPath)) {
+          importLoreFile(projectPath);
+          log.info("imported knowledge from .lore.md");
+        }
+      } else if (cfg.agentsFile.enabled) {
+        const filePath = join(projectPath, cfg.agentsFile.path);
+        if (shouldImport({ projectPath, filePath })) {
+          importFromFile({ projectPath, filePath });
+          log.info("imported knowledge from", cfg.agentsFile.path);
+        }
+      }
+    } catch (e) {
+      log.error("startup knowledge import error:", e);
+    }
+
+    // Prune corrupted/oversized knowledge entries (safety net for past bugs).
+    const pruned = ltm.pruneOversized(1200);
+    if (pruned > 0) {
+      log.info(`pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
+    }
+  }
+
+  // Startup backfills — idempotent, run once per process.
+  try {
+    distillation.backfillMetrics();
+  } catch (e) {
+    log.info("metric backfill failed:", e);
+  }
+  embedding.runStartupBackfill().catch((e) => {
+    log.info("embedding backfill failed:", e);
+  });
+
+  // Index lat.md/ directory sections (content-hash-based, skips unchanged files).
+  try {
+    latReader.refresh(projectPath);
+  } catch (e) {
+    log.error("lat-reader startup refresh error:", e);
+  }
 
   // Pre-warm models.dev pricing/limits cache so synchronous lookups in the
   // request hot path (getModelSpec, emitCostMetric) resolve from memory.
