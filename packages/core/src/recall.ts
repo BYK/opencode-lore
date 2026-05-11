@@ -64,7 +64,7 @@ export type RecallInput = {
 /** Result of a full recall run — markdown-formatted string for the LLM. */
 export type RecallResult = string;
 
-type TaggedResult =
+export type TaggedResult =
   | { source: "knowledge"; item: ltm.ScoredKnowledgeEntry }
   | {
       source: "cross-knowledge";
@@ -74,6 +74,8 @@ type TaggedResult =
   | { source: "distillation"; item: ScoredDistillation }
   | { source: "temporal"; item: temporal.ScoredTemporalMessage }
   | { source: "lat-section"; item: latReader.ScoredLatSection };
+
+export type ScoredTaggedResult = { item: TaggedResult; score: number };
 
 // ---------------------------------------------------------------------------
 // Tagged result helpers (used by exact-match boost + formatting)
@@ -256,8 +258,15 @@ function formatFusedResults(
 // Main entry point
 // ---------------------------------------------------------------------------
 
-/** Full recall run: search every relevant source, fuse with RRF, format as markdown. */
-export async function runRecall(input: RecallInput): Promise<RecallResult> {
+/**
+ * Search every relevant source, fuse with RRF, and return raw scored results.
+ *
+ * This is the search+fusion core shared by `runRecall()` (LLM-formatted) and
+ * direct consumers like the web UI that need access to the raw result items.
+ */
+export async function searchRecall(
+  input: RecallInput,
+): Promise<ScoredTaggedResult[]> {
   const {
     query,
     scope = "all",
@@ -272,7 +281,7 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
 
   // Short-circuit vague queries — stopwords-only would match everything.
   if (ftsQuery(query) === EMPTY_QUERY) {
-    return "Query too vague — try using specific keywords, file names, or technical terms.";
+    return [];
   }
 
   // Optional query expansion: generate alternative phrasings via LLM.
@@ -566,7 +575,17 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
     }
   }
 
-  const fused = reciprocalRankFusion<TaggedResult>(allRrfLists);
+  return reciprocalRankFusion<TaggedResult>(allRrfLists);
+}
+
+/** Full recall run: search every relevant source, fuse with RRF, format as markdown. */
+export async function runRecall(input: RecallInput): Promise<RecallResult> {
+  // Short-circuit vague queries — stopwords-only would match everything.
+  if (ftsQuery(input.query) === EMPTY_QUERY) {
+    return "Query too vague — try using specific keywords, file names, or technical terms.";
+  }
+
+  const fused = await searchRecall(input);
   return formatFusedResults(fused, 20);
 }
 

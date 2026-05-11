@@ -9,10 +9,12 @@ import {
   data,
   ltm,
   temporal,
-  runRecall,
+  searchRecall,
   config,
   projectName,
   ensureProject,
+  renderMarkdown,
+  type TaggedResult,
 } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
@@ -48,6 +50,11 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Render markdown to HTML, wrapped in a scoped container. */
+function md(markdown: string): string {
+  return `<div class="md">${renderMarkdown(markdown)}</div>`;
 }
 
 function truncate(str: string, max: number): string {
@@ -133,6 +140,23 @@ form.inline { display: inline; }
 .msg-assistant { background: var(--bg2); border-left: 3px solid #10b981; }
 .actions { margin: 16px 0; display: flex; gap: 8px; }
 .empty { color: var(--fg3); font-style: italic; padding: 24px 0; text-align: center; }
+.md { font-size: 0.9em; line-height: 1.6; overflow-wrap: break-word; }
+.md h1, .md h2, .md h3, .md h4 { margin: 12px 0 6px; font-weight: 600; }
+.md h1 { font-size: 1.3em; } .md h2 { font-size: 1.15em; } .md h3 { font-size: 1.05em; }
+.md p { margin: 6px 0; }
+.md ul, .md ol { margin: 6px 0; padding-left: 24px; }
+.md li { margin: 2px 0; }
+.md pre { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; overflow-x: auto; font-family: var(--mono); font-size: 0.9em; margin: 6px 0; }
+.md code { font-family: var(--mono); font-size: 0.9em; background: var(--bg3); padding: 1px 4px; border-radius: 3px; }
+.md pre code { background: none; padding: 0; font-size: 1em; }
+.md blockquote { border-left: 3px solid var(--border); padding-left: 12px; margin: 6px 0; color: var(--fg2); }
+.md a { color: var(--accent); }
+.md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.md table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 0.9em; }
+.md th, .md td { text-align: left; padding: 6px 8px; border: 1px solid var(--border); }
+.md th { background: var(--bg2); font-weight: 600; }
+.md img { max-width: 100%; }
 `;
 
 function layout(title: string, body: string): string {
@@ -345,7 +369,7 @@ function pageKnowledge(id: string): string | null {
   if (entry.metadata) {
     body += `<div class="field"><span class="key">Metadata:</span></div><pre>${esc(entry.metadata)}</pre>`;
   }
-  body += `<h2>Content</h2><pre>${esc(entry.content)}</pre>`;
+  body += `<h2>Content</h2>${md(entry.content)}`;
 
   body += `<div class="actions">
     ${deleteForm(`/ui/api/delete/knowledge/${esc(entry.id)}`, "Delete Entry", "Delete this knowledge entry?")}
@@ -431,13 +455,52 @@ function pageDistillation(id: string): string | null {
   body += `<div class="field"><span class="key">Archived:</span> ${dist.archived ? "Yes" : "No"}</div>`;
   body += `<div class="field"><span class="key">Created:</span> ${formatDate(dist.created_at)}</div>`;
   body += `<div class="field"><span class="key">Source IDs:</span></div><pre>${esc(dist.source_ids)}</pre>`;
-  body += `<h2>Observations</h2><pre>${esc(dist.observations)}</pre>`;
+  body += `<h2>Observations</h2>${md(dist.observations)}`;
 
   body += `<div class="actions">
     ${deleteForm(`/ui/api/delete/distillation/${esc(dist.id)}`, "Delete Distillation", "Delete this distillation?")}
   </div>`;
 
   return layout("Distillation", body);
+}
+
+function formatSearchResult(tagged: TaggedResult): string {
+  switch (tagged.source) {
+    case "knowledge":
+    case "cross-knowledge": {
+      const k = tagged.item;
+      const from =
+        tagged.source === "cross-knowledge"
+          ? ` <span style="color:var(--fg3);font-size:0.8em">from: ${esc(tagged.projectLabel)}</span>`
+          : "";
+      return `<div class="card">
+        <h3>${badge(k.category)}${from} <a href="/ui/knowledge/${esc(k.id)}">${esc(k.title)}</a></h3>
+        ${md(k.content)}
+      </div>`;
+    }
+    case "distillation": {
+      const d = tagged.item;
+      return `<div class="card">
+        <h3>${badge("distilled")} <span style="color:var(--fg3);font-size:0.8em">gen ${d.generation} &middot; session ${esc(d.session_id.slice(0, 12))} &middot; ${formatDate(d.created_at)}</span></h3>
+        ${md(d.observations)}
+      </div>`;
+    }
+    case "temporal": {
+      const m = tagged.item;
+      const cls = m.role === "user" ? "msg-user" : "msg-assistant";
+      return `<div class="card">
+        <h3>${badge(m.role)} <span style="color:var(--fg3);font-size:0.8em">session ${esc(m.session_id.slice(0, 12))} &middot; ${formatDate(m.created_at)}</span></h3>
+        <div class="msg ${cls}">${md(m.content)}</div>
+      </div>`;
+    }
+    case "lat-section": {
+      const s = tagged.item;
+      return `<div class="card">
+        <h3>${badge("lat.md")} <span style="color:var(--fg3);font-size:0.8em">${esc(s.file)}</span> ${esc(s.heading)}</h3>
+        ${md(s.content)}
+      </div>`;
+    }
+  }
 }
 
 async function pageSearch(url: URL): Promise<string> {
@@ -471,16 +534,19 @@ async function pageSearch(url: URL): Promise<string> {
           recallLimit: 20,
           queryExpansion: false,
         };
-        const result = await runRecall({
+        const results = await searchRecall({
           query,
           scope,
           projectPath,
           searchConfig,
         });
-        body += `<h2>Results</h2>`;
-        // The recall result is markdown — render as preformatted text
-        // (proper markdown rendering would require a dependency)
-        body += `<pre>${esc(result)}</pre>`;
+        body += `<h2>Results (${results.length})</h2>`;
+        if (!results.length) {
+          body += `<p class="empty">No results found for this query.</p>`;
+        }
+        for (const { item: tagged } of results.slice(0, 20)) {
+          body += formatSearchResult(tagged);
+        }
       } catch (err) {
         body += `<p style="color:var(--danger)">Search error: ${esc(err instanceof Error ? err.message : String(err))}</p>`;
       }

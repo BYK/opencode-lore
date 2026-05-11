@@ -1,3 +1,4 @@
+import { micromark } from "micromark";
 import { remark } from "remark";
 import type {
   Root,
@@ -126,4 +127,18 @@ export function strong(value: string): Strong {
 
 export function root(...children: Root["children"]): Root {
   return { type: "root", children };
+}
+
+/**
+ * Render a markdown string to sanitized HTML.
+ *
+ * Uses micromark with default options:
+ * - Raw HTML in input is escaped (no allowDangerousHtml)
+ * - Only safe URL protocols are permitted (no allowDangerousProtocol)
+ *
+ * The output is safe to embed directly in an HTML page without
+ * additional escaping.
+ */
+export function renderMarkdown(md: string): string {
+  return micromark(md);
 }
