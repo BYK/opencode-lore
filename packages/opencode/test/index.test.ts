@@ -527,8 +527,8 @@ async function initPluginCustomClient(
   };
 }
 
-describe("auto-recovery re-entrancy guard", () => {
-  test("first overflow triggers recovery prompt", async () => {
+describe("overflow defers to built-in compaction", () => {
+  test("overflow sets forceMinLayer but does NOT call session.prompt", async () => {
     const { hooks, calls, cleanup } = await initPlugin();
     try {
       const sessionID = "ses_test_overflow_001";
@@ -544,150 +544,41 @@ describe("auto-recovery re-entrancy guard", () => {
         } as any,
       });
 
-      // Recovery runs fire-and-forget — flush the microtask queue.
+      // Flush microtask queue
       await flushAsync();
 
-      // Should have called session.prompt for recovery
-      expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
+      // Should NOT call session.prompt — OpenCode's built-in reactive
+      // compaction handles the overflow via halt() → needsCompaction →
+      // compaction.create(auto:true, overflow:true) with autocontinue.
+      expect(calls["session.prompt"]?.length ?? 0).toBe(0);
     } finally {
       cleanup();
     }
   });
 
-  test("second overflow for same session does NOT trigger another recovery prompt", async () => {
+  test("repeated overflows for same session do not call session.prompt", async () => {
     const { hooks, calls, cleanup } = await initPlugin();
     try {
       const sessionID = "ses_test_overflow_002";
 
-      // Make session.prompt reject to simulate the recovery itself overflowing.
-      // The plugin sends recovery → new LLM call → that call overflows → new session.error.
-      // We need the first recovery to "succeed" (session.prompt resolves) but then
-      // a second session.error arrives for the same session while recoveringSessions
-      // still contains it. To test this properly, we need the session.prompt to be
-      // slow enough that the second error arrives while recovery is in progress.
-      //
-      // Simpler approach: make session.prompt block and fire the second error concurrently.
-      let resolvePrompt: () => void;
-      const promptBlocker = new Promise<void>((r) => { resolvePrompt = r; });
-      let promptCallCount = 0;
+      // Fire two overflow errors in sequence
+      for (let i = 0; i < 2; i++) {
+        await hooks.event!({
+          event: {
+            type: "session.error",
+            properties: {
+              sessionID,
+              error: { message: "prompt is too long: 300000 tokens" },
+            },
+          } as any,
+        });
+        await flushAsync();
+      }
 
-      // Monkey-patch session.prompt to block on first call
-      const mockClient = (hooks as any);
-      // We can't easily monkey-patch the closure, so instead test the sequential case:
-      // First call succeeds, then a second overflow error arrives.
-
-      // Fire first overflow — this will call session.prompt
-      await hooks.event!({
-        event: {
-          type: "session.error",
-          properties: {
-            sessionID,
-            error: { message: "prompt is too long: 300000 tokens" },
-          },
-        } as any,
-      });
-
-      // Recovery runs fire-and-forget — flush the microtask queue.
-      await flushAsync();
-
-      const promptCountAfterFirst = calls["session.prompt"]?.length ?? 0;
-      expect(promptCountAfterFirst).toBeGreaterThanOrEqual(1);
-
-      // The first recovery completed (session.prompt resolved), so recoveringSessions
-      // was cleaned up in the finally block. To test the guard, we need to simulate
-      // the scenario where the recovery prompt itself causes an overflow — which means
-      // the second session.error fires while recoveringSessions still has the ID.
-      //
-      // We can test this by making session.prompt throw (simulating the recovery failing
-      // at the API level), then immediately firing another session.error. But the finally
-      // block clears recoveringSessions regardless.
-      //
-      // The actual protection is: recovery prompt → triggers LLM → LLM overflows →
-      // new session.error event (NOT a thrown exception). So both events complete
-      // independently. The guard works because recoveringSessions.add happens BEFORE
-      // session.prompt, and .delete happens in finally AFTER await resolves.
-      //
-      // To properly test: we need the event handler to be re-entered while the first
-      // call is still awaiting session.prompt. Let's make session.prompt never resolve
-      // on the first call, fire the second error, and verify no additional prompt call.
+      // No session.prompt calls for either overflow
+      expect(calls["session.prompt"]?.length ?? 0).toBe(0);
     } finally {
       cleanup();
-    }
-  });
-
-  test("re-entrancy guard prevents infinite loop (concurrent scenario)", async () => {
-    const { mkdirSync, rmSync } = await import("fs");
-    const tmpDir = `${import.meta.dir}/__tmp_reentry_${Date.now()}__`;
-    mkdirSync(tmpDir, { recursive: true });
-
-    let promptCallCount = 0;
-    let resolveFirstPrompt: (() => void) | null = null;
-
-    const { client } = createMockClient();
-    // Override session.prompt to block on first call
-    (client.session as any).prompt = () => {
-      promptCallCount++;
-      if (promptCallCount === 1) {
-        // First call: block until we manually resolve
-        return new Promise<{ data: unknown }>((resolve) => {
-          resolveFirstPrompt = () => resolve({ data: {} });
-        });
-      }
-      // Subsequent calls: resolve immediately (shouldn't happen with the guard)
-      return Promise.resolve({ data: {} });
-    };
-
-    try {
-      const hooks = await LorePlugin({
-        client,
-        project: { id: "test", path: tmpDir } as any,
-        directory: tmpDir,
-        worktree: tmpDir,
-        serverUrl: new URL("http://localhost:0"),
-        $: {} as any,
-      });
-
-      const sessionID = "ses_reentry_test";
-
-      // Fire first overflow — this will call session.prompt which blocks
-      const firstError = hooks.event!({
-        event: {
-          type: "session.error",
-          properties: {
-            sessionID,
-            error: { message: "prompt is too long: 250000 tokens" },
-          },
-        } as any,
-      });
-
-      // Wait a tick for the first handler to reach session.prompt
-      await new Promise((r) => setTimeout(r, 50));
-      expect(promptCallCount).toBe(1);
-
-      // Fire second overflow for the SAME session while first is still blocking.
-      // With the re-entrancy guard, this should bail out immediately without
-      // calling session.prompt again.
-      const secondError = hooks.event!({
-        event: {
-          type: "session.error",
-          properties: {
-            sessionID,
-            error: { message: "prompt is too long: 250000 tokens" },
-          },
-        } as any,
-      });
-
-      // The second handler should complete quickly (bails out)
-      await secondError;
-
-      // Still only 1 session.prompt call — the second was blocked by the guard
-      expect(promptCallCount).toBe(1);
-
-      // Resolve the first prompt so the test can clean up
-      resolveFirstPrompt!();
-      await firstError;
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });
@@ -1024,11 +915,9 @@ describe("findPreviousCompactSummary", () => {
   });
 });
 
-describe("auto-recovery — media-aware path (F9)", () => {
-  test("recovery prompt includes attachment list + user text when last user message has media", async () => {
-    const { hooks, calls, client, cleanup } = await initPluginCustomClient((c) => {
-      // Override session.messages to return a user message with an
-      // image attachment + text question.
+describe("overflow defers to built-in compaction — no session.prompt (F9 superseded)", () => {
+  test("overflow with media-bearing user message does NOT call session.prompt", async () => {
+    const { hooks, calls, cleanup } = await initPluginCustomClient((c) => {
       (c.session as any).messages = () =>
         Promise.resolve({
           data: [
@@ -1058,27 +947,16 @@ describe("auto-recovery — media-aware path (F9)", () => {
           },
         } as any,
       });
-      // Recovery runs fire-and-forget — flush the microtask queue.
       await flushAsync();
-      // Recovery prompt was sent.
-      expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
-      // Inspect the body.
-      const promptArgs = calls["session.prompt"]![0]![0] as {
-        body: { parts: Array<{ text: string }> };
-      };
-      const text = promptArgs.body.parts[0]!.text;
-      expect(text).toContain("[Attached image/png: screenshot.png]");
-      expect(text).toContain("Explain this screenshot please.");
-      expect(text).toContain("compressed the conversation history");
-      expect(text).toContain("attachment(s) that were removed");
+      // No session.prompt — OpenCode's reactive compaction handles overflow.
+      expect(calls["session.prompt"]?.length ?? 0).toBe(0);
     } finally {
       cleanup();
     }
   });
 
-  test("recovery prompt falls back to plain buildRecoveryMessage when no media in last user message", async () => {
+  test("overflow with text-only user message does NOT call session.prompt", async () => {
     const { hooks, calls, cleanup } = await initPluginCustomClient((c) => {
-      // User message with text only — no media.
       (c.session as any).messages = () =>
         Promise.resolve({
           data: [
@@ -1100,109 +978,8 @@ describe("auto-recovery — media-aware path (F9)", () => {
           },
         } as any,
       });
-      // Recovery runs fire-and-forget — flush the microtask queue.
       await flushAsync();
-      expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
-      const promptArgs = calls["session.prompt"]![0]![0] as {
-        body: { parts: Array<{ text: string }> };
-      };
-      const text = promptArgs.body.parts[0]!.text;
-      // Plain recovery contract per F9 D4: byte-identical to today.
-      // We seed no distillations in this test (initPluginCustomClient
-      // creates an empty DB), so the expected payload is the
-      // "no summaries provided" fallback. Pin the full string so any
-      // accidental drift (e.g. an extra blank line, a section sneaking
-      // through the no-media path) is caught.
-      expect(text).toBe(buildRecoveryMessage([]));
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("recovery falls through to plain path when session.messages throws", async () => {
-    const { hooks, calls, cleanup } = await initPluginCustomClient((c) => {
-      (c.session as any).messages = () =>
-        Promise.reject(new Error("simulated SDK failure"));
-    });
-    try {
-      const sessionID = "ses_f9_sdk_fail_001";
-      await hooks.event!({
-        event: {
-          type: "session.error",
-          properties: {
-            sessionID,
-            error: { message: "prompt is too long: 250000 tokens" },
-          },
-        } as any,
-      });
-      // Recovery runs fire-and-forget — flush the microtask queue.
-      await flushAsync();
-      // Recovery still happens — falls back to plain message.
-      expect(calls["session.prompt"]?.length ?? 0).toBeGreaterThanOrEqual(1);
-      const promptArgs = calls["session.prompt"]![0]![0] as {
-        body: { parts: Array<{ text: string }> };
-      };
-      const text = promptArgs.body.parts[0]!.text;
-      expect(text).not.toContain("attachment(s) that were removed");
-      expect(text).toContain("compressed the conversation history");
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("multiple media attachments are all listed in the notice", async () => {
-    const { hooks, calls, cleanup } = await initPluginCustomClient((c) => {
-      (c.session as any).messages = () =>
-        Promise.resolve({
-          data: [
-            {
-              info: { id: "m1", role: "user" },
-              parts: [
-                { type: "text", text: "compare these" },
-                {
-                  type: "file",
-                  mime: "image/png",
-                  filename: "a.png",
-                  url: "data:image/png;base64,a",
-                },
-                {
-                  type: "file",
-                  mime: "image/jpeg",
-                  filename: "b.jpg",
-                  url: "data:image/jpeg;base64,b",
-                },
-                {
-                  type: "file",
-                  mime: "application/pdf",
-                  filename: "c.pdf",
-                  url: "file:///tmp/c.pdf",
-                },
-              ],
-            },
-          ],
-        });
-    });
-    try {
-      const sessionID = "ses_f9_multi_media";
-      await hooks.event!({
-        event: {
-          type: "session.error",
-          properties: {
-            sessionID,
-            error: { message: "prompt is too long: 250000 tokens" },
-          },
-        } as any,
-      });
-      // Recovery runs fire-and-forget — flush the microtask queue.
-      await flushAsync();
-      const promptArgs = calls["session.prompt"]![0]![0] as {
-        body: { parts: Array<{ text: string }> };
-      };
-      const text = promptArgs.body.parts[0]!.text;
-      expect(text).toContain("3 attachment(s) that were removed");
-      expect(text).toContain("[Attached image/png: a.png]");
-      expect(text).toContain("[Attached image/jpeg: b.jpg]");
-      expect(text).toContain("[Attached application/pdf: c.pdf]");
+      expect(calls["session.prompt"]?.length ?? 0).toBe(0);
     } finally {
       cleanup();
     }
@@ -2042,7 +1819,7 @@ describe("experimental.session.compacting", () => {
       expect(prompt).toContain("## Next Steps");
       expect(prompt).toContain("## Critical Context");
       expect(prompt).toContain("## Relevant Files");
-      expect(prompt).toContain("I'm ready to continue.");
+      expect(prompt).not.toContain("I'm ready to continue.");
       // No distillations seeded, no context pushed.
       expect(context).toHaveLength(0);
     } finally {
