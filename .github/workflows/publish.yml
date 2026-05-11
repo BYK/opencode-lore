@@ -62,7 +62,7 @@ jobs:
           sudo chmod +x /usr/local/bin/craft
 
       - name: Publish
-        run: craft publish "${{ steps.inputs.outputs.version }}" --no-input --no-status-check
+        run: craft publish "${{ steps.inputs.outputs.version }}" --no-input
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
