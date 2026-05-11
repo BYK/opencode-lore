@@ -164,7 +164,7 @@ export function expandRecallMarkers(
     // We process one marker per assistant message per pass; the outer
     // loop will revisit if there's more than one (rare).
     let markerIdx = -1;
-    let parsed: { query: string; scope: RecallScope } | null = null;
+    let parsed: { query: string; scope: RecallScope; id?: string } | null = null;
     for (let j = 0; j < msg.content.length; j++) {
       const block = msg.content[j];
       if (block.type !== "text") continue;
