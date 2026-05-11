@@ -74,7 +74,7 @@ export function normalizeBodyForComparison(body: string): string {
   return body
     .replace(CCH_PATTERN, CCH_REPLACEMENT)
     .replace(CC_VERSION_SUFFIX_PATTERN, CC_VERSION_SUFFIX_REPLACEMENT)
-    .replace(TOP_LEVEL_MAX_TOKENS, "$1_");
+    .replace(TOP_LEVEL_MAX_TOKENS, "$10");
 }
 
 // ---------------------------------------------------------------------------
