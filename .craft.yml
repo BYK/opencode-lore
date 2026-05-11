@@ -6,6 +6,14 @@ versioning:
 # Custom version bump script — bypasses craft's built-in npm-based auto-bumping
 # which fails on our `workspace:*` deps. See scripts/bump-version.sh for details.
 preReleaseCommand: bash scripts/bump-version.sh
+statusProvider:
+  name: github
+  config:
+    contexts:
+      # Must match the check-run names from ci.yml that produce release artifacts.
+      # Update these if you rename the jobs.
+      - "test"
+      - "Generate Release Patches"
 artifactProvider:
   name: github
   config:
