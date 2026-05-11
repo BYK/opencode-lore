@@ -8,6 +8,9 @@ import {
   vectorSearch,
   checkConfigChange,
   resetProvider,
+  _shutdownAndDisable,
+  _saveAndClearProvider,
+  _restoreProvider,
   embed,
   LocalProviderUnavailableError,
   pickRemoteFallback,
@@ -89,21 +92,19 @@ describe("BLOB round-trip", () => {
 
 describe("isAvailable", () => {
   test("returns true with default local provider (no API key needed)", () => {
-    resetProvider(); // Clear cached provider so isAvailable re-evaluates
     // Default provider is "local" — fastembed doesn't need an API key.
     // LocalProvider construction always succeeds; the dynamic import only
     // happens on first embed() call, so isAvailable() is true.
+    // NOTE: we do NOT call _clearProviderCache() here — killing a worker
+    // that loaded ONNX prevents a second worker from loading ONNX in the
+    // same Bun process (native module conflict).
     expect(isAvailable()).toBe(true);
-    resetProvider(); // Restore cached provider state
   });
 
   test("returns false when embeddings explicitly disabled", () => {
-    // We can't easily change config in tests, but verify the provider
-    // cache reset works correctly
-    resetProvider();
-    // After reset, re-evaluation with default config should still work
+    // With default config, isAvailable should be true regardless of
+    // whether the provider was cached from a previous test file's embed.
     expect(isAvailable()).toBe(true);
-    resetProvider();
   });
 });
 
@@ -122,25 +123,28 @@ describe("fastembed unavailable fallback (#185)", () => {
 
   let savedVoyage: string | undefined;
   let savedOpenAI: string | undefined;
+  let savedProvider: unknown;
 
   beforeEach(() => {
     savedVoyage = process.env.VOYAGE_API_KEY;
     savedOpenAI = process.env.OPENAI_API_KEY;
     delete process.env.VOYAGE_API_KEY;
     delete process.env.OPENAI_API_KEY;
+    // Save the real provider (with its live worker) and clear the cache
+    // so these tests get a fresh LocalProvider with _markFastembedUnavailable.
+    // No worker is spawned because fastembed is marked unavailable before embed().
+    savedProvider = _saveAndClearProvider();
   });
 
   afterEach(() => {
     if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
     if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
-    // Restore real probe state for subsequent tests (the LocalProvider
-    // integration suite below depends on fastembed actually loading).
+    // Restore real probe state + original provider for subsequent tests.
     _resetFastembedProbe();
-    resetProvider();
+    _restoreProvider(savedProvider);
   });
 
   test("isAvailable() returns false once fastembed is known missing", () => {
-    resetProvider();
     _resetFastembedProbe();
     expect(isAvailable()).toBe(true); // optimistic before probe runs
 
@@ -149,7 +153,6 @@ describe("fastembed unavailable fallback (#185)", () => {
   });
 
   test("embed() throws LocalProviderUnavailableError when fastembed is missing", async () => {
-    resetProvider();
     _markFastembedUnavailable();
 
     let caught: unknown;
@@ -163,7 +166,6 @@ describe("fastembed unavailable fallback (#185)", () => {
   });
 
   test("isAvailable() flips to false after the first embed() failure", async () => {
-    resetProvider();
     _markFastembedUnavailable();
 
     // First embed call surfaces the error (callers like recall.ts wrap in try/catch).
@@ -183,6 +185,7 @@ describe("auto-fallback to remote provider when fastembed is unavailable", () =>
   let savedVoyage: string | undefined;
   let savedOpenAI: string | undefined;
   let savedFetch: typeof fetch;
+  let savedProvider: unknown;
 
   beforeEach(() => {
     savedVoyage = process.env.VOYAGE_API_KEY;
@@ -190,6 +193,7 @@ describe("auto-fallback to remote provider when fastembed is unavailable", () =>
     delete process.env.VOYAGE_API_KEY;
     delete process.env.OPENAI_API_KEY;
     savedFetch = globalThis.fetch;
+    savedProvider = _saveAndClearProvider();
   });
 
   afterEach(() => {
@@ -199,7 +203,7 @@ describe("auto-fallback to remote provider when fastembed is unavailable", () =>
     else delete process.env.OPENAI_API_KEY;
     globalThis.fetch = savedFetch;
     _resetFastembedProbe();
-    resetProvider();
+    _restoreProvider(savedProvider);
   });
 
   /** Build a fake fetch returning provider-shaped JSON. Records URLs for
@@ -225,7 +229,6 @@ describe("auto-fallback to remote provider when fastembed is unavailable", () =>
   }
 
   test("auto-falls back to Voyage when VOYAGE_API_KEY is set", async () => {
-    resetProvider();
     _markFastembedUnavailable();
     process.env.VOYAGE_API_KEY = "vk-test";
     const { fetch, calls } = fakeFetch("voyage");
@@ -239,7 +242,6 @@ describe("auto-fallback to remote provider when fastembed is unavailable", () =>
   });
 
   test("auto-falls back to OpenAI when only OPENAI_API_KEY is set", async () => {
-    resetProvider();
     _markFastembedUnavailable();
     process.env.OPENAI_API_KEY = "sk-test";
     const { fetch, calls } = fakeFetch("openai");
@@ -253,7 +255,6 @@ describe("auto-fallback to remote provider when fastembed is unavailable", () =>
   });
 
   test("Voyage wins when both keys are set", async () => {
-    resetProvider();
     _markFastembedUnavailable();
     process.env.VOYAGE_API_KEY = "vk-test";
     process.env.OPENAI_API_KEY = "sk-test";
@@ -265,7 +266,6 @@ describe("auto-fallback to remote provider when fastembed is unavailable", () =>
   });
 
   test("subsequent embed() calls go directly to the swapped provider (no double fail)", async () => {
-    resetProvider();
     _markFastembedUnavailable();
     process.env.VOYAGE_API_KEY = "vk-test";
     const { fetch, calls } = fakeFetch("voyage");
@@ -283,7 +283,6 @@ describe("auto-fallback to remote provider when fastembed is unavailable", () =>
   });
 
   test("with no API keys set, embed() still throws LocalProviderUnavailableError", async () => {
-    resetProvider();
     _markFastembedUnavailable();
     // Neither VOYAGE_API_KEY nor OPENAI_API_KEY in env (cleared in beforeEach).
 
@@ -602,7 +601,10 @@ describe("LocalProvider worker thread", () => {
   afterAll(async () => {
     // Await shutdown so the worker fully exits before Bun's test runner
     // tears down the process — prevents NAPI segfault during cleanup.
-    await resetProvider();
+    // Use _shutdownAndDisable (sets cachedProvider=null) to prevent
+    // fire-and-forget embeds from other test files from spawning a new
+    // worker after this cleanup.
+    await _shutdownAndDisable();
   });
 });
 
@@ -662,4 +664,13 @@ describe("checkConfigChange", () => {
       .get() as { embedding: Buffer | null };
     expect(row.embedding).toBeNull();
   });
+});
+
+// ── Global cleanup ──────────────────────────────────────────────────────
+// File-level afterAll runs after ALL describe blocks in this file complete.
+// This ensures the worker (if any) is fully shut down before Bun's test
+// runner tears down the process — preventing the NAPI segfault that occurs
+// when Bun forcefully terminates a worker that loaded onnxruntime bindings.
+afterAll(async () => {
+  await _shutdownAndDisable();
 });

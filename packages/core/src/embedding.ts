@@ -202,9 +202,15 @@ export function _markFastembedUnavailable(): void {
 async function tryLoadFastembed(): Promise<typeof import("fastembed") | null> {
   if (fastembedProbed) return fastembedAvailable ? fastembedModule : null;
   try {
-    fastembedModule = await loadFastembedModule();
+    const mod = await loadFastembedModule();
+    // Re-check after the async boundary: another caller (e.g. a test helper
+    // like _markFastembedUnavailable) may have set the probe while we were
+    // awaiting. Their decision takes priority — don't overwrite it.
+    if (fastembedProbed) return fastembedAvailable ? fastembedModule : null;
+    fastembedModule = mod;
     fastembedAvailable = true;
   } catch (err) {
+    if (fastembedProbed) return fastembedAvailable ? fastembedModule : null;
     fastembedAvailable = false;
     if (!fastembedLogged) {
       fastembedLogged = true;
@@ -536,9 +542,49 @@ export function resetProvider(): Promise<void> {
   return shutdownPromise;
 }
 
+/** Shut down the current provider and prevent any new provider from being
+ *  created. After this call, `embed()` throws and `isAvailable()` returns
+ *  false. Test-only: prevents fire-and-forget embeds (queued by other test
+ *  files) from spawning a new worker after cleanup. */
+export function _shutdownAndDisable(): Promise<void> {
+  let shutdownPromise: Promise<void> = Promise.resolve();
+  if (cachedProvider instanceof LocalProvider) {
+    shutdownPromise = cachedProvider.shutdown();
+  }
+  cachedProvider = null; // null (not undefined) → getProvider() returns null, won't create new
+  remoteFallbackLogged = false;
+  return shutdownPromise;
+}
+
+/** Save the current cached provider reference (including the live worker)
+ *  and clear the cache so the next `getProvider()` call creates a fresh one.
+ *  Returns an opaque token that must be passed to `_restoreProvider()` to
+ *  put the original provider back — without this, the worker is orphaned and
+ *  a second ONNX load in the same Bun process will crash.
+ *
+ *  Test-only helper: lets suites temporarily swap in a mock/unavailable
+ *  provider without killing the real worker. */
+export function _saveAndClearProvider(): unknown {
+  const saved = { provider: cachedProvider, remoteFallbackLogged };
+  cachedProvider = undefined;
+  remoteFallbackLogged = false;
+  return saved;
+}
+
+/** Restore a provider previously saved by `_saveAndClearProvider()`. Any
+ *  provider created between save and restore is discarded (callers must
+ *  ensure it's not a LocalProvider with a live worker — those suites only
+ *  use `_markFastembedUnavailable()` so no worker is spawned). */
+export function _restoreProvider(token: unknown): void {
+  const saved = token as { provider: EmbeddingProvider | null | undefined; remoteFallbackLogged: boolean };
+  cachedProvider = saved.provider;
+  remoteFallbackLogged = saved.remoteFallbackLogged;
+}
+
 /** True once we've logged an auto-fallback notice this process — keeps the
  *  one-line warning from spamming on every fire-and-forget embed call. */
 let remoteFallbackLogged = false;
+
 
 /**
  * Build a remote `EmbeddingProvider` from whichever API key is in env.
