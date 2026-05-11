@@ -253,4 +253,65 @@ export type SessionState = {
   lastStopReason?: string;
   /** Total input tokens from the last completed turn (for headroom calculation). */
   lastInputTokens?: number;
+
+  // --- Cache warming ---
+
+  /** Consecutive turns where stop_reason was "end_turn" and the response
+   *  contained no tool_use blocks (text-only replies). Resets to 0 whenever
+   *  a tool_use turn occurs. Used to dampen the survival estimate — multiple
+   *  text-only replies suggest the model is done working. */
+  consecutiveTextOnlyTurns: number;
+
+  /** Cache warming state for speculative keep-alive pings. */
+  warmup?: WarmupState;
+  /** Per-session survival model (inter-turn gap histogram by time slot). */
+  survivalModel?: SurvivalModel;
+  /** Model name from the last real request (for warming profile resolution). */
+  lastModel?: string;
+  /** Protocol from the last real request (for warming profile resolution). */
+  lastProtocol?: "anthropic" | "openai";
+};
+
+// ---------------------------------------------------------------------------
+// Cache warming types
+// ---------------------------------------------------------------------------
+
+/** Time-of-day slot for survival analysis — captures circadian work patterns. */
+export type TimeSlot = "work" | "evening" | "night";
+
+/** Binned histogram of inter-turn gaps for survival analysis. */
+export type InterTurnHistogram = {
+  /** Count per bin (length = number of bin edges + 1 for overflow). */
+  counts: number[];
+  /** Total observations (sum of counts). */
+  total: number;
+};
+
+/** Per-session survival model with time-slot segmented histograms. */
+export type SurvivalModel = {
+  slots: Record<TimeSlot, InterTurnHistogram>;
+};
+
+/** Per-session cache warming state. */
+export type WarmupState = {
+  /** Timestamp (ms) of the last warmup ping sent. */
+  lastWarmupAt: number;
+  /** Total warmup pings sent in this session. */
+  warmupCount: number;
+  /** Warmups followed by a user return within TTL (confirmed saves). */
+  warmupHits: number;
+  /** Session marked as dead — survival dropped below threshold. Resets on real request. */
+  disabled: boolean;
+  /** User explicitly requested keep-warm via /keep command. Bypasses survival analysis. */
+  forceKeepWarm?: boolean;
+};
+
+/** Result from a warmup request — used for circuit breaker and metrics. */
+export type WarmupResult = {
+  /** Whether the upstream accepted the request (HTTP 2xx). */
+  ok: boolean;
+  /** Cache read tokens from the warmup response (confirms cache was refreshed). */
+  cacheReadTokens: number;
+  /** Cache creation tokens (non-zero means warmup caused a fresh write — bad). */
+  cacheCreationTokens: number;
 };

@@ -264,6 +264,77 @@ async function getPricing(model: string): Promise<ModelPricing> {
  *  - cache_creation_input_tokens: written to prompt cache (1.25× input price)
  *  - output_tokens: generated output (output price)
  */
+// ---------------------------------------------------------------------------
+// Cache warming telemetry
+// ---------------------------------------------------------------------------
+
+import type { SessionState, WarmupResult } from "./translate/types";
+
+/**
+ * Emit metrics for a cache warmup attempt.
+ *
+ * Tracks warmup sent/hit/miss counts and estimated cost/savings for
+ * ROI analysis. All metrics are tagged by model and TTL.
+ */
+export function emitWarmupMetric(
+  state: SessionState,
+  result: WarmupResult,
+): void {
+  if (!Sentry.isInitialized()) return;
+
+  const model = state.lastModel ?? "unknown";
+  const ttl = state.resolvedConversationTTL ?? "5m";
+  const attrs = { model, ttl };
+
+  // Count every warmup sent
+  Sentry.metrics.count("lore.cache_warmup.sent", 1, { attributes: attrs });
+
+  if (result.ok && result.cacheReadTokens > 0 && result.cacheCreationTokens === 0) {
+    // Pure cache refresh — ideal outcome
+    Sentry.metrics.count("lore.cache_warmup.refresh", 1, { attributes: attrs });
+  } else if (result.ok && result.cacheCreationTokens > 0 && result.cacheReadTokens === 0) {
+    // Uncached warmup — circuit breaker material
+    Sentry.metrics.count("lore.cache_warmup.uncached", 1, { attributes: attrs });
+  }
+
+  // Emit warmup cost as a distribution (fire-and-forget)
+  if (result.ok) {
+    getPricing(model).then((pricing) => {
+      const readCost = (result.cacheReadTokens / 1_000_000) * pricing.cache_read;
+      const writeCost = (result.cacheCreationTokens / 1_000_000) * pricing.cache_write;
+      Sentry.metrics.distribution("lore.cache_warmup.cost_usd", readCost + writeCost, {
+        attributes: attrs,
+        unit: "dollar",
+      });
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Emit a metric when a user returns after a warmup (confirmed save).
+ */
+export function emitWarmupHitMetric(
+  model: string,
+  ttl: string,
+): void {
+  if (!Sentry.isInitialized()) return;
+  Sentry.metrics.count("lore.cache_warmup.hit", 1, {
+    attributes: { model, ttl },
+  });
+}
+
+/**
+ * Emit a metric when the circuit breaker trips.
+ */
+export function emitWarmupCircuitBreakerMetric(): void {
+  if (!Sentry.isInitialized()) return;
+  Sentry.metrics.count("lore.cache_warmup.circuit_breaker_tripped", 1, {});
+}
+
+// ---------------------------------------------------------------------------
+// LLM cost estimation
+// ---------------------------------------------------------------------------
+
 export function emitCostMetric(
   model: string,
   usage: AnthropicUsage,

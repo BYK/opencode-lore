@@ -104,14 +104,21 @@ import { captureBillingPrefix, hasBillingHeader, resignBody } from "./cch";
 import { detectClientType } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
+  resolveTimeSlot,
+  recordGap,
+  getSessionHistogram,
+  recordGlobalGap,
+} from "./cache-warmer";
+import {
    setSentryRequestContext,
    setSentryCacheContext,
    setSentryLightContext,
    setGenAiUsageAttributes,
    setCacheAnalyticsAttributes,
-   emitCostMetric,
-   emitCacheBustMetric,
-   type AnthropicUsage,
+    emitCostMetric,
+    emitCacheBustMetric,
+    emitWarmupHitMetric,
+    type AnthropicUsage,
 } from "./sentry";
 import {
   RECALL_GATEWAY_TOOL,
@@ -431,6 +438,7 @@ function getOrCreateSession(
       lastRequestTime: Date.now(),
       messageCount: 0,
       turnsSinceCuration: 0,
+      consecutiveTextOnlyTurns: 0,
       recallStore: new Map(),
       cacheAnalytics: {
         lastRequestBody: null,
@@ -1217,6 +1225,15 @@ function postResponse(
       // Update session state
       sessionState.turnsSinceCuration =
         (sessionState.turnsSinceCuration ?? 0) + 1;
+
+      // --- Track consecutive text-only end_turn responses (session-end heuristic) ---
+      const hasToolUse = resp.content.some((b) => b.type === "tool_use");
+      if (resp.stopReason === "end_turn" && !hasToolUse) {
+        sessionState.consecutiveTextOnlyTurns =
+          (sessionState.consecutiveTextOnlyTurns ?? 0) + 1;
+      } else {
+        sessionState.consecutiveTextOnlyTurns = 0;
+      }
     }
 
     // --- Output tracking for dynamic max_tokens sizing ---
@@ -1241,6 +1258,44 @@ function postResponse(
                   outputTokens * EMA_ALPHA,
               );
       }
+    }
+
+    // --- Cache warming: record inter-turn gap + track warmup hits ---
+    const now = Date.now();
+    if (sessionState.lastRequestTime > 0) {
+      const gap = now - sessionState.lastRequestTime;
+      const slot = resolveTimeSlot(new Date(now));
+      recordGap(getSessionHistogram(sessionState, slot), gap);
+      recordGlobalGap(sessionState.projectPath, slot, gap);
+
+      // Track warmup hit: user returned after we warmed the cache
+      if (sessionState.warmup?.lastWarmupAt) {
+        const ttlMs = sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
+        const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
+        if (sinceWarmup < ttlMs) {
+          sessionState.warmup.warmupHits++;
+          emitWarmupHitMetric(
+            sessionState.lastModel ?? req.model,
+            sessionState.resolvedConversationTTL ?? "5m",
+          );
+          log.info(
+            `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
+              `user returned ${(sinceWarmup / 1000).toFixed(0)}s after warmup`,
+          );
+        }
+      }
+    }
+    // Track model/protocol for warmup profile resolution
+    sessionState.lastModel = req.model;
+    sessionState.lastProtocol =
+      resolveUpstreamRoute(req.model)?.protocol ?? "anthropic";
+
+    // Reset dead flag if session was marked dead but user returned
+    if (sessionState.warmup?.disabled) {
+      sessionState.warmup.disabled = false;
+      log.info(
+        `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
+      );
     }
 
     // --- Schedule background work (fire-and-forget) ---
@@ -2126,6 +2181,114 @@ export function removeOrphanedToolResults(
 }
 
 // ---------------------------------------------------------------------------
+// Slash command interception (/done, /keep)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the text of the last user message, trimmed and lowercased.
+ * Returns empty string if no user message found.
+ */
+function lastUserTextTrimmed(req: GatewayRequest): string {
+  for (let i = req.messages.length - 1; i >= 0; i--) {
+    const msg = req.messages[i];
+    if (msg.role !== "user") continue;
+    const text = msg.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { type: "text"; text: string }).text)
+      .join("\n")
+      .trim();
+    return text;
+  }
+  return "";
+}
+
+/**
+ * Check if the last user message is a warmup slash command.
+ *
+ * `/done` — disables cache warming for this session (user is finished).
+ * `/keep` — forces cache warming regardless of survival analysis.
+ *
+ * Returns a synthetic Anthropic-format response if a command was matched,
+ * or null to continue normal processing.
+ */
+function handleWarmupSlashCommand(
+  req: GatewayRequest,
+  allSessions: Map<string, SessionState>,
+): Response | null {
+  const text = lastUserTextTrimmed(req);
+  const lower = text.toLowerCase();
+
+  const isDone = lower === "/done";
+  const isKeep = lower === "/keep" || lower === "/keep-warm";
+  if (!isDone && !isKeep) return null;
+
+  // Find the session for this request (use the same header-based lookup)
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  let state: SessionState | undefined;
+  if (known) {
+    const indexKey = `${known.headerName}:${known.sessionId}`;
+    const sid = headerSessionIndex.get(indexKey);
+    if (sid) state = allSessions.get(sid);
+  }
+
+  // Update session warmup state
+  if (state) {
+    if (!state.warmup) {
+      state.warmup = { lastWarmupAt: 0, warmupCount: 0, warmupHits: 0, disabled: isDone };
+    } else {
+      state.warmup.disabled = isDone;
+    }
+    if (isKeep) state.warmup.forceKeepWarm = true;
+    log.info(
+      `cache-warmer: ${lower} received for session=${state.sessionID.slice(0, 16)} — ` +
+        `warming ${isDone ? "disabled" : "forced"}`,
+    );
+  }
+
+  const responseText = isDone ? "🧊 Freezing session." : "🔥 Keeping cache warm.";
+
+  const msgId = `msg_lore_${Date.now()}`;
+
+  // Return SSE stream when the client expects streaming (OpenCode, Claude Code)
+  if (req.stream) {
+    const sseBody = buildSSETextResponse(msgId, req.model, responseText, {
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+    return new Response(sseBody, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      },
+    });
+  }
+
+  // Non-streaming: plain JSON
+  const body = JSON.stringify({
+    id: msgId,
+    type: "message",
+    role: "assistant",
+    content: [{ type: "text", text: responseText }],
+    model: req.model,
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    },
+  });
+
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Error response builder
 // ---------------------------------------------------------------------------
 
@@ -2175,6 +2338,10 @@ export async function handleRequest(
       const sid = headerSessionIndex.get(indexKey);
       if (sid) priorState = sessions.get(sid);
     }
+
+    // --- Case 0: Slash command interception (/done, /keep) ---
+    const slashResult = handleWarmupSlashCommand(req, sessions);
+    if (slashResult) return slashResult;
 
     // --- Case 1: Compaction request → intercept ---
     // Structural detection (session-aware) first, pattern matching as fallback.

@@ -5,6 +5,10 @@
  * `session.idle` event), it uses a timer-based approach to detect when
  * sessions go idle and trigger background work (distillation, curation,
  * pruning, AGENTS.md export, etc.).
+ *
+ * Also runs speculative cache warming checks on every 30s tick — separate
+ * from idle work (which triggers after idleTimeoutSeconds). Warming needs
+ * to fire ~45s before cache TTL expiry, not after the idle timeout.
  */
 
 import { join } from "node:path";
@@ -24,6 +28,17 @@ import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
 import { getWorkerModel } from "./worker-model";
+import {
+  isCircuitBreakerTripped,
+  resolveProfile,
+  resolveTimeSlot,
+  blendedHistogramForSession,
+  shouldWarm,
+  executeWarmup,
+  loadGlobalHistograms,
+  flushGlobalHistograms,
+} from "./cache-warmer";
+import { emitWarmupMetric } from "./sentry";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -46,11 +61,13 @@ export function startIdleScheduler(
   doIdleWork: (sessionID: string, state: SessionState) => Promise<void>,
 ): () => void {
   const inProgress = new Set<string>();
+  const warmupInProgress = new Set<string>();
 
   const timer = setInterval(() => {
     const now = Date.now();
     const timeoutMs = config.idleTimeoutSeconds * 1000;
 
+    // --- Idle work (distillation, curation, etc.) ---
     for (const [sessionID, state] of sessions) {
       if (inProgress.has(sessionID)) continue;
       if (now - state.lastRequestTime < timeoutMs) continue;
@@ -59,6 +76,43 @@ export function startIdleScheduler(
       doIdleWork(sessionID, state)
         .catch((e) => log.error(`idle work failed for session ${sessionID}:`, e))
         .finally(() => inProgress.delete(sessionID));
+    }
+
+    // --- Cache warming (separate from idle work — fires before TTL expiry) ---
+    if (isCircuitBreakerTripped()) return;
+
+    for (const [sessionID, state] of sessions) {
+      if (warmupInProgress.has(sessionID)) continue;
+
+      // Ensure global histograms are loaded from SQLite for this project
+      loadGlobalHistograms(state.projectPath);
+
+      const profile = resolveProfile(
+        state.lastModel,
+        state.lastProtocol,
+        state.resolvedConversationTTL,
+      );
+      if (!profile) continue;
+
+      const slot = resolveTimeSlot(new Date(now));
+      const blendedHist = blendedHistogramForSession(state, slot);
+      if (!shouldWarm(state, profile, blendedHist, now)) continue;
+
+      warmupInProgress.add(sessionID);
+      executeWarmup(state, profile)
+        .then((result) => emitWarmupMetric(state, result))
+        .catch((e) =>
+          log.error(`cache-warmer: warmup failed session=${sessionID.slice(0, 16)}:`, e),
+        )
+        .finally(() => warmupInProgress.delete(sessionID));
+    }
+
+    // Flush dirty global histograms to SQLite (debounced — runs at most
+    // once per 30s poll tick, not on every recordGap call).
+    try {
+      flushGlobalHistograms();
+    } catch (e) {
+      log.warn("cache-warmer: histogram flush error:", e);
     }
   }, POLL_INTERVAL_MS);
 
