@@ -15,6 +15,7 @@ import {
   emitCostMetric,
   type AnthropicUsage,
 } from "./sentry";
+import { recordWorkerCost } from "./cost-tracker";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -258,6 +259,7 @@ export function createGatewayLLMClient(
                 if (data.usage) {
                   setGenAiUsageAttributes(span, data.usage, data.model);
                   emitCostMetric(model.modelID, data.usage, "direct");
+                  recordWorkerCost(opts?.sessionID, model.modelID, data.usage, "direct", opts?.workerID);
                 }
 
                 // Enrich span with retry metadata on eventual success

@@ -369,3 +369,64 @@ export function emitCostMetric(
     // Silently ignore — cost metrics are best-effort, not critical path.
   });
 }
+
+// ---------------------------------------------------------------------------
+// Session-level cost/savings aggregates
+// ---------------------------------------------------------------------------
+
+import {
+  getSessionCosts,
+  totalActualCost,
+  totalWorkerCost,
+  totalSavings,
+} from "./cost-tracker";
+
+/**
+ * Emit session-level cost and savings metrics to Sentry.
+ *
+ * Called when a session goes idle (natural "session over" signal) and
+ * captures the accumulated cost intelligence for alerting and dashboards.
+ */
+export function emitSessionCostMetrics(sessionID: string): void {
+  if (!Sentry.isInitialized()) return;
+
+  const costs = getSessionCosts(sessionID);
+  if (!costs || costs.conversation.turns === 0) return;
+
+  const actual = totalActualCost(costs);
+  const worker = totalWorkerCost(costs);
+  const saved = totalSavings(costs);
+  const savingsPct = actual + saved > 0
+    ? (saved / (actual + saved)) * 100
+    : 0;
+
+  Sentry.metrics.distribution("lore.session_cost_usd", actual, {
+    unit: "dollar",
+  });
+
+  Sentry.metrics.distribution("lore.session_worker_cost_usd", worker, {
+    unit: "dollar",
+  });
+
+  Sentry.metrics.distribution("lore.session_savings_usd", saved, {
+    unit: "dollar",
+  });
+
+  Sentry.metrics.gauge("lore.session_savings_pct", savingsPct, {
+    unit: "percent",
+  });
+
+  // Emit counterfactual breakdown
+  if (costs.counterfactual.avoidedCompactions > 0) {
+    Sentry.metrics.distribution(
+      "lore.session_avoided_compactions",
+      costs.counterfactual.avoidedCompactions,
+    );
+  }
+
+  if (costs.batchSavings > 0) {
+    Sentry.metrics.distribution("lore.session_batch_savings_usd", costs.batchSavings, {
+      unit: "dollar",
+    });
+  }
+}

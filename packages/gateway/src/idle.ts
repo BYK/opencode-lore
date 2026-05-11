@@ -38,7 +38,7 @@ import {
   loadGlobalHistograms,
   flushGlobalHistograms,
 } from "./cache-warmer";
-import { emitWarmupMetric } from "./sentry";
+import { emitWarmupMetric, emitSessionCostMetrics } from "./sentry";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -268,5 +268,8 @@ export function buildIdleWorkHandler(
     } catch (e) {
       log.error("idle lat-reader refresh error:", e);
     }
+
+    // 8. Emit session cost/savings metrics to Sentry
+    emitSessionCostMetrics(sessionID);
   };
 }

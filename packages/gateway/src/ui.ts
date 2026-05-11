@@ -16,6 +16,16 @@ import {
   renderMarkdown,
   type TaggedResult,
 } from "@loreai/core";
+import {
+  computeHistoricalEstimates,
+  getSessionCosts,
+  getAllSessionCosts,
+  totalActualCost,
+  totalWorkerCost,
+  totalSavings,
+  costWithoutLore,
+  type SessionCosts,
+} from "./cost-tracker";
 
 // ---------------------------------------------------------------------------
 // HTML template helpers
@@ -55,6 +65,100 @@ function formatBytes(bytes: number): string {
 /** Render markdown to HTML, wrapped in a scoped container. */
 function md(markdown: string): string {
   return `<div class="md">${renderMarkdown(markdown)}</div>`;
+}
+
+function formatUSD(amount: number): string {
+  if (amount === 0) return "$0.00";
+  if (Math.abs(amount) < 0.01) return `$${amount.toFixed(4)}`;
+  return `$${amount.toFixed(2)}`;
+}
+
+function formatTokens(count: number): string {
+  if (count < 1_000) return String(count);
+  if (count < 1_000_000) return `${(count / 1_000).toFixed(1)}K`;
+  return `${(count / 1_000_000).toFixed(2)}M`;
+}
+
+function renderCostSummary(sessionId: string): string {
+  const costs = getSessionCosts(sessionId);
+  if (!costs || costs.conversation.turns === 0) return "";
+
+  const actual = totalActualCost(costs);
+  const workerCost = totalWorkerCost(costs);
+  const savings = totalSavings(costs);
+  const withoutLore = costWithoutLore(costs);
+
+  const totalInput = costs.conversation.inputTokens +
+    costs.conversation.cacheReadTokens +
+    costs.conversation.cacheWriteTokens;
+  const cacheHitRate = totalInput > 0
+    ? (costs.conversation.cacheReadTokens / totalInput * 100).toFixed(0)
+    : "0";
+
+  const savingsPct = withoutLore > 0
+    ? (savings / withoutLore * 100).toFixed(0)
+    : "0";
+
+  let html = `<div class="card" style="margin-bottom:1.5em">
+    <h2 style="margin-top:0">Cost Intelligence</h2>
+    <table class="cost-table">
+      <tr class="section-header"><td colspan="2"><strong>Your Spend</strong></td></tr>
+      <tr>
+        <td>Conversation</td>
+        <td>${formatUSD(costs.conversation.cost)}
+          <span style="color:var(--fg3);font-size:0.85em">(${formatTokens(totalInput)} in, ${formatTokens(costs.conversation.outputTokens)} out, ${cacheHitRate}% cache hit)</span></td>
+      </tr>`;
+
+  if (workerCost > 0) {
+    html += `<tr>
+        <td>+ Lore overhead</td>
+        <td>${formatUSD(workerCost)}`;
+    const parts: string[] = [];
+    if (costs.workers.distillation.cost > 0) parts.push(`distill: ${formatUSD(costs.workers.distillation.cost)}`);
+    if (costs.workers.curation.cost > 0) parts.push(`curate: ${formatUSD(costs.workers.curation.cost)}`);
+    if (costs.workers.compaction.cost > 0) parts.push(`compact: ${formatUSD(costs.workers.compaction.cost)}`);
+    if (costs.workers.warmup.cost > 0) parts.push(`warmup: ${formatUSD(costs.workers.warmup.cost)}`);
+    if (costs.workers.recall.cost > 0) parts.push(`recall: ${formatUSD(costs.workers.recall.cost)}`);
+    if (parts.length) html += ` <span style="color:var(--fg3);font-size:0.85em">(${parts.join(", ")})</span>`;
+    html += `</td></tr>`;
+  }
+
+  html += `<tr style="border-top:1px solid var(--border)">
+        <td><strong>Total</strong></td>
+        <td><strong>${formatUSD(actual)}</strong></td>
+      </tr>`;
+
+  // Counterfactual section
+  if (withoutLore > actual) {
+    html += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Without Lore (estimated)</strong></td></tr>
+      <tr>
+        <td>Estimated total</td>
+        <td>${formatUSD(withoutLore)}</td>
+      </tr>`;
+  }
+
+  // Savings breakdown
+  const hasSavings = savings > 0;
+  if (hasSavings) {
+    html += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Savings: ${formatUSD(savings)} (${savingsPct}%)</strong></td></tr>`;
+    if (costs.counterfactual.warmupSavings > 0) {
+      html += `<tr><td>Cache warming</td><td>${formatUSD(costs.counterfactual.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${costs.counterfactual.warmupHits} hits)</span></td></tr>`;
+    }
+    if (costs.counterfactual.ttlSavings > 0) {
+      html += `<tr><td>1h TTL</td><td>${formatUSD(costs.counterfactual.ttlSavings)} <span style="color:var(--fg3);font-size:0.85em">(${costs.counterfactual.ttlHits} turns with &gt;5m gaps)</span></td></tr>`;
+    }
+    if (costs.batchSavings > 0) {
+      html += `<tr><td>Batch API</td><td>${formatUSD(costs.batchSavings)}</td></tr>`;
+    }
+    if (costs.counterfactual.avoidedCompactionCost > 0) {
+      html += `<tr><td>Avoided compactions</td><td>${formatUSD(costs.counterfactual.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${costs.counterfactual.avoidedCompactions} compactions)</span></td></tr>`;
+    }
+  } else if (savings < 0) {
+    html += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em;color:#e06c75"><strong>Net overhead: ${formatUSD(-savings)}</strong> (Lore overhead exceeds savings this session)</td></tr>`;
+  }
+
+  html += `</table></div>`;
+  return html;
 }
 
 function truncate(str: string, max: number): string {
@@ -138,6 +242,8 @@ form.inline { display: inline; }
 .msg { padding: 8px 12px; margin: 4px 0; border-radius: var(--radius); font-size: 0.85em; font-family: var(--mono); }
 .msg-user { background: var(--bg2); border-left: 3px solid var(--accent); }
 .msg-assistant { background: var(--bg2); border-left: 3px solid #10b981; }
+.cost-table td { padding: 4px 10px; font-size: 0.9em; }
+.cost-table .section-header td { padding-top: 0.6em; }
 .actions { margin: 16px 0; display: flex; gap: 8px; }
 .empty { color: var(--fg3); font-style: italic; padding: 24px 0; text-align: center; }
 .md { font-size: 0.9em; line-height: 1.6; overflow-wrap: break-word; }
@@ -173,6 +279,7 @@ function layout(title: string, body: string): string {
   <span class="brand">Lore</span>
   <a href="/ui">Dashboard</a>
   <a href="/ui/search">Search</a>
+  <a href="/ui/costs">Costs</a>
 </nav>
 <div class="container">
 ${body}
@@ -228,6 +335,16 @@ function pageDashboard(): string {
   const stats = data.globalStats();
 
   let body = `<h1>Dashboard</h1>`;
+  // Aggregate cost stats across all tracked sessions
+  const allCosts = getAllSessionCosts();
+  let totalSpend = 0;
+  let totalSaved = 0;
+  for (const [, c] of allCosts) {
+    totalSpend += totalActualCost(c);
+    const s = totalSavings(c);
+    if (s > 0) totalSaved += s;
+  }
+
   body += `<div class="stats">
     <div class="stat"><div class="label">Projects</div><div class="value">${stats.project_count}</div></div>
     <div class="stat"><div class="label">Knowledge</div><div class="value">${stats.knowledge_count}</div></div>
@@ -235,6 +352,8 @@ function pageDashboard(): string {
     <div class="stat"><div class="label">Messages</div><div class="value">${stats.message_count}</div></div>
     <div class="stat"><div class="label">Distillations</div><div class="value">${stats.distillation_count}</div></div>
     <div class="stat"><div class="label">DB Size</div><div class="value">${formatBytes(stats.db_size_bytes)}</div></div>
+    ${allCosts.size > 0 ? `<div class="stat"><div class="label">Session Spend</div><div class="value">${formatUSD(totalSpend)}</div></div>` : ""}
+    ${totalSaved > 0 ? `<div class="stat"><div class="label">Est. Saved</div><div class="value" style="color:#10b981">${formatUSD(totalSaved)}</div></div>` : ""}
   </div>`;
 
   if (!projects.length) {
@@ -403,6 +522,9 @@ function pageSession(pid: string, sessionId: string): string | null {
     body += `<div class="field"><span class="key">Time range:</span> ${formatDate(messages[0].created_at)} &mdash; ${formatDate(messages[messages.length - 1].created_at)}</div>`;
   }
 
+  // Cost intelligence
+  body += renderCostSummary(sessionId);
+
   // Messages
   body += `<h2>Messages (${messages.length})</h2>`;
   for (const msg of messages) {
@@ -556,6 +678,161 @@ async function pageSearch(url: URL): Promise<string> {
   return layout("Search", body);
 }
 
+
+// ---------------------------------------------------------------------------
+// Global Costs page
+// ---------------------------------------------------------------------------
+
+function pageCosts(): string {
+  let body = breadcrumb([
+    { label: "Dashboard", href: "/ui" },
+    { label: "Costs" },
+  ]);
+
+  body += `<h1>Cost Intelligence</h1>`;
+
+  // --- Live session costs ---
+  const allCosts = getAllSessionCosts();
+  let liveTotalSpend = 0;
+  let liveTotalSavings = 0;
+  let liveTotalWithout = 0;
+  let liveTotalWorker = 0;
+  let liveTotalConversation = 0;
+  let liveTotalTurns = 0;
+  let liveBatchSavings = 0;
+  let liveWarmupSavings = 0;
+  let liveTtlSavings = 0;
+  let liveAvoidedCompactions = 0;
+  let liveAvoidedCompactionCost = 0;
+
+  for (const [, c] of allCosts) {
+    liveTotalSpend += totalActualCost(c);
+    const s = totalSavings(c);
+    liveTotalSavings += s;
+    liveTotalWithout += costWithoutLore(c);
+    liveTotalWorker += totalWorkerCost(c);
+    liveTotalConversation += c.conversation.cost;
+    liveTotalTurns += c.conversation.turns;
+    liveBatchSavings += c.batchSavings;
+    liveWarmupSavings += c.counterfactual.warmupSavings;
+    liveTtlSavings += c.counterfactual.ttlSavings;
+    liveAvoidedCompactions += c.counterfactual.avoidedCompactions;
+    liveAvoidedCompactionCost += c.counterfactual.avoidedCompactionCost;
+  }
+
+  // --- Historical (backdated) estimates ---
+  const historical = computeHistoricalEstimates();
+  const hist = historical.totals;
+
+  // --- Combined totals ---
+  const combinedWorkerCost = liveTotalWorker + hist.distillationCost;
+  const combinedAvoidedCompactions = liveAvoidedCompactions + hist.avoidedCompactions;
+  const combinedAvoidedCompactionCost = liveAvoidedCompactionCost + hist.avoidedCompactionCost;
+  // Net savings = counterfactual savings - worker overhead
+  const combinedNetSavings =
+    liveWarmupSavings + liveTtlSavings + liveBatchSavings +
+    combinedAvoidedCompactionCost - combinedWorkerCost;
+
+  // Summary stats
+  body += `<div class="stats">
+    <div class="stat"><div class="label">Live Sessions</div><div class="value">${allCosts.size}</div></div>
+    <div class="stat"><div class="label">Historical Sessions</div><div class="value">${hist.sessionCount}</div></div>
+    <div class="stat"><div class="label">Live Spend</div><div class="value">${formatUSD(liveTotalSpend)}</div></div>
+    <div class="stat"><div class="label">Avoided Compactions</div><div class="value">${combinedAvoidedCompactions}</div></div>
+    ${combinedNetSavings > 0 ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(combinedNetSavings)}</div></div>` : ""}
+    ${combinedNetSavings < 0 ? `<div class="stat"><div class="label">Net Overhead</div><div class="value" style="color:#e06c75">${formatUSD(-combinedNetSavings)}</div></div>` : ""}
+  </div>`;
+
+  // =====================================================
+  // LIVE SESSIONS section
+  // =====================================================
+  body += `<h2>Live Sessions (since gateway start)</h2>`;
+
+  if (allCosts.size === 0) {
+    body += `<p class="empty">No active sessions yet. Cost tracking begins when the first conversation turn is processed.</p>`;
+  } else {
+    body += `<div class="card">
+      <table class="cost-table">
+        <tr class="section-header"><td colspan="2"><strong>Aggregated Spend</strong></td></tr>
+        <tr><td>Conversation</td><td>${formatUSD(liveTotalConversation)} <span style="color:var(--fg3);font-size:0.85em">(${liveTotalTurns} turns)</span></td></tr>
+        <tr><td>+ Lore overhead</td><td>${formatUSD(liveTotalWorker)}</td></tr>
+        <tr style="border-top:1px solid var(--border)"><td><strong>Total</strong></td><td><strong>${formatUSD(liveTotalSpend)}</strong></td></tr>`;
+
+    if (liveTotalSavings !== 0) {
+      body += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Savings Breakdown</strong></td></tr>`;
+      if (liveWarmupSavings > 0) body += `<tr><td>Cache warming</td><td>${formatUSD(liveWarmupSavings)}</td></tr>`;
+      if (liveTtlSavings > 0) body += `<tr><td>1h TTL</td><td>${formatUSD(liveTtlSavings)}</td></tr>`;
+      if (liveBatchSavings > 0) body += `<tr><td>Batch API</td><td>${formatUSD(liveBatchSavings)}</td></tr>`;
+      if (liveAvoidedCompactionCost > 0) body += `<tr><td>Avoided compactions</td><td>${formatUSD(liveAvoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${liveAvoidedCompactions})</span></td></tr>`;
+      body += `<tr style="border-top:1px solid var(--border)"><td><strong>Net savings</strong></td><td><strong style="color:${liveTotalSavings >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(liveTotalSavings)}</strong></td></tr>`;
+    }
+    body += `</table></div>`;
+
+    // Per-session table
+    body += `<h3>Per Session</h3><table>
+      <tr><th>Session</th><th>Turns</th><th>Conversation</th><th>Worker</th><th>Total</th><th>Savings</th></tr>`;
+    for (const [sid, c] of allCosts) {
+      const actual = totalActualCost(c);
+      const saved = totalSavings(c);
+      body += `<tr>
+        <td><code>${esc(sid.slice(0, 16))}</code></td>
+        <td>${c.conversation.turns}</td>
+        <td>${formatUSD(c.conversation.cost)}</td>
+        <td>${formatUSD(totalWorkerCost(c))}</td>
+        <td>${formatUSD(actual)}</td>
+        <td style="color:${saved >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(saved)}</td>
+      </tr>`;
+    }
+    body += `</table>`;
+  }
+
+  // =====================================================
+  // HISTORICAL (BACKDATED) section
+  // =====================================================
+  body += `<h2>Historical Estimates (from stored data)</h2>`;
+  body += `<p style="color:var(--fg3);font-size:0.9em">
+    Estimated from ${hist.messageCount.toLocaleString()} stored messages across ${hist.sessionCount} sessions.
+    Distillation overhead and avoided compactions can be estimated from stored data.
+    Cache warming, 1h TTL, and batch API savings require live request data and are <strong>only tracked for live sessions</strong>.
+  </p>`;
+
+  if (hist.sessionCount === 0) {
+    body += `<p class="empty">No historical sessions found in the database.</p>`;
+  } else {
+    body += `<div class="card">
+      <table class="cost-table">
+        <tr class="section-header"><td colspan="2"><strong>Estimated Lore Overhead</strong></td></tr>
+        <tr><td>Distillation calls</td><td>${formatUSD(hist.distillationCost)} <span style="color:var(--fg3);font-size:0.85em">(${hist.distillationCalls} calls)</span></td></tr>
+        <tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Estimated Savings</strong></td></tr>
+        <tr><td>Avoided compactions</td><td>${formatUSD(hist.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${hist.avoidedCompactions})</span></td></tr>
+        <tr style="border-top:1px solid var(--border)"><td><strong>Net estimated savings</strong></td><td><strong style="color:${hist.avoidedCompactionCost - hist.distillationCost >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(hist.avoidedCompactionCost - hist.distillationCost)}</strong></td></tr>
+      </table>
+    </div>`;
+
+    // Per-session historical table (top 50)
+    const displayed = historical.sessions.slice(0, 50);
+    body += `<h3>Per Session (top ${displayed.length} by recency)</h3><table>
+      <tr><th>Project</th><th>Session</th><th>Messages</th><th>Model</th><th>Distill Cost</th><th>Avoided Compactions</th><th>Last Active</th></tr>`;
+    for (const s of displayed) {
+      body += `<tr>
+        <td><a href="/ui/projects/${esc(s.projectId)}">${esc(s.projectName ?? "(unnamed)")}</a></td>
+        <td><a href="/ui/sessions/${esc(s.projectId)}/${esc(s.sessionId)}"><code>${esc(s.sessionId.slice(0, 12))}</code></a></td>
+        <td>${s.messageCount}</td>
+        <td style="font-size:0.85em">${esc(s.model.replace("claude-", "").slice(0, 20))}</td>
+        <td>${formatUSD(s.distillationCost)}</td>
+        <td>${s.avoidedCompactions > 0 ? `${s.avoidedCompactions} (${formatUSD(s.avoidedCompactionCost)})` : "-"}</td>
+        <td>${timeAgo(s.lastMessage)}</td>
+      </tr>`;
+    }
+    body += `</table>`;
+    if (historical.sessions.length > 50) {
+      body += `<p style="color:var(--fg3);font-size:0.85em">Showing 50 of ${historical.sessions.length} sessions.</p>`;
+    }
+  }
+
+  return layout("Costs", body);
+}
+
 // ---------------------------------------------------------------------------
 // Route matching helpers
 // ---------------------------------------------------------------------------
@@ -634,6 +911,11 @@ export async function handleUIRequest(
       return html
         ? htmlResponse(html)
         : htmlResponse(layout("Not Found", `<h1>Distillation not found</h1>`), 404);
+    }
+
+    // Costs
+    if (pathname === "/ui/costs") {
+      return htmlResponse(pageCosts());
     }
 
     // Search

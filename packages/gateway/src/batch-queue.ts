@@ -27,6 +27,7 @@ import {
   emitCostMetric,
   type AnthropicUsage,
 } from "./sentry";
+import { recordWorkerCost } from "./cost-tracker";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,6 +56,8 @@ interface PendingRequest {
   auth: AuthCredential;
   /** Session ID for billing header injection on fallback to individual requests. */
   sessionID?: string;
+  /** Worker ID for cost attribution (e.g. "lore-distill", "lore-curator"). */
+  workerID?: string;
 }
 
 /** A batch that has been submitted and is being polled for results. */
@@ -414,6 +417,7 @@ export function createBatchLLMClient(
                   },
                 );
                 emitCostMetric(pending.params.model, msg.usage, "batch");
+                recordWorkerCost(pending.sessionID, pending.params.model, msg.usage, "batch", pending.workerID);
               }
 
               pending.resolve(textBlock?.text ?? null);
@@ -560,6 +564,7 @@ export function createBatchLLMClient(
           enqueuedAt: Date.now(),
           auth: cred,
           sessionID: opts?.sessionID,
+          workerID: opts?.workerID,
         });
       });
 

@@ -121,6 +121,12 @@ import {
     type AnthropicUsage,
 } from "./sentry";
 import {
+  recordConversationCost,
+  updateShadowContext,
+  recordWarmupHit,
+  recordTTLSavings,
+} from "./cost-tracker";
+import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
   executeRecall,
@@ -1134,6 +1140,7 @@ function postResponse(
       cache_creation_input_tokens: resp.usage.cacheCreationInputTokens,
     };
     emitCostMetric(resp.model, usageForSentry, "conversation");
+    recordConversationCost(sessionID, resp.model, usageForSentry);
     if (genAiSpan) {
       setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
     }
@@ -1278,10 +1285,25 @@ function postResponse(
             sessionState.lastModel ?? req.model,
             sessionState.resolvedConversationTTL ?? "5m",
           );
+          // Record counterfactual savings: without warming, these cache
+          // reads would have been full cache writes.
+          const cacheRead = resp.usage.cacheReadInputTokens ?? 0;
+          if (cacheRead > 0) {
+            recordWarmupHit(sessionID, req.model, cacheRead);
+          }
           log.info(
             `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
               `user returned ${(sinceWarmup / 1000).toFixed(0)}s after warmup`,
           );
+        }
+      }
+
+      // Track 1h TTL savings: if gap > 5m but we still got cache reads,
+      // the 1h TTL saved a full cache write.
+      if (gap > 300_000) {
+        const cacheRead = resp.usage.cacheReadInputTokens ?? 0;
+        if (cacheRead > 0) {
+          recordTTLSavings(sessionID, req.model, cacheRead);
         }
       }
     }
@@ -1296,6 +1318,14 @@ function postResponse(
       log.info(
         `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
       );
+    }
+
+    // --- Shadow context tracking for counterfactual compaction estimation ---
+    // Track how large the context *would* be without Lore's distillation
+    // compressing it. When the shadow counter crosses the auto-compact
+    // threshold, record a counterfactual compaction event.
+    if (!isSubagentTurn) {
+      updateShadowContext(sessionID, actualInput, getWorkerModel()?.modelID ?? "unknown", req.model);
     }
 
     // --- Schedule background work (fire-and-forget) ---

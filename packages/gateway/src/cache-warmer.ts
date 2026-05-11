@@ -37,6 +37,7 @@ import { resolveAuth, authHeaders } from "./auth";
 import { resignBody } from "./cch";
 import { resolveUpstreamRoute } from "./config";
 import { getModelEntrySync } from "./worker-model";
+import { recordWarmupCost } from "./cost-tracker";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -685,6 +686,14 @@ export async function executeWarmup(
           `cost=${costStr} — warmup body may not match cached prefix`,
       );
     }
+
+    // Accumulate warmup cost for the session
+    recordWarmupCost(
+      state.sessionID,
+      state.lastModel ?? "unknown",
+      cacheReadTokens,
+      cacheCreationTokens,
+    );
 
     // Update session warmup state
     if (!state.warmup) {

@@ -1116,7 +1116,7 @@ function buildPrefixMessages(formatted: string): MessageWithParts[] {
           sessionID: "",
           messageID: "lore-distilled-assistant",
           type: "text" as const,
-          text: formatted + "\n\nI'm ready to continue.",
+          text: formatted,
           time: { start: 0, end: 0 },
         },
       ],

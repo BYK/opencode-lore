@@ -28,8 +28,8 @@ describe("COMPACT_SUMMARY_TEMPLATE", () => {
     }
   });
 
-  test("instructs the model to close with 'I'm ready to continue.'", () => {
-    expect(COMPACT_SUMMARY_TEMPLATE).toContain("I'm ready to continue.");
+  test("does NOT include 'I'm ready to continue.' (prevents model echoing)", () => {
+    expect(COMPACT_SUMMARY_TEMPLATE).not.toContain("I'm ready to continue.");
   });
 
   test("sections appear in the upstream-canonical order", () => {

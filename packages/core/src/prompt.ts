@@ -446,8 +446,7 @@ Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
 - Preserve exact file paths, commands, error strings, and identifiers when known.
-- Do not mention the summary process or that context was compacted.
-- End with "I'm ready to continue." on its own line after the closing "---".`;
+- Do not mention the summary process or that context was compacted.`;
 
 // Build the user-facing prompt passed to the compaction agent during /compact.
 // Lore injects pre-computed distillations as context separately; this prompt

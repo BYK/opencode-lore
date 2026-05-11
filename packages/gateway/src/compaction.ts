@@ -86,7 +86,7 @@ function estimateTokens(text: string): number {
  * so the client's "X% until auto-compact" UI grows naturally but never
  * triggers the compaction.
  */
-const AUTOCOMPACT_THRESHOLD = 167_000;
+export const AUTOCOMPACT_THRESHOLD = 167_000;
 const TARGET_RATIO = 0.9;
 const MAX_REPORTED_USAGE = Math.floor(AUTOCOMPACT_THRESHOLD * TARGET_RATIO);
 
