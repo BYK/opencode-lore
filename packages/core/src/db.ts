@@ -462,6 +462,18 @@ export function db(): Database {
     mkdirSync(dirname(envPath), { recursive: true });
     path = envPath;
   } else {
+    // Guard: refuse to open the production DB during test runs.
+    // The test preload (setup.ts) sets LORE_DB_PATH to a temp directory.
+    // If we reach here with NODE_ENV=test, the preload didn't fire
+    // (e.g. bun test invoked from outside the repo). Throw instead of
+    // silently writing test fixtures into the user's live database.
+    if (process.env.NODE_ENV === "test") {
+      throw new Error(
+        "LORE_DB_PATH is not set but NODE_ENV=test. " +
+          "Run tests via `bun test` from the repo root, or set " +
+          "LORE_DB_PATH to a temp path to avoid polluting the production DB.",
+      );
+    }
     const dir = dataDir();
     mkdirSync(dir, { recursive: true });
     path = join(dir, "lore.db");
