@@ -59,6 +59,7 @@ import {
 } from "./session";
 import {
   isCompactionRequest,
+  detectCompactionRequest,
   isStructuralCompaction,
   isTitleOrSummaryRequest,
   extractPreviousSummary,
@@ -2381,11 +2382,39 @@ export async function handleRequest(
 
     // --- Case 1: Compaction request → intercept ---
     // Structural detection (session-aware) first, pattern matching as fallback.
-    if (
-      isStructuralCompaction(req, priorState) ||
-      isCompactionRequest(req)
-    ) {
+    //
+    // IMPORTANT: structural detection catches post-compaction autocontinue turns
+    // (OpenCode already compacted internally, now sends ~3 messages to continue).
+    // For subagent sessions, intercepting these is fatal: the gateway returns a
+    // compaction summary which becomes the subagent's task_result and leaks into
+    // the parent session.  Structural detection is skipped for subagents.
+    //
+    // Pattern-detected compaction (system prompt / user keywords / template) IS
+    // a real compaction request from OpenCode.  Intercepting with our
+    // distillation-based summary is cheaper than an upstream model call and works
+    // correctly for both main and subagent sessions (the summary flows into
+    // OpenCode's compaction processor, not directly as task_result).
+    const isSubagent = extractParentSessionId(req.rawHeaders) != null;
+    const structuralCompaction = !isSubagent && isStructuralCompaction(req, priorState);
+    const patternDetection = structuralCompaction ? undefined : detectCompactionRequest(req);
+    if (structuralCompaction || patternDetection?.detected) {
+      const reason = structuralCompaction
+        ? `structural (prior=${priorState?.messageCount ?? "?"} curr=${req.messages.length})`
+        : patternDetection?.detected
+          ? patternDetection.reason === "system-prompt"
+            ? `pattern: system-prompt match "${patternDetection.pattern}"`
+            : patternDetection.reason === "user-keywords"
+              ? `pattern: user-keyword match "${patternDetection.pattern}"`
+              : `pattern: template-sections (${patternDetection.matchCount} matches)`
+          : "unknown";
+      log.info(`compaction detected: ${reason} messages=${req.messages.length} tools=${req.tools.length}`);
       return await handleCompaction(req, config);
+    }
+    if (isSubagent && isStructuralCompaction(req, priorState)) {
+      log.info(
+        `structural compaction skipped for subagent: prior=${priorState?.messageCount ?? "?"} curr=${req.messages.length}`
+        + ` — post-compaction autocontinue, passing through to upstream`,
+      );
     }
 
     // --- Case 2: Title/summary request → passthrough ---

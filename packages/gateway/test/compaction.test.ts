@@ -1,6 +1,8 @@
 import { describe, test, expect } from "bun:test";
 import {
   isCompactionRequest,
+  detectCompactionRequest,
+  isStructuralCompaction,
   extractPreviousSummary,
   isTitleOrSummaryRequest,
   buildCompactionResponse,
@@ -444,5 +446,140 @@ describe("buildCompactionResponse", () => {
       "gpt-4o-2024-05-13",
     );
     expect(response.model).toBe("gpt-4o-2024-05-13");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isStructuralCompaction
+// ---------------------------------------------------------------------------
+
+describe("isStructuralCompaction", () => {
+  test("returns false when no prior state", () => {
+    const req = makeRequest({ messages: [userMsg("hello")] });
+    expect(isStructuralCompaction(req, undefined)).toBe(false);
+  });
+
+  test("returns false when prior messageCount <= 10", () => {
+    const req = makeRequest({ messages: [userMsg("hello")] });
+    expect(isStructuralCompaction(req, { messageCount: 10 })).toBe(false);
+    expect(isStructuralCompaction(req, { messageCount: 5 })).toBe(false);
+  });
+
+  test("detects structural compaction: many messages → very few", () => {
+    const req = makeRequest({
+      messages: [userMsg("summary"), assistantMsg("ok"), userMsg("continue")],
+    });
+    expect(isStructuralCompaction(req, { messageCount: 35 })).toBe(true);
+  });
+
+  test("returns false when message count doesn't drop enough", () => {
+    const msgs = Array.from({ length: 15 }, (_, i) =>
+      i % 2 === 0 ? userMsg(`msg ${i}`) : assistantMsg(`reply ${i}`),
+    );
+    const req = makeRequest({ messages: msgs });
+    expect(isStructuralCompaction(req, { messageCount: 20 })).toBe(false);
+  });
+
+  test("returns false when currCount > 3 even with large drop", () => {
+    const req = makeRequest({
+      messages: [
+        userMsg("a"), assistantMsg("b"), userMsg("c"), assistantMsg("d"),
+      ],
+    });
+    expect(isStructuralCompaction(req, { messageCount: 50 })).toBe(false);
+  });
+
+  test("post-compaction autocontinue not re-detected when messageCount updated", () => {
+    const req = makeRequest({
+      messages: [userMsg("summary"), assistantMsg("ok"), userMsg("continue")],
+    });
+    // After handleCompaction updates messageCount to 3:
+    expect(isStructuralCompaction(req, { messageCount: 3 })).toBe(false);
+  });
+
+  test("stale messageCount causes false positive (the bug scenario)", () => {
+    const req = makeRequest({
+      messages: [userMsg("summary"), assistantMsg("ok"), userMsg("continue")],
+    });
+    // Stale count → fires (the bug)
+    expect(isStructuralCompaction(req, { messageCount: 35 })).toBe(true);
+    // Updated count → doesn't fire (the fix)
+    expect(isStructuralCompaction(req, { messageCount: 3 })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectCompactionRequest
+// ---------------------------------------------------------------------------
+
+describe("detectCompactionRequest", () => {
+  test("returns detected:false for normal request", () => {
+    const req = makeRequest({
+      system: "You are a helpful assistant.",
+      tools: [{ name: "bash", description: "Run shell", inputSchema: {} }],
+      messages: [userMsg("What is 2+2?")],
+    });
+    const result = detectCompactionRequest(req);
+    expect(result.detected).toBe(false);
+  });
+
+  test("returns system-prompt reason for system prompt match", () => {
+    const req = makeRequest({
+      system: "You are an anchored context summarization assistant.",
+      messages: [userMsg("Summarize")],
+    });
+    const result = detectCompactionRequest(req);
+    expect(result).toEqual({
+      detected: true,
+      reason: "system-prompt",
+      pattern: COMPACTION_SYSTEM_PATTERNS[0],
+    });
+  });
+
+  test("returns user-keywords reason for user message pattern match", () => {
+    const req = makeRequest({
+      system: "Generic",
+      tools: [],
+      messages: [
+        userMsg("Create an anchored summary from the conversation history above."),
+      ],
+    });
+    const result = detectCompactionRequest(req);
+    expect(result).toEqual({
+      detected: true,
+      reason: "user-keywords",
+      pattern: COMPACTION_USER_PATTERNS[0],
+    });
+  });
+
+  test("returns template-sections reason for template match", () => {
+    const templateContent = [
+      "<template>",
+      "## Goal", "## Progress", "## Key Decisions",
+      "## Next Steps", "## Critical Context", "## Relevant Files",
+      "</template>",
+    ].join("\n");
+    const req = makeRequest({
+      system: "Generic",
+      messages: [userMsg(templateContent)],
+    });
+    const result = detectCompactionRequest(req);
+    expect(result.detected).toBe(true);
+    if (result.detected) {
+      expect(result.reason).toBe("template-sections");
+      expect((result as any).matchCount).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  test("is consistent with isCompactionRequest", () => {
+    const cases = [
+      makeRequest({ system: "anchored context summarization assistant", messages: [userMsg("hi")] }),
+      makeRequest({ system: "Normal", tools: [], messages: [userMsg("<previous-summary>x</previous-summary>")] }),
+      makeRequest({ system: "Normal", tools: [{ name: "t", description: "d", inputSchema: {} }], messages: [userMsg("hello")] }),
+      makeRequest({ messages: [] }),
+    ];
+    for (const req of cases) {
+      expect(detectCompactionRequest(req).detected).toBe(isCompactionRequest(req));
+    }
   });
 });

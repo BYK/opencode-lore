@@ -166,11 +166,24 @@ export function isStructuralCompaction(
  *  3. Last user message has `<template>` tag AND ≥4 template sections → true
  *  4. Otherwise → false
  */
-export function isCompactionRequest(req: GatewayRequest): boolean {
+/** Detection reason returned by `detectCompactionRequest`. */
+export type CompactionDetection =
+  | { detected: false }
+  | { detected: true; reason: "system-prompt"; pattern: string }
+  | { detected: true; reason: "user-keywords"; pattern: string }
+  | { detected: true; reason: "template-sections"; matchCount: number };
+
+/**
+ * Detect whether a request is a compaction request and return the reason.
+ * Used by the pipeline for logging; `isCompactionRequest` is the boolean wrapper.
+ */
+export function detectCompactionRequest(req: GatewayRequest): CompactionDetection {
   // 1. System prompt check — strongest signal, sufficient alone
   const systemLower = req.system.toLowerCase();
   for (const pattern of COMPACTION_SYSTEM_PATTERNS) {
-    if (systemLower.includes(pattern.toLowerCase())) return true;
+    if (systemLower.includes(pattern.toLowerCase())) {
+      return { detected: true, reason: "system-prompt", pattern };
+    }
   }
 
   const userText = lastUserText(req);
@@ -178,7 +191,9 @@ export function isCompactionRequest(req: GatewayRequest): boolean {
   // 2. No tools + user message contains compaction keywords
   if (req.tools.length === 0 && userText) {
     for (const pattern of COMPACTION_USER_PATTERNS) {
-      if (userText.includes(pattern)) return true;
+      if (userText.includes(pattern)) {
+        return { detected: true, reason: "user-keywords", pattern };
+      }
     }
   }
 
@@ -188,10 +203,16 @@ export function isCompactionRequest(req: GatewayRequest): boolean {
     for (const section of COMPACTION_TEMPLATE_SECTIONS) {
       if (userText.includes(section)) matches++;
     }
-    if (matches >= MIN_TEMPLATE_SECTION_MATCHES) return true;
+    if (matches >= MIN_TEMPLATE_SECTION_MATCHES) {
+      return { detected: true, reason: "template-sections", matchCount: matches };
+    }
   }
 
-  return false;
+  return { detected: false };
+}
+
+export function isCompactionRequest(req: GatewayRequest): boolean {
+  return detectCompactionRequest(req).detected;
 }
 
 // ---------------------------------------------------------------------------
