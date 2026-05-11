@@ -23,6 +23,7 @@ import {
   getLastTurnAt,
   exportToFile,
   exportLoreFile,
+  saveSessionCosts,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
@@ -39,6 +40,7 @@ import {
   flushGlobalHistograms,
 } from "./cache-warmer";
 import { emitWarmupMetric, emitSessionCostMetrics } from "./sentry";
+import { getSessionCosts, totalWorkerCost } from "./cost-tracker";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -276,5 +278,27 @@ export function buildIdleWorkHandler(
 
     // 8. Emit session cost/savings metrics to Sentry
     emitSessionCostMetrics(sessionID);
+
+    // 9. Persist live session cost snapshot to DB so historical estimates
+    //    include cache warming, 1h TTL, and batch API savings after restart.
+    try {
+      const costs = getSessionCosts(sessionID);
+      if (costs && costs.conversation.turns > 0) {
+        saveSessionCosts(sessionID, {
+          conversationCost: costs.conversation.cost,
+          workerCost: totalWorkerCost(costs),
+          conversationTurns: costs.conversation.turns,
+          cacheReadTokens: costs.conversation.cacheReadTokens,
+          cacheWriteTokens: costs.conversation.cacheWriteTokens,
+          warmupSavings: costs.counterfactual.warmupSavings,
+          warmupHits: costs.counterfactual.warmupHits,
+          ttlSavings: costs.counterfactual.ttlSavings,
+          ttlHits: costs.counterfactual.ttlHits,
+          batchSavings: costs.batchSavings,
+        });
+      }
+    } catch (e) {
+      log.error("idle session cost persistence error:", e);
+    }
   };
 }

@@ -12,7 +12,7 @@
 
 import { getModelEntrySync, getWorkerModel } from "./worker-model";
 import { AUTOCOMPACT_THRESHOLD } from "./compaction";
-import { log, data, temporal } from "@loreai/core";
+import { log, data, temporal, loadAllSessionCosts } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -97,6 +97,14 @@ export type HistoricalEstimates = {
     avoidedCompactionCost: number;
     /** Model used (from metadata of first message, or fallback). */
     model: string;
+    /** Persisted live-session cost data (null if not available for this session). */
+    persisted: {
+      warmupSavings: number;
+      warmupHits: number;
+      ttlSavings: number;
+      ttlHits: number;
+      batchSavings: number;
+    } | null;
   }>;
   /** Totals across all sessions. */
   totals: {
@@ -106,6 +114,11 @@ export type HistoricalEstimates = {
     distillationDirectCalls: number;
     avoidedCompactions: number;
     avoidedCompactionCost: number;
+    warmupSavings: number;
+    warmupHits: number;
+    ttlSavings: number;
+    ttlHits: number;
+    batchSavings: number;
     sessionCount: number;
     messageCount: number;
   };
@@ -534,8 +547,8 @@ const DEFAULT_ESTIMATION_MODEL = "claude-sonnet-4-20250514";
  *    temporal messages chronologically. When the running total crosses the
  *    auto-compact threshold, counts a counterfactual compaction and resets.
  *
- * Cache/TTL/warmup/batch savings cannot be backdated (require live request
- * data not stored in the DB).
+  * Cache/TTL/warmup/batch savings are loaded from persisted session cost
+  * snapshots (saved on idle) when available.
  *
  * Results are cached for 1 minute to avoid repeated DB scans.
  */
@@ -552,6 +565,11 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
     distillationDirectCalls: 0,
     avoidedCompactions: 0,
     avoidedCompactionCost: 0,
+    warmupSavings: 0,
+    warmupHits: 0,
+    ttlSavings: 0,
+    ttlHits: 0,
+    batchSavings: 0,
     sessionCount: 0,
     messageCount: 0,
   };
@@ -564,6 +582,9 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
   const workerResult = getWorkerModel();
   const workerModelID = workerResult?.modelID ?? DEFAULT_ESTIMATION_MODEL;
   const workerPricing = getPricingSync(workerModelID);
+
+  // Load persisted cost snapshots from DB (saved on idle).
+  const persistedCosts = loadAllSessionCosts();
 
   try {
     const projects = data.listProjects();
@@ -639,6 +660,24 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
         totals.avoidedCompactions += avoidedCompactions;
         totals.avoidedCompactionCost += sessionCompactionCost;
 
+        // --- 3. Look up persisted live-session cost data ---
+        const persisted = persistedCosts.get(sess.session_id);
+        let sessionPersisted: HistoricalEstimates["sessions"][number]["persisted"] = null;
+        if (persisted) {
+          sessionPersisted = {
+            warmupSavings: persisted.warmupSavings,
+            warmupHits: persisted.warmupHits,
+            ttlSavings: persisted.ttlSavings,
+            ttlHits: persisted.ttlHits,
+            batchSavings: persisted.batchSavings,
+          };
+          totals.warmupSavings += persisted.warmupSavings;
+          totals.warmupHits += persisted.warmupHits;
+          totals.ttlSavings += persisted.ttlSavings;
+          totals.ttlHits += persisted.ttlHits;
+          totals.batchSavings += persisted.batchSavings;
+        }
+
         sessionEstimates.push({
           projectPath: project.path,
           projectName: project.name,
@@ -654,6 +693,7 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
           avoidedCompactions,
           avoidedCompactionCost: sessionCompactionCost,
           model,
+          persisted: sessionPersisted,
         });
       }
     }
@@ -670,7 +710,10 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
   log.info(
     `cost-tracker: computed historical estimates for ${totals.sessionCount} sessions — ` +
       `distillation=$${totals.distillationCost.toFixed(4)}, ` +
-      `avoided compactions=${totals.avoidedCompactions} ($${totals.avoidedCompactionCost.toFixed(4)})`,
+      `avoided compactions=${totals.avoidedCompactions} ($${totals.avoidedCompactionCost.toFixed(4)}), ` +
+      `warmup=$${totals.warmupSavings.toFixed(4)} (${totals.warmupHits} hits), ` +
+      `ttl=$${totals.ttlSavings.toFixed(4)} (${totals.ttlHits} hits), ` +
+      `batch=$${totals.batchSavings.toFixed(4)}`,
   );
 
   return historicalCache;

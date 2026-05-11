@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId } from "../src/db";
+import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts } from "../src/db";
 
 
 describe("db", () => {
@@ -22,7 +22,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(17);
+    expect(row.version).toBe(18);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -346,5 +346,75 @@ describe("db", () => {
       .get() as { name: string } | null;
     expect(after).not.toBeNull();
     expect(after!.name).toBe("project_path_aliases");
+  });
+
+  test("saveSessionCosts and loadSessionCosts round-trip", () => {
+    const sid = `test-costs-${crypto.randomUUID()}`;
+    const snapshot = {
+      conversationCost: 1.23,
+      workerCost: 0.45,
+      conversationTurns: 10,
+      cacheReadTokens: 50000,
+      cacheWriteTokens: 5000,
+      warmupSavings: 0.12,
+      warmupHits: 3,
+      ttlSavings: 0.34,
+      ttlHits: 7,
+      batchSavings: 0.56,
+    };
+    saveSessionCosts(sid, snapshot);
+    const loaded = loadSessionCosts(sid);
+    expect(loaded).toEqual(snapshot);
+  });
+
+  test("saveSessionCosts overwrites existing data", () => {
+    const sid = `test-costs-overwrite-${crypto.randomUUID()}`;
+    saveSessionCosts(sid, {
+      conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+      warmupSavings: 0, warmupHits: 0, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
+    });
+    saveSessionCosts(sid, {
+      conversationCost: 2.0, workerCost: 0.5, conversationTurns: 15,
+      cacheReadTokens: 100000, cacheWriteTokens: 10000,
+      warmupSavings: 0.5, warmupHits: 5, ttlSavings: 0.8, ttlHits: 10, batchSavings: 1.2,
+    });
+    const loaded = loadSessionCosts(sid);
+    expect(loaded!.conversationCost).toBe(2.0);
+    expect(loaded!.conversationTurns).toBe(15);
+    expect(loaded!.warmupSavings).toBe(0.5);
+  });
+
+  test("saveSessionCosts preserves existing forceMinLayer", () => {
+    const sid = `test-costs-layer-${crypto.randomUUID()}`;
+    saveForceMinLayer(sid, 2);
+    saveSessionCosts(sid, {
+      conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+      warmupSavings: 0, warmupHits: 0, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
+    });
+    expect(loadForceMinLayer(sid)).toBe(2);
+    expect(loadSessionCosts(sid)!.conversationTurns).toBe(5);
+  });
+
+  test("loadSessionCosts returns null for unknown session", () => {
+    expect(loadSessionCosts("nonexistent-session")).toBeNull();
+  });
+
+  test("loadAllSessionCosts returns only sessions with cost data", () => {
+    const sid1 = `test-costs-all-1-${crypto.randomUUID()}`;
+    const sid2 = `test-costs-all-2-${crypto.randomUUID()}`;
+    saveSessionCosts(sid1, {
+      conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+      warmupSavings: 0.1, warmupHits: 1, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
+    });
+    // sid2: all zeros — should not appear (only forceMinLayer row)
+    saveForceMinLayer(sid2, 1);
+
+    const all = loadAllSessionCosts();
+    expect(all.has(sid1)).toBe(true);
+    expect(all.has(sid2)).toBe(false);
+    expect(all.get(sid1)!.warmupSavings).toBe(0.1);
   });
 });

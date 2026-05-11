@@ -437,6 +437,22 @@ const MIGRATIONS: string[] = [
   -- 'batch' = 50% discount on input+output, 'direct' = full price.
   ALTER TABLE distillations ADD COLUMN call_type TEXT;
   `,
+  `
+  -- Version 18: Persist live session cost data so historical estimates
+  -- include cache warming, 1h TTL savings, and batch API savings — metrics
+  -- that were previously lost on gateway restart.
+  -- All cost columns are in USD. Token columns are raw counts.
+  ALTER TABLE session_state ADD COLUMN conversation_cost REAL NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN worker_cost REAL NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN conversation_turns INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN warmup_savings REAL NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN warmup_hits INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN ttl_savings REAL NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN ttl_hits INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN batch_savings REAL NOT NULL DEFAULT 0;
+  `,
 ];
 
 function dataDir() {
@@ -821,6 +837,136 @@ export function saveForceMinLayer(sessionID: string, layer: number): void {
       )
       .run(sessionID, layer, Date.now());
   }
+}
+
+/** Persisted cost snapshot for a session. */
+export type SessionCostSnapshot = {
+  conversationCost: number;
+  workerCost: number;
+  conversationTurns: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  warmupSavings: number;
+  warmupHits: number;
+  ttlSavings: number;
+  ttlHits: number;
+  batchSavings: number;
+};
+
+/**
+ * Persist a session's cost snapshot. Uses INSERT OR REPLACE so it works
+ * whether or not a row already exists (forceMinLayer may have created one).
+ */
+export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot): void {
+  db()
+    .query(
+      `INSERT INTO session_state (session_id, force_min_layer, updated_at,
+         conversation_cost, worker_cost, conversation_turns,
+         cache_read_tokens, cache_write_tokens,
+         warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings)
+       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         conversation_cost = excluded.conversation_cost,
+         worker_cost = excluded.worker_cost,
+         conversation_turns = excluded.conversation_turns,
+         cache_read_tokens = excluded.cache_read_tokens,
+         cache_write_tokens = excluded.cache_write_tokens,
+         warmup_savings = excluded.warmup_savings,
+         warmup_hits = excluded.warmup_hits,
+         ttl_savings = excluded.ttl_savings,
+         ttl_hits = excluded.ttl_hits,
+         batch_savings = excluded.batch_savings,
+         updated_at = excluded.updated_at`,
+    )
+    .run(
+      sessionID, sessionID, Date.now(),
+      costs.conversationCost, costs.workerCost, costs.conversationTurns,
+      costs.cacheReadTokens, costs.cacheWriteTokens,
+      costs.warmupSavings, costs.warmupHits, costs.ttlSavings, costs.ttlHits, costs.batchSavings,
+    );
+}
+
+/**
+ * Load persisted cost snapshot for a session. Returns null if not stored
+ * or if all cost columns are zero (pre-migration row from forceMinLayer only).
+ */
+export function loadSessionCosts(sessionID: string): SessionCostSnapshot | null {
+  const row = db()
+    .query(
+      `SELECT conversation_cost, worker_cost, conversation_turns,
+              cache_read_tokens, cache_write_tokens,
+              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings
+       FROM session_state WHERE session_id = ?`,
+    )
+    .get(sessionID) as {
+      conversation_cost: number;
+      worker_cost: number;
+      conversation_turns: number;
+      cache_read_tokens: number;
+      cache_write_tokens: number;
+      warmup_savings: number;
+      warmup_hits: number;
+      ttl_savings: number;
+      ttl_hits: number;
+      batch_savings: number;
+    } | null;
+  if (!row) return null;
+  return {
+    conversationCost: row.conversation_cost,
+    workerCost: row.worker_cost,
+    conversationTurns: row.conversation_turns,
+    cacheReadTokens: row.cache_read_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    warmupSavings: row.warmup_savings,
+    warmupHits: row.warmup_hits,
+    ttlSavings: row.ttl_savings,
+    ttlHits: row.ttl_hits,
+    batchSavings: row.batch_savings,
+  };
+}
+
+/**
+ * Load cost snapshots for all sessions that have non-zero cost data.
+ * Returns a map of sessionID → SessionCostSnapshot.
+ */
+export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
+  const rows = db()
+    .query(
+      `SELECT session_id, conversation_cost, worker_cost, conversation_turns,
+              cache_read_tokens, cache_write_tokens,
+              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings
+       FROM session_state
+       WHERE conversation_turns > 0 OR warmup_savings > 0 OR ttl_savings > 0 OR batch_savings > 0`,
+    )
+    .all() as Array<{
+      session_id: string;
+      conversation_cost: number;
+      worker_cost: number;
+      conversation_turns: number;
+      cache_read_tokens: number;
+      cache_write_tokens: number;
+      warmup_savings: number;
+      warmup_hits: number;
+      ttl_savings: number;
+      ttl_hits: number;
+      batch_savings: number;
+    }>;
+  const result = new Map<string, SessionCostSnapshot>();
+  for (const row of rows) {
+    result.set(row.session_id, {
+      conversationCost: row.conversation_cost,
+      workerCost: row.worker_cost,
+      conversationTurns: row.conversation_turns,
+      cacheReadTokens: row.cache_read_tokens,
+      cacheWriteTokens: row.cache_write_tokens,
+      warmupSavings: row.warmup_savings,
+      warmupHits: row.warmup_hits,
+      ttlSavings: row.ttl_savings,
+      ttlHits: row.ttl_hits,
+      batchSavings: row.batch_savings,
+    });
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

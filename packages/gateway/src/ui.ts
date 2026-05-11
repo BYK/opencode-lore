@@ -917,9 +917,12 @@ function pageCosts(): string {
   const combinedWorkerCost = liveTotalWorker + hist.distillationCost;
   const combinedAvoidedCompactions = liveAvoidedCompactions + hist.avoidedCompactions;
   const combinedAvoidedCompactionCost = liveAvoidedCompactionCost + hist.avoidedCompactionCost;
+  const combinedWarmupSavings = liveWarmupSavings + hist.warmupSavings;
+  const combinedTtlSavings = liveTtlSavings + hist.ttlSavings;
+  const combinedBatchSavings = liveBatchSavings + hist.batchSavings;
   // Net savings = counterfactual savings - worker overhead
   const combinedNetSavings =
-    liveWarmupSavings + liveTtlSavings + liveBatchSavings +
+    combinedWarmupSavings + combinedTtlSavings + combinedBatchSavings +
     combinedAvoidedCompactionCost - combinedWorkerCost;
 
   // Summary stats
@@ -981,20 +984,24 @@ function pageCosts(): string {
   body += `<h2>Historical Estimates (from stored data)</h2>`;
   body += `<p style="color:var(--fg3);font-size:0.9em">
     Estimated from ${hist.messageCount.toLocaleString()} stored messages across ${hist.sessionCount} sessions.
-    Distillation overhead (including batch API discount), avoided compactions, and net savings are estimated from stored data.
-    Cache warming and 1h TTL savings require live request data and are <strong>only tracked for live sessions</strong>.
+    Distillation overhead, avoided compactions, and net savings are estimated from stored data.
+    Cache warming, 1h TTL, and batch API savings are persisted from live sessions on idle.
   </p>`;
 
   if (hist.sessionCount === 0) {
     body += `<p class="empty">No historical sessions found in the database.</p>`;
   } else {
+    const histNetSavings = hist.avoidedCompactionCost + hist.warmupSavings + hist.ttlSavings + hist.batchSavings - hist.distillationCost;
     body += `<div class="card">
       <table class="cost-table">
         <tr class="section-header"><td colspan="2"><strong>Estimated Lore Overhead</strong></td></tr>
         <tr><td>Distillation calls</td><td>${formatUSD(hist.distillationCost)} <span style="color:var(--fg3);font-size:0.85em">(${hist.distillationCalls} calls: ${hist.distillationBatchCalls} batched, ${hist.distillationDirectCalls} direct)</span></td></tr>
         <tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Estimated Savings</strong></td></tr>
         <tr><td>Avoided compactions</td><td>${formatUSD(hist.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${hist.avoidedCompactions})</span></td></tr>
-        <tr style="border-top:1px solid var(--border)"><td><strong>Net estimated savings</strong></td><td><strong style="color:${hist.avoidedCompactionCost - hist.distillationCost >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(hist.avoidedCompactionCost - hist.distillationCost)}</strong></td></tr>
+        ${hist.warmupSavings > 0 ? `<tr><td>Cache warming</td><td>${formatUSD(hist.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.warmupHits} hits)</span></td></tr>` : ""}
+        ${hist.ttlSavings > 0 ? `<tr><td>1h TTL extension</td><td>${formatUSD(hist.ttlSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.ttlHits} hits)</span></td></tr>` : ""}
+        ${hist.batchSavings > 0 ? `<tr><td>Batch API discount</td><td>${formatUSD(hist.batchSavings)}</td></tr>` : ""}
+        <tr style="border-top:1px solid var(--border)"><td><strong>Net estimated savings</strong></td><td><strong style="color:${histNetSavings >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(histNetSavings)}</strong></td></tr>
       </table>
     </div>`;
 
