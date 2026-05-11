@@ -185,8 +185,24 @@ export const LoreConfig = z.object({
        *    downgrades when <20%. Auto-syncs idleResumeMinutes to 60 when 1h is active.
        *  Default: "auto". */
       conversationTTL: z.enum(["5m", "1h", "auto"]).default("auto"),
+      /** Speculative cache warming — sends max_tokens:0 keepalive requests to
+       *  refresh the Anthropic prompt cache before it expires. Uses survival
+       *  analysis on inter-turn gaps to predict whether the user will return. */
+      warming: z
+        .object({
+          /** Enable cache warming. Default: true. */
+          enabled: z.boolean().default(true),
+          /** Override the survival probability threshold below which warming is
+           *  skipped. Default: auto-derived from cache read/write cost ratio
+           *  (~0.08 for 5m TTL, ~0.05 for 1h TTL). */
+          minReturnProbability: z.number().min(0).max(1).optional(),
+        })
+        .default({ enabled: true }),
     })
-    .default({ conversationTTL: "auto" }),
+    .default({
+      conversationTTL: "auto",
+      warming: { enabled: true },
+    }),
   crossProject: z.boolean().default(false),
   agentsFile: z
     .object({

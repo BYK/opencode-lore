@@ -4,7 +4,7 @@ import { mkdirSync } from "fs";
 import { homedir } from "os";
 import { getGitRemote } from "./git";
 
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 
 const MIGRATIONS: string[] = [
   `
@@ -382,6 +382,27 @@ const MIGRATIONS: string[] = [
   CREATE TABLE IF NOT EXISTS project_path_aliases (
     path TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+  );
+  `,
+
+  `
+  -- Version 15: Cache warming survival histograms.
+  --
+  -- Persists global (per-project, per-time-slot) inter-turn gap histograms
+  -- across gateway restarts. These histograms feed the survival analysis
+  -- model that decides whether to send speculative cache-warming pings.
+  -- Without persistence, the model has no data until enough turns rebuild
+  -- the histogram from scratch (cold start problem).
+  --
+  -- counts: JSON array of bin counts (21 elements: 20 bins + 1 overflow).
+  -- total: Sum of counts (denormalized for fast reads).
+  CREATE TABLE IF NOT EXISTS warmup_histograms (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    time_slot TEXT NOT NULL,
+    counts TEXT NOT NULL DEFAULT '[]',
+    total INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, time_slot)
   );
   `,
 ];
