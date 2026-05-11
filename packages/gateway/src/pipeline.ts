@@ -1178,39 +1178,46 @@ function postResponse(
       sessionState.sessionID,
     );
 
-    // --- Temporal storage ---
-    // Store all messages (user + assistant) from this turn.
-    // Convert gateway messages to Lore format.
-    const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
-    resolveToolResults(loreMessages);
+    // --- Temporal storage & session-state updates ---
+    // Sub-agent turns are excluded from temporal storage: their tool-call
+    // messages would pollute the parent session's conversation history,
+    // trigger distillation of sub-agent content, and inject a synthetic
+    // "I'm ready to continue" prefix that primes the model to echo the
+    // plan mode system prompt instead of continuing with the actual task.
+    if (!isSubagentTurn) {
+      // Store all messages (user + assistant) from this turn.
+      // Convert gateway messages to Lore format.
+      const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
+      resolveToolResults(loreMessages);
 
-    // Store the latest user message (last user message in the array)
-    for (let i = loreMessages.length - 1; i >= 0; i--) {
-      if (loreMessages[i].info.role === "user") {
-        temporal.store({
-          projectPath,
-          info: loreMessages[i].info,
-          parts: loreMessages[i].parts,
-        });
-        break;
+      // Store the latest user message (last user message in the array)
+      for (let i = loreMessages.length - 1; i >= 0; i--) {
+        if (loreMessages[i].info.role === "user") {
+          temporal.store({
+            projectPath,
+            info: loreMessages[i].info,
+            parts: loreMessages[i].parts,
+          });
+          break;
+        }
       }
+
+      // Build and store the assistant response message
+      const assistantMsg = gatewayMessagesToLore(
+        [{ role: "assistant", content: resp.content }],
+        sessionID,
+      )[0];
+      updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
+      temporal.store({
+        projectPath,
+        info: assistantMsg.info,
+        parts: assistantMsg.parts,
+      });
+
+      // Update session state
+      sessionState.turnsSinceCuration =
+        (sessionState.turnsSinceCuration ?? 0) + 1;
     }
-
-    // Build and store the assistant response message
-    const assistantMsg = gatewayMessagesToLore(
-      [{ role: "assistant", content: resp.content }],
-      sessionID,
-    )[0];
-    updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
-    temporal.store({
-      projectPath,
-      info: assistantMsg.info,
-      parts: assistantMsg.parts,
-    });
-
-    // Update session state
-    sessionState.turnsSinceCuration =
-      (sessionState.turnsSinceCuration ?? 0) + 1;
 
     // --- Output tracking for dynamic max_tokens sizing ---
     // Sub-agent turns are excluded: their short tool-call responses would
@@ -1237,7 +1244,11 @@ function postResponse(
     }
 
     // --- Schedule background work (fire-and-forget) ---
-    scheduleBackgroundWork(sessionState, config);
+    // Skip for sub-agent turns: no temporal messages were stored above,
+    // so there's nothing new to distill or curate.
+    if (!isSubagentTurn) {
+      scheduleBackgroundWork(sessionState, config);
+    }
   } catch (e) {
     log.error("post-response processing failed:", e);
   }
