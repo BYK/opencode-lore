@@ -1784,8 +1784,13 @@ async function handleConversationTurn(
     );
   }
 
-  // Always update message count for proximity matching
-  sessionState.messageCount = currMsgCount;
+  // Update message count for proximity matching & structural compaction detection.
+  // Sub-agent turns have their own independent (smaller) message arrays — updating
+  // messageCount with those would inflate then "drop" the count when the main agent
+  // resumes, triggering false structural compaction detection.
+  if (!isSubagentTurn) {
+    sessionState.messageCount = currMsgCount;
+  }
 
   // Track session model for worker model discovery
   lastSeenSessionModel = req.model;
