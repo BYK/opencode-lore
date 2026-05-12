@@ -157,14 +157,13 @@ export function touchSession(
  *
  * Each step is independently try/catch'd — one failure won't block the rest.
  *
- * @param projectPath - Resolved project directory path
  * @param llm - LLM client for worker calls (distillation, curation)
  */
 export function buildIdleWorkHandler(
-  projectPath: string,
   llm: LLMClient,
 ): (sessionID: string, state: SessionState) => Promise<void> {
   return async (sessionID: string, state: SessionState) => {
+    const projectPath = state.projectPath;
     const cfg = loreConfig();
     const model = getWorkerModel();
 
