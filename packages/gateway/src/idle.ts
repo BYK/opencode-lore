@@ -39,7 +39,8 @@ import {
   loadGlobalHistograms,
   flushGlobalHistograms,
 } from "./cache-warmer";
-import { emitWarmupMetric, emitSessionCostMetrics } from "./sentry";
+import * as Sentry from "@sentry/bun";
+import { emitWarmupMetric, emitSessionCostMetrics, emitCurationMetrics } from "./sentry";
 import { getSessionCosts, totalWorkerCost } from "./cost-tracker";
 
 const POLL_INTERVAL_MS = 30_000;
@@ -193,8 +194,17 @@ export function buildIdleWorkHandler(
     if (cfg.knowledge.enabled && cfg.curator.onIdle) {
       try {
         if (state.turnsSinceCuration >= cfg.curator.afterTurns) {
-          await curator.run({ llm, projectPath, sessionID, model });
+          const result = await Sentry.startSpan(
+            { name: "lore.curator", op: "lore.curation", attributes: { trigger: "idle" } },
+            () => curator.run({ llm, projectPath, sessionID, model }),
+          );
           state.turnsSinceCuration = 0;
+          if (result.created > 0 || result.updated > 0 || result.deleted > 0) {
+            log.info(
+              `idle curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
+            );
+            emitCurationMetrics({ ...result, trigger: "idle" });
+          }
         }
       } catch (e) {
         log.error("idle curation error:", e);
@@ -209,14 +219,13 @@ export function buildIdleWorkHandler(
           log.info(
             `entry count ${entries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
           );
-          const { updated, deleted } = await curator.consolidate({
-            llm,
-            projectPath,
-            sessionID,
-            model,
-          });
-          if (updated > 0 || deleted > 0) {
-            log.info(`consolidation: ${updated} updated, ${deleted} deleted`);
+          const result = await Sentry.startSpan(
+            { name: "lore.consolidation", op: "lore.curation", attributes: { trigger: "consolidation" } },
+            () => curator.consolidate({ llm, projectPath, sessionID, model }),
+          );
+          if (result.updated > 0 || result.deleted > 0) {
+            log.info(`consolidation: ${result.updated} updated, ${result.deleted} deleted`);
+            emitCurationMetrics({ created: 0, ...result, trigger: "consolidation" });
           }
         }
       } catch (e) {

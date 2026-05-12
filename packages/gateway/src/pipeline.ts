@@ -125,10 +125,11 @@ import {
    setSentryLightContext,
    setGenAiUsageAttributes,
    setCacheAnalyticsAttributes,
-    emitCostMetric,
-    emitCacheBustMetric,
-    emitWarmupHitMetric,
-    type AnthropicUsage,
+     emitCostMetric,
+     emitCacheBustMetric,
+     emitWarmupHitMetric,
+     emitCurationMetrics,
+     type AnthropicUsage,
 } from "./sentry";
 import {
   recordConversationCost,
@@ -1564,12 +1565,20 @@ function scheduleBackgroundWork(
     cfg.curator.onIdle &&
     sessionState.turnsSinceCuration >= effectiveAfterTurns
   ) {
-    curator
-      .run({ llm, projectPath, sessionID, model })
-      .then(() => {
+    Sentry.startSpan(
+      { name: "lore.curator", op: "lore.curation", attributes: { trigger: "in-flight" } },
+      () => curator.run({ llm, projectPath, sessionID, model }),
+    )
+      .then((result) => {
         sessionState.turnsSinceCuration = 0;
         // Invalidate LTM cache after curation changes knowledge entries
         ltmSessionCache.delete(sessionID);
+        if (result.created > 0 || result.updated > 0 || result.deleted > 0) {
+          log.info(
+            `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
+          );
+          emitCurationMetrics({ ...result, trigger: "in-flight" });
+        }
       })
       .catch((e) => log.error("background curation failed:", e));
   }

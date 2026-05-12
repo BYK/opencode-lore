@@ -96,6 +96,13 @@ export function extractPatterns(observations: string): ExtractedPattern[] {
     regex.lastIndex = 0;
     let match: RegExpMatchArray | null;
     while ((match = regex.exec(observations)) !== null) {
+      // Skip false positives: template placeholders (e.g. "X", "Y"),
+      // quoted fragments, or very short captures that are clearly not
+      // real technology/tool names. Plain apostrophes (') are allowed
+      // since they appear in valid names like "Bun's test runner".
+      const captures = match.slice(1);
+      if (captures.some((c) => c && (c.trim().length <= 2 || /["\u201C\u201D`\u2018\u2019]/.test(c)))) continue;
+
       const title = titleFn(match);
       const key = title.toLowerCase();
       if (seen.has(key)) continue;

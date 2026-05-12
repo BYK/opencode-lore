@@ -290,5 +290,27 @@ describe("extractPatterns", () => {
         "chose Tailwind over Bootstrap for utility-first CSS.",
       );
     });
+
+    test("rejects template placeholders like X and Y", () => {
+      const results = extractPatterns(
+        'Patterns like "decided to use X" and "prefers X over Y" are matched.',
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("rejects captures containing smart quote characters", () => {
+      const results = extractPatterns(
+        "decided to use \u201CPostgreSQL\u201D for the main database.",
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("rejects very short captures (1-2 chars)", () => {
+      const results = extractPatterns(
+        "Decided to use Go, which is fast.",
+      );
+      // "Go" is only 2 chars — too short to be a reliable extraction
+      expect(results).toHaveLength(0);
+    });
   });
 });
