@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { inferProjectPath, getProjectPath } from "../src/config";
+import { resolveSessionProjectPath } from "../src/pipeline";
 
 // ---------------------------------------------------------------------------
 // inferProjectPath
@@ -95,7 +96,7 @@ describe("getProjectPath", () => {
       `Working directory: /home/user/inferred-project`,
       { "x-lore-project": "/home/user/explicit-project" },
     );
-    expect(result).toBe("/home/user/explicit-project");
+    expect(result).toEqual({ path: "/home/user/explicit-project", source: "header" });
   });
 
   test("falls back to inferProjectPath when no header", () => {
@@ -103,12 +104,12 @@ describe("getProjectPath", () => {
       `Working directory: /home/user/inferred-project`,
       {},
     );
-    expect(result).toBe("/home/user/inferred-project");
+    expect(result).toEqual({ path: "/home/user/inferred-project", source: "inferred" });
   });
 
   test("falls back to process.cwd() when neither header nor inference match", () => {
     const result = getProjectPath("You are a helpful assistant.", {});
-    expect(result).toBe(process.cwd());
+    expect(result).toEqual({ path: process.cwd(), source: "cwd" });
   });
 
   test("ignores empty X-Lore-Project header", () => {
@@ -116,6 +117,76 @@ describe("getProjectPath", () => {
       `Working directory: /home/user/project`,
       { "x-lore-project": "" },
     );
-    expect(result).toBe("/home/user/project");
+    expect(result).toEqual({ path: "/home/user/project", source: "inferred" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveSessionProjectPath
+// ---------------------------------------------------------------------------
+
+describe("resolveSessionProjectPath", () => {
+  function makeSessionState(projectPath: string) {
+    return { projectPath } as any;
+  }
+
+  test("upgrades cwd fallback to session's cached path", () => {
+    const state = makeSessionState("/home/user/real-project");
+    const result = resolveSessionProjectPath(
+      { path: process.cwd(), source: "cwd" },
+      state,
+    );
+    expect(result).toBe("/home/user/real-project");
+  });
+
+  test("keeps cwd when session has the same path (no upgrade available)", () => {
+    const cwd = process.cwd();
+    const state = makeSessionState(cwd);
+    const result = resolveSessionProjectPath(
+      { path: cwd, source: "cwd" },
+      state,
+    );
+    expect(result).toBe(cwd);
+  });
+
+  test("uses inferred path and updates session cache", () => {
+    const state = makeSessionState("/home/user/old-project");
+    const result = resolveSessionProjectPath(
+      { path: "/home/user/new-project", source: "inferred" },
+      state,
+    );
+    expect(result).toBe("/home/user/new-project");
+    expect(state.projectPath).toBe("/home/user/new-project");
+  });
+
+  test("uses header path and updates session cache", () => {
+    const state = makeSessionState("/home/user/old-project");
+    const result = resolveSessionProjectPath(
+      { path: "/home/user/header-project", source: "header" },
+      state,
+    );
+    expect(result).toBe("/home/user/header-project");
+    expect(state.projectPath).toBe("/home/user/header-project");
+  });
+
+  test("does not update session cache on cwd fallback", () => {
+    const state = makeSessionState("/home/user/real-project");
+    resolveSessionProjectPath(
+      { path: process.cwd(), source: "cwd" },
+      state,
+    );
+    // Session cache should remain unchanged (upgraded, not overwritten)
+    expect(state.projectPath).toBe("/home/user/real-project");
+  });
+
+  test("does not update session cache when upgrade from cwd occurs", () => {
+    const state = makeSessionState("/home/user/cached-project");
+    const result = resolveSessionProjectPath(
+      { path: "/tmp/wrong", source: "cwd" },
+      state,
+    );
+    expect(result).toBe("/home/user/cached-project");
+    // Session cache should remain unchanged
+    expect(state.projectPath).toBe("/home/user/cached-project");
   });
 });
