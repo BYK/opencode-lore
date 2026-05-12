@@ -97,8 +97,8 @@ export async function _cli(): Promise<void> {
     process.exit(1);
   }
 
-  // --version / -v
-  if (values.version) {
+  // --version / -v (only when no subcommand is given)
+  if (values.version && positionals.length === 0) {
     printVersion();
     return;
   }
@@ -206,7 +206,12 @@ export async function _cli(): Promise<void> {
 
       case "upgrade": {
         const { commandUpgrade } = await import("./upgrade");
-        await commandUpgrade(rest);
+        // Pass raw args so upgrade's own parseArgs handles --version, --channel etc.
+        // Start search at index 2 to skip the binary/script path entries.
+        const rawUpgradeArgs = process.argv.slice(
+          process.argv.indexOf("upgrade", 2) + 1,
+        );
+        await commandUpgrade(rawUpgradeArgs);
         break;
       }
 

@@ -206,6 +206,16 @@ installed_version=$("$dest" --version 2>/dev/null || echo "$version")
 echo -e "${GREEN}✓ lore v${installed_version} installed to ${dest}${NC}"
 
 # ---------------------------------------------------------------------------
+# Persist release channel
+# ---------------------------------------------------------------------------
+
+if [[ "$requested_version" == "nightly" ]]; then
+  lore_config_dir="${LORE_CONFIG_DIR:-${HOME}/.lore}"
+  mkdir -p "$lore_config_dir"
+  echo -n "nightly" > "${lore_config_dir}/channel"
+fi
+
+# ---------------------------------------------------------------------------
 # PATH setup
 # ---------------------------------------------------------------------------
 
