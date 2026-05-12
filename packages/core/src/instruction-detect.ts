@@ -45,7 +45,7 @@ const MAX_CANDIDATES = 5;
 const INSTRUCTION_PATTERNS: RegExp[] = [
   /\balways\b (.{10,80}?)(?:\.|,|!|$)/gi,
   /\bnever\b (.{10,80}?)(?:\.|,|!|$)/gi,
-  /\bmake sure (?:to )?(.{10,80}?)(?:\.|,|!|$)/gi,
+  /\bmake sure to (.{10,80}?)(?:\.|,|!|$)/gi,
   /\bdon'?t forget (?:to )?(.{10,80}?)(?:\.|,|!|$)/gi,
   /\bplease (?:always |make sure (?:to )?)(.{10,80}?)(?:\.|,|!|$)/gi,
   /\bI (?:want|need|prefer|expect) (?:you to )?(.{10,80}?)(?:\.|,|!|$)/gi,
@@ -124,28 +124,36 @@ export async function findRepeatedInstructions(input: {
   if (!input.candidates.length) return [];
 
   const pid = ensureProject(input.projectPath);
+
+  // Batch-embed all candidate texts in a single call (1×RTT instead of N×RTT)
+  let candidateEmbeddings: Float32Array[] = [];
+  if (embedding.isAvailable()) {
+    try {
+      candidateEmbeddings = await embedding.embed(
+        input.candidates.map((c) => c.text),
+        "query",
+      );
+    } catch (err) {
+      log.warn("instruction-detect: batch embedding failed:", err);
+    }
+  }
+
   const results: RepeatedInstruction[] = [];
 
-  for (const candidate of input.candidates) {
+  for (let i = 0; i < input.candidates.length; i++) {
+    const candidate = input.candidates[i];
     const sessionIDs = new Set<string>();
 
-    // Path A: Vector search (when embeddings are available)
-    if (embedding.isAvailable()) {
-      try {
-        const vecs = await embedding.embed([candidate.text], "query");
-        if (vecs.length > 0) {
-          const hits = embedding.vectorSearchAllDistillations(vecs[0], pid, 20);
-          for (const hit of hits) {
-            if (
-              hit.similarity >= VECTOR_SIMILARITY_THRESHOLD &&
-              hit.session_id !== input.currentSessionID
-            ) {
-              sessionIDs.add(hit.session_id);
-            }
-          }
+    // Path A: Vector search (when embeddings succeeded)
+    if (candidateEmbeddings.length > i) {
+      const hits = embedding.vectorSearchAllDistillations(candidateEmbeddings[i], pid, 20);
+      for (const hit of hits) {
+        if (
+          hit.similarity >= VECTOR_SIMILARITY_THRESHOLD &&
+          hit.session_id !== input.currentSessionID
+        ) {
+          sessionIDs.add(hit.session_id);
         }
-      } catch {
-        // Vector search failed — fall through to FTS
       }
     }
 
@@ -204,8 +212,8 @@ function searchDistillationsFTS(
       id: string;
       session_id: string;
     }>;
-  } catch {
-    // FTS failed — return empty
+  } catch (err) {
+    log.warn("instruction-detect: FTS search failed:", err);
     return [];
   }
 }

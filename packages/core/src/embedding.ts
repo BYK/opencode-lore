@@ -846,8 +846,11 @@ export type DistillationVectorHit = {
  * repeated instructions across sessions where older distillations have
  * been archived after meta-distillation.
  *
- * Pure brute-force — fine for ~200 entries per project.
+ * Pure brute-force — fine for ~200 entries per project. Safety-capped
+ * at 500 rows to prevent excessive CPU on long-running projects.
  */
+const MAX_DISTILLATION_VECTOR_ROWS = 500;
+
 export function vectorSearchAllDistillations(
   queryEmbedding: Float32Array,
   projectId: string,
@@ -855,9 +858,9 @@ export function vectorSearchAllDistillations(
 ): DistillationVectorHit[] {
   const rows = db()
     .query(
-      "SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ?",
+      "SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?",
     )
-    .all(projectId) as Array<{ id: string; session_id: string; embedding: Buffer }>;
+    .all(projectId, MAX_DISTILLATION_VECTOR_ROWS) as Array<{ id: string; session_id: string; embedding: Buffer }>;
 
   const scored: DistillationVectorHit[] = [];
   for (const row of rows) {

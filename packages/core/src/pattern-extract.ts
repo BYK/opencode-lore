@@ -101,7 +101,7 @@ const PATTERNS: PatternDef[] = [
     titleFn: (m) => `Never ${m[1].trim()}`,
   },
   {
-    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?make sure (?:to )?(.+?)(?:\.|,|$)/gi,
+    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?make sure to (.+?)(?:\.|,|$)/gi,
     category: "preference",
     titleFn: (m) => `Make sure to ${m[1].trim()}`,
   },

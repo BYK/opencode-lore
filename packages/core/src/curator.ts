@@ -162,7 +162,7 @@ export async function run(input: {
       sessionID: input.sessionID,
     });
   } catch (err) {
-    log.info("instruction-detect failed (non-fatal):", err);
+    log.warn("instruction-detect failed (non-fatal):", err);
   }
 
   const userContent = baseUserContent + crossSessionContext;

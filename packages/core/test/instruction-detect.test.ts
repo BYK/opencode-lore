@@ -143,15 +143,15 @@ describe("extractInstructionCandidates", () => {
     expect(results[0].text).toBe("use squash merges for all PRs");
   });
 
-  test("extracts 'please always X' pattern", () => {
+  test("extracts 'please always X' pattern — deduped with 'always X'", () => {
     const messages = [
       { role: "user", content: "Please always run tests before committing.", session_id: "s1" },
     ];
     const results = extractInstructionCandidates(messages);
-    // "please always X" and "always X" may both match — at least 1 candidate
-    expect(results.length).toBeGreaterThanOrEqual(1);
-    const texts = results.map((r) => r.text);
-    expect(texts.some((t) => t.includes("run tests before committing"))).toBe(true);
+    // Both "always X" and "please always X" patterns fire, but dedup
+    // collapses them since they produce the same lowercased text
+    expect(results).toHaveLength(1);
+    expect(results[0].text).toBe("run tests before committing");
   });
 
   test("ignores assistant messages", () => {

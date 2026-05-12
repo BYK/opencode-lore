@@ -306,12 +306,12 @@ describe("extractPatterns", () => {
       expect(results[0].title).toBe("Make sure to run the linter before pushing");
     });
 
-    test("user stated make sure (without 'to')", () => {
+    test("user stated make sure without 'to' does not match", () => {
       const results = extractPatterns(
         "🔴 (11:00) User stated make sure tests pass before merging.",
       );
-      expect(results).toHaveLength(1);
-      expect(results[0].title).toBe("Make sure to tests pass before merging");
+      // Requires "make sure to" — without "to" the phrasing is non-standard
+      expect(results).toHaveLength(0);
     });
 
     test("does not match without stated/asserted/said prefix", () => {
@@ -372,12 +372,12 @@ describe("extractPatterns", () => {
       expect(titles).toContain("Make sure to run tests");
     });
 
-    test("rejects short captures (≤2 chars)", () => {
+    test("matches instruction with short but valid capture", () => {
       const results = extractPatterns(
         "User stated always do it.",
       );
-      // "do it" has 5 chars, so it passes the length check.
-      // But "stated" prefix is required — this should match.
+      // "do it" is 5 chars (above the 2-char rejection threshold)
+      // and "stated" prefix is present — this should match.
       expect(results).toHaveLength(1);
     });
 
