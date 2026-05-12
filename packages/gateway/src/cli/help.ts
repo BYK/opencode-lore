@@ -12,6 +12,7 @@ Usage:
 Commands:
   run [command...]    Start gateway and launch an AI agent (default)
   start               Start the gateway server only
+  logs                Show lore activity log
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
   recall <query>      Search project memory from the command line
@@ -26,6 +27,11 @@ Options:
   -d, --debug         Enable debug logging (env: LORE_DEBUG=1)
   -v, --version       Print version and exit
   -h, --help          Show this help text
+
+Log options (lore logs):
+  -f, --follow        Follow log output in real-time
+  -n, --lines <n>     Number of lines to show (default: 50)
+  --path              Print log file path and exit
 
 Data subcommands:
   data list <type>              List entries (projects, knowledge, sessions, distillations)
@@ -72,6 +78,10 @@ Examples:
   lore import                   # Import knowledge from prior AI conversations
   lore import --dry-run         # Show what would be imported
   lore import --agent claude-code  # Import from Claude Code only
+  lore logs                     # Show recent log entries
+  lore logs -f                  # Follow log output in real-time
+  lore logs -n 100              # Show last 100 lines
+  lore logs --path              # Print log file path
   lore recall "error handling"  # Search project memory from CLI
 
 Environment variables:
