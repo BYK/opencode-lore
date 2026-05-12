@@ -115,36 +115,36 @@ export async function commandStart(opts: StartOptions): Promise<never> {
 
   if (!owned) {
     // Another lore gateway is already running — nothing to do.
-    console.error(`[lore] Gateway already running on ${addrs.join(", ")}`);
+    console.log(`[lore] Gateway already running on ${addrs.join(", ")}`);
     if (!opts.quiet) {
-      console.error("[lore] Use that instance, or stop it first to start a new one.");
+      console.log("[lore] Use that instance, or stop it first to start a new one.");
     }
     safeExit(0);
   }
 
-  console.error(`[lore] Gateway listening on ${addrs.join(", ")}`);
+  console.log(`[lore] Gateway listening on ${addrs.join(", ")}`);
 
   if (!opts.quiet) {
     const localAddr = addrs[0];
-    console.error(
+    console.log(
       `[lore] Model routing: claude-* → Anthropic, nvidia/* → Nvidia NIM, gpt-* → OpenAI, …`,
     );
-    console.error("");
-    console.error("[lore] Point your AI agent at the gateway:");
-    console.error(`  export ANTHROPIC_BASE_URL=${localAddr}`);
-    console.error(`  export OPENAI_BASE_URL=${localAddr}/v1`);
-    console.error("");
-    console.error("[lore] Configuration (environment variables):");
-    console.error(`  LORE_LISTEN_PORT        Port to listen on (current: ${port})`);
-    console.error(`  LORE_LISTEN_HOST        Hosts to bind to, comma-separated (current: ${config.hosts.join(",")})`);
-    console.error(`  LORE_UPSTREAM_ANTHROPIC Anthropic API URL (current: ${config.upstreamAnthropic})`);
-    console.error(`  LORE_UPSTREAM_OPENAI    OpenAI API URL (current: ${config.upstreamOpenAI})`);
-    console.error(`  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`);
-    console.error(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
-    console.error(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
-    console.error("");
-    console.error("[lore] When using Claude Code, also set:");
-    console.error("  export DISABLE_AUTO_COMPACT=1");
+    console.log("");
+    console.log("[lore] Point your AI agent at the gateway:");
+    console.log(`  export ANTHROPIC_BASE_URL=${localAddr}`);
+    console.log(`  export OPENAI_BASE_URL=${localAddr}/v1`);
+    console.log("");
+    console.log("[lore] Configuration (environment variables):");
+    console.log(`  LORE_LISTEN_PORT        Port to listen on (current: ${port})`);
+    console.log(`  LORE_LISTEN_HOST        Hosts to bind to, comma-separated (current: ${config.hosts.join(",")})`);
+    console.log(`  LORE_UPSTREAM_ANTHROPIC Anthropic API URL (current: ${config.upstreamAnthropic})`);
+    console.log(`  LORE_UPSTREAM_OPENAI    OpenAI API URL (current: ${config.upstreamOpenAI})`);
+    console.log(`  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`);
+    console.log(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
+    console.log(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
+    console.log("");
+    console.log("[lore] When using Claude Code, also set:");
+    console.log("  export DISABLE_AUTO_COMPACT=1");
   }
   // Block until signal
   let shuttingDown = false;
