@@ -319,6 +319,7 @@ function layout(title: string, body: string): string {
 <nav>
   <span class="brand">Lore</span>
   <a href="/ui">Dashboard</a>
+  <a href="/ui/knowledge">Knowledge</a>
   <a href="/ui/search">Search</a>
   <a href="/ui/costs">Costs</a>
 </nav>
@@ -573,18 +574,68 @@ function pageProject(projectId: string): string | null {
   return layout(project.name ?? "Project", body);
 }
 
+function pageUserKnowledge(): string {
+  const entries = ltm.crossProject();
+
+  let body = breadcrumb([
+    { label: "Dashboard", href: "/ui" },
+    { label: "Knowledge" },
+  ]);
+  body += `<h1>User Knowledge (${entries.length})</h1>`;
+
+  if (!entries.length) {
+    body += `<p class="empty">No cross-project or global knowledge entries found. These are created automatically when the curator identifies knowledge worth sharing across projects.</p>`;
+    return layout("User Knowledge", body);
+  }
+
+  // Category breakdown stats
+  const cats: Record<string, number> = {};
+  for (const e of entries) {
+    cats[e.category] = (cats[e.category] || 0) + 1;
+  }
+  body += `<div class="stats">
+    <div class="stat"><div class="label">Total</div><div class="value">${entries.length}</div></div>`;
+  for (const [cat, count] of Object.entries(cats).sort((a, b) => b[1] - a[1])) {
+    body += `<div class="stat"><div class="label">${esc(cat)}</div><div class="value">${count}</div></div>`;
+  }
+  body += `</div>`;
+
+  body += `<div class="table-filter"><input type="text" placeholder="Filter knowledge\u2026"><span class="count"></span></div>
+  <table>
+    <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="text">Source Project</th><th data-sort="num">Confidence</th><th data-sort="date">Updated</th></tr>`;
+  for (const e of entries) {
+    const projName = e.project_id ? projectName(e.project_id) : null;
+    const projDisplay = e.project_id
+      ? `<a href="/ui/projects/${esc(e.project_id)}">${esc(projName ?? "(unknown)")}</a>`
+      : "(global)";
+    body += `<tr>
+      <td>${badge(e.category)}</td>
+      <td><a href="/ui/knowledge/${esc(e.id)}">${esc(truncate(e.title, 60))}</a></td>
+      <td>${projDisplay}</td>
+      <td>${e.confidence.toFixed(2)}</td>
+      <td>${timeAgo(e.updated_at)}</td>
+    </tr>`;
+  }
+  body += `</table>`;
+
+  return layout("User Knowledge", body);
+}
+
 function pageKnowledge(id: string): string | null {
   const entry = ltm.get(id);
   if (!entry) return null;
 
   const projName = entry.project_id ? projectName(entry.project_id) : null;
 
+  const isCrossOrGlobal = entry.cross_project || !entry.project_id;
   let body = breadcrumb([
     { label: "Dashboard", href: "/ui" },
-    ...(entry.project_id
-      ? [{ label: projName ?? "Project", href: `/ui/projects/${entry.project_id}` }]
-      : []),
-    { label: "Knowledge" },
+    ...(isCrossOrGlobal
+      ? [{ label: "Knowledge", href: "/ui/knowledge" }]
+      : entry.project_id
+        ? [{ label: projName ?? "Project", href: `/ui/projects/${entry.project_id}` }]
+        : []),
+    { label: truncate(entry.title, 40) },
   ]);
 
   body += `<h1>${esc(entry.title)}</h1>`;
@@ -1084,6 +1135,11 @@ export async function handleUIRequest(
         : htmlResponse(layout("Not Found", `<h1>Project not found</h1>`), 404);
     }
 
+    // User knowledge list (cross-project + global entries)
+    if (pathname === "/ui/knowledge") {
+      return htmlResponse(pageUserKnowledge());
+    }
+
     // Knowledge detail
     const knowledgeMatch = matchRoute(pathname, "/ui/knowledge/:id");
     if (knowledgeMatch) {
@@ -1138,8 +1194,10 @@ export async function handleUIRequest(
     if (delKnowledge) {
       const entry = ltm.get(delKnowledge.id);
       data.deleteKnowledge(delKnowledge.id);
-      const projectIdVal = entry?.project_id;
-      return redirect(projectIdVal ? `/ui/projects/${projectIdVal}` : "/ui");
+      if (entry?.cross_project || !entry?.project_id) {
+        return redirect("/ui/knowledge");
+      }
+      return redirect(`/ui/projects/${entry.project_id}`);
     }
 
     // Delete session

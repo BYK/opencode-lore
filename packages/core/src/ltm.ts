@@ -418,6 +418,17 @@ export function all(): KnowledgeEntry[] {
     .all() as KnowledgeEntry[];
 }
 
+/** Return all cross-project and global (user-level) knowledge entries. */
+export function crossProject(): KnowledgeEntry[] {
+  return db()
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+       WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2
+       ORDER BY confidence DESC, updated_at DESC`,
+    )
+    .all() as KnowledgeEntry[];
+}
+
 // LIKE-based fallback for when FTS5 fails unexpectedly.
 function searchLike(input: {
   query: string;
