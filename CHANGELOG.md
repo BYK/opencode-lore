@@ -1,4 +1,11 @@
 # Changelog
+## 0.17.1
+
+### Bug Fixes 🐛
+
+- Start gateway in-process instead of spawning a subprocess by @BYK in [#243](https://github.com/BYK/loreai/pull/243)
+- Configure Craft statusProvider to wait for CI before publishing by @BYK in [#241](https://github.com/BYK/loreai/pull/241)
+
 ## 0.17.0
 
 ### New Features ✨
