@@ -8,7 +8,7 @@
  *
  * Three request classes are handled:
  *  1. Compaction requests → intercepted, never forwarded upstream.
- *  2. Title/summary requests → forwarded transparently, no Lore processing.
+ *  2. Meta requests (title gen, summaries, etc.) → forwarded transparently, no Lore processing.
  *  3. Normal conversation turns → full pipeline.
  */
 import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
@@ -69,7 +69,8 @@ import {
   isCompactionRequest,
   detectCompactionRequest,
   isStructuralCompaction,
-  isTitleOrSummaryRequest,
+  isMetaRequest,
+  LORE_AGENT_HEADER,
   extractPreviousSummary,
   buildCompactionResponse,
   scaleUsageForClient,
@@ -1671,7 +1672,7 @@ async function handleCompaction(
 }
 
 // ---------------------------------------------------------------------------
-// Case 2: Title/summary passthrough
+// Case 2: Meta request passthrough (title gen, summaries, categorization, etc.)
 // ---------------------------------------------------------------------------
 
 async function handlePassthrough(
@@ -2025,7 +2026,7 @@ async function handleConversationTurn(
   //  - LTM: separate system block (no breakpoint, benefits from prefix)
   //  - Tools: 1h TTL on last tool (recall + git reminder are static)
   //  - Conversation: configurable TTL on last message block (5m default, 1h opt-in/auto)
-  // Title/summary passthrough (handlePassthrough) never reaches here — it
+  // Meta request passthrough (handlePassthrough) never reaches here — it
   // forwards the raw request without buildAnthropicRequest, so no caching.
 
   // Resolve conversation cache TTL: explicit "5m"/"1h" pass through,
@@ -2583,8 +2584,12 @@ export async function handleRequest(
       );
     }
 
-    // --- Case 2: Title/summary request → passthrough ---
-    if (isTitleOrSummaryRequest(req)) {
+    // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
+    if (isMetaRequest(req)) {
+      log.info(
+        `meta request detected: messages=${req.messages.length} tools=${req.tools.length}`
+        + ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,
+      );
       return await handlePassthrough(req, config);
     }
 

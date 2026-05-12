@@ -157,6 +157,12 @@ export const LorePlugin: Plugin = async (ctx) => {
     },
 
     tool: {},
+
+    // Inject the agent name so the gateway can distinguish meta requests
+    // (title generation, summary agents, etc.) from real conversation turns.
+    "chat.headers": async (input, output) => {
+      output.headers["x-lore-agent"] = input.agent;
+    },
   };
 
   // Startup banner — visible in stderr so silent failures are obvious.

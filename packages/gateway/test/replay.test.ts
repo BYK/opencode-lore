@@ -22,7 +22,7 @@ import { parseMarker } from "../src/session";
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Minimal request body that passes isTitleOrSummaryRequest → false. */
+/** Minimal request body that passes isMetaRequest → false. */
 function makeBody(
   userMessage: string,
   extraMessages: unknown[] = [],
@@ -265,10 +265,10 @@ describe("Temporal storage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite: "Title/summary passthrough"
+// Suite: "Meta request passthrough"
 // ---------------------------------------------------------------------------
 
-describe("Title/summary passthrough", () => {
+describe("Meta request passthrough", () => {
   let harness: Harness;
 
   afterEach(() => harness?.teardown());
@@ -289,7 +289,7 @@ describe("Title/summary passthrough", () => {
       ],
     });
 
-    // Title/summary request shape: short system (<500 chars), ≤2 tools, ≤2 messages
+    // Meta request shape: short system (<500 chars), ≤2 tools, ≤2 messages
     const resp = await harness.chat({
       model: DEFAULT_MODEL,
       max_tokens: 50,
@@ -298,7 +298,7 @@ describe("Title/summary passthrough", () => {
       messages: [
         { role: "user", content: "Title: User asks about math" },
       ],
-      // No tools — signals title/summary agent
+      // No tools — signals meta request (title/summary agent)
     });
 
     expect(resp.status).toBe(200);

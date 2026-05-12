@@ -236,38 +236,106 @@ export function extractPreviousSummary(
 }
 
 // ---------------------------------------------------------------------------
-// isTitleOrSummaryRequest
+// isMetaRequest (replaces isTitleOrSummaryRequest)
 // ---------------------------------------------------------------------------
 
-/** Max system prompt length for title/summary agents (chars). */
-const TITLE_SUMMARY_MAX_SYSTEM_LENGTH = 500;
-
-/** Max number of tools for a title/summary agent (0 or very few). */
-const TITLE_SUMMARY_MAX_TOOLS = 2;
-
-/** Max message count for a title/summary agent (system extracted, so 1–2). */
-const TITLE_SUMMARY_MAX_MESSAGES = 2;
+/** Header injected by the OpenCode plugin identifying the calling agent. */
+export const LORE_AGENT_HEADER = "x-lore-agent";
 
 /**
- * Detect non-conversation requests that should be forwarded without Lore
- * pipeline processing (title generation, summary agents, etc.).
- *
- * These have:
- *  - Empty or very few tools (≤2)
- *  - Only 1–2 messages (system already extracted to `req.system`)
- *  - Short system prompt (< 500 chars)
- *  - NOT a compaction request (handled separately)
+ * Agent names known to be primary conversation agents (NOT meta).
+ * When `x-lore-agent` matches, the request is always a normal turn.
  */
-export function isTitleOrSummaryRequest(req: GatewayRequest): boolean {
-  // Compaction requests are handled separately — don't classify as title/summary
+const PRIMARY_AGENTS = new Set(["coder", "code"]);
+
+/**
+ * Agent names known to be meta/housekeeping agents.
+ * When `x-lore-agent` matches, the request is always passthrough.
+ */
+const META_AGENTS = new Set(["title", "summary", "summarize", "categorize", "label", "classify"]);
+
+// Heuristic scoring weights — each signal contributes independently.
+// Threshold of 8 preserves backward compat: the old 3-check AND scored 3+3+2 = 8.
+const SCORE_FEW_TOOLS = 3; // tools ≤ 2  (real agents have 5+)
+const SCORE_FEW_MESSAGES = 3; // messages ≤ 2  (meta requests are single-shot)
+const SCORE_SHORT_SYSTEM = 2; // system < 500 chars  (real prompts are 2K–50K)
+const SCORE_LOW_MAX_TOKENS = 3; // maxTokens ≤ 300  (title gen uses tiny budgets)
+const SCORE_META_KEYWORDS = 2; // system prompt contains meta-task keywords
+const META_SCORE_THRESHOLD = 8;
+
+/** Max tools for the structural heuristic signal. */
+const META_MAX_TOOLS = 2;
+/** Max messages for the structural heuristic signal. */
+const META_MAX_MESSAGES = 2;
+/** Max system prompt length for the structural heuristic signal (chars). */
+const META_MAX_SYSTEM_LENGTH = 500;
+/** Max output tokens that suggests a meta/title request. */
+const META_MAX_TOKENS = 300;
+/** Max system prompt length for keyword scanning (avoid false positives on large prompts). */
+const META_KEYWORD_SYSTEM_LENGTH = 2000;
+
+const META_KEYWORDS = [
+  "generate a title",
+  "generate a short title",
+  "title for the conversation",
+  "title for this conversation",
+  "summarize this conversation",
+  "summarize the conversation",
+  "conversation summary",
+  "categorize",
+  "classify this",
+  "label this",
+];
+
+/**
+ * Detect non-conversation meta requests that should be forwarded without
+ * Lore pipeline processing (title generation, summary agents, categorization,
+ * labeling, etc.).
+ *
+ * Uses a two-layer approach:
+ *  1. Explicit `x-lore-agent` header (OpenCode plugin) — authoritative signal.
+ *  2. Heuristic scoring (all clients) — structural + budget + keyword signals.
+ *
+ * Returns `true` when the request should bypass Lore processing.
+ * Biased toward false negatives (letting meta requests through to full pipeline)
+ * over false positives (incorrectly skipping a real conversation turn).
+ */
+export function isMetaRequest(req: GatewayRequest): boolean {
+  // Compaction requests are handled separately
   if (isCompactionRequest(req)) return false;
 
-  return (
-    req.tools.length <= TITLE_SUMMARY_MAX_TOOLS &&
-    req.messages.length <= TITLE_SUMMARY_MAX_MESSAGES &&
-    req.system.length < TITLE_SUMMARY_MAX_SYSTEM_LENGTH
-  );
+  // --- Layer 1: Explicit agent header ---
+  const agentHeader = req.rawHeaders[LORE_AGENT_HEADER];
+  if (agentHeader) {
+    const agent = agentHeader.toLowerCase();
+    if (PRIMARY_AGENTS.has(agent)) return false;
+    if (META_AGENTS.has(agent)) return true;
+    // Unknown agent → fall through to heuristics
+  }
+
+  // --- Layer 2: Heuristic scoring ---
+  let score = 0;
+
+  if (req.tools.length <= META_MAX_TOOLS) score += SCORE_FEW_TOOLS;
+  if (req.messages.length <= META_MAX_MESSAGES) score += SCORE_FEW_MESSAGES;
+  if (req.system.length < META_MAX_SYSTEM_LENGTH) score += SCORE_SHORT_SYSTEM;
+  if (req.maxTokens > 0 && req.maxTokens <= META_MAX_TOKENS) score += SCORE_LOW_MAX_TOKENS;
+
+  // Keyword check — only on short-ish system prompts to avoid false positives
+  // from large prompts that mention "title" or "summary" in passing.
+  if (req.system.length < META_KEYWORD_SYSTEM_LENGTH) {
+    const systemLower = req.system.toLowerCase();
+    for (const kw of META_KEYWORDS) {
+      if (systemLower.includes(kw)) {
+        score += SCORE_META_KEYWORDS;
+        break; // Count once
+      }
+    }
+  }
+
+  return score >= META_SCORE_THRESHOLD;
 }
+
 
 // ---------------------------------------------------------------------------
 // buildCompactionResponse
