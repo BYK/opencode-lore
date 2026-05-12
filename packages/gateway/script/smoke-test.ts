@@ -180,8 +180,8 @@ try {
   // Test 2 — Non-streaming request with marker injection
   // -----------------------------------------------------------------------
   await runTest("Test 2: Non-streaming request", async () => {
-    // Include tools so the request isn't classified as a title/summary
-    // passthrough (isTitleOrSummaryRequest checks tools.length ≤ 2)
+    // Include tools so the request isn't classified as a meta request
+    // passthrough (isMetaRequest scores tools.length ≤ 2 as a signal)
     const tools = [
       { name: "bash", description: "Run a shell command", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
       { name: "read", description: "Read a file", input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
