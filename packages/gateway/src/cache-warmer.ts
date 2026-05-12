@@ -74,14 +74,14 @@ export const HISTOGRAM_BINS: readonly number[] = [
 const BIN_COUNT = HISTOGRAM_BINS.length + 1;
 
 /** Pseudocount for Bayesian blending of session vs global histograms. */
-const BLEND_PSEUDOCOUNT = 20;
+export const BLEND_PSEUDOCOUNT = 20;
 
 /** Survival probability below which a session is marked dead. */
-const DEAD_SESSION_THRESHOLD = 0.02;
+export const DEAD_SESSION_THRESHOLD = 0.02;
 
 /** Minimum completed turns before warming is eligible. Filters out one-shot
  *  sessions and ensures the survival model has ≥2 gap observations. */
-const MIN_TURNS_FOR_WARMING = 3;
+export const MIN_TURNS_FOR_WARMING = 3;
 
 /** Max uncached warmup responses before the global circuit breaker trips. */
 const CIRCUIT_BREAKER_MAX_FAILURES = 3;
@@ -104,6 +104,19 @@ let circuitBreakerTripped = false;
  */
 export function isCircuitBreakerTripped(): boolean {
   return circuitBreakerTripped;
+}
+
+/** Snapshot of circuit breaker state for dashboard rendering. */
+export function getCircuitBreakerStatus(): {
+  tripped: boolean;
+  failures: number;
+  maxFailures: number;
+} {
+  return {
+    tripped: circuitBreakerTripped,
+    failures: circuitBreakerFailures,
+    maxFailures: CIRCUIT_BREAKER_MAX_FAILURES,
+  };
 }
 
 /**
@@ -540,6 +553,149 @@ export function shouldWarm(
 }
 
 // ---------------------------------------------------------------------------
+// Dashboard snapshot
+// ---------------------------------------------------------------------------
+
+/** All data the dashboard needs for one session's warming visualization. */
+export type WarmingSnapshot = {
+  sessionId: string;
+  projectPath: string;
+  // State
+  messageCount: number;
+  idleMs: number;
+  consecutiveTextOnlyTurns: number;
+  ttl: "5m" | "1h" | undefined;
+  // Warmup state
+  warmupCount: number;
+  warmupHits: number;
+  lastWarmupAt: number;
+  disabled: boolean;
+  forceKeepWarm: boolean;
+  // Survival analysis
+  currentSlot: TimeSlot;
+  sessionHistogram: InterTurnHistogram;
+  globalHistogram: InterTurnHistogram;
+  blendedHistogram: InterTurnHistogram;
+  sessionWeight: number;
+  survivalAtIdle: number;
+  pReturn: number;
+  pReturnDampened: number;
+  costThreshold: number;
+  // Decision
+  shouldWarmNow: boolean;
+  notWarmingReason: string | null;
+  // Circuit breaker (global, same for all sessions)
+  circuitBreaker: { tripped: boolean; failures: number; maxFailures: number };
+};
+
+/**
+ * Compute a read-only snapshot of all warming heuristics for a session.
+ *
+ * Used by the dashboard to render warming state without importing
+ * internal functions. All calls are pure or idempotent (read-only).
+ */
+export function computeWarmingSnapshot(
+  state: SessionState,
+  now: number = Date.now(),
+): WarmingSnapshot {
+  const cfg = loreConfig();
+  const slot = resolveTimeSlot(new Date(now));
+  const idleMs = now - state.lastRequestTime;
+
+  // Histograms
+  const sessionHist = state.survivalModel?.slots[slot] ?? createHistogram();
+  loadGlobalHistograms(state.projectPath);
+  const globalHist = getGlobalHistogram(state.projectPath, slot);
+  const blendedHist = blendHistograms(sessionHist, globalHist);
+  const sessionWeight = Math.min(sessionHist.total / BLEND_PSEUDOCOUNT, 1.0);
+
+  // Survival & return probability
+  const survivalAtIdle = survivalFunction(blendedHist, idleMs);
+
+  const profile = resolveProfile(
+    state.lastModel,
+    state.lastProtocol,
+    state.resolvedConversationTTL,
+  );
+  const ttlMs = profile?.ttlMs ?? 300_000;
+  const warmupMarginMs = profile?.warmupMarginMs ?? 45_000;
+
+  const pReturn = conditionalReturnProbability(blendedHist, idleMs, ttlMs);
+  const textOnlyRuns = state.consecutiveTextOnlyTurns ?? 0;
+  const pReturnDampened =
+    textOnlyRuns > 0 ? pReturn * Math.pow(0.5, textOnlyRuns) : pReturn;
+
+  // Threshold
+  const autoThreshold = profile
+    ? profile.cacheReadCostPerMTok / profile.cacheMissCostPerMTok
+    : 0.1;
+  const costThreshold = cfg.cache.warming.minReturnProbability ?? autoThreshold;
+
+  // Decision + reason
+  const warmNow =
+    profile != null &&
+    shouldWarm(state, profile, blendedHist, now);
+
+  let notWarmingReason: string | null = null;
+  if (!warmNow) {
+    if (circuitBreakerTripped) {
+      notWarmingReason = "Circuit breaker tripped";
+    } else if (!cfg.cache.warming.enabled) {
+      notWarmingReason = "Warming disabled in config";
+    } else if (!state.cacheAnalytics.lastRequestBody) {
+      notWarmingReason = "No stored request body";
+    } else if (!profile) {
+      notWarmingReason = "No warming profile (non-Anthropic or unknown model)";
+    } else if (state.warmup?.forceKeepWarm) {
+      const intoWindow = idleMs % ttlMs;
+      if (intoWindow < ttlMs - warmupMarginMs) {
+        notWarmingReason = "Force-keep: not in warmup window yet";
+      }
+    } else if (state.warmup?.lastWarmupAt && now - state.warmup.lastWarmupAt < ttlMs) {
+      notWarmingReason = "Already warmed in this TTL window";
+    } else if (idleMs < ttlMs - warmupMarginMs) {
+      notWarmingReason = "Cache still fresh";
+    } else if (idleMs >= ttlMs) {
+      notWarmingReason = "Cache already expired";
+    } else if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
+      notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
+    } else if (state.warmup?.disabled) {
+      notWarmingReason = "Session marked dead";
+    } else if (pReturnDampened <= costThreshold) {
+      notWarmingReason = `P(return) ${(pReturnDampened * 100).toFixed(1)}% <= threshold ${(costThreshold * 100).toFixed(1)}%`;
+    } else {
+      notWarmingReason = "Unknown";
+    }
+  }
+
+  return {
+    sessionId: state.sessionID,
+    projectPath: state.projectPath,
+    messageCount: state.messageCount,
+    idleMs,
+    consecutiveTextOnlyTurns: textOnlyRuns,
+    ttl: state.resolvedConversationTTL,
+    warmupCount: state.warmup?.warmupCount ?? 0,
+    warmupHits: state.warmup?.warmupHits ?? 0,
+    lastWarmupAt: state.warmup?.lastWarmupAt ?? 0,
+    disabled: state.warmup?.disabled ?? false,
+    forceKeepWarm: state.warmup?.forceKeepWarm ?? false,
+    currentSlot: slot,
+    sessionHistogram: sessionHist,
+    globalHistogram: globalHist,
+    blendedHistogram: blendedHist,
+    sessionWeight,
+    survivalAtIdle,
+    pReturn,
+    pReturnDampened,
+    costThreshold,
+    shouldWarmNow: warmNow,
+    notWarmingReason,
+    circuitBreaker: getCircuitBreakerStatus(),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Warmup execution
 // ---------------------------------------------------------------------------
 
@@ -837,6 +993,15 @@ export function recordGlobalGap(
   const hist = getGlobalHistogram(projectPath, slot);
   recordGap(hist, gapMs);
   markDirty(projectPath, slot);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard helpers
+// ---------------------------------------------------------------------------
+
+/** Read-only snapshot of all loaded global survival models (for dashboard). */
+export function getGlobalModelsSnapshot(): ReadonlyMap<string, SurvivalModel> {
+  return globalModels;
 }
 
 // ---------------------------------------------------------------------------

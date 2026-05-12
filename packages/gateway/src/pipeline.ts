@@ -214,6 +214,11 @@ let cachedProjectPath: string | null = null;
 /** Per-session state tracked across requests. */
 const sessions = new Map<string, SessionState>();
 
+/** Read-only access to live session states (for dashboard rendering). */
+export function getActiveSessions(): ReadonlyMap<string, SessionState> {
+  return sessions;
+}
+
 /**
  * Reverse lookup: maps header-based session ID values to internal session IDs.
  * Key: `headerName:headerValue` (e.g. `x-claude-code-session-id:uuid-1234`).
