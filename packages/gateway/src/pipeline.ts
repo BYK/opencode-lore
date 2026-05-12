@@ -85,6 +85,12 @@ import {
   buildOpenAIResponse,
 } from "./translate/openai";
 import {
+  buildOpenAIResponsesUpstreamRequest,
+} from "./translate/openai-responses";
+import {
+  accumulateResponsesSSEStream,
+} from "./stream/openai-responses";
+import {
   createStreamAccumulator,
   createRecallAwareAccumulator,
   parseSSEStream,
@@ -753,6 +759,8 @@ type UpstreamResult = {
   response: Response;
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
+  /** The wire protocol used for the upstream request (may differ from ingress). */
+  effectiveProtocol: "anthropic" | "openai" | "openai-responses";
 };
 
 /**
@@ -776,11 +784,25 @@ async function forwardToUpstream(
   let body: unknown;
 
   // Infer upstream from model name; fall back to protocol + env-var defaults.
+  // Preserve "openai-responses" from ingress — model prefix routing returns
+  // "openai" for OpenAI models, but we must not downgrade the wire protocol.
   const route = resolveUpstreamRoute(req.model);
-  const effectiveProtocol = route?.protocol ?? req.protocol;
-  const effectiveUpstreamBase = route?.url ?? (effectiveProtocol === "openai" ? config.upstreamOpenAI : config.upstreamAnthropic);
+  const effectiveProtocol =
+    req.protocol === "openai-responses"
+      ? "openai-responses"
+      : (route?.protocol ?? req.protocol);
+  const effectiveUpstreamBase =
+    route?.url ??
+    (effectiveProtocol === "anthropic"
+      ? config.upstreamAnthropic
+      : config.upstreamOpenAI);
 
-  if (effectiveProtocol === "openai") {
+  if (effectiveProtocol === "openai-responses") {
+    const result = buildOpenAIResponsesUpstreamRequest(req, effectiveUpstreamBase);
+    url = result.url;
+    headers = result.headers;
+    body = result.body;
+  } else if (effectiveProtocol === "openai") {
     const result = buildOpenAIUpstreamRequest(req, effectiveUpstreamBase);
     url = result.url;
     headers = result.headers;
@@ -823,7 +845,7 @@ async function forwardToUpstream(
           body: serializedBody,
         }),
     );
-    return { response, serializedBody };
+    return { response, serializedBody, effectiveProtocol };
   }
 
   const response = await fetch(url, {
@@ -831,7 +853,7 @@ async function forwardToUpstream(
     headers,
     body: serializedBody,
   });
-  return { response, serializedBody };
+  return { response, serializedBody, effectiveProtocol };
 }
 
 // ---------------------------------------------------------------------------
@@ -1134,12 +1156,29 @@ function buildStreamingResponse(
 
 /**
  * Accumulate a non-streaming upstream response into a GatewayResponse.
+ *
+ * Dispatches to the correct parser based on the upstream wire protocol:
+ *  - "anthropic": Anthropic Messages API format
+ *  - "openai": OpenAI Chat Completions API format
+ *  - "openai-responses": OpenAI Responses API format
  */
 async function accumulateNonStreamResponse(
   upstreamResponse: Response,
+  protocol: "anthropic" | "openai" | "openai-responses" = "anthropic",
 ): Promise<GatewayResponse> {
   const json = (await upstreamResponse.json()) as Record<string, unknown>;
 
+  switch (protocol) {
+    case "openai":
+      return accumulateOpenAINonStreamJSON(json);
+    case "openai-responses":
+      return accumulateResponsesNonStreamJSON(json);
+    default:
+      return accumulateAnthropicNonStreamJSON(json);
+  }
+}
+
+function accumulateAnthropicNonStreamJSON(json: Record<string, unknown>): GatewayResponse {
   const content: GatewayContentBlock[] = [];
   const rawContent = json.content as Array<Record<string, unknown>> | undefined;
   if (rawContent) {
@@ -1187,11 +1226,117 @@ async function accumulateNonStreamResponse(
   };
 }
 
+function accumulateOpenAINonStreamJSON(json: Record<string, unknown>): GatewayResponse {
+  const content: GatewayContentBlock[] = [];
+  const choices = json.choices as Array<Record<string, unknown>> | undefined;
+  const firstChoice = choices?.[0];
+  const message = firstChoice?.message as Record<string, unknown> | undefined;
+
+  if (message) {
+    const textContent = message.content as string | undefined;
+    if (textContent) {
+      content.push({ type: "text", text: textContent });
+    }
+    const toolCalls = message.tool_calls as Array<Record<string, unknown>> | undefined;
+    if (toolCalls) {
+      for (const tc of toolCalls) {
+        const fn = tc.function as Record<string, unknown> | undefined;
+        let input: unknown = {};
+        if (typeof fn?.arguments === "string") {
+          try { input = JSON.parse(fn.arguments as string); } catch { input = fn.arguments; }
+        }
+        content.push({
+          type: "tool_use",
+          id: String(tc.id ?? ""),
+          name: String(fn?.name ?? ""),
+          input,
+        });
+      }
+    }
+  }
+
+  // Map OpenAI finish_reason to gateway stop reason
+  const finishReason = firstChoice?.finish_reason as string | undefined;
+  let stopReason = "end_turn";
+  if (finishReason === "stop") stopReason = "end_turn";
+  else if (finishReason === "length") stopReason = "max_tokens";
+  else if (finishReason === "tool_calls") stopReason = "tool_use";
+
+  const usage = json.usage as Record<string, unknown> | undefined;
+  const promptTokensDetails = usage?.prompt_tokens_details as Record<string, number> | undefined;
+
+  return {
+    id: String(json.id ?? ""),
+    model: String(json.model ?? ""),
+    content,
+    stopReason,
+    usage: {
+      inputTokens: (usage?.prompt_tokens as number) ?? 0,
+      outputTokens: (usage?.completion_tokens as number) ?? 0,
+      cacheReadInputTokens: promptTokensDetails?.cached_tokens,
+    },
+  };
+}
+
+function accumulateResponsesNonStreamJSON(json: Record<string, unknown>): GatewayResponse {
+  const content: GatewayContentBlock[] = [];
+  const output = json.output as Array<Record<string, unknown>> | undefined;
+
+  if (output) {
+    for (const item of output) {
+      if (item.type === "message") {
+        const msgContent = item.content as Array<Record<string, unknown>> | undefined;
+        if (msgContent) {
+          for (const part of msgContent) {
+            if (part.type === "output_text") {
+              content.push({ type: "text", text: String(part.text ?? "") });
+            }
+          }
+        }
+      } else if (item.type === "function_call") {
+        let input: unknown = {};
+        if (typeof item.arguments === "string") {
+          try { input = JSON.parse(item.arguments as string); } catch { input = item.arguments; }
+        }
+        content.push({
+          type: "tool_use",
+          id: String(item.call_id ?? item.id ?? ""),
+          name: String(item.name ?? ""),
+          input,
+        });
+      }
+    }
+  }
+
+  // Map Responses API status to gateway stop reason
+  const status = json.status as string | undefined;
+  let stopReason = "end_turn";
+  if (status === "incomplete") stopReason = "max_tokens";
+  if (content.some(b => b.type === "tool_use") && stopReason === "end_turn") {
+    stopReason = "tool_use";
+  }
+
+  const usage = json.usage as Record<string, unknown> | undefined;
+  const promptTokensDetails = usage?.prompt_tokens_details as Record<string, number> | undefined;
+
+  return {
+    id: String(json.id ?? ""),
+    model: String(json.model ?? ""),
+    content,
+    stopReason,
+    usage: {
+      inputTokens: (usage?.input_tokens as number) ?? 0,
+      outputTokens: (usage?.output_tokens as number) ?? 0,
+      cacheReadInputTokens: promptTokensDetails?.cached_tokens,
+    },
+  };
+}
+
 /**
- * Accumulate a streaming upstream SSE response into a GatewayResponse.
+ * Accumulate a streaming upstream Anthropic SSE response into a GatewayResponse.
  *
- * Used for OpenAI requests where we need to convert the accumulated
- * response to OpenAI format before returning to the client.
+ * Used for Anthropic requests where we need to convert the accumulated
+ * response to another format before returning to the client.
  */
 async function accumulateStreamResponse(
   upstreamResponse: Response,
@@ -1204,6 +1349,109 @@ async function accumulateStreamResponse(
   }
 
   return accumulator.getResponse();
+}
+
+/**
+ * Accumulate a streaming upstream OpenAI Chat Completions SSE response
+ * into a GatewayResponse.
+ *
+ * OpenAI SSE chunks have a different format from Anthropic:
+ *   data: {"id":"...","choices":[{"delta":{"content":"..."},"finish_reason":null}]}
+ */
+async function accumulateNonStreamOpenAIStream(
+  upstreamResponse: Response,
+): Promise<GatewayResponse> {
+  let id = "";
+  let model = "";
+  let stopReason = "end_turn";
+  let textContent = "";
+  const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedTokens: number | undefined;
+
+  const reader = upstreamResponse.body!.getReader();
+
+  for await (const { data } of parseSSEStream(reader)) {
+    if (data === "[DONE]") break;
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+
+    if (typeof parsed.id === "string") id = parsed.id;
+    if (typeof parsed.model === "string") model = parsed.model;
+
+    const choices = parsed.choices as Array<Record<string, unknown>> | undefined;
+    const firstChoice = choices?.[0];
+    if (firstChoice) {
+      const delta = firstChoice.delta as Record<string, unknown> | undefined;
+      if (delta) {
+        if (typeof delta.content === "string") {
+          textContent += delta.content;
+        }
+        const tcs = delta.tool_calls as Array<Record<string, unknown>> | undefined;
+        if (tcs) {
+          for (const tc of tcs) {
+            const idx = tc.index as number;
+            const fn = tc.function as Record<string, unknown> | undefined;
+            const existing = toolCalls.get(idx);
+            if (!existing) {
+              toolCalls.set(idx, {
+                id: String(tc.id ?? ""),
+                name: String(fn?.name ?? ""),
+                args: String(fn?.arguments ?? ""),
+              });
+            } else {
+              if (fn?.arguments) existing.args += fn.arguments;
+            }
+          }
+        }
+      }
+      if (typeof firstChoice.finish_reason === "string") {
+        const fr = firstChoice.finish_reason;
+        if (fr === "stop") stopReason = "end_turn";
+        else if (fr === "length") stopReason = "max_tokens";
+        else if (fr === "tool_calls") stopReason = "tool_use";
+      }
+    }
+
+    // Usage is typically in the final chunk
+    const usage = parsed.usage as Record<string, unknown> | undefined;
+    if (usage) {
+      if (typeof usage.prompt_tokens === "number") inputTokens = usage.prompt_tokens as number;
+      if (typeof usage.completion_tokens === "number") outputTokens = usage.completion_tokens as number;
+      const details = usage.prompt_tokens_details as Record<string, number> | undefined;
+      if (details?.cached_tokens !== undefined) cachedTokens = details.cached_tokens;
+    }
+  }
+
+  const content: GatewayContentBlock[] = [];
+  if (textContent) {
+    content.push({ type: "text", text: textContent });
+  }
+  for (const [, tc] of Array.from(toolCalls.entries()).sort(([a], [b]) => a - b)) {
+    let input: unknown = {};
+    if (tc.args) {
+      try { input = JSON.parse(tc.args); } catch { input = tc.args; }
+    }
+    content.push({ type: "tool_use", id: tc.id, name: tc.name, input });
+  }
+
+  return {
+    id,
+    model,
+    content,
+    stopReason,
+    usage: {
+      inputTokens,
+      outputTokens,
+      cacheReadInputTokens: cachedTokens,
+    },
+  };
 }
 
 /**
@@ -1473,7 +1721,9 @@ function postResponse(
     // Track model/protocol for warmup profile resolution
     sessionState.lastModel = req.model;
     sessionState.lastProtocol =
-      resolveUpstreamRoute(req.model)?.protocol ?? "anthropic";
+      req.protocol === "openai-responses"
+        ? "openai-responses"
+        : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic");
 
     // Reset dead flag if session was marked dead but user returned
     if (sessionState.warmup?.disabled) {
@@ -1829,7 +2079,7 @@ async function handleConversationTurn(
     authFingerprint: cred ? authFingerprint(cred) : null,
     sessionID,
     model: req.model,
-    upstreamUrl: resolveUpstreamRoute(req.model)?.url ?? config.upstreamAnthropic,
+    upstreamUrl: resolveUpstreamRoute(req.model)?.url ?? (req.protocol === "anthropic" ? config.upstreamAnthropic : config.upstreamOpenAI),
     port: config.port,
     projectPath,
   });
@@ -2113,13 +2363,15 @@ async function handleConversationTurn(
       "gen_ai.operation.name": "chat",
       "gen_ai.request.model": req.model,
       "gen_ai.provider.name":
-        resolveUpstreamRoute(req.model)?.protocol ?? "anthropic",
+        req.protocol === "openai-responses"
+          ? "openai-responses"
+          : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic"),
       "gen_ai.response.streaming": req.stream,
       // NO gen_ai.input.messages — privacy (proxy for other people's projects)
     },
   });
 
-  const { response: upstreamResponse, serializedBody: requestBody } =
+  const { response: upstreamResponse, serializedBody: requestBody, effectiveProtocol } =
     await forwardToUpstream(
       modifiedReq,
       config,
@@ -2141,7 +2393,23 @@ async function handleConversationTurn(
   }
 
   if (req.stream && upstreamResponse.body) {
-    // Streaming: forward events and accumulate in parallel.
+    // Non-Anthropic upstream streaming responses need their own accumulator
+    // since the Anthropic SSE accumulator can't parse OpenAI SSE formats.
+    if (effectiveProtocol === "openai-responses") {
+      const resp = await accumulateResponsesSSEStream(upstreamResponse);
+      postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+      return nonStreamHttpResponse(resp);
+    }
+
+    if (effectiveProtocol === "openai") {
+      // OpenAI Chat Completions streaming — accumulate and return as
+      // non-streaming Anthropic format (same pattern as non-stream path).
+      const resp = await accumulateNonStreamOpenAIStream(upstreamResponse);
+      postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+      return nonStreamHttpResponse(resp);
+    }
+
+    // Anthropic streaming: forward events and accumulate in parallel.
     // Pass recall context so the accumulator can intercept recall tool_use.
     const hasRecallTool = modifiedReq.tools.some(
       (t) => t.name === RECALL_TOOL_NAME,
@@ -2155,8 +2423,8 @@ async function handleConversationTurn(
     );
   }
 
-  // Non-streaming (also used for OpenAI protocol via accumulateStreamResponse)
-  const resp = await accumulateNonStreamResponse(upstreamResponse);
+  // Non-streaming: dispatch to correct accumulator based on upstream protocol.
+  const resp = await accumulateNonStreamResponse(upstreamResponse, effectiveProtocol);
 
   // --- Recall interception (non-streaming) ---
   if (hasRecallToolUse(resp)) {
@@ -2195,7 +2463,8 @@ async function handleConversationTurn(
     );
     const followUp = buildRecallFollowUp(modifiedReq, resp, result, recallBlock);
     let followUpResponse: Response;
-    ({ response: followUpResponse } = await forwardToUpstream(
+    let followUpProtocol: "anthropic" | "openai" | "openai-responses";
+    ({ response: followUpResponse, effectiveProtocol: followUpProtocol } = await forwardToUpstream(
       followUp,
       config,
       undefined,
@@ -2212,7 +2481,7 @@ async function handleConversationTurn(
       return nonStreamHttpResponse(markerResp);
     }
 
-    const continuationResp = await accumulateNonStreamResponse(followUpResponse);
+    const continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
 
     // Merge usage from both requests
     continuationResp.usage.inputTokens += resp.usage.inputTokens;

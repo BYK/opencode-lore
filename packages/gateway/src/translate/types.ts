@@ -74,7 +74,7 @@ export type GatewayTool = {
 // Request — the normalized form after ingress translation
 // ---------------------------------------------------------------------------
 
-export type GatewayProtocol = "anthropic" | "openai";
+export type GatewayProtocol = "anthropic" | "openai" | "openai-responses";
 
 /** Normalized request after ingress translation from either protocol. */
 export type GatewayRequest = {
@@ -112,6 +112,12 @@ export type GatewayRequest = {
     user?: string;
     logprobs?: boolean;
     top_logprobs?: number;
+    /** OpenAI Responses API: previous response ID for conversation continuation. */
+    previous_response_id?: string;
+    /** OpenAI Responses API: reasoning configuration. */
+    reasoning?: unknown;
+    /** OpenAI Responses API: truncation settings. */
+    truncation?: unknown;
   };
 };
 
@@ -269,7 +275,7 @@ export type SessionState = {
   /** Model name from the last real request (for warming profile resolution). */
   lastModel?: string;
   /** Protocol from the last real request (for warming profile resolution). */
-  lastProtocol?: "anthropic" | "openai";
+  lastProtocol?: "anthropic" | "openai" | "openai-responses";
 };
 
 // ---------------------------------------------------------------------------

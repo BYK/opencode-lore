@@ -53,7 +53,7 @@ export function loadConfig(): GatewayConfig {
 
 export type UpstreamRoute = {
   url: string;
-  protocol: "anthropic" | "openai";
+  protocol: "anthropic" | "openai" | "openai-responses";
 };
 
 /**
@@ -63,7 +63,7 @@ export type UpstreamRoute = {
  * matches `claude-` before any catch-all. Unknown models fall back to the
  * env-var-configured defaults.
  */
-const UPSTREAM_ROUTES: Array<{ prefix: string; url: string; protocol: "anthropic" | "openai" }> = [
+const UPSTREAM_ROUTES: Array<{ prefix: string; url: string; protocol: "anthropic" | "openai" | "openai-responses" }> = [
   // Anthropic
   { prefix: "claude-",        url: "https://api.anthropic.com",          protocol: "anthropic" },
   // Nvidia NIM
