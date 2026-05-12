@@ -1321,7 +1321,9 @@ function pageCosts(): string {
   const hist = historical.totals;
 
   // --- Combined totals ---
-  const combinedWorkerCost = liveTotalWorker + hist.distillationCost;
+  // Use totalWorkerCost (persisted real API data where available, heuristic
+  // distillation estimate as fallback) instead of distillationCost alone.
+  const combinedWorkerCost = liveTotalWorker + hist.totalWorkerCost;
   const combinedAvoidedCompactions = liveAvoidedCompactions + hist.avoidedCompactions;
   const combinedAvoidedCompactionCost = liveAvoidedCompactionCost + hist.avoidedCompactionCost;
   const combinedWarmupSavings = liveWarmupSavings + hist.warmupSavings;
@@ -1390,19 +1392,27 @@ function pageCosts(): string {
   // =====================================================
   body += `<h2>Historical Estimates (from stored data)</h2>`;
   body += `<p style="color:var(--fg3);font-size:0.9em">
-    Estimated from ${hist.messageCount.toLocaleString()} stored messages across ${hist.sessionCount} sessions.
-    Distillation overhead, avoided compactions, and net savings are estimated from stored data.
-    Cache warming, 1h TTL, and batch API savings are persisted from live sessions on idle.
+    Aggregated from ${hist.sessionCount} sessions (${hist.messageCount.toLocaleString()} messages).
+    Worker overhead and savings use persisted live-session data where available,
+    with heuristic estimates as fallback for sessions without a snapshot.
   </p>`;
 
   if (hist.sessionCount === 0) {
     body += `<p class="empty">No historical sessions found in the database.</p>`;
   } else {
-    const histNetSavings = hist.avoidedCompactionCost + hist.warmupSavings + hist.ttlSavings + hist.batchSavings - hist.distillationCost;
+    const histNetSavings = hist.avoidedCompactionCost + hist.warmupSavings + hist.ttlSavings + hist.batchSavings - hist.totalWorkerCost;
     body += `<div class="card">
-      <table class="cost-table">
-        <tr class="section-header"><td colspan="2"><strong>Estimated Lore Overhead</strong></td></tr>
-        <tr><td>Distillation calls</td><td>${formatUSD(hist.distillationCost)} <span style="color:var(--fg3);font-size:0.85em">(${hist.distillationCalls} calls: ${hist.distillationBatchCalls} batched, ${hist.distillationDirectCalls} direct)</span></td></tr>
+      <table class="cost-table">`;
+    if (hist.persistedConversationCost > 0) {
+      body += `<tr class="section-header"><td colspan="2"><strong>Historical Spend</strong></td></tr>
+        <tr><td>Conversation</td><td>${formatUSD(hist.persistedConversationCost)}</td></tr>`;
+    }
+    body += `<tr class="section-header"><td colspan="2"${hist.persistedConversationCost > 0 ? ' style="padding-top:0.8em"' : ""}><strong>Lore Overhead</strong></td></tr>
+        <tr><td>Total worker cost</td><td>${formatUSD(hist.totalWorkerCost)}`;
+    if (hist.totalWorkerCost !== hist.distillationCost) {
+      body += ` <span style="color:var(--fg3);font-size:0.85em">(distillation-only estimate: ${formatUSD(hist.distillationCost)})</span>`;
+    }
+    body += `</td></tr>
         <tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Estimated Savings</strong></td></tr>
         <tr><td>Avoided compactions</td><td>${formatUSD(hist.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${hist.avoidedCompactions})</span></td></tr>
         ${hist.warmupSavings > 0 ? `<tr><td>Cache warming</td><td>${formatUSD(hist.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.warmupHits} hits)</span></td></tr>` : ""}
@@ -1417,14 +1427,15 @@ function pageCosts(): string {
     body += `<h3>Per Session (top ${displayed.length} by recency)</h3>
     <div class="table-filter"><input type="text" placeholder="Filter sessions\u2026"><span class="count"></span></div>
     <table>
-      <tr><th data-sort="text">Project</th><th>Session</th><th data-sort="num">Messages</th><th data-sort="text">Model</th><th data-sort="num">Distill Cost</th><th data-sort="num">Avoided Compactions</th><th data-sort="date">Last Active</th></tr>`;
+      <tr><th data-sort="text">Project</th><th>Session</th><th data-sort="num">Messages</th><th data-sort="text">Model</th><th data-sort="num">Worker Cost</th><th data-sort="num">Avoided Compactions</th><th data-sort="date">Last Active</th></tr>`;
     for (const s of displayed) {
+      const sessionWorkerCost = s.persisted?.workerCost ?? s.distillationCost;
       body += `<tr>
         <td><a href="/ui/projects/${esc(s.projectId)}">${esc(s.projectName ?? "(unnamed)")}</a></td>
         <td><a href="/ui/sessions/${esc(s.projectId)}/${esc(s.sessionId)}"><code>${esc(s.sessionId.slice(0, 12))}</code></a></td>
         <td>${s.messageCount}</td>
         <td style="font-size:0.85em">${esc(s.model.replace("claude-", "").slice(0, 20))}</td>
-        <td>${formatUSD(s.distillationCost)}</td>
+        <td>${formatUSD(sessionWorkerCost)}</td>
         <td>${s.avoidedCompactions > 0 ? `${s.avoidedCompactions} (${formatUSD(s.avoidedCompactionCost)})` : "-"}</td>
         <td>${timeAgo(s.lastMessage)}</td>
       </tr>`;

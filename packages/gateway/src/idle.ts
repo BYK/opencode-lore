@@ -288,7 +288,8 @@ export function buildIdleWorkHandler(
     emitSessionCostMetrics(sessionID);
 
     // 9. Persist live session cost snapshot to DB so historical estimates
-    //    include cache warming, 1h TTL, and batch API savings after restart.
+    //    include all worker costs, avoided compactions, cache warming,
+    //    1h TTL, and batch API savings after restart.
     try {
       const costs = getSessionCosts(sessionID);
       if (costs && costs.conversation.turns > 0) {
@@ -303,6 +304,8 @@ export function buildIdleWorkHandler(
           ttlSavings: costs.counterfactual.ttlSavings,
           ttlHits: costs.counterfactual.ttlHits,
           batchSavings: costs.batchSavings,
+          avoidedCompactions: costs.counterfactual.avoidedCompactions,
+          avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
         });
       }
     } catch (e) {

@@ -23,7 +23,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(20);
+    expect(row.version).toBe(21);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -362,6 +362,8 @@ describe("db", () => {
       ttlSavings: 0.34,
       ttlHits: 7,
       batchSavings: 0.56,
+      avoidedCompactions: 2,
+      avoidedCompactionCost: 0.78,
     };
     saveSessionCosts(sid, snapshot);
     const loaded = loadSessionCosts(sid);
@@ -374,16 +376,20 @@ describe("db", () => {
       conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
       cacheReadTokens: 0, cacheWriteTokens: 0,
       warmupSavings: 0, warmupHits: 0, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
+      avoidedCompactions: 0, avoidedCompactionCost: 0,
     });
     saveSessionCosts(sid, {
       conversationCost: 2.0, workerCost: 0.5, conversationTurns: 15,
       cacheReadTokens: 100000, cacheWriteTokens: 10000,
       warmupSavings: 0.5, warmupHits: 5, ttlSavings: 0.8, ttlHits: 10, batchSavings: 1.2,
+      avoidedCompactions: 3, avoidedCompactionCost: 1.5,
     });
     const loaded = loadSessionCosts(sid);
     expect(loaded!.conversationCost).toBe(2.0);
     expect(loaded!.conversationTurns).toBe(15);
     expect(loaded!.warmupSavings).toBe(0.5);
+    expect(loaded!.avoidedCompactions).toBe(3);
+    expect(loaded!.avoidedCompactionCost).toBe(1.5);
   });
 
   test("saveSessionCosts preserves existing forceMinLayer", () => {
@@ -393,6 +399,7 @@ describe("db", () => {
       conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
       cacheReadTokens: 0, cacheWriteTokens: 0,
       warmupSavings: 0, warmupHits: 0, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
+      avoidedCompactions: 0, avoidedCompactionCost: 0,
     });
     expect(loadForceMinLayer(sid)).toBe(2);
     expect(loadSessionCosts(sid)!.conversationTurns).toBe(5);
@@ -409,6 +416,7 @@ describe("db", () => {
       conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
       cacheReadTokens: 0, cacheWriteTokens: 0,
       warmupSavings: 0.1, warmupHits: 1, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
+      avoidedCompactions: 1, avoidedCompactionCost: 0.3,
     });
     // sid2: all zeros — should not appear (only forceMinLayer row)
     saveForceMinLayer(sid2, 1);

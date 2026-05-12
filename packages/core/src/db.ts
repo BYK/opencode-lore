@@ -484,6 +484,16 @@ const MIGRATIONS: string[] = [
     OR content LIKE '%You are a memory reflector.%'
     OR content LIKE '%You are evaluating distillation quality.%';
   `,
+  `
+  -- Version 21: Persist avoided compaction data from live sessions.
+  -- Historical estimates previously re-simulated avoided compactions from
+  -- temporal message token estimates (chars/3), missing system prompt and
+  -- tool definition overhead. Persisting the live session's real shadow
+  -- context tracking (from actual API-reported total input tokens) gives
+  -- accurate post-restart historical estimates.
+  ALTER TABLE session_state ADD COLUMN avoided_compactions INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN avoided_compaction_cost REAL NOT NULL DEFAULT 0;
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -876,6 +886,8 @@ export type SessionCostSnapshot = {
   ttlSavings: number;
   ttlHits: number;
   batchSavings: number;
+  avoidedCompactions: number;
+  avoidedCompactionCost: number;
 };
 
 /**
@@ -888,8 +900,9 @@ export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot):
       `INSERT INTO session_state (session_id, force_min_layer, updated_at,
          conversation_cost, worker_cost, conversation_turns,
          cache_read_tokens, cache_write_tokens,
-         warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings)
-       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings,
+         avoided_compactions, avoided_compaction_cost)
+       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          conversation_cost = excluded.conversation_cost,
          worker_cost = excluded.worker_cost,
@@ -901,6 +914,8 @@ export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot):
          ttl_savings = excluded.ttl_savings,
          ttl_hits = excluded.ttl_hits,
          batch_savings = excluded.batch_savings,
+         avoided_compactions = excluded.avoided_compactions,
+         avoided_compaction_cost = excluded.avoided_compaction_cost,
          updated_at = excluded.updated_at`,
     )
     .run(
@@ -908,6 +923,7 @@ export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot):
       costs.conversationCost, costs.workerCost, costs.conversationTurns,
       costs.cacheReadTokens, costs.cacheWriteTokens,
       costs.warmupSavings, costs.warmupHits, costs.ttlSavings, costs.ttlHits, costs.batchSavings,
+      costs.avoidedCompactions, costs.avoidedCompactionCost,
     );
 }
 
@@ -920,7 +936,8 @@ export function loadSessionCosts(sessionID: string): SessionCostSnapshot | null 
     .query(
       `SELECT conversation_cost, worker_cost, conversation_turns,
               cache_read_tokens, cache_write_tokens,
-              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings
+              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings,
+              avoided_compactions, avoided_compaction_cost
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
@@ -934,6 +951,8 @@ export function loadSessionCosts(sessionID: string): SessionCostSnapshot | null 
       ttl_savings: number;
       ttl_hits: number;
       batch_savings: number;
+      avoided_compactions: number;
+      avoided_compaction_cost: number;
     } | null;
   if (!row) return null;
   return {
@@ -947,6 +966,8 @@ export function loadSessionCosts(sessionID: string): SessionCostSnapshot | null 
     ttlSavings: row.ttl_savings,
     ttlHits: row.ttl_hits,
     batchSavings: row.batch_savings,
+    avoidedCompactions: row.avoided_compactions,
+    avoidedCompactionCost: row.avoided_compaction_cost,
   };
 }
 
@@ -959,7 +980,8 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
     .query(
       `SELECT session_id, conversation_cost, worker_cost, conversation_turns,
               cache_read_tokens, cache_write_tokens,
-              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings
+              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings,
+              avoided_compactions, avoided_compaction_cost
        FROM session_state
        WHERE conversation_turns > 0 OR warmup_savings > 0 OR ttl_savings > 0 OR batch_savings > 0`,
     )
@@ -975,6 +997,8 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
       ttl_savings: number;
       ttl_hits: number;
       batch_savings: number;
+      avoided_compactions: number;
+      avoided_compaction_cost: number;
     }>;
   const result = new Map<string, SessionCostSnapshot>();
   for (const row of rows) {
@@ -989,6 +1013,8 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
       ttlSavings: row.ttl_savings,
       ttlHits: row.ttl_hits,
       batchSavings: row.batch_savings,
+      avoidedCompactions: row.avoided_compactions,
+      avoidedCompactionCost: row.avoided_compaction_cost,
     });
   }
   return result;

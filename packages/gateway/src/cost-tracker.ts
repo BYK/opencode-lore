@@ -99,11 +99,16 @@ export type HistoricalEstimates = {
     model: string;
     /** Persisted live-session cost data (null if not available for this session). */
     persisted: {
+      conversationCost: number;
+      workerCost: number;
+      conversationTurns: number;
       warmupSavings: number;
       warmupHits: number;
       ttlSavings: number;
       ttlHits: number;
       batchSavings: number;
+      avoidedCompactions: number;
+      avoidedCompactionCost: number;
     } | null;
   }>;
   /** Totals across all sessions. */
@@ -121,6 +126,14 @@ export type HistoricalEstimates = {
     batchSavings: number;
     sessionCount: number;
     messageCount: number;
+    /**
+     * Total worker cost using persisted real API data where available,
+     * falling back to heuristic distillation estimates for sessions
+     * without a persisted snapshot.
+     */
+    totalWorkerCost: number;
+    /** Persisted conversation cost (from sessions that went idle). */
+    persistedConversationCost: number;
   };
 };
 
@@ -572,6 +585,8 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
     batchSavings: 0,
     sessionCount: 0,
     messageCount: 0,
+    totalWorkerCost: 0,
+    persistedConversationCost: 0,
   };
 
   const sessionEstimates: HistoricalEstimates["sessions"] = [];
@@ -657,25 +672,55 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
         }
 
         const sessionCompactionCost = avoidedCompactions * estimateCompactionCost(workerModelID, model);
-        totals.avoidedCompactions += avoidedCompactions;
-        totals.avoidedCompactionCost += sessionCompactionCost;
 
         // --- 3. Look up persisted live-session cost data ---
+        // Avoided compaction and worker cost totals are accumulated here
+        // (not above) because persisted real data is preferred over simulation.
         const persisted = persistedCosts.get(sess.session_id);
         let sessionPersisted: HistoricalEstimates["sessions"][number]["persisted"] = null;
         if (persisted) {
           sessionPersisted = {
+            conversationCost: persisted.conversationCost,
+            workerCost: persisted.workerCost,
+            conversationTurns: persisted.conversationTurns,
             warmupSavings: persisted.warmupSavings,
             warmupHits: persisted.warmupHits,
             ttlSavings: persisted.ttlSavings,
             ttlHits: persisted.ttlHits,
             batchSavings: persisted.batchSavings,
+            avoidedCompactions: persisted.avoidedCompactions,
+            avoidedCompactionCost: persisted.avoidedCompactionCost,
           };
           totals.warmupSavings += persisted.warmupSavings;
           totals.warmupHits += persisted.warmupHits;
           totals.ttlSavings += persisted.ttlSavings;
           totals.ttlHits += persisted.ttlHits;
           totals.batchSavings += persisted.batchSavings;
+          totals.persistedConversationCost += persisted.conversationCost;
+
+          // Prefer persisted real worker cost over heuristic distillation estimate.
+          // The persisted workerCost includes all 5 buckets (distillation, curation,
+          // compaction, recall, warmup) from exact API-reported usage.
+          totals.totalWorkerCost += persisted.workerCost;
+
+          // Prefer persisted avoided compaction data over re-simulation.
+          // Live tracking uses real API-reported total input tokens; the
+          // simulation uses chars/3 estimates that miss system prompt and
+          // tool definition overhead.
+          if (persisted.avoidedCompactions > 0) {
+            totals.avoidedCompactions += persisted.avoidedCompactions;
+            totals.avoidedCompactionCost += persisted.avoidedCompactionCost;
+          } else {
+            // No persisted compaction data — use simulation fallback
+            totals.avoidedCompactions += avoidedCompactions;
+            totals.avoidedCompactionCost += sessionCompactionCost;
+          }
+        } else {
+          // No persisted snapshot — use heuristic distillation estimate as
+          // worker cost and simulation for avoided compactions.
+          totals.totalWorkerCost += sessionDistillCost;
+          totals.avoidedCompactions += avoidedCompactions;
+          totals.avoidedCompactionCost += sessionCompactionCost;
         }
 
         sessionEstimates.push({
@@ -690,8 +735,8 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
           distillationCalls: distillations.length,
           distillationBatchCalls: sessionBatchCalls,
           distillationDirectCalls: sessionDirectCalls,
-          avoidedCompactions,
-          avoidedCompactionCost: sessionCompactionCost,
+          avoidedCompactions: persisted?.avoidedCompactions || avoidedCompactions,
+          avoidedCompactionCost: persisted?.avoidedCompactionCost || sessionCompactionCost,
           model,
           persisted: sessionPersisted,
         });
@@ -709,7 +754,8 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
 
   log.info(
     `cost-tracker: computed historical estimates for ${totals.sessionCount} sessions — ` +
-      `distillation=$${totals.distillationCost.toFixed(4)}, ` +
+      `worker overhead=$${totals.totalWorkerCost.toFixed(4)} (distillation-only=$${totals.distillationCost.toFixed(4)}), ` +
+      `conversation=$${totals.persistedConversationCost.toFixed(4)}, ` +
       `avoided compactions=${totals.avoidedCompactions} ($${totals.avoidedCompactionCost.toFixed(4)}), ` +
       `warmup=$${totals.warmupSavings.toFixed(4)} (${totals.warmupHits} hits), ` +
       `ttl=$${totals.ttlSavings.toFixed(4)} (${totals.ttlHits} hits), ` +
