@@ -1,5 +1,5 @@
 /**
- * `lore start` — start the gateway server only.
+ * `lore start` — start the gateway server without auto-launching an agent.
  *
  * Extracted from the old top-level index.ts boot logic.
  */

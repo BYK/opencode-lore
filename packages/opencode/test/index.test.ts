@@ -117,7 +117,7 @@ describe("LorePlugin hooks", () => {
     try {
       expect(hooks.config).toBeDefined();
       expect(hooks.tool).toBeDefined();
-      // All standalone-mode hooks should be stripped
+      // Only config, tool, and chat.headers hooks should be registered
       expect(hooks.event).toBeUndefined();
       expect(hooks["experimental.chat.system.transform"]).toBeUndefined();
       expect(hooks["experimental.chat.messages.transform"]).toBeUndefined();

@@ -5,7 +5,7 @@
  *
  * Commands:
  *   (none) / run   → start gateway + launch agent
- *   start          → start gateway server only
+ *   start          → start gateway server (no agent auto-launch)
  *   data           → inspect and manage stored data
  *   recall         → search project memory from the terminal
  *   upgrade        → self-update
