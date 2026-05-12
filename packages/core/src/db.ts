@@ -470,6 +470,20 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_import_history_project ON import_history(project_id);
   `,
+  `
+  -- Version 20: Purge worker boilerplate from temporal messages.
+  -- Legacy gateway/plugin worker calls (distillation observer, curator,
+  -- consolidation, reflector, eval) stored their full system prompts
+  -- (containing entire conversation transcripts, up to 1.6MB each) as
+  -- temporal messages. These pollute FTS search results by matching
+  -- virtually any domain keyword. Safe to delete: their actual output
+  -- (distillations, knowledge entries) is stored in dedicated tables.
+  DELETE FROM temporal_messages WHERE content LIKE '%You are a memory observer.%'
+    OR content LIKE '%You are a long-term memory curator.%'
+    OR content LIKE '%You are a long-term memory curator performing a consolidation pass.%'
+    OR content LIKE '%You are a memory reflector.%'
+    OR content LIKE '%You are evaluating distillation quality.%';
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
