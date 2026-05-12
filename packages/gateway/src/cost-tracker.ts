@@ -72,8 +72,12 @@ export type SessionCosts = {
     avoidedCompactionCost: number;
   };
 
-  /** Shadow context counter — tracks virtual context growth for compaction estimation. */
+  /** Shadow context counter — tracks virtual uncompressed context growth for compaction estimation. */
   _shadowContextTokens: number;
+  /** Previous turn's actual (compressed) input tokens — for delta estimation. */
+  _lastActualInput: number;
+  /** Previous turn's output tokens (always uncompressed) — for growth estimation. */
+  _lastOutputTokens: number;
 };
 
 /** Backdated historical estimates from stored data. */
@@ -180,6 +184,8 @@ function emptyCosts(): SessionCosts {
       avoidedCompactionCost: 0,
     },
     _shadowContextTokens: 0,
+    _lastActualInput: 0,
+    _lastOutputTokens: 0,
   };
 }
 
@@ -378,35 +384,55 @@ function estimateCompactionCost(
 /**
  * Update the shadow context counter after a conversation turn.
  *
- * Maintains a virtual "what would context size be without Lore?" counter.
- * When it crosses the compaction threshold, records a counterfactual
- * compaction event and resets.
+ * Maintains a virtual "what would context size be without Lore?" counter
+ * using additive growth tracking. Instead of snapshotting the compressed
+ * API token count (which underestimates because Lore's gradient manager
+ * already trimmed the context), we accumulate per-turn growth from
+ * uncompressed signals:
+ *
+ * - Output tokens are always uncompressed (the model's full response).
+ * - The previous turn's output becomes part of the next turn's context.
+ * - New user input is estimated from the delta in actual input tokens.
+ *
+ * When the shadow counter crosses the compaction threshold, a
+ * counterfactual compaction event is recorded and the counter resets.
  *
  * @param totalInputTokens - Total input tokens for this turn (input + cache_read + cache_write)
+ * @param outputTokens - Output tokens for this turn (always uncompressed)
  * @param workerModel - Model ID used for worker calls (for compaction cost estimation)
  */
 export function updateShadowContext(
   sessionID: string,
   totalInputTokens: number,
+  outputTokens: number,
   workerModel: string,
   conversationModel?: string,
 ): void {
   const costs = getOrCreate(sessionID);
 
-  // On first turn, initialize shadow context to the actual input size
+  // On first turn, initialize shadow context to the actual input size.
+  // No compression has happened yet, so the actual count is accurate.
+  // NOTE: this check relies on recordConversationCost() having already
+  // incremented turns for this turn (called earlier in postResponse).
   if (costs.conversation.turns <= 1) {
     costs._shadowContextTokens = totalInputTokens;
+    costs._lastActualInput = totalInputTokens;
+    costs._lastOutputTokens = outputTokens;
     return;
   }
 
-  // Estimate context growth this turn. In reality, each turn adds roughly
-  // the output tokens from the previous turn + new user message tokens.
-  // We approximate by looking at the delta between current total input
-  // and the previous turn's total input (tracked separately in session state).
-  // For simplicity, use the actual total input as the shadow context.
-  // This slightly overestimates because Lore might have trimmed context,
-  // but that's fine — we want a conservative counterfactual.
-  costs._shadowContextTokens = totalInputTokens;
+  // Estimate uncompressed context growth since the last turn.
+  // Growth is at least prevOutput (the assistant's response is always
+  // added to context, uncompressed) and at most inputDelta (when new
+  // user content exceeds the response size). If gradient compression
+  // makes the delta negative, we fall back to prevOutput as the floor.
+  const inputDelta = totalInputTokens - costs._lastActualInput;
+  const prevOutput = costs._lastOutputTokens;
+  const growth = Math.max(inputDelta, prevOutput);
+
+  costs._shadowContextTokens += growth;
+  costs._lastActualInput = totalInputTokens;
+  costs._lastOutputTokens = outputTokens;
 
   if (costs._shadowContextTokens > AUTOCOMPACT_THRESHOLD) {
     costs.counterfactual.avoidedCompactions++;

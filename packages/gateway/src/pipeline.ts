@@ -1708,12 +1708,18 @@ function postResponse(
     // (B) Track warmup hits and TTL savings — valid for ALL turn types.
     // A user returning after a warmup is a hit regardless of whether it's
     // a subagent turn or tool-use continuation.
+    // NOTE: warmup hits and TTL savings are mutually exclusive — if a turn
+    // is attributed to a warmup hit, skip TTL savings to avoid double-counting
+    // the same cacheReadTokens in both buckets.
     if (sessionState.lastRequestTime > 0) {
+      let warmupHitThisTurn = false;
+
       // Track warmup hit: user returned after we warmed the cache
       if (sessionState.warmup?.lastWarmupAt) {
         const ttlMs = sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
         const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
         if (sinceWarmup < ttlMs) {
+          warmupHitThisTurn = true;
           sessionState.warmup.warmupHits++;
           emitWarmupHitMetric(
             sessionState.lastModel ?? req.model,
@@ -1733,12 +1739,15 @@ function postResponse(
       }
 
       // Track 1h TTL savings: if gap > 5m but we still got cache reads,
-      // the 1h TTL saved a full cache write.
-      const requestGap = now - sessionState.lastRequestTime;
-      if (requestGap > 300_000) {
-        const cacheRead = resp.usage.cacheReadInputTokens ?? 0;
-        if (cacheRead > 0) {
-          recordTTLSavings(sessionID, req.model, cacheRead);
+      // the 1h TTL saved a full cache write. Skip if already counted as
+      // a warmup hit to avoid double-counting the same tokens.
+      if (!warmupHitThisTurn) {
+        const requestGap = now - sessionState.lastRequestTime;
+        if (requestGap > 300_000) {
+          const cacheRead = resp.usage.cacheReadInputTokens ?? 0;
+          if (cacheRead > 0) {
+            recordTTLSavings(sessionID, req.model, cacheRead);
+          }
         }
       }
     }
@@ -1762,7 +1771,7 @@ function postResponse(
     // compressing it. When the shadow counter crosses the auto-compact
     // threshold, record a counterfactual compaction event.
     if (!isSubagentTurn) {
-      updateShadowContext(sessionID, actualInput, getWorkerModel()?.modelID ?? "unknown", req.model);
+      updateShadowContext(sessionID, actualInput, resp.usage.outputTokens ?? 0, getWorkerModel()?.modelID ?? "unknown", req.model);
     }
 
     // --- Schedule background work (fire-and-forget) ---

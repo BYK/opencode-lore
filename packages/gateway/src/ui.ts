@@ -1292,6 +1292,11 @@ function pageCosts(): string {
   let liveTtlSavings = 0;
   let liveAvoidedCompactions = 0;
   let liveAvoidedCompactionCost = 0;
+  let liveDistillCost = 0;
+  let liveCurateCost = 0;
+  let liveCompactCost = 0;
+  let liveWarmupCost = 0;
+  let liveRecallCost = 0;
 
   for (const [, c] of allCosts) {
     liveTotalSpend += totalActualCost(c);
@@ -1306,6 +1311,11 @@ function pageCosts(): string {
     liveTtlSavings += c.counterfactual.ttlSavings;
     liveAvoidedCompactions += c.counterfactual.avoidedCompactions;
     liveAvoidedCompactionCost += c.counterfactual.avoidedCompactionCost;
+    liveDistillCost += c.workers.distillation.cost;
+    liveCurateCost += c.workers.curation.cost;
+    liveCompactCost += c.workers.compaction.cost;
+    liveWarmupCost += c.workers.warmup.cost;
+    liveRecallCost += c.workers.recall.cost;
   }
 
   // --- Historical (backdated) estimates ---
@@ -1348,7 +1358,15 @@ function pageCosts(): string {
       <table class="cost-table">
         <tr class="section-header"><td colspan="2"><strong>Aggregated Spend</strong></td></tr>
         <tr><td>Conversation</td><td>${formatUSD(liveTotalConversation)} <span style="color:var(--fg3);font-size:0.85em">(${liveTotalTurns} turns)</span></td></tr>
-        <tr><td>+ Lore overhead</td><td>${formatUSD(liveTotalWorker)}</td></tr>
+        <tr><td>+ Lore overhead</td><td>${formatUSD(liveTotalWorker)}${(() => {
+          const parts: string[] = [];
+          if (liveDistillCost > 0) parts.push(`distill: ${formatUSD(liveDistillCost)}`);
+          if (liveCurateCost > 0) parts.push(`curate: ${formatUSD(liveCurateCost)}`);
+          if (liveCompactCost > 0) parts.push(`compact: ${formatUSD(liveCompactCost)}`);
+          if (liveWarmupCost > 0) parts.push(`warmup: ${formatUSD(liveWarmupCost)}`);
+          if (liveRecallCost > 0) parts.push(`recall: ${formatUSD(liveRecallCost)}`);
+          return parts.length ? ` <span style="color:var(--fg3);font-size:0.85em">(${parts.join(", ")})</span>` : "";
+        })()}</td></tr>
         <tr style="border-top:1px solid var(--border)"><td><strong>Total</strong></td><td><strong>${formatUSD(liveTotalSpend)}</strong></td></tr>`;
 
     if (liveTotalSavings !== 0) {
