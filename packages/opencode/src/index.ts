@@ -97,28 +97,29 @@ async function startInProcess(): Promise<string | null> {
 
 // Process-wide initialization state — shared across all sessions.
 // The plugin function is called once per OpenCode session/project, but
-// gateway detection only needs to run once per process.
+// lore init only needs to run once per process.
 let processInitDone = false;
-let processGatewayActive = false;
-let processGatewayBase = "";
+let processLoreActive = false;
+let processLoreBase = "";
 
-/** Memoized gateway init promise — ensures concurrent plugin calls don't race. */
-let gatewayInitPromise: Promise<string | null> | null = null;
+/** Memoized lore init promise — ensures concurrent plugin calls don't race. */
+let loreInitPromise: Promise<string | null> | null = null;
 
 export const LorePlugin: Plugin = async (ctx) => {
-  // Determine if the gateway is active — only probe once per process.
-  let gatewayActive = processGatewayActive;
-  let gatewayBase = processGatewayBase;
+  // Initialize lore — only probe/start once per process.
+  const loreDisabled =
+    process.env.LORE_DISABLED === "1" || process.env.LORE_DISABLED === "true";
+  let loreActive = processLoreActive;
+  let gatewayBase = processLoreBase;
   if (!processInitDone) {
     const inTestEnv =
       process.env.NODE_ENV === "test" ||
-      process.env.LORE_GATEWAY_MODE === "test" ||
       process.argv.some((a) => a.includes(".test."));
 
-    if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
+    if (!loreDisabled && !inTestEnv) {
       // Memoize so concurrent LorePlugin calls don't race on probe→spawn.
-      if (!gatewayInitPromise) {
-        gatewayInitPromise = (async () => {
+      if (!loreInitPromise) {
+        loreInitPromise = (async () => {
           // Try to find a running gateway first (probes port file + known ports).
           const existingUrl = await resolveGatewayUrl();
           if (existingUrl) {
@@ -135,24 +136,23 @@ export const LorePlugin: Plugin = async (ctx) => {
           return null;
         })();
       }
-      const result = await gatewayInitPromise;
+      const result = await loreInitPromise;
       if (result) {
-        gatewayActive = true;
+        loreActive = true;
         gatewayBase = result;
       }
     }
-    processGatewayActive = gatewayActive;
-    processGatewayBase = gatewayBase;
+    processLoreActive = loreActive;
+    processLoreBase = gatewayBase;
   }
 
-  if (!gatewayActive && process.env.LORE_GATEWAY_MODE !== "0") {
+  if (!loreActive && !loreDisabled) {
     const inTestEnv =
       process.env.NODE_ENV === "test" ||
-      process.env.LORE_GATEWAY_MODE === "test" ||
       process.argv.some((a) => a.includes(".test."));
     if (!inTestEnv) {
-      const msg = "Lore gateway failed to start — memory features are unavailable. " +
-        "Ensure @loreai/gateway is installed or start the gateway manually.";
+      const msg = "Lore failed to start — memory features are unavailable. " +
+        "Ensure @loreai/gateway is installed.";
       process.stderr.write(`[lore] ERROR: ${msg}\n`);
       log.error(msg);
     }
@@ -181,7 +181,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         },
       };
 
-      if (gatewayActive) {
+      if (loreActive) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const p = cfg.provider as Record<string, any> ?? {};
         cfg.provider = p;
@@ -207,8 +207,8 @@ export const LorePlugin: Plugin = async (ctx) => {
     const projectPath = ctx.worktree || ctx.directory;
     process.stderr.write(`[lore] active: ${projectPath}\n`);
 
-    if (gatewayActive) {
-      process.stderr.write(`[lore] gateway mode — routing through ${gatewayBase}\n`);
+    if (loreActive) {
+      process.stderr.write(`[lore] routing through ${gatewayBase}\n`);
       process.stderr.write(`[lore] dashboard: ${gatewayBase}/ui\n`);
     }
 

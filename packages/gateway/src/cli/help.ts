@@ -11,7 +11,7 @@ Usage:
 
 Commands:
   run [command...]    Start gateway and launch an AI agent (default)
-  start               Start the gateway server only
+  start               Start the gateway server (without launching an agent)
   logs                Show lore activity log
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
@@ -62,7 +62,7 @@ Examples:
   lore                          # Auto-detect agent and launch with gateway
   lore run claude               # Launch Claude Code through the gateway
   lore run opencode             # Launch OpenCode through the gateway
-  lore start                    # Start gateway only (set ANTHROPIC_BASE_URL yourself)
+  lore start                    # Start gateway without launching an agent
   lore start -p 8080            # Start gateway on a custom port
   lore start -H 127.0.0.1 -H 100.69.65.125  # Bind to multiple interfaces
   lore start -H 127.0.0.1,100.69.65.125     # Same, comma-separated

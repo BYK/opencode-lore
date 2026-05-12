@@ -138,8 +138,8 @@ export async function commandRun(
   const target = await resolveLaunchTarget(gatewayUrl, cmdArgs);
 
   if (!target) {
-    // No agent found / non-interactive — fall back to server-only mode
-    console.log("[lore] Running in server-only mode. Point your agent at the gateway manually.");
+    // No agent found — start server without launching an agent
+    console.log("[lore] No agent detected. Point your agent at the gateway manually.");
     console.log(`[lore]   export ANTHROPIC_BASE_URL=${gatewayUrl}`);
 
     if (owned) {

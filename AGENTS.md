@@ -30,7 +30,7 @@ Binary entry: `packages/gateway/src/cli/bin.ts` -> `packages/gateway/src/cli/mai
 | Command | Handler | Description |
 |---|---|---|
 | `run` (default) | `cli/run.ts` | Start gateway + auto-detect and launch AI agent |
-| `start` | `cli/start.ts` | Start gateway server only |
+| `start` | `cli/start.ts` | Start gateway server (without launching an agent) |
 | `data` | `cli/data.ts` | Inspect/manage stored data (`list`, `show`, `clear`, `delete`, `merge`, `recover`) |
 | `recall` | `cli/recall-cmd.ts` | Search project memory from terminal |
 | `upgrade` | `cli/upgrade.ts` | Self-update the binary |

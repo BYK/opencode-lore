@@ -36,8 +36,8 @@ export { _cli } from "./cli/main";
 
 if (typeof Bun !== "undefined" && Bun.main === import.meta.path) {
   // Direct execution (e.g. `bun run src/index.ts` from the OpenCode plugin)
-  // defaults to server-only mode (`start`), not `run` — there's no TTY and
-  // no reason to auto-detect agents when launched as an embedded server.
+  // defaults to `start` (no agent auto-launch), not `run` — there's no TTY
+  // and no reason to auto-detect agents when launched as an embedded server.
   // esbuild CJS output drops import.meta to `{}` so the condition is
   // always false in the npm bundle — the await is dead-code-eliminated.
   import("./cli/start").then(({ commandStart }) => commandStart({ quiet: true }));

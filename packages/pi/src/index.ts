@@ -1,17 +1,17 @@
 /**
  * @loreai/pi — Lore memory engine as a Pi coding-agent extension.
  *
- * On startup, the extension probes for an existing Lore gateway and, if
- * none is found, starts one in-process by importing @loreai/gateway.
- * It then redirects compatible provider URLs through the gateway and
- * registers a single Pi-specific hook (session_before_compact) that the
- * gateway cannot handle via HTTP interception. All other memory features
- * (LTM injection, gradient transforms, temporal capture, recall, idle
- * work) are handled exclusively by the gateway pipeline.
+ * On startup, the extension probes for an existing Lore gateway server
+ * and, if none is found, starts one in-process by importing
+ * @loreai/gateway. It then redirects compatible provider URLs through
+ * the gateway and registers a Pi-specific compaction hook
+ * (session_before_compact) that requires Pi's extension API. All other
+ * memory features (LTM injection, gradient transforms, temporal capture,
+ * recall, idle work) are handled by the gateway pipeline.
  *
- * If the gateway cannot be started, the extension logs an error and
- * becomes inert — no hooks are registered and Pi runs without memory
- * features.
+ * If the gateway server cannot be reached, the extension logs an error
+ * and becomes inert — no hooks are registered and Pi runs without
+ * memory features.
  *
  * Installation (in user's `~/.pi/agent/extensions/`):
  *   import lore from "@loreai/pi";
@@ -172,18 +172,18 @@ function sessionIDFor(sessionFile: string | undefined): string {
  */
 export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   let gatewayBase = "";
-  let gatewayActive = false;
-  const inTestEnv =
-    process.env.NODE_ENV === "test" ||
-    process.env.LORE_GATEWAY_MODE === "test";
+  let loreActive = false;
+  const loreDisabled =
+    process.env.LORE_DISABLED === "1" || process.env.LORE_DISABLED === "true";
+  const inTestEnv = process.env.NODE_ENV === "test";
 
-  if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
+  if (!loreDisabled && !inTestEnv) {
     // Try to find a running gateway first (probes port file + known ports).
     const existingUrl = await resolveGatewayUrl();
     if (existingUrl) {
       console.info(`pi: gateway detected at ${existingUrl}`);
       gatewayBase = existingUrl;
-      gatewayActive = true;
+      loreActive = true;
     } else {
       // No running gateway — start one in-process (handles fallback chain).
       console.info("pi: starting gateway in-process…");
@@ -191,22 +191,22 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       if (startedUrl) {
         console.info(`pi: gateway started in-process at ${startedUrl}`);
         gatewayBase = startedUrl;
-        gatewayActive = true;
+        loreActive = true;
       }
     }
   }
 
-  if (!gatewayActive && !inTestEnv && process.env.LORE_GATEWAY_MODE !== "0") {
+  if (!loreActive && !inTestEnv && !loreDisabled) {
     const msg =
-      "Lore gateway failed to start — memory features are unavailable. " +
-      "Ensure @loreai/gateway is installed or start the gateway manually.";
+      "Lore failed to start — memory features are unavailable. " +
+      "Ensure @loreai/gateway is installed.";
     console.error("pi:", msg);
     return;
   }
 
-  if (!gatewayActive) return;
+  if (!loreActive) return;
 
-  console.info(`pi: gateway active — routing providers through ${gatewayBase}`);
+  console.info(`pi: routing providers through ${gatewayBase}`);
 
   // ---------------------------------------------------------------------------
   // Session tracking — used for provider header injection and compaction.

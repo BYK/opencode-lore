@@ -13,8 +13,8 @@
  * by credential at flush time — this ensures multi-session isolation when
  * multiple clients with different API keys are connected simultaneously.
  *
- * This is a gateway-only enhancement — the OpenCode and Pi adapters
- * always process immediately regardless of the `urgent` flag.
+ * The OpenCode and Pi plugin adapters always process LLM calls
+ * immediately regardless of the `urgent` flag.
  */
 
 import type { LLMClient } from "@loreai/core";
