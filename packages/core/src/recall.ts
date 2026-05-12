@@ -492,6 +492,10 @@ export async function searchRecall(
     weight?: number;
   }> = [];
 
+  // Track where primary (first-query) lists end so the MAX_RRF_LISTS cap
+  // trims expanded-query lists first, preserving vector/supplemental lists.
+  let primaryListEnd = 0;
+
   for (const q of queries) {
     const knowledgeResults: ltm.ScoredKnowledgeEntry[] = [];
     if (knowledgeEnabled && scope !== "session") {
@@ -577,7 +581,15 @@ export async function searchRecall(
         key: (r) => `t:${r.item.id}`,
       });
     }
+
+    // Mark the end of the first (original) query's lists. Supplemental lists
+    // (vector, lat.md, cross-project, quality, exact-match) are appended after
+    // the loop and should be preserved over expanded-query lists when capping.
+    if (primaryListEnd === 0) {
+      primaryListEnd = allRrfLists.length;
+    }
   }
+  const perQueryListEnd = allRrfLists.length;
 
   // Vector search on the original query (not expansions — avoid redundant embeds).
   if (embedding.isAvailable() && scope !== "session") {
@@ -800,12 +812,21 @@ export async function searchRecall(
 
   // Cap the number of RRF lists to prevent score inflation from marginal items.
   // With query expansion (3 queries × 4 sources + supplemental lists), the list
-  // count can exceed 12. Each list gives marginal items enough cumulative RRF
-  // score to clear the relevance floor. Trim lowest-priority lists (those added
-  // last — supplemental boosters) when over the cap.
+  // count can exceed 15. Each list gives marginal items enough cumulative RRF
+  // score to clear the relevance floor.
+  //
+  // Priority: primary (original query BM25 + recency) and supplemental
+  // (vector, lat.md, cross-project, quality, exact-match) are high-value.
+  // Expanded-query BM25 lists are lowest priority — trim those first.
   const MAX_RRF_LISTS = 10;
   if (allRrfLists.length > MAX_RRF_LISTS) {
-    allRrfLists.length = MAX_RRF_LISTS;
+    // Layout: [0..primaryListEnd) = primary, [primaryListEnd..perQueryEnd) = expanded, [perQueryEnd..) = supplemental
+    const primary = allRrfLists.slice(0, primaryListEnd);
+    const expanded = allRrfLists.slice(primaryListEnd, perQueryListEnd);
+    const supplemental = allRrfLists.slice(perQueryListEnd);
+    const budget = Math.max(0, MAX_RRF_LISTS - primary.length - supplemental.length);
+    allRrfLists.length = 0;
+    allRrfLists.push(...primary, ...expanded.slice(0, budget), ...supplemental);
   }
 
   const fused = reciprocalRankFusion<TaggedResult>(allRrfLists);

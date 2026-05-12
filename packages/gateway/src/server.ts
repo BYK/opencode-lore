@@ -123,6 +123,10 @@ async function handleAnthropicMessages(
   }
 }
 
+// NOTE: This endpoint only supports the Anthropic upstream. OpenAI clients
+// calling GET /v1/models will have their request forwarded to Anthropic,
+// which will likely reject the OpenAI API key. A proper fix would route
+// based on auth header type, but that's a separate enhancement.
 async function handleModelsPassthrough(req: Request, config: GatewayConfig): Promise<Response> {
   try {
     // Forward auth headers from the original request so upstream

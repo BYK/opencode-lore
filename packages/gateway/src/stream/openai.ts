@@ -84,6 +84,7 @@ export function translateAnthropicStreamToOpenAI(
   // Tool call tracking: blockIndex → InflightToolCall
   const toolCalls = new Map<number, InflightToolCall>();
   let nextToolCallIndex = 0;
+  let cancelled = false;
 
   function formatChunk(
     delta: Record<string, unknown>,
@@ -111,10 +112,23 @@ export function translateAnthropicStreamToOpenAI(
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      function safeEnqueue(chunk: Uint8Array): boolean {
+        if (cancelled) return false;
+        try {
+          controller.enqueue(chunk);
+          return true;
+        } catch {
+          cancelled = true;
+          return false;
+        }
+      }
+
       try {
         const reader = anthropicResponse.body!.getReader();
 
         for await (const { event, data } of parseSSEStream(reader)) {
+          if (cancelled) break;
+
           // Always feed the accumulator so we get a complete GatewayResponse
           accumulator.processEvent(event, data);
 
@@ -138,7 +152,7 @@ export function translateAnthropicStreamToOpenAI(
 
               // Emit the role chunk
               if (!roleChunkEmitted) {
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(formatChunk({ role: "assistant" }, null)),
                 );
                 roleChunkEmitted = true;
@@ -166,7 +180,7 @@ export function translateAnthropicStreamToOpenAI(
                 toolCalls.set(index, tc);
 
                 // Emit the tool call header chunk (id, type, function name)
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     formatChunk(
                       {
@@ -202,7 +216,7 @@ export function translateAnthropicStreamToOpenAI(
 
               if (delta.type === "text_delta" && typeof delta.text === "string") {
                 // Emit text content incrementally
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(formatChunk({ content: delta.text }, null)),
                 );
               } else if (
@@ -212,7 +226,7 @@ export function translateAnthropicStreamToOpenAI(
                 // Stream tool call arguments incrementally
                 const tc = toolCalls.get(index);
                 if (tc) {
-                  controller.enqueue(
+                  safeEnqueue(
                     encoder.encode(
                       formatChunk(
                         {
@@ -265,14 +279,14 @@ export function translateAnthropicStreamToOpenAI(
               }
 
               // Emit final chunk with finish_reason and usage
-              controller.enqueue(
+              safeEnqueue(
                 encoder.encode(
                   formatChunk({}, finishReason || "stop", usage),
                 ),
               );
 
               // Emit [DONE] sentinel
-              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+              safeEnqueue(encoder.encode("data: [DONE]\n\n"));
               break;
             }
 
@@ -282,7 +296,7 @@ export function translateAnthropicStreamToOpenAI(
       } catch (err) {
         // If upstream errors, try to close gracefully with [DONE]
         try {
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          safeEnqueue(encoder.encode("data: [DONE]\n\n"));
         } catch {
           // Controller may already be closed
         }
@@ -293,6 +307,16 @@ export function translateAnthropicStreamToOpenAI(
         } catch {
           // Already closed
         }
+      }
+    },
+
+    cancel() {
+      // Client disconnected — cancel the upstream reader to stop wasting bandwidth
+      cancelled = true;
+      try {
+        anthropicResponse.body?.cancel();
+      } catch {
+        // Best-effort cancellation
       }
     },
   });

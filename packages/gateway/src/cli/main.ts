@@ -226,10 +226,28 @@ export async function _cli(): Promise<void> {
               "start", "run", "data", "recall", "logs", "import", "upgrade", "help",
               ...knownBinaries,
             ];
-            // Simple "did you mean?" — find closest match by common prefix
-            const suggestion = knownCommands.find(
-              (c) => c.startsWith(command.slice(0, 2)) || command.startsWith(c.slice(0, 2)),
-            );
+            // "Did you mean?" — use Levenshtein distance for robust matching
+            function levenshtein(a: string, b: string): number {
+              const m = a.length, n = b.length;
+              const dp: number[][] = Array.from({ length: m + 1 }, (_, i) =>
+                Array.from({ length: n + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+              );
+              for (let i = 1; i <= m; i++)
+                for (let j = 1; j <= n; j++)
+                  dp[i][j] = a[i - 1] === b[j - 1]
+                    ? dp[i - 1][j - 1]
+                    : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+              return dp[m][n];
+            }
+            let suggestion: string | undefined;
+            let bestDist = Infinity;
+            for (const c of knownCommands) {
+              const dist = levenshtein(command, c);
+              if (dist < bestDist && dist <= Math.max(2, Math.floor(command.length / 2))) {
+                bestDist = dist;
+                suggestion = c;
+              }
+            }
             const hint = suggestion ? ` Did you mean "lore ${suggestion}"?` : "";
             console.error(`Unknown command "${command}".${hint}\nRun "lore help" for available commands.`);
             process.exitCode = 1;

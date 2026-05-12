@@ -279,6 +279,7 @@ export function translateAnthropicStreamToResponses(
       };
 
   const outputItems = new Map<number, OutputItem>();
+  let cancelled = false;
 
   function emit(eventType: string, data: Record<string, unknown>): string {
     return `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -286,10 +287,23 @@ export function translateAnthropicStreamToResponses(
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      function safeEnqueue(chunk: Uint8Array): boolean {
+        if (cancelled) return false;
+        try {
+          controller.enqueue(chunk);
+          return true;
+        } catch {
+          cancelled = true;
+          return false;
+        }
+      }
+
       try {
         const reader = anthropicResponse.body!.getReader();
 
         for await (const { event, data } of parseSSEStream(reader)) {
+          if (cancelled) break;
+
           // Always feed the accumulator
           accumulator.processEvent(event, data);
 
@@ -317,7 +331,7 @@ export function translateAnthropicStreamToResponses(
               }
 
               // response.created
-              controller.enqueue(
+              safeEnqueue(
                 encoder.encode(
                   emit("response.created", {
                     type: "response.created",
@@ -335,7 +349,7 @@ export function translateAnthropicStreamToResponses(
               );
 
               // response.in_progress
-              controller.enqueue(
+              safeEnqueue(
                 encoder.encode(
                   emit("response.in_progress", {
                     type: "response.in_progress",
@@ -375,7 +389,7 @@ export function translateAnthropicStreamToResponses(
                 });
 
                 // response.output_item.added
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.output_item.added", {
                       type: "response.output_item.added",
@@ -392,7 +406,7 @@ export function translateAnthropicStreamToResponses(
                 );
 
                 // response.content_part.added
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.content_part.added", {
                       type: "response.content_part.added",
@@ -423,7 +437,7 @@ export function translateAnthropicStreamToResponses(
                 });
 
                 // response.output_item.added
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.output_item.added", {
                       type: "response.output_item.added",
@@ -464,7 +478,7 @@ export function translateAnthropicStreamToResponses(
                 item.text += delta.text;
 
                 // response.output_text.delta
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.output_text.delta", {
                       type: "response.output_text.delta",
@@ -483,7 +497,7 @@ export function translateAnthropicStreamToResponses(
                 item.args += delta.partial_json;
 
                 // response.function_call_arguments.delta
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.function_call_arguments.delta", {
                       type: "response.function_call_arguments.delta",
@@ -506,7 +520,7 @@ export function translateAnthropicStreamToResponses(
 
               if (item.kind === "text") {
                 // response.output_text.done
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.output_text.done", {
                       type: "response.output_text.done",
@@ -519,7 +533,7 @@ export function translateAnthropicStreamToResponses(
                 );
 
                 // response.content_part.done
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.content_part.done", {
                       type: "response.content_part.done",
@@ -536,7 +550,7 @@ export function translateAnthropicStreamToResponses(
                 );
 
                 // response.output_item.done
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.output_item.done", {
                       type: "response.output_item.done",
@@ -559,7 +573,7 @@ export function translateAnthropicStreamToResponses(
                 );
               } else if (item.kind === "tool_use") {
                 // response.function_call_arguments.done
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.function_call_arguments.done", {
                       type: "response.function_call_arguments.done",
@@ -571,7 +585,7 @@ export function translateAnthropicStreamToResponses(
                 );
 
                 // response.output_item.done
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(
                     emit("response.output_item.done", {
                       type: "response.output_item.done",
@@ -643,7 +657,7 @@ export function translateAnthropicStreamToResponses(
                 };
               }
 
-              controller.enqueue(
+              safeEnqueue(
                 encoder.encode(
                   emit("response.completed", {
                     type: "response.completed",
@@ -670,12 +684,47 @@ export function translateAnthropicStreamToResponses(
           "[lore] openai-responses stream translation error:",
           err,
         );
+        // Emit a response.failed event so clients don't hang waiting
+        try {
+          controller.enqueue(
+            encoder.encode(
+              emit("response.failed", {
+                type: "response.failed",
+                response: {
+                  id: respId || "resp_error",
+                  object: "response",
+                  created_at: created,
+                  model,
+                  status: "failed",
+                  output: [],
+                  usage: null,
+                  error: {
+                    type: "server_error",
+                    message: err instanceof Error ? err.message : "upstream stream error",
+                  },
+                },
+              }),
+            ),
+          );
+        } catch {
+          // Controller may already be closed
+        }
       } finally {
         try {
           controller.close();
         } catch {
           // Already closed
         }
+      }
+    },
+
+    cancel() {
+      // Client disconnected — cancel the upstream reader to stop wasting bandwidth
+      cancelled = true;
+      try {
+        anthropicResponse.body?.cancel();
+      } catch {
+        // Best-effort cancellation
       }
     },
   });
