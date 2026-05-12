@@ -325,20 +325,26 @@ export function startServer(config: GatewayConfig): {
   // Spawn one Bun.serve() per host address. This allows binding to
   // specific interfaces (e.g. 127.0.0.1 + a Tailscale IP) without
   // opening to 0.0.0.0.
-  const servers = config.hosts.map((host) =>
-    Bun.serve({
-      port: config.port,
+  //
+  // Pin the resolved port after the first bind so that when config.port
+  // is 0 (OS-assigned), all hosts share the same actual port.
+  let resolvedPort = config.port;
+  const servers = config.hosts.map((host) => {
+    const s = Bun.serve({
+      port: resolvedPort,
       hostname: host,
       // Bun defaults to 10s which is too short for LLM streaming responses.
       // 255 is the maximum allowed by Bun.
       idleTimeout: 255,
       fetch,
-    }),
-  );
+    });
+    resolvedPort = s.port ?? resolvedPort;
+    return s;
+  });
 
   return {
     stop: () => servers.forEach((s) => s.stop()),
-    port: servers[0].port ?? config.port,
+    port: resolvedPort,
     hosts: config.hosts,
   };
 }

@@ -21,7 +21,7 @@ Commands:
   help                Show this help text
 
 Options:
-  -p, --port <port>   Gateway port (default: 6969, env: LORE_LISTEN_PORT)
+  -p, --port <port>   Gateway port (default: 3207, env: LORE_LISTEN_PORT)
   -H, --host <host>   Gateway host(s), repeatable or comma-separated
                       (default: 127.0.0.1, env: LORE_LISTEN_HOST)
   -d, --debug         Enable debug logging (env: LORE_DEBUG=1)

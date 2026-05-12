@@ -49,7 +49,7 @@ export interface AgentDef {
   binary: string;
   /** Returns the binary path if found, or null */
   detect: () => string | null;
-  /** Env vars to inject given the gateway URL (e.g. "http://127.0.0.1:6969") */
+  /** Env vars to inject given the gateway URL (e.g. "http://127.0.0.1:3207") */
   envVars: (gatewayUrl: string) => Record<string, string>;
 }
 
