@@ -56,7 +56,7 @@ import type {
   SessionState,
 } from "./translate/types";
 import type { GatewayConfig } from "./config";
-import { getProjectPath, resolveUpstreamRoute } from "./config";
+import { getProjectPath, resolveUpstreamRoute, type ProjectPathResult } from "./config";
 import {
   generateSessionID,
   fingerprintMessages,
@@ -593,6 +593,54 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     }
   }
   return llmClient;
+}
+
+// ---------------------------------------------------------------------------
+// Project path resolution with session cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Upgrade a project path result using the session's cached path.
+ *
+ * Some requests (e.g. Claude Code's non-streaming prompt-caching probes)
+ * have stripped-down system prompts that lack path references, causing
+ * `getProjectPath()` to fall back to `process.cwd()`. When the session
+ * already has a known-good path from a prior turn, we use that instead.
+ *
+ * Also updates the session cache when a fresh inference or header provides
+ * a new path, so future path-less turns benefit.
+ *
+ * Returns the final resolved project path.
+ */
+export function resolveSessionProjectPath(
+  result: ProjectPathResult,
+  sessionState: SessionState,
+): string {
+  let { path: projectPath, source } = result;
+
+  // Upgrade from cwd fallback using session's cached path
+  if (source === "cwd" && sessionState.projectPath !== projectPath) {
+    projectPath = sessionState.projectPath;
+    source = "cached" as typeof source;
+  }
+
+  // Update session cache when a fresh path was resolved so future
+  // path-less turns benefit from the cached value.
+  if (source === "inferred" || source === "header") {
+    sessionState.projectPath = projectPath;
+  }
+
+  // Log warning only when the cwd fallback truly sticks (no session cache
+  // was available to upgrade from).
+  if (source === "cwd") {
+    console.error(
+      `[lore] warning: project path falling back to process.cwd() (${projectPath}). ` +
+      `Data may be misattributed. Set X-Lore-Project header or include a working ` +
+      `directory in the system prompt to fix this.`,
+    );
+  }
+
+  return projectPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -1959,11 +2007,12 @@ async function handleCompaction(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
-  const projectPath = getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(projectPath, config);
+  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  await initIfNeeded(pathResult.path, config);
 
-  const { sessionID } = await identifySession(req, projectPath);
-  const sessionState = getOrCreateSession(sessionID, projectPath);
+  const { sessionID } = await identifySession(req, pathResult.path);
+  const sessionState = getOrCreateSession(sessionID, pathResult.path);
+  const projectPath = resolveSessionProjectPath(pathResult, sessionState);
 
   setSentryLightContext({ model: req.model, projectPath });
   log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
@@ -2168,8 +2217,8 @@ async function handleConversationTurn(
   config: GatewayConfig,
 ): Promise<Response> {
   // --- 1. Project path & init ---
-  const projectPath = getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(projectPath, config);
+  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  await initIfNeeded(pathResult.path, config);
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
@@ -2178,8 +2227,9 @@ async function handleConversationTurn(
   }
 
   // --- 3. Session identification ---
-  const { sessionID, isNew, tier } = await identifySession(req, projectPath);
-  const sessionState = getOrCreateSession(sessionID, projectPath);
+  const { sessionID, isNew, tier } = await identifySession(req, pathResult.path);
+  const sessionState = getOrCreateSession(sessionID, pathResult.path);
+  const projectPath = resolveSessionProjectPath(pathResult, sessionState);
 
   // Detect sub-agent turns (e.g. OpenCode explore/general agents) that were
   // merged into the parent session via x-parent-session-id.  These turns
