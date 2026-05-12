@@ -18,14 +18,14 @@
  * ## File logging
  *
  * All log calls (info, warn, error) are written to a persistent log file
- * at `~/.local/share/opencode-lore/lore.log` regardless of `LORE_DEBUG`.
+ * at `~/.local/share/lore/lore.log` regardless of `LORE_DEBUG`.
  * The file is rotated when it exceeds 5 MB (single `.log.1` backup).
  * Use `lore logs` to view; disabled during tests (`NODE_ENV=test`).
  */
 
 import { appendFileSync, renameSync, statSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { dataDir } from "./data-dir";
 
 // ---------------------------------------------------------------------------
 // Sink — optional external log consumer (e.g. Sentry)
@@ -85,9 +85,7 @@ let writeCount = 0;
 function resolveLogPath(): string | undefined {
   if (process.env.NODE_ENV === "test") return undefined;
   try {
-    const base =
-      process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
-    const dir = join(base, "opencode-lore");
+    const dir = dataDir();
     mkdirSync(dir, { recursive: true });
     return join(dir, "lore.log");
   } catch {

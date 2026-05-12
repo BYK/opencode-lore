@@ -54,6 +54,7 @@ export type {
 } from "./types";
 export { isTextPart, isReasoningPart, isToolPart } from "./types";
 
+export { dataDir } from "./data-dir";
 export { load, config, type LoreConfig } from "./config";
 export {
   db,

@@ -1,8 +1,8 @@
 import { Database } from "#db/driver";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
-import { homedir } from "os";
 import { getGitRemote } from "./git";
+import { dataDir } from "./data-dir";
 
 /**
  * Extract the repository name from a normalized git remote URL.
@@ -471,12 +471,6 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_import_history_project ON import_history(project_id);
   `,
 ];
-
-function dataDir() {
-  const xdg = process.env.XDG_DATA_HOME;
-  const base = xdg || join(homedir(), ".local", "share");
-  return join(base, "opencode-lore");
-}
 
 /** Return the resolved path of the SQLite database file. */
 export function dbPath(): string {

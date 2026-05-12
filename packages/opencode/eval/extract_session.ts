@@ -8,10 +8,9 @@
  */
 import { parseArgs } from "util";
 import { Database } from "bun:sqlite";
+import { dbPath } from "@loreai/core";
 
-const DB_PATH =
-  process.env.LORE_DB_PATH ??
-  `${process.env.HOME}/.local/share/opencode-lore/lore.db`;
+const DB_PATH = dbPath();
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),

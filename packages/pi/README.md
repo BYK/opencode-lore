@@ -45,7 +45,7 @@ If none apply, recall transparently falls back to FTS-only search.
 
 ## Companion packages
 
-Lore ships as three packages sharing the same SQLite database at `~/.local/share/opencode-lore/lore.db`:
+Lore ships as three packages sharing the same SQLite database at `~/.local/share/lore/lore.db`:
 
 - **`@loreai/pi`** (you are here) — Pi coding-agent extension
 - [`@loreai/opencode`](https://www.npmjs.com/package/@loreai/opencode) — [OpenCode](https://opencode.ai) plugin (also published as [`opencode-lore`](https://www.npmjs.com/package/opencode-lore) legacy alias)

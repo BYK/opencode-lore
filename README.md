@@ -4,7 +4,7 @@
 
 An implementation of [Sanity's Nuum](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) memory architecture and [Mastra's Observational Memory](https://mastra.ai/research/observational-memory) system for coding agents. Both projects pioneered the idea that coding agents need **distillation, not summarization** — preserving operational intelligence (file paths, error messages, exact decisions) rather than narrative summaries that lose the details agents need to keep working.
 
-Lore is published as three packages, all sharing the same SQLite database at `~/.local/share/opencode-lore/lore.db`:
+Lore is published as three packages, all sharing the same SQLite database at `~/.local/share/lore/lore.db`:
 
 | Package | For | Install |
 |---|---|---|
@@ -220,7 +220,7 @@ Once Lore is active, you should notice several changes:
 
 ## What gets stored
 
-All data lives locally in `~/.local/share/opencode-lore/lore.db`:
+All data lives locally in `~/.local/share/lore/lore.db`:
 
 - **Session observations** — timestamped event log of each conversation: what was asked, what was done, decisions made, errors found
 - **Long-term knowledge** — patterns, gotchas, and architectural decisions curated across sessions and projects. Entries can reference each other with `[[entry-id]]` wiki links, forming a navigable knowledge graph. Dead references are automatically cleaned up when entries are deleted or consolidated.
