@@ -1243,6 +1243,28 @@ describe("importLoreFile", () => {
 
     expect(second).toBe(first);
   });
+
+  test("importLoreFile updates cache so shouldImportLoreFile fast-paths afterwards", () => {
+    // Simulate a .lore.md from another machine (entries not in DB yet).
+    const fp = join(PROJECT, LORE_FILE);
+    writeFileSync(
+      fp,
+      `<!-- Managed by lore (https://github.com/BYK/loreai) — manual edits are imported on next session. -->\n\n## Long-term Knowledge\n\n### Decision\n\n<!-- lore:${TEST_UUIDS[0]} -->\n* **Auth**: OAuth2\n`,
+      "utf8",
+    );
+
+    // DB is empty, file has entries — should need import.
+    expect(shouldImportLoreFile(PROJECT)).toBe(true);
+
+    // Import the entries.
+    importLoreFile(PROJECT);
+    const entry = ltm.get(TEST_UUIDS[0]);
+    expect(entry).not.toBeNull();
+
+    // After import, shouldImportLoreFile should return false WITHOUT needing
+    // an export cycle — importLoreFile itself updates the cache.
+    expect(shouldImportLoreFile(PROJECT)).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

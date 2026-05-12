@@ -42,6 +42,7 @@ import {
   loreFileExists,
   shouldImport,
   importFromFile,
+  LORE_FILE,
   latReader,
   embedding,
 } from "@loreai/core";
@@ -194,6 +195,10 @@ export async function resetPipelineState(): Promise<void> {
   }
   llmClient = null;
   activeInterceptor = undefined;
+  if (stopFileWatcher) {
+    stopFileWatcher();
+    stopFileWatcher = null;
+  }
   if (stopIdleScheduler) {
     stopIdleScheduler();
     stopIdleScheduler = null;
@@ -276,6 +281,9 @@ let batchQueueEnabled = false;
 
 /** Cleanup function for the idle scheduler timer. */
 let stopIdleScheduler: (() => void) | null = null;
+
+/** Cleanup function for the .lore.md / agents-file watcher. */
+let stopFileWatcher: (() => void) | null = null;
 
 /** Last seen session model ID — used for worker model discovery context. */
 let lastSeenSessionModel: string | null = null;
@@ -370,6 +378,115 @@ export function computeMaxTokens(
 }
 
 // ---------------------------------------------------------------------------
+// Knowledge file import — shared by startup + file watcher + new-session check
+// ---------------------------------------------------------------------------
+
+/**
+ * Attempt to import knowledge from `.lore.md` (preferred) or the agents file
+ * (AGENTS.md/CLAUDE.md, backward compat).  Safe to call frequently — the
+ * underlying `shouldImportLoreFile()` / `shouldImport()` do mtime + content-hash
+ * checks and short-circuit when nothing changed.
+ *
+ * Returns true if entries were actually imported.
+ */
+function tryImportKnowledge(projectPath: string): boolean {
+  const cfg = loreConfig();
+  if (!cfg.knowledge.enabled) return false;
+
+  try {
+    if (loreFileExists(projectPath)) {
+      if (shouldImportLoreFile(projectPath)) {
+        importLoreFile(projectPath);
+        log.info("imported knowledge from .lore.md");
+        return true;
+      }
+    } else if (cfg.agentsFile.enabled) {
+      const { join } = require("node:path") as typeof import("node:path");
+      const filePath = join(projectPath, cfg.agentsFile.path);
+      if (shouldImport({ projectPath, filePath })) {
+        importFromFile({ projectPath, filePath });
+        log.info("imported knowledge from", cfg.agentsFile.path);
+        return true;
+      }
+    }
+  } catch (e) {
+    log.error("knowledge import error:", e);
+  }
+
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// File watcher for .lore.md / agents file — picks up external edits live
+// ---------------------------------------------------------------------------
+
+/**
+ * Start watching `.lore.md` (and the agents file as fallback) for changes.
+ * Uses `fs.watch()` with a debounce to avoid rapid-fire triggers from
+ * editors that do atomic write-rename sequences.
+ *
+ * Safe against import-after-export loops: `shouldImportLoreFile()` compares
+ * the file content hash against what the DB would produce, so our own
+ * exports are recognized as no-ops.
+ */
+function startKnowledgeFileWatcher(projectPath: string): () => void {
+  const { join } = require("node:path") as typeof import("node:path");
+  const { watch, existsSync } = require("node:fs") as typeof import("node:fs");
+
+  const watchers: import("node:fs").FSWatcher[] = [];
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  const DEBOUNCE_MS = 500;
+
+  const onFileChange = () => {
+    // Debounce: editors often write-rename-delete in rapid succession.
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      tryImportKnowledge(projectPath);
+    }, DEBOUNCE_MS);
+  };
+
+  // Watch .lore.md
+  const loreFilePath = join(projectPath, LORE_FILE);
+  if (existsSync(loreFilePath)) {
+    try {
+      const w = watch(loreFilePath, onFileChange);
+      w.on("error", () => {}); // suppress — file may be deleted
+      watchers.push(w);
+    } catch {
+      // watch not supported (rare) — fall back to session-start checks only
+    }
+  }
+
+  // Watch agents file (AGENTS.md etc.) as fallback
+  const cfg = loreConfig();
+  if (cfg.agentsFile.enabled) {
+    const agentsFilePath = join(projectPath, cfg.agentsFile.path);
+    if (existsSync(agentsFilePath)) {
+      try {
+        const w = watch(agentsFilePath, onFileChange);
+        w.on("error", () => {});
+        watchers.push(w);
+      } catch {
+        // watch not supported
+      }
+    }
+  }
+
+  if (watchers.length > 0) {
+    log.info(`watching ${watchers.length} knowledge file(s) for changes`);
+  }
+
+  return () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    for (const w of watchers) {
+      try { w.close(); } catch { /* already closed */ }
+    }
+    watchers.length = 0;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
 
@@ -389,28 +506,17 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
   // since last session). Falls back to agents file for backward compat.
   const cfg = loreConfig();
   if (cfg.knowledge.enabled) {
-    try {
-      const { join } = await import("node:path");
-      if (loreFileExists(projectPath)) {
-        if (shouldImportLoreFile(projectPath)) {
-          importLoreFile(projectPath);
-          log.info("imported knowledge from .lore.md");
-        }
-      } else if (cfg.agentsFile.enabled) {
-        const filePath = join(projectPath, cfg.agentsFile.path);
-        if (shouldImport({ projectPath, filePath })) {
-          importFromFile({ projectPath, filePath });
-          log.info("imported knowledge from", cfg.agentsFile.path);
-        }
-      }
-    } catch (e) {
-      log.error("startup knowledge import error:", e);
-    }
+    tryImportKnowledge(projectPath);
 
     // Prune corrupted/oversized knowledge entries (safety net for past bugs).
     const pruned = ltm.pruneOversized(1200);
     if (pruned > 0) {
       log.info(`pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
+    }
+
+    // Watch knowledge files for live changes (git pull, manual edits, etc.)
+    if (!stopFileWatcher) {
+      stopFileWatcher = startKnowledgeFileWatcher(projectPath);
     }
   }
 
@@ -1655,6 +1761,13 @@ async function handleConversationTurn(
       const result = learnHeaders(sessionState.candidateHeaders, req.rawHeaders);
       sessionState.candidateHeaders = result.updatedCandidates;
     }
+
+    // Re-check knowledge files on new session start.  The file watcher
+    // covers live edits, but this catches cases where:
+    //  - The watcher wasn't set up (file didn't exist at startup)
+    //  - The watcher missed an event (e.g. network-mounted fs)
+    //  - The file was created after gateway startup (first export from another machine)
+    tryImportKnowledge(projectPath);
   }
 
   // --- Compaction anomaly detection ---
