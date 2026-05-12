@@ -9,6 +9,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { startGateway, type StartOptions } from "./start";
 import { detectAgents, AGENTS, type DetectedAgent } from "./agents";
+import { safeExit } from "./exit";
 
 // ---------------------------------------------------------------------------
 // Interactive agent picker (TTY only)
@@ -135,9 +136,12 @@ export async function commandRun(
     console.error("[lore] Running in server-only mode. Point your agent at the gateway manually.");
     console.error(`[lore]   export ANTHROPIC_BASE_URL=${gatewayUrl}`);
 
+    let shuttingDown = false;
     const onSignal = async () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
       await shutdown();
-      process.exit(0);
+      safeExit(0);
     };
     process.on("SIGINT", () => onSignal());
     process.on("SIGTERM", () => onSignal());
@@ -167,15 +171,15 @@ export async function commandRun(
         const SIGNAL_CODES: Record<string, number> = {
           SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGTERM: 15,
         };
-        process.exit(128 + (SIGNAL_CODES[signal] ?? 1));
+        safeExit(128 + (SIGNAL_CODES[signal] ?? 1));
       }
-      process.exit(code ?? 0);
+      safeExit(code ?? 0);
     });
 
     child.on("error", async (err) => {
       console.error(`[lore] Failed to launch ${target.command}: ${err.message}`);
       await shutdown();
-      process.exit(1);
+      safeExit(1);
     });
   });
 }

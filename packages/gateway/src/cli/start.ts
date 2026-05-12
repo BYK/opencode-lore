@@ -6,6 +6,8 @@
 import { loadConfig, type GatewayConfig } from "../config";
 import { startServer } from "../server";
 import { resetPipelineState } from "../pipeline";
+import { embedding } from "@loreai/core";
+import { safeExit } from "./exit";
 
 export interface StartOptions {
   port?: number;
@@ -39,6 +41,11 @@ export function startGateway(opts: StartOptions = {}): {
     console.error("[lore] Shutting down…");
     server.stop();
     await resetPipelineState();
+    // Shut down the embedding worker thread gracefully. Done after
+    // resetPipelineState (which clears sessions/timers) but before
+    // safeExit — gives the worker time to exit cleanly via its
+    // "shutdown" message handler rather than being killed by _exit().
+    await embedding.resetProvider();
   };
 
   return { config, port: actualPort, shutdown };
@@ -90,9 +97,12 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.error("  export DISABLE_AUTO_COMPACT=1");
   }
   // Block until signal
+  let shuttingDown = false;
   const onSignal = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     await shutdown();
-    process.exit(0);
+    safeExit(0);
   };
 
   process.on("SIGINT", () => onSignal());

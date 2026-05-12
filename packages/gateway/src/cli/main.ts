@@ -124,22 +124,10 @@ export async function _cli(): Promise<void> {
         process.exit(1);
       }
       console.log(`ok dim=${vec.length}`);
-      // Force-exit to avoid Bun 1.3.x NAPI teardown crash: when ONNX
-      // Runtime native bindings are cleaned up during normal process
-      // shutdown, Bun panics with a C++ exception. process.exit(0) still
-      // runs atexit handlers; _exit(0) via FFI terminates immediately.
-      try {
-        const { dlopen, FFIType } = await import("bun:ffi");
-        const libs = process.platform === "win32"
-          ? ["msvcrt.dll"]
-          : ["libSystem.B.dylib", "libc.so.6"];
-        for (const name of libs) {
-          try {
-            dlopen(name, { _exit: { args: [FFIType.int], returns: FFIType.void } }).symbols._exit(0);
-          } catch { /* try next */ }
-        }
-      } catch { /* fallthrough */ }
-      process.exit(0);
+      // Force-exit to avoid Bun NAPI teardown crash — fastembed is loaded
+      // on the main thread in this diagnostic path.
+      const { safeExit } = await import("./exit");
+      safeExit(0);
     } catch (err: unknown) {
       const cause = (err as Error & { cause?: unknown })?.cause;
       console.error(
