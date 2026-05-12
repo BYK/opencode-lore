@@ -2,8 +2,9 @@
  * HTTP server for the Lore gateway proxy.
  *
  * Routes:
- *   POST /v1/messages          → Anthropic protocol (Phase 1)
- *   POST /v1/chat/completions  → OpenAI protocol (Phase 2 stub)
+ *   POST /v1/messages          → Anthropic protocol
+ *   POST /v1/chat/completions  → OpenAI Chat Completions protocol
+ *   POST /v1/responses         → OpenAI Responses API protocol
  *   GET  /v1/models            → Passthrough to upstream
  *   GET  /health               → Health check
  *
@@ -13,7 +14,12 @@ import type { GatewayConfig } from "./config";
 import type { GatewayRequest } from "./translate/types";
 import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest, buildOpenAIResponse } from "./translate/openai";
+import {
+  parseOpenAIResponsesRequest,
+  buildOpenAIResponsesResponse,
+} from "./translate/openai-responses";
 import { accumulateSSEResponse } from "./stream/anthropic";
+import { accumulateResponsesSSEStream } from "./stream/openai-responses";
 import { handleRequest } from "./pipeline";
 
 // ---------------------------------------------------------------------------
@@ -186,6 +192,52 @@ async function handleOpenAIChatCompletions(
   return withCors(buildOpenAIResponse(respBody, false));
 }
 
+async function handleOpenAIResponses(
+  req: Request,
+  config: GatewayConfig,
+): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(400, "invalid_request_error", "Invalid JSON body");
+  }
+
+  let gatewayReq: GatewayRequest;
+  try {
+    gatewayReq = parseOpenAIResponsesRequest(body, headersToRecord(req.headers));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to parse request";
+    return errorResponse(400, "invalid_request_error", msg);
+  }
+
+  let pipelineResp: Response;
+  try {
+    pipelineResp = await handleRequest(gatewayReq, config);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Pipeline error";
+    console.error(`[lore] pipeline error: ${msg}`);
+    return errorResponse(502, "api_error", `Gateway pipeline error: ${msg}`);
+  }
+
+  // Pipeline always returns internal Anthropic-format response.
+  // Translate back to Responses API format before returning to the client.
+  if (!pipelineResp.ok) {
+    return withCors(pipelineResp);
+  }
+
+  const contentType = pipelineResp.headers.get("content-type") ?? "";
+  if (contentType.includes("text/event-stream")) {
+    // Streaming: accumulate the internal SSE then re-emit as Responses API SSE
+    const accumulated = await accumulateSSEResponse(pipelineResp);
+    return withCors(buildOpenAIResponsesResponse(accumulated, true));
+  }
+
+  // Non-streaming: translate JSON body
+  const respBody = await pipelineResp.json();
+  return withCors(buildOpenAIResponsesResponse(respBody, false));
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -219,6 +271,11 @@ export function startServer(config: GatewayConfig): {
       // POST /v1/chat/completions — OpenAI protocol
       if (method === "POST" && pathname === "/v1/chat/completions") {
         return await handleOpenAIChatCompletions(req, config);
+      }
+
+      // POST /v1/responses — OpenAI Responses API protocol
+      if (method === "POST" && pathname === "/v1/responses") {
+        return await handleOpenAIResponses(req, config);
       }
 
       // GET /v1/models — passthrough

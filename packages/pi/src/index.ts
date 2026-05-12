@@ -45,9 +45,10 @@ type SessionBeforeCompactResult = {
  *
  * - anthropic-messages API → gateway POST /v1/messages
  * - openai-completions API → gateway POST /v1/chat/completions
+ * - openai-responses API   → gateway POST /v1/responses
  *
- * Providers using other protocols (Google SDK, AWS Bedrock SDK, OpenAI
- * responses API, Mistral conversations) are not redirected.
+ * Providers using other protocols (Google SDK, AWS Bedrock SDK,
+ * Mistral conversations) are not redirected.
  */
 const GATEWAY_PROVIDERS = [
   // anthropic-messages API
@@ -61,6 +62,13 @@ const GATEWAY_PROVIDERS = [
   "cerebras",
   "openrouter",
   "huggingface",
+  "zai",
+  "minimax",
+  "minimax-cn",
+  "kimi-coding",
+  "vercel-ai-gateway",
+  // openai-responses API
+  "openai",
 ];
 
 /**

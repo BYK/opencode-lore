@@ -435,7 +435,7 @@ export function buildAnthropicProfile(
  */
 export function resolveProfile(
   model: string | undefined,
-  protocol: "anthropic" | "openai" | undefined,
+  protocol: "anthropic" | "openai" | "openai-responses" | undefined,
   ttl: "5m" | "1h" | undefined,
   upstreamBase?: string,
 ): CacheWarmingProfile | null {

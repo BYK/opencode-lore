@@ -85,6 +85,9 @@ import {
   buildOpenAIResponse,
 } from "./translate/openai";
 import {
+  buildOpenAIResponsesUpstreamRequest,
+} from "./translate/openai-responses";
+import {
   createStreamAccumulator,
   createRecallAwareAccumulator,
   parseSSEStream,
@@ -776,11 +779,25 @@ async function forwardToUpstream(
   let body: unknown;
 
   // Infer upstream from model name; fall back to protocol + env-var defaults.
+  // Preserve "openai-responses" from ingress — model prefix routing returns
+  // "openai" for OpenAI models, but we must not downgrade the wire protocol.
   const route = resolveUpstreamRoute(req.model);
-  const effectiveProtocol = route?.protocol ?? req.protocol;
-  const effectiveUpstreamBase = route?.url ?? (effectiveProtocol === "openai" ? config.upstreamOpenAI : config.upstreamAnthropic);
+  const effectiveProtocol =
+    req.protocol === "openai-responses"
+      ? "openai-responses"
+      : (route?.protocol ?? req.protocol);
+  const effectiveUpstreamBase =
+    route?.url ??
+    (effectiveProtocol === "anthropic"
+      ? config.upstreamAnthropic
+      : config.upstreamOpenAI);
 
-  if (effectiveProtocol === "openai") {
+  if (effectiveProtocol === "openai-responses") {
+    const result = buildOpenAIResponsesUpstreamRequest(req, effectiveUpstreamBase);
+    url = result.url;
+    headers = result.headers;
+    body = result.body;
+  } else if (effectiveProtocol === "openai") {
     const result = buildOpenAIUpstreamRequest(req, effectiveUpstreamBase);
     url = result.url;
     headers = result.headers;
@@ -1473,7 +1490,9 @@ function postResponse(
     // Track model/protocol for warmup profile resolution
     sessionState.lastModel = req.model;
     sessionState.lastProtocol =
-      resolveUpstreamRoute(req.model)?.protocol ?? "anthropic";
+      req.protocol === "openai-responses"
+        ? "openai-responses"
+        : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic");
 
     // Reset dead flag if session was marked dead but user returned
     if (sessionState.warmup?.disabled) {
@@ -1829,7 +1848,7 @@ async function handleConversationTurn(
     authFingerprint: cred ? authFingerprint(cred) : null,
     sessionID,
     model: req.model,
-    upstreamUrl: resolveUpstreamRoute(req.model)?.url ?? config.upstreamAnthropic,
+    upstreamUrl: resolveUpstreamRoute(req.model)?.url ?? (req.protocol === "anthropic" ? config.upstreamAnthropic : config.upstreamOpenAI),
     port: config.port,
     projectPath,
   });
@@ -2113,7 +2132,9 @@ async function handleConversationTurn(
       "gen_ai.operation.name": "chat",
       "gen_ai.request.model": req.model,
       "gen_ai.provider.name":
-        resolveUpstreamRoute(req.model)?.protocol ?? "anthropic",
+        req.protocol === "openai-responses"
+          ? "openai-responses"
+          : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic"),
       "gen_ai.response.streaming": req.stream,
       // NO gen_ai.input.messages — privacy (proxy for other people's projects)
     },
