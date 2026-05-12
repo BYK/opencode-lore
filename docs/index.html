@@ -1,12 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LoreAI — Persistent Memory for AI Coding Agents</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:wght@200;300;400&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:wght@200;300;400&display=swap"
+    rel="stylesheet" />
 
   <style>
     :root {
@@ -26,8 +29,19 @@
       --sans: 'DM Sans', sans-serif;
       --ease: cubic-bezier(0.22, 1, 0.36, 1);
     }
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html { scroll-behavior: smooth; }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
     body {
       background: var(--c0);
       color: var(--ink);
@@ -37,9 +51,11 @@
       overflow-x: hidden;
       cursor: none;
     }
+
     .cursor {
       position: fixed;
-      width: 8px; height: 8px;
+      width: 8px;
+      height: 8px;
       background: var(--g2);
       border-radius: 50%;
       pointer-events: none;
@@ -47,50 +63,107 @@
       transform: translate(-50%, -50%);
       transition: width .3s var(--ease), height .3s var(--ease), background .3s;
     }
+
     .cursor.expand {
-      width: 36px; height: 36px;
+      width: 36px;
+      height: 36px;
       background: transparent;
       border: 1px solid var(--g3);
     }
+
     body::after {
       content: '';
-      position: fixed; inset: 0;
+      position: fixed;
+      inset: 0;
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23g)' opacity='0.035'/%3E%3C/svg%3E");
       pointer-events: none;
       z-index: 9998;
     }
-    a { color: inherit; text-decoration: none; }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
 
     /* NAV */
     nav {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 500;
-      display: flex; align-items: center; justify-content: space-between;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 500;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       padding: 1.4rem 3rem;
-      background: rgba(247,242,232,0.85);
+      background: rgba(247, 242, 232, 0.85);
       backdrop-filter: blur(16px);
-      border-bottom: 1px solid rgba(90,143,99,.12);
+      border-bottom: 1px solid rgba(90, 143, 99, .12);
     }
+
     .logo {
-      font-family: var(--serif); font-size: 1.5rem; color: var(--g0);
-      display: flex; align-items: center; gap: .5rem;
+      font-family: var(--serif);
+      font-size: 1.5rem;
+      color: var(--g0);
+      display: flex;
+      align-items: center;
+      gap: .5rem;
     }
+
     .logo-dot {
-      width: 6px; height: 6px; background: var(--g3); border-radius: 50%;
+      width: 6px;
+      height: 6px;
+      background: var(--g3);
+      border-radius: 50%;
       animation: pulse 3s ease-in-out infinite;
     }
-    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.7)} }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+        transform: scale(1)
+      }
+
+      50% {
+        opacity: .5;
+        transform: scale(.7)
+      }
+    }
+
     .nav-links {
-      display: flex; gap: 2.5rem; list-style: none;
-      font-size: .75rem; letter-spacing: .14em; text-transform: uppercase; color: var(--mid);
+      display: flex;
+      gap: 2.5rem;
+      list-style: none;
+      font-size: .75rem;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--mid);
     }
-    .nav-links a { transition: color .25s; }
-    .nav-links a:hover { color: var(--g1); }
+
+    .nav-links a {
+      transition: color .25s;
+    }
+
+    .nav-links a:hover {
+      color: var(--g1);
+    }
+
     .nav-btn {
-      font-size: .73rem; letter-spacing: .13em; text-transform: uppercase;
-      padding: .55rem 1.4rem; background: var(--g0); color: var(--c0);
-      border-radius: 1px; transition: background .3s;
+      font-size: .73rem;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+      padding: .55rem 1.4rem;
+      background: var(--g0);
+      color: var(--c0);
+      border-radius: 1px;
+      transition: background .3s;
     }
-    .nav-btn:hover { background: var(--g1); }
+
+    .nav-btn:hover {
+      background: var(--g1);
+    }
 
     /* HERO */
     .hero {
@@ -98,447 +171,854 @@
       padding: 10rem 3rem 5rem;
       display: grid;
       grid-template-columns: 1.1fr 1fr;
-      gap: 4rem; align-items: center;
-      position: relative; overflow: hidden;
+      gap: 4rem;
+      align-items: center;
+      position: relative;
+      overflow: hidden;
     }
-    .hero-bg {
-      position: absolute; inset: 0; pointer-events: none; overflow: hidden;
-    }
-    .hero-bg svg {
-      position: absolute; right: -5%; top: 5%; width: 55%; opacity: .1;
-    }
-    .hero-badge {
-      display: inline-flex; align-items: center; gap: .7rem;
-      font-size: .7rem; letter-spacing: .18em; text-transform: uppercase;
-      color: var(--g3); margin-bottom: 2rem;
-    }
-    .hero-badge::before { content:''; display:block; width:28px; height:1px; background:var(--g4); }
-    .badge-pill {
-      background: var(--g6); border: 1px solid var(--g5);
-      padding: .22rem .65rem; border-radius: 20px;
-      font-size: .64rem; color: var(--g2);
-    }
-    h1 {
-      font-family: var(--serif); font-size: clamp(2.8rem, 5.5vw, 5.5rem);
-      font-weight: 400; line-height: 1.08; color: var(--g0); margin-bottom: 2rem;
-    }
-    h1 em {
-      font-style: italic; color: var(--g2); position: relative; display: inline-block;
-    }
-    h1 em::after {
-      content: ''; position: absolute; bottom: .08em; left: 0; right: 0;
-      height: 2px; background: linear-gradient(90deg, var(--g4), transparent);
-    }
-    .hero-desc {
-      font-size: 1rem; color: var(--mid); max-width: 42ch; line-height: 1.9; margin-bottom: 3rem;
-    }
-    .hero-actions { display: flex; align-items: center; gap: 1.2rem; flex-wrap: wrap; }
-    .btn-fill {
-      display: inline-flex; align-items: center; gap: .6rem;
-      background: var(--g0); color: var(--c0);
-      padding: .9rem 2rem; font-size: .78rem; letter-spacing: .12em; text-transform: uppercase;
-      border-radius: 2px; transition: background .3s, transform .2s var(--ease);
-    }
-    .btn-fill:hover { background: var(--g1); transform: translateY(-2px); }
-    .btn-fill svg { width: 14px; height: 14px; }
-    .btn-ghost {
-      font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; color: var(--g2);
-      border-bottom: 1px solid var(--g4); padding-bottom: 2px; transition: color .25s, border-color .25s;
-    }
-    .btn-ghost:hover { color: var(--g0); border-color: var(--g2); }
 
-    /* install block */
-    .hero-install { margin-bottom: 2rem; }
-    .install-block {
-      display: inline-flex; align-items: center; gap: 1rem;
-      background: var(--g0); border-radius: 4px; padding: .9rem 1.4rem;
-      cursor: pointer; position: relative; transition: background .2s;
+    .hero-bg {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: hidden;
     }
-    .install-block:hover { background: var(--g1); }
-    .install-block code {
-      font-family: monospace; font-size: .88rem; color: var(--g5); letter-spacing: .02em;
+
+    .hero-bg svg {
+      position: absolute;
+      right: -5%;
+      top: 5%;
+      width: 55%;
+      opacity: .1;
     }
-    .install-prompt { color: var(--g3); margin-right: .3rem; }
-    .install-copy { color: var(--g4); opacity: .6; transition: opacity .2s; display: flex; }
-    .install-block:hover .install-copy { opacity: 1; }
-    .install-copied {
-      position: absolute; top: -1.8rem; right: 0;
-      font-size: .7rem; color: var(--g3); opacity: 0; transition: opacity .25s;
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: .7rem;
+      font-size: .7rem;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      color: var(--g3);
+      margin-bottom: 2rem;
     }
-    .install-copied.show { opacity: 1; }
-    .install-alt {
-      margin-top: .7rem; font-size: .78rem; color: var(--mid);
+
+    .hero-badge::before {
+      content: '';
+      display: block;
+      width: 28px;
+      height: 1px;
+      background: var(--g4);
     }
-    .install-alt code {
-      font-size: .78rem; background: var(--g6); padding: .15em .45em; border-radius: 3px;
+
+    .badge-pill {
+      background: var(--g6);
+      border: 1px solid var(--g5);
+      padding: .22rem .65rem;
+      border-radius: 20px;
+      font-size: .64rem;
+      color: var(--g2);
+    }
+
+    h1 {
+      font-family: var(--serif);
+      font-size: clamp(2.8rem, 5.5vw, 5.5rem);
+      font-weight: 400;
+      line-height: 1.08;
+      color: var(--g0);
+      margin-bottom: 2rem;
+    }
+
+    h1 em {
+      font-style: italic;
+      color: var(--g2);
+      position: relative;
+      display: inline-block;
+    }
+
+    h1 em::after {
+      content: '';
+      position: absolute;
+      bottom: .08em;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--g4), transparent);
+    }
+
+    .hero-desc {
+      font-size: 1rem;
+      color: var(--mid);
+      max-width: 42ch;
+      line-height: 1.9;
+      margin-bottom: 3rem;
+    }
+
+    .hero-actions {
+      display: flex;
+      align-items: center;
+      gap: 1.2rem;
+      flex-wrap: wrap;
+    }
+
+    .btn-fill {
+      display: inline-flex;
+      align-items: center;
+      gap: .6rem;
+      background: var(--g0);
+      color: var(--c0);
+      padding: .9rem 2rem;
+      font-size: .78rem;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      border-radius: 2px;
+      transition: background .3s, transform .2s var(--ease);
+    }
+
+    .btn-fill:hover {
+      background: var(--g1);
+      transform: translateY(-2px);
+    }
+
+    .btn-fill svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    .btn-ghost {
+      font-size: .78rem;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--g2);
+      border-bottom: 1px solid var(--g4);
+      padding-bottom: 2px;
+      transition: color .25s, border-color .25s;
+    }
+
+    .btn-ghost:hover {
+      color: var(--g0);
+      border-color: var(--g2);
     }
 
     /* graph visual */
-    .hero-visual { display: flex; justify-content: center; align-items: center; position: relative; }
-    .graph-wrap { width: min(430px, 100%); aspect-ratio: 1; position: relative; }
-    .graph-wrap svg { width: 100%; height: 100%; }
+    .hero-visual {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      position: relative;
+    }
+
+    .graph-wrap {
+      width: min(430px, 100%);
+      aspect-ratio: 1;
+      position: relative;
+    }
+
+    .graph-wrap svg {
+      width: 100%;
+      height: 100%;
+    }
+
     .mg-edge {
-      stroke-dasharray: 220; stroke-dashoffset: 220;
+      stroke-dasharray: 220;
+      stroke-dashoffset: 220;
       animation: draw 2s var(--ease) forwards;
     }
-    @keyframes draw { to { stroke-dashoffset: 0; } }
-    .mn { animation: breathe 4s ease-in-out infinite; }
-    @keyframes breathe { 0%,100%{opacity:.75} 50%{opacity:1} }
-    .g-chip {
-      position: absolute; background: var(--c0); border: 1px solid var(--c2); border-radius: 3px;
-      padding: .28rem .65rem; font-size: .67rem; letter-spacing: .07em; color: var(--mid);
-      box-shadow: 0 4px 14px rgba(26,51,32,.06); white-space: nowrap;
+
+    @keyframes draw {
+      to {
+        stroke-dashoffset: 0;
+      }
     }
-    .gc1{top:10%;left:2%} .gc2{top:28%;right:-2%} .gc3{bottom:20%;left:0%} .gc4{bottom:8%;right:5%}
+
+    .mn {
+      animation: breathe 4s ease-in-out infinite;
+    }
+
+    @keyframes breathe {
+
+      0%,
+      100% {
+        opacity: .75
+      }
+
+      50% {
+        opacity: 1
+      }
+    }
+
+    .g-chip {
+      position: absolute;
+      background: var(--c0);
+      border: 1px solid var(--c2);
+      border-radius: 3px;
+      padding: .28rem .65rem;
+      font-size: .67rem;
+      letter-spacing: .07em;
+      color: var(--mid);
+      box-shadow: 0 4px 14px rgba(26, 51, 32, .06);
+      white-space: nowrap;
+    }
+
+    .gc1 {
+      top: 10%;
+      left: 2%
+    }
+
+    .gc2 {
+      top: 28%;
+      right: -2%
+    }
+
+    .gc3 {
+      bottom: 20%;
+      left: 0%
+    }
+
+    .gc4 {
+      bottom: 8%;
+      right: 5%
+    }
 
     /* stat strip */
     .hero-stats {
       grid-column: 1 / -1;
-      display: grid; grid-template-columns: repeat(3, 1fr);
-      gap: 1px; background: var(--c2);
-      border: 1px solid var(--c2); border-radius: 3px; overflow: hidden; margin-top: 1rem;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--c2);
+      border: 1px solid var(--c2);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 1rem;
     }
-    .stat-cell { background: var(--c0); padding: 1.6rem 2rem; }
+
+    .stat-cell {
+      background: var(--c0);
+      padding: 1.6rem 2rem;
+    }
+
     .stat-n {
-      font-family: var(--serif); font-size: 2.2rem; color: var(--g1); line-height: 1; margin-bottom: .3rem;
+      font-family: var(--serif);
+      font-size: 2.2rem;
+      color: var(--g1);
+      line-height: 1;
+      margin-bottom: .3rem;
     }
-    .stat-l { font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--mid); }
+
+    .stat-l {
+      font-size: .72rem;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--mid);
+    }
 
     /* TICKER */
-    .ticker { overflow: hidden; background: var(--g0); padding: .9rem 0; white-space: nowrap; }
-    .ticker-track { display: inline-flex; animation: scroll 26s linear infinite; }
-    .ti { font-family: var(--serif); font-size: 1rem; font-style: italic; color: var(--g5); padding: 0 2.5rem; }
-    .td { color: var(--g3); font-style: normal; font-family: var(--sans); font-size: .44rem; display:inline-flex;align-items:center; }
-    @keyframes scroll { to { transform: translateX(-50%); } }
+    .ticker {
+      overflow: hidden;
+      background: var(--g0);
+      padding: .9rem 0;
+      white-space: nowrap;
+    }
+
+    .ticker-track {
+      display: inline-flex;
+      animation: scroll 26s linear infinite;
+    }
+
+    .ti {
+      font-family: var(--serif);
+      font-size: 1rem;
+      font-style: italic;
+      color: var(--g5);
+      padding: 0 2.5rem;
+    }
+
+    .td {
+      color: var(--g3);
+      font-style: normal;
+      font-family: var(--sans);
+      font-size: .44rem;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    @keyframes scroll {
+      to {
+        transform: translateX(-50%);
+      }
+    }
 
     /* HOW */
-    .how { padding: 8rem 3rem; background: var(--c0); }
+    .how {
+      padding: 8rem 3rem;
+      background: var(--c0);
+    }
+
     .sec-hd {
-      max-width: 1100px; margin: 0 auto 5rem;
-      display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 2rem;
+      max-width: 1100px;
+      margin: 0 auto 5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      flex-wrap: wrap;
+      gap: 2rem;
     }
-    .eyebrow { font-size: .7rem; letter-spacing: .22em; text-transform: uppercase; color: var(--g3); margin-bottom: 1rem; }
-    .sec-title { font-family: var(--serif); font-size: clamp(2rem,3.5vw,3rem); font-weight: 400; color: var(--g0); line-height: 1.2; }
-    .sec-title em { font-style: italic; color: var(--g2); }
-    .sec-sub { font-size: .9rem; color: var(--mid); max-width: 34ch; line-height: 1.8; }
+
+    .eyebrow {
+      font-size: .7rem;
+      letter-spacing: .22em;
+      text-transform: uppercase;
+      color: var(--g3);
+      margin-bottom: 1rem;
+    }
+
+    .sec-title {
+      font-family: var(--serif);
+      font-size: clamp(2rem, 3.5vw, 3rem);
+      font-weight: 400;
+      color: var(--g0);
+      line-height: 1.2;
+    }
+
+    .sec-title em {
+      font-style: italic;
+      color: var(--g2);
+    }
+
+    .sec-sub {
+      font-size: .9rem;
+      color: var(--mid);
+      max-width: 34ch;
+      line-height: 1.8;
+    }
+
     .steps {
-      max-width: 1100px; margin: 0 auto;
-      display: grid; grid-template-columns: repeat(3, 1fr);
-      border: 1px solid var(--c2); border-radius: 4px; overflow: hidden;
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid var(--c2);
+      border-radius: 4px;
+      overflow: hidden;
     }
+
     .step {
-      padding: 3.5rem 2.5rem; border-right: 1px solid var(--c2);
-      position: relative; transition: background .35s;
+      padding: 3.5rem 2.5rem;
+      border-right: 1px solid var(--c2);
+      position: relative;
+      transition: background .35s;
     }
-    .step:last-child { border-right: none; }
-    .step:hover { background: var(--g6); }
-    .step-n { font-family: var(--serif); font-size: .8rem; color: var(--g4); margin-bottom: 2rem; }
-    .step-icon { width: 40px; height: 40px; color: var(--g2); margin-bottom: 1.5rem; }
-    .step-t { font-family: var(--serif); font-size: 1.4rem; color: var(--g0); margin-bottom: .8rem; }
-    .step-b { font-size: .84rem; color: var(--mid); line-height: 1.9; }
+
+    .step:last-child {
+      border-right: none;
+    }
+
+    .step:hover {
+      background: var(--g6);
+    }
+
+    .step-n {
+      font-family: var(--serif);
+      font-size: .8rem;
+      color: var(--g4);
+      margin-bottom: 2rem;
+    }
+
+    .step-icon {
+      width: 40px;
+      height: 40px;
+      color: var(--g2);
+      margin-bottom: 1.5rem;
+    }
+
+    .step-t {
+      font-family: var(--serif);
+      font-size: 1.4rem;
+      color: var(--g0);
+      margin-bottom: .8rem;
+    }
+
+    .step-b {
+      font-size: .84rem;
+      color: var(--mid);
+      line-height: 1.9;
+    }
 
     /* FEATURES */
-    .features { padding: 8rem 3rem; background: var(--c1); }
-    .bento {
-      max-width: 1100px; margin: 4rem auto 0;
-      display: grid; grid-template-columns: repeat(12,1fr); gap: 1rem;
+    .features {
+      padding: 8rem 3rem;
+      background: var(--c1);
     }
+
+    .bento {
+      max-width: 1100px;
+      margin: 4rem auto 0;
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 1rem;
+    }
+
     .bc {
-      background: var(--c0); border: 1px solid var(--c2); border-radius: 4px;
-      padding: 2.5rem; overflow: hidden; position: relative;
+      background: var(--c0);
+      border: 1px solid var(--c2);
+      border-radius: 4px;
+      padding: 2.5rem;
+      overflow: hidden;
+      position: relative;
       transition: transform .35s var(--ease), box-shadow .35s;
     }
-    .bc:hover { transform: translateY(-3px); box-shadow: 0 16px 48px rgba(26,51,32,.08); }
-    .bc-1 { grid-column: span 7; }
-    .bc-2 { grid-column: span 5; }
-    .bc-3 { grid-column: span 12; display: grid; grid-template-columns: 1.2fr 1fr; gap: 3rem; align-items: center; }
-    .bc-tag { font-size: .65rem; letter-spacing: .18em; text-transform: uppercase; color: var(--g3); margin-bottom: 1.2rem; }
-    .bc-t { font-family: var(--serif); font-size: 1.55rem; color: var(--g0); line-height: 1.25; margin-bottom: .8rem; }
-    .bc-b { font-size: .84rem; color: var(--mid); line-height: 1.85; }
-    
+
+    .bc:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 16px 48px rgba(26, 51, 32, .08);
+    }
+
+    .bc-1 {
+      grid-column: span 7;
+    }
+
+    .bc-2 {
+      grid-column: span 5;
+    }
+
+    .bc-3 {
+      grid-column: span 12;
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 3rem;
+      align-items: center;
+    }
+
+    .bc-tag {
+      font-size: .65rem;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      color: var(--g3);
+      margin-bottom: 1.2rem;
+    }
+
+    .bc-t {
+      font-family: var(--serif);
+      font-size: 1.55rem;
+      color: var(--g0);
+      line-height: 1.25;
+      margin-bottom: .8rem;
+    }
+
+    .bc-b {
+      font-size: .84rem;
+      color: var(--mid);
+      line-height: 1.85;
+    }
+
     /* code */
     .code-block {
-      margin-top: 1.2rem; background: var(--g0); border-radius: 3px; padding: 1.5rem;
+      margin-top: 1.2rem;
+      background: var(--g0);
+      border-radius: 3px;
+      padding: 1.5rem;
     }
-    .code-block code { font-size: .78rem; color: var(--g4); font-family: monospace; line-height: 1.6; }
-    .code-block .ck { color: var(--c0); }
-    .code-block .cv { color: var(--g5); }
+
+    .code-block code {
+      font-size: .78rem;
+      color: var(--g4);
+      font-family: monospace;
+      line-height: 1.6;
+    }
+
+    .code-block .ck {
+      color: var(--c0);
+    }
+
+    .code-block .cv {
+      color: var(--g5);
+    }
 
     /* CTA */
-    .cta { padding: 9rem 3rem; background: var(--c1); position: relative; text-align: center; }
-    .cta-inner { max-width: 680px; margin: 0 auto; position: relative; z-index: 1; }
-    .cta-inner h2 { font-family: var(--serif); font-size: clamp(2rem,4vw,3.4rem); color: var(--g0); line-height: 1.2; margin-bottom: 1.2rem; }
-    .cta-sub { font-size: .92rem; color: var(--mid); line-height: 1.9; max-width: 42ch; margin: 0 auto 2.8rem; }
+    .cta {
+      padding: 9rem 3rem;
+      background: var(--c1);
+      position: relative;
+      text-align: center;
+    }
+
+    .cta-inner {
+      max-width: 680px;
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .cta-inner h2 {
+      font-family: var(--serif);
+      font-size: clamp(2rem, 4vw, 3.4rem);
+      color: var(--g0);
+      line-height: 1.2;
+      margin-bottom: 1.2rem;
+    }
+
+    .cta-sub {
+      font-size: .92rem;
+      color: var(--mid);
+      line-height: 1.9;
+      max-width: 42ch;
+      margin: 0 auto 2.8rem;
+    }
+
     .cta-input {
-      width: 268px; padding: .85rem 1.3rem; background: var(--c0);
-      border: 1px solid var(--c2); border-radius: 2px; outline: none;
+      width: 268px;
+      padding: .85rem 1.3rem;
+      background: var(--c0);
+      border: 1px solid var(--c2);
+      border-radius: 2px;
+      outline: none;
     }
+
     .cta-submit {
-      padding: .85rem 2rem; background: var(--g0); color: var(--c0);
-      border: none; border-radius: 2px; cursor: pointer; text-transform: uppercase; letter-spacing: .1em;
+      padding: .85rem 2rem;
+      background: var(--g0);
+      color: var(--c0);
+      border: none;
+      border-radius: 2px;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: .1em;
     }
-    .cta-submit:hover { background: var(--g1); }
-    .cta-note { margin-top: 1.2rem; font-size: .72rem; color: var(--mid); opacity: .7; }
+
+    .cta-submit:hover {
+      background: var(--g1);
+    }
+
+    .cta-note {
+      margin-top: 1.2rem;
+      font-size: .72rem;
+      color: var(--mid);
+      opacity: .7;
+    }
+
     .cta-success {
-      display: none; font-family: var(--serif); font-size: 1.3rem;
-      color: var(--g2); margin-top: 1rem;
+      display: none;
+      font-family: var(--serif);
+      font-size: 1.3rem;
+      color: var(--g2);
+      margin-top: 1rem;
     }
-    .cta-success.show { display: block; }
+
+    .cta-success.show {
+      display: block;
+    }
 
     /* FOOTER */
-    footer { background: var(--g0); color: var(--g5); padding: 4rem 3rem 2rem; text-align: center; }
-    .foot-bottom { padding-top: 1.8rem; border-top: 1px solid rgba(196,221,199,.1); }
+    footer {
+      background: var(--g0);
+      color: var(--g5);
+      padding: 4rem 3rem 2rem;
+      text-align: center;
+    }
+
+    .foot-bottom {
+      padding-top: 1.8rem;
+      border-top: 1px solid rgba(196, 221, 199, .1);
+    }
 
     /* REVEAL */
-    .sr { opacity: 0; transform: translateY(20px); transition: 0.8s var(--ease); }
-    .sr.in { opacity: 1; transform: none; }
+    .sr {
+      opacity: 0;
+      transform: translateY(20px);
+      transition: 0.8s var(--ease);
+    }
 
-    @media(max-width:900px){
-      .hero{grid-template-columns:1fr; text-align:center; padding-top: 8rem;}
-      .hero-actions{justify-content:center;}
-      .steps{grid-template-columns:1fr;}
-      .bc-1, .bc-2, .bc-3 { grid-column: span 12; }
-      .hero-visual { order: -1; }
+    .sr.in {
+      opacity: 1;
+      transform: none;
+    }    @media(max-width:900px){
+      html, body { overflow-x: hidden; width: 100%; -webkit-text-size-adjust: 100%; }
+      
+      nav { padding: 1rem 1.2rem; }
+      .nav-links { display: none; }
+      .nav-btn { padding: .5rem 1rem; font-size: .65rem; }
+      
+      h1 { font-size: 2.4rem !important; line-height: 1.1; word-wrap: break-word; }
+      .hero { grid-template-columns: 1fr; text-align: center; padding: 6rem 1.2rem 3rem; }
+      .hero-badge { flex-wrap: wrap; justify-content: center; line-height: 1.6; }
+      .hero-desc { margin: 0 auto 2rem; font-size: 0.95rem; }
+      .hero-actions { justify-content: center; flex-direction: column; gap: 1rem; width: 100%; }
+      .btn-fill, .btn-ghost { width: 100%; justify-content: center; box-sizing: border-box; }
+      
+      .hero-visual { order: -1; margin-bottom: 1rem; max-width: 100%; }
+      .gc1, .gc2, .gc3, .gc4 { display: none; }
+      
+      .hero-stats { grid-template-columns: 1fr; margin-top: 1.5rem; }
+      .stat-cell { padding: 1.2rem; }
+      
+      .how, .features, .cta { padding: 4rem 1.2rem; overflow: hidden; }
+      footer { padding: 3rem 1.2rem 1.5rem; text-align: center; }
+      
+      .sec-hd { margin-bottom: 2rem; justify-content: center; text-align: center; }
+      .sec-title { font-size: 2rem !important; word-wrap: break-word; }
+      
+      .steps { grid-template-columns: 1fr; max-width: 100%; }
+      .step { border-right: none; border-bottom: 1px solid var(--c2); padding: 2rem 1.2rem; text-align: center; min-width: 0; }
+      .step-icon { margin: 0 auto 1.5rem; }
+      .step:last-child { border-bottom: none; }
+      
+      .bento { grid-template-columns: 1fr; gap: 1.2rem; margin-top: 2rem; max-width: 100%; }
+      .bc { padding: 1.5rem; min-width: 0; }
+      .bc-1, .bc-2, .bc-3 { grid-column: span 1; }
+      .bc-3 { grid-template-columns: 1fr; gap: 1.5rem; }
+      
+      .code-block { padding: 1rem; width: 100%; box-sizing: border-box; word-break: break-all; white-space: pre-wrap; }
+      .code-block code { font-size: 0.75rem; white-space: pre-wrap; word-break: break-all; }
+      
+      .cta-form { display: flex; flex-direction: column; align-items: center; gap: 0.8rem; width: 100%; }
+      .cta-input, .cta-submit { width: 100%; max-width: none; box-sizing: border-box; }
+    }
+
+    @media(pointer: coarse), (max-width: 768px) {
+      body { cursor: auto; }
+      .cursor { display: none; }
     }
   </style>
 </head>
+
 <body>
 
-<div class="cursor" id="cur"></div>
+  <div class="cursor" id="cur"></div>
 
-<!-- NAV -->
-<nav>
-  <div class="logo">LoreAI <span class="logo-dot"></span></div>
-  <ul class="nav-links">
-    <li><a href="#how">How It Works</a></li>
-    <li><a href="#features">Features</a></li>
-    <li><a href="https://github.com/byk/loreai" target="_blank">GitHub</a></li>
-  </ul>
-  <a href="#waitlist" class="nav-btn">Join Waitlist</a>
-</nav>
+  <!-- NAV -->
+  <nav>
+    <div class="logo">LoreAI <span class="logo-dot"></span></div>
+    <ul class="nav-links">
+      <li><a href="#how">How It Works</a></li>
+      <li><a href="#features">Features</a></li>
+      <li><a href="https://github.com/byk/loreai" target="_blank">GitHub</a></li>
+    </ul>
+    <a href="#waitlist" class="nav-btn">Join Waitlist</a>
+  </nav>
 
-<!-- HERO -->
-<section class="hero">
-  <div class="hero-bg">
-    <svg viewBox="0 0 500 500" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <circle cx="250" cy="250" r="240" stroke="#3d6644" stroke-width=".8"/>
-      <circle cx="250" cy="250" r="120" stroke="#3d6644" stroke-width=".5"/>
-    </svg>
-  </div>
-
-  <div>
-    <div class="hero-badge sr">
-      <span class="badge-pill" id="version-badge">loading…</span>
-      Persistent Memory for AI Coding Agents
-    </div>
-    <h1 class="sr">
-      Let your AI<br>
-      remember your<br>
-      <em>full project.</em>
-    </h1>
-    <p class="hero-desc sr">Lore is a transparent LLM proxy that adds three-tier memory to any AI coding client. Point Claude Code, Cursor, or any Anthropic/OpenAI-compatible tool at <code style="font-size:.85em;background:var(--g6);padding:.15em .4em;border-radius:3px;">localhost:6969</code> and your agent remembers everything — across sessions.</p>
-    <div class="hero-install sr">
-      <div class="install-block" onclick="navigator.clipboard.writeText('curl -fsSL https://withlore.ai/install | bash').then(()=>{this.querySelector('.install-copied').classList.add('show');setTimeout(()=>this.querySelector('.install-copied').classList.remove('show'),2000)})">
-        <code><span class="install-prompt">$</span> curl -fsSL https://withlore.ai/install | bash</code>
-        <span class="install-copy" title="Copy to clipboard">
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M3 11V3a1.5 1.5 0 011.5-1.5H11"/></svg>
-        </span>
-        <span class="install-copied">Copied!</span>
-      </div>
-      <p class="install-alt">or <code>npx @loreai/gateway</code></p>
-    </div>
-    <div class="hero-actions sr">
-      <a href="https://github.com/byk/loreai" target="_blank" class="btn-fill">
-        View on GitHub
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 7h10M7 2l5 5-5 5"/></svg>
-      </a>
-      <a href="#how" class="btn-ghost">How It Works</a>
-    </div>
-  </div>
-
-  <div class="hero-visual sr">
-    <div class="graph-wrap">
-      <svg viewBox="0 0 400 400" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="200" cy="200" r="30" fill="#2a4d32" class="mn"/>
-        <text x="200" y="205" text-anchor="middle" fill="#e8f2e9" font-family="Playfair Display,serif" font-size="12">Lore</text>
-        <circle cx="90" cy="100" r="15" fill="#c4ddc7" opacity=".8"/>
-        <circle cx="310" cy="100" r="15" fill="#c4ddc7" opacity=".8"/>
-        <circle cx="200" cy="330" r="15" fill="#dfd5bb" opacity=".8"/>
-        <line x1="200" y1="200" x2="90" y2="100" stroke="#8fba96" stroke-width="1" class="mg-edge"/>
-        <line x1="200" y1="200" x2="310" y2="100" stroke="#8fba96" stroke-width="1" class="mg-edge"/>
-        <line x1="200" y1="200" x2="200" y2="330" stroke="#8fba96" stroke-width="1" class="mg-edge"/>
+  <!-- HERO -->
+  <section class="hero">
+    <div class="hero-bg">
+      <svg viewBox="0 0 500 500" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="250" cy="250" r="240" stroke="#3d6644" stroke-width=".8" />
+        <circle cx="250" cy="250" r="120" stroke="#3d6644" stroke-width=".5" />
       </svg>
-      <div class="g-chip gc1">@loreai/gateway</div>
-      <div class="g-chip gc2">Anthropic + OpenAI</div>
-      <div class="g-chip gc3">Local SQLite + FTS5</div>
-      <div class="g-chip gc4">19× Compression</div>
     </div>
-  </div>
 
-  <div class="hero-stats sr">
-    <div class="stat-cell">
-      <div class="stat-n">85%</div>
-      <div class="stat-l">Coding Recall Accuracy</div>
-    </div>
-    <div class="stat-cell">
-      <div class="stat-n">7.4×</div>
-      <div class="stat-l">Cheaper per Correct Answer</div>
-    </div>
-    <div class="stat-cell">
-      <div class="stat-n">19×</div>
-      <div class="stat-l">Compression Ratio</div>
-    </div>
-  </div>
-</section>
-
-<!-- HOW -->
-<section class="how" id="how">
-  <div class="sec-hd">
     <div>
-      <p class="eyebrow sr">The Workflow</p>
-      <h2 class="sec-title sr">How LoreAI <em>scales</em> knowledge</h2>
+      <div class="hero-badge sr">
+        <span class="badge-pill" id="version-badge">loading…</span>
+        Persistent Memory for AI Coding Agents
+      </div>
+      <h1 class="sr">
+        Let your AI<br>
+        remember your<br>
+        <em>full project.</em>
+      </h1>
+      <p class="hero-desc sr">Lore is a transparent LLM proxy that adds three-tier memory to any AI coding client. Point
+        Claude Code, Cursor, or any Anthropic/OpenAI-compatible tool at <code
+          style="font-size:.85em;background:var(--g6);padding:.15em .4em;border-radius:3px;">localhost:6969</code> and
+        your agent remembers everything — across sessions.</p>
+      <div class="hero-actions sr">
+        <a href="#waitlist" class="btn-fill">
+          Join the Waitlist
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M2 7h10M7 2l5 5-5 5" />
+          </svg>
+        </a>
+        <a href="https://github.com/byk/loreai" target="_blank" class="btn-ghost">View Repository</a>
+      </div>
     </div>
-  </div>
-  <div class="steps">
-    <div class="step sr">
-      <div class="step-n">01</div>
-      <h3 class="step-t">Intercept</h3>
-      <p class="step-b">The gateway proxy sits between your AI client and the upstream API. It captures every message — no client changes needed, just change the base URL.</p>
-    </div>
-    <div class="step sr">
-      <div class="step-n">02</div>
-      <h3 class="step-t">Context Management</h3>
-      <p class="step-b">No more compaction — a gradient context manager replaces it entirely. Distillations run as batch background requests at 50% lower cost, and an embedded vector search lets your agent recall any detail on demand.</p>
-    </div>
-    <div class="step sr">
-      <div class="step-n">03</div>
-      <h3 class="step-t">Distill</h3>
-      <p class="step-b">Messages are incrementally distilled into timestamped observation logs — preserving file paths, error messages, exact decisions, and bug fixes instead of lossy summaries.</p>
-    </div>
-  </div>
-</section>
 
-<!-- FEATURES -->
-<section class="features" id="features">
-  <div class="bento">
-    <div class="bc bc-1 sr">
-      <p class="bc-tag">Core Tech</p>
-      <h3 class="bc-t">Operational Intelligence</h3>
-      <p class="bc-b">Lore preserves the operational details that summarization destroys: file paths, error messages, exact commands, and why decisions were made. Distillation, not summarization.</p>
+    <div class="hero-visual sr">
+      <div class="graph-wrap">
+        <svg viewBox="0 0 400 400" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="200" cy="200" r="30" fill="#2a4d32" class="mn" />
+          <text x="200" y="205" text-anchor="middle" fill="#e8f2e9" font-family="Playfair Display,serif"
+            font-size="12">Lore</text>
+          <circle cx="90" cy="100" r="15" fill="#c4ddc7" opacity=".8" />
+          <circle cx="310" cy="100" r="15" fill="#c4ddc7" opacity=".8" />
+          <circle cx="200" cy="330" r="15" fill="#dfd5bb" opacity=".8" />
+          <line x1="200" y1="200" x2="90" y2="100" stroke="#8fba96" stroke-width="1" class="mg-edge" />
+          <line x1="200" y1="200" x2="310" y2="100" stroke="#8fba96" stroke-width="1" class="mg-edge" />
+          <line x1="200" y1="200" x2="200" y2="330" stroke="#8fba96" stroke-width="1" class="mg-edge" />
+        </svg>
+        <div class="g-chip gc1">@loreai/gateway</div>
+        <div class="g-chip gc2">Anthropic + OpenAI</div>
+        <div class="g-chip gc3">Local SQLite + FTS5</div>
+        <div class="g-chip gc4">19× Compression</div>
+      </div>
     </div>
-    <div class="bc bc-2 sr">
-      <p class="bc-tag">Architecture</p>
-      <h3 class="bc-t">Three-Tier Memory</h3>
-      <p class="bc-b">Temporal storage (FTS5-indexed messages), distilled observation logs (timestamped, priority-tagged), and long-term curated knowledge — following Nuum and Mastra's research.</p>
+
+    <div class="hero-stats sr">
+      <div class="stat-cell">
+        <div class="stat-n">85%</div>
+        <div class="stat-l">Coding Recall Accuracy</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-n">7.4×</div>
+        <div class="stat-l">Cheaper per Correct Answer</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-n">19×</div>
+        <div class="stat-l">Compression Ratio</div>
+      </div>
     </div>
-    <div class="bc bc-3 sr">
+  </section>
+
+  <!-- HOW -->
+  <section class="how" id="how">
+    <div class="sec-hd">
       <div>
-        <p class="bc-tag">Integration</p>
-        <h3 class="bc-t">Works with Any AI Client</h3>
-        <p class="bc-b">Transparent proxy on port 6969 — supports Anthropic and OpenAI protocols. Point Claude Code, Cursor, Copilot, Windsurf, or any compatible client at the gateway. Zero client changes.</p>
-      </div>
-      <div class="code-block">
-        <code><span class="ck"># Auto-detect your agent and launch</span><br>
-<span class="cv">$</span> lore<br>
-<br>
-<span class="ck"># Or launch a specific agent</span><br>
-<span class="cv">$</span> lore run claude<br>
-<span class="cv">$</span> lore run opencode<br>
-<br>
-<span class="ck"># Or just the gateway</span><br>
-<span class="cv">$</span> lore start</code>
+        <p class="eyebrow sr">The Workflow</p>
+        <h2 class="sec-title sr">How LoreAI <em>scales</em> knowledge</h2>
       </div>
     </div>
-  </div>
-</section>
+    <div class="steps">
+      <div class="step sr">
+        <div class="step-n">01</div>
+        <h3 class="step-t">Intercept</h3>
+        <p class="step-b">The gateway proxy sits between your AI client and the upstream API. It captures every message
+          — no client changes needed, just change the base URL.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">02</div>
+        <h3 class="step-t">Context Management</h3>
+        <p class="step-b">No more compaction — a gradient context manager replaces it entirely. Distillations run as
+          batch background requests at 50% lower cost, and an embedded vector search lets your agent recall any detail
+          on demand.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">03</div>
+        <h3 class="step-t">Distill</h3>
+        <p class="step-b">Messages are incrementally distilled into timestamped observation logs — preserving file
+          paths, error messages, exact decisions, and bug fixes instead of lossy summaries.</p>
+      </div>
+    </div>
+  </section>
 
-<!-- CTA -->
-<section class="cta" id="waitlist">
-  <div class="cta-inner">
-    <h2 class="sr">Get early access to <em>Lore.</em></h2>
-    <p class="cta-sub sr">Join the waitlist and be the first to know when new features ship. We'll never spam you.</p>
-    <form class="cta-form sr" id="waitlist-form" action="https://formsubmit.co/build@withlore.ai" method="POST">
-      <input type="hidden" name="_subject" value="New Lore Waitlist Signup">
-      <input type="hidden" name="_captcha" value="false">
-      <input type="hidden" name="_template" value="box">
-      <input type="hidden" name="_next" value="https://byk.github.io/loreai/#waitlist">
-      <input class="cta-input" type="email" name="email" placeholder="your@email.com" id="emailInput" required />
-      <button class="cta-submit" type="submit" id="submitBtn">Join Waitlist</button>
-    </form>
-    <p class="cta-note sr">No spam. Unsubscribe anytime.</p>
-    <p class="cta-success" id="waitlist-success">✓ You're on the list. We'll be in touch.</p>
-  </div>
-</section>
+  <!-- FEATURES -->
+  <section class="features" id="features">
+    <div class="bento">
+      <div class="bc bc-1 sr">
+        <p class="bc-tag">Core Tech</p>
+        <h3 class="bc-t">Operational Intelligence</h3>
+        <p class="bc-b">Lore preserves the operational details that summarization destroys: file paths, error messages,
+          exact commands, and why decisions were made. Distillation, not summarization.</p>
+      </div>
+      <div class="bc bc-2 sr">
+        <p class="bc-tag">Architecture</p>
+        <h3 class="bc-t">Three-Tier Memory</h3>
+        <p class="bc-b">Temporal storage (FTS5-indexed messages), distilled observation logs (timestamped,
+          priority-tagged), and long-term curated knowledge — following Nuum and Mastra's research.</p>
+      </div>
+      <div class="bc bc-3 sr">
+        <div>
+          <p class="bc-tag">Integration</p>
+          <h3 class="bc-t">Works with Any AI Client</h3>
+          <p class="bc-b">Transparent proxy on port 6969 — supports Anthropic and OpenAI protocols. Point Claude Code,
+            Cursor, Copilot, Windsurf, or any compatible client at the gateway. Zero client changes.</p>
+        </div>
+        <div class="code-block">
+          <code><span class="ck"># Start the gateway</span><br>
+<span class="cv">$</span> npx @loreai/gateway<br>
+<br>
+<span class="ck"># Point your client at it</span><br>
+<span class="cv">ANTHROPIC_BASE_URL</span>=<span class="ck">http://localhost:6969</span></code>
+        </div>
+      </div>
+    </div>
+  </section>
 
-<footer>
-  <div class="foot-bottom">
-    <p>© 2026 Burak Yigit Kaya · FSL-1.1-Apache-2.0</p>
-  </div>
-</footer>
+  <!-- CTA -->
+  <section class="cta" id="waitlist">
+    <div class="cta-inner">
+      <h2 class="sr">Get early access to <em>Lore.</em></h2>
+      <p class="cta-sub sr">Join the waitlist and be the first to know when new features ship. We'll never spam you.</p>
+      <form class="cta-form sr" id="waitlist-form" action="https://formsubmit.co/build@withlore.ai" method="POST">
+        <input type="hidden" name="_subject" value="New Lore Waitlist Signup">
+        <input type="hidden" name="_captcha" value="false">
+        <input type="hidden" name="_template" value="box">
+        <input type="hidden" name="_next" value="https://byk.github.io/loreai/#waitlist">
+        <input class="cta-input" type="email" name="email" placeholder="your@email.com" id="emailInput" required />
+        <button class="cta-submit" type="submit" id="submitBtn">Join Waitlist</button>
+      </form>
+      <p class="cta-note sr">No spam. Unsubscribe anytime.</p>
+      <p class="cta-success" id="waitlist-success">✓ You're on the list. We'll be in touch.</p>
+    </div>
+  </section>
 
-<script>
-  // custom cursor
-  const cur = document.getElementById('cur');
-  document.addEventListener('mousemove', e => {
-    cur.style.left = e.clientX + 'px';
-    cur.style.top  = e.clientY + 'px';
-  });
-  document.querySelectorAll('a,button').forEach(el => {
-    el.addEventListener('mouseenter', () => cur.classList.add('expand'));
-    el.addEventListener('mouseleave', () => cur.classList.remove('expand'));
-  });
+  <footer>
+    <div class="foot-bottom">
+      <p>© 2026 Burak Yigit Kaya · FSL-1.1-Apache-2.0</p>
+    </div>
+  </footer>
 
-  // scroll reveal
-  const obs = new IntersectionObserver(entries => {
-    entries.forEach(e => { if(e.isIntersecting){ e.target.classList.add('in'); } });
-  }, { threshold: 0.1 });
-  document.querySelectorAll('.sr').forEach(el => obs.observe(el));
+  <script>
+    // custom cursor
+    const cur = document.getElementById('cur');
+    document.addEventListener('mousemove', e => {
+      cur.style.left = e.clientX + 'px';
+      cur.style.top = e.clientY + 'px';
+    });
+    document.querySelectorAll('a,button').forEach(el => {
+      el.addEventListener('mouseenter', () => cur.classList.add('expand'));
+      el.addEventListener('mouseleave', () => cur.classList.remove('expand'));
+    });
 
-  // dynamic version from GitHub releases
-  (async () => {
-    const badge = document.getElementById('version-badge');
-    try {
-      const res = await fetch('https://api.github.com/repos/BYK/loreai/releases/latest');
-      if (res.ok) {
-        const data = await res.json();
-        badge.textContent = 'v' + (data.tag_name || '0.13.4');
-      } else {
+    // scroll reveal
+    const obs = new IntersectionObserver(entries => {
+      entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); } });
+    }, { threshold: 0.1 });
+    document.querySelectorAll('.sr').forEach(el => obs.observe(el));
+
+    // dynamic version from GitHub releases
+    (async () => {
+      const badge = document.getElementById('version-badge');
+      try {
+        const res = await fetch('https://api.github.com/repos/BYK/loreai/releases/latest');
+        if (res.ok) {
+          const data = await res.json();
+          badge.textContent = 'v' + (data.tag_name || '0.13.4');
+        } else {
+          badge.textContent = 'v0.13.4';
+        }
+      } catch {
         badge.textContent = 'v0.13.4';
       }
-    } catch {
-      badge.textContent = 'v0.13.4';
-    }
-  })();
+    })();
 
-  // waitlist form — intercept submit for AJAX + feedback
-  const form = document.getElementById('waitlist-form');
-  form?.addEventListener('submit', async function(e) {
-    e.preventDefault();
-    const btn = document.getElementById('submitBtn');
-    const inp = document.getElementById('emailInput');
-    const success = document.getElementById('waitlist-success');
-    const email = inp.value;
-    if (!email) return;
+    // waitlist form — intercept submit for AJAX + feedback
+    const form = document.getElementById('waitlist-form');
+    form?.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      const btn = document.getElementById('submitBtn');
+      const inp = document.getElementById('emailInput');
+      const success = document.getElementById('waitlist-success');
+      const email = inp.value;
+      if (!email) return;
 
-    btn.textContent = 'Sending…';
-    btn.disabled = true;
+      btn.textContent = 'Sending…';
+      btn.disabled = true;
 
-    try {
-      await fetch(form.action, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ email })
-      });
-    } catch { /* formsubmit.co may redirect — that's fine */ }
+      try {
+        await fetch(form.action, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+      } catch { /* formsubmit.co may redirect — that's fine */ }
 
-    // Always show success (formsubmit handles the email)
-    btn.textContent = '✓ You\'re on the list';
-    btn.style.background = 'var(--g2)';
-    inp.value = '';
-    inp.placeholder = 'Thanks! We\'ll be in touch.';
-    success.classList.add('show');
-    form.querySelector('.cta-note')?.remove();
-  });
-</script>
+      // Always show success (formsubmit handles the email)
+      btn.textContent = '✓ You\'re on the list';
+      btn.style.background = 'var(--g2)';
+      inp.value = '';
+      inp.placeholder = 'Thanks! We\'ll be in touch.';
+      success.classList.add('show');
+      form.querySelector('.cta-note')?.remove();
+    });
+  </script>
 </body>
+
 </html>
