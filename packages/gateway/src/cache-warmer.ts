@@ -488,7 +488,7 @@ export function shouldWarm(
   // next warmup fires before the current cache expires. Without this, the
   // full-ttlMs guard combined with margin positioning produces a ~2x TTL
   // cadence (e.g. 10 min on a 5 min TTL), leaving a dead zone each cycle.
-  const cooldownMs = forced ? ttlMs - warmupMarginMs : ttlMs;
+  const cooldownMs = forced ? Math.max(ttlMs - warmupMarginMs, 0) : ttlMs;
   if (state.warmup?.lastWarmupAt && (now - state.warmup.lastWarmupAt) < cooldownMs) {
     return false;
   }

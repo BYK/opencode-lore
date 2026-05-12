@@ -1972,12 +1972,9 @@ async function handlePassthrough(
  */
 function isCacheWarm(state: SessionState): boolean {
   const warmup = state.warmup;
+  // Require at least one successful warmup before claiming warm.
+  // This also gates the forceKeepWarm early-return below.
   if (!warmup?.lastWarmupAt) return false;
-
-  // /keep sessions are always considered warm — the warmer is actively
-  // maintaining the cache on a schedule, so post-idle compaction would
-  // just bust the prefix the warmer is preserving.
-  if (warmup.forceKeepWarm) return true;
 
   const profile = resolveWarmingProfile(
     state.lastModel,
@@ -1985,6 +1982,14 @@ function isCacheWarm(state: SessionState): boolean {
     state.resolvedConversationTTL,
   );
   if (!profile) return false;
+
+  // /keep sessions: consider warm if the last warmup was within 2 TTL
+  // windows. The warmer fires once per TTL window, so 2× provides a
+  // safety margin while still expiring if the warmer has stopped
+  // (e.g. circuit breaker tripped, process-level failure).
+  if (warmup.forceKeepWarm) {
+    return (Date.now() - warmup.lastWarmupAt) < profile.ttlMs * 2;
+  }
 
   return (Date.now() - warmup.lastWarmupAt) < profile.ttlMs;
 }
