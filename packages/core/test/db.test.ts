@@ -16,13 +16,14 @@ describe("db", () => {
     expect(names).toContain("schema_version");
     expect(names).toContain("session_state");
     expect(names).toContain("metadata");
+    expect(names).toContain("import_history");
   });
 
   test("schema version is set", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(18);
+    expect(row.version).toBe(19);
   });
 
   test("distillation_fts virtual table exists", () => {

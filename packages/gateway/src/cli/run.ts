@@ -10,6 +10,7 @@ import { createInterface } from "node:readline";
 import { startGateway, type StartOptions } from "./start";
 import { detectAgents, AGENTS, type DetectedAgent } from "./agents";
 import { safeExit } from "./exit";
+import { maybeAutoImport } from "./import-auto";
 
 // ---------------------------------------------------------------------------
 // Interactive agent picker (TTY only)
@@ -155,6 +156,9 @@ export async function commandRun(
     // Block forever
     return new Promise(() => {});
   }
+
+  // 2b. Auto-detect prior conversations (first run only)
+  await maybeAutoImport(config);
 
   // 3. Launch agent child process
   console.log(`[lore] Launching: ${target.command} ${target.args.join(" ")}`.trimEnd());

@@ -186,6 +186,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "import": {
+        const { commandImport } = await import("./import");
+        await commandImport(rest, values as Record<string, unknown>);
+        break;
+      }
+
       case "upgrade": {
         const { commandUpgrade } = await import("./upgrade");
         await commandUpgrade(rest);

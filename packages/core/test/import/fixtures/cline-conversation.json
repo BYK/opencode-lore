@@ -1,0 +1,25 @@
+[
+  {
+    "role": "user",
+    "content": "Add input validation to the signup form"
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {"type": "text", "text": "I'll add input validation to the signup form. Let me first read the current form component."},
+      {"type": "tool_use", "id": "tool_1", "name": "read_file", "input": {"path": "src/components/SignupForm.tsx"}}
+    ]
+  },
+  {
+    "role": "user",
+    "content": [
+      {"type": "tool_result", "tool_use_id": "tool_1", "content": "export function SignupForm() {\n  return <form>...</form>\n}"}
+    ]
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {"type": "text", "text": "I can see the form lacks validation. I'll add zod schema validation for email, password strength, and name fields. This is a pattern you should follow for all forms in this project."}
+    ]
+  }
+]
