@@ -31,7 +31,7 @@ import { getActiveSessions } from "./pipeline";
 import {
   computeWarmingSnapshot,
   getCircuitBreakerStatus,
-  getGlobalModelsSnapshot,
+  getGlobalHistogramsSnapshot,
   HISTOGRAM_BINS,
   BLEND_PSEUDOCOUNT,
   type WarmingSnapshot,
@@ -872,7 +872,6 @@ function renderWarmingSection(sessionId: string): string {
   html += `<details class="warming"><summary>Decision Details</summary>
     <div class="card">
       <div class="field"><span class="key">Idle:</span> ${formatDuration(snap.idleMs)}</div>
-      <div class="field"><span class="key">Time slot:</span> ${snap.currentSlot}</div>
       <div class="field"><span class="key">TTL:</span> ${snap.ttl ?? "5m (default)"}</div>
       <div class="field"><span class="key">Turns:</span> ${snap.messageCount}</div>
       <div class="field"><span class="key">Text-only runs:</span> ${snap.consecutiveTextOnlyTurns}</div>
@@ -886,7 +885,7 @@ function renderWarmingSection(sessionId: string): string {
   </details>`;
 
   // Expandable histogram
-  html += `<details class="warming"><summary>Survival Histogram &mdash; ${esc(snap.currentSlot)} slot</summary>
+  html += `<details class="warming"><summary>Survival Histogram</summary>
     ${renderHistogram({
       session: snap.sessionHistogram,
       global: snap.globalHistogram,
@@ -1222,7 +1221,6 @@ function pageWarming(): string {
         <th>Session</th>
         <th data-sort="num">Turns</th>
         <th data-sort="num">Idle</th>
-        <th data-sort="text">Slot</th>
         <th data-sort="text">TTL</th>
         <th data-sort="num">S(t)</th>
         <th data-sort="num">P(return)</th>
@@ -1235,7 +1233,6 @@ function pageWarming(): string {
         <td><code>${esc(snap.sessionId.slice(0, 16))}</code></td>
         <td>${snap.messageCount}</td>
         <td>${formatDuration(snap.idleMs)}</td>
-        <td>${esc(snap.currentSlot)}</td>
         <td>${snap.ttl ?? "5m"}</td>
         <td>${(snap.survivalAtIdle * 100).toFixed(1)}%</td>
         <td>${(snap.pReturnDampened * 100).toFixed(1)}%</td>
@@ -1248,24 +1245,19 @@ function pageWarming(): string {
   }
 
   // Global histograms
-  const globalModels = getGlobalModelsSnapshot();
-  if (globalModels.size > 0) {
+  const globalHists = getGlobalHistogramsSnapshot();
+  if (globalHists.size > 0) {
     body += `<h2>Global Histograms</h2>`;
     body += `<p style="color:var(--fg3);font-size:0.9em">
       Per-project inter-turn gap distributions from all historical sessions.
       Used as Bayesian prior for sessions with few observations.
     </p>`;
 
-    for (const [projectPath, model] of globalModels) {
+    for (const [projectPath, hist] of globalHists) {
       const name = projectPath.split("/").pop() ?? projectPath;
-      const totals = `work: ${model.slots.work.total}, evening: ${model.slots.evening.total}, night: ${model.slots.night.total}`;
       body += `<details class="warming">
-        <summary>${esc(name)} &mdash; ${totals} observations</summary>`;
-
-      for (const slot of ["work", "evening", "night"] as const) {
-        const hist = model.slots[slot];
-        if (hist.total === 0) continue;
-        body += `<h3>${esc(slot)}</h3>`;
+        <summary>${esc(name)} &mdash; ${hist.total} observations</summary>`;
+      if (hist.total > 0) {
         body += renderHistogram({ global: hist });
       }
       body += `</details>`;

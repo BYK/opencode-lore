@@ -120,7 +120,6 @@ import { captureBillingPrefix, hasBillingHeader, resignBody } from "./cch";
 import { detectClientType } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
-  resolveTimeSlot,
   recordGap,
   getSessionHistogram,
   recordGlobalGap,
@@ -611,6 +610,7 @@ function getOrCreateSession(
       projectPath,
       fingerprint: "",
       lastRequestTime: Date.now(),
+      lastUserTurnTime: 0,
       messageCount: 0,
       turnsSinceCuration: 0,
       consecutiveTextOnlyTurns: 0,
@@ -1608,6 +1608,10 @@ function postResponse(
       sessionState.sessionID,
     );
 
+    // Capture previous stop reason before it's overwritten below (line ~1667).
+    // Used to detect tool-use continuation turns for gap recording filtering.
+    const prevStopReason = sessionState.lastStopReason;
+
     // --- Temporal storage & session-state updates ---
     // Sub-agent turns are excluded from temporal storage: their tool-call
     // messages would pollute the parent session's conversation history,
@@ -1684,12 +1688,27 @@ function postResponse(
 
     // --- Cache warming: record inter-turn gap + track warmup hits ---
     const now = Date.now();
-    if (sessionState.lastRequestTime > 0) {
-      const gap = now - sessionState.lastRequestTime;
-      const slot = resolveTimeSlot(new Date(now));
-      recordGap(getSessionHistogram(sessionState, slot), gap);
-      recordGlobalGap(sessionState.projectPath, slot, gap);
 
+    // (A) Record inter-turn gap — only for genuine user-initiated turns.
+    // Subagent turns (x-parent-session-id) and tool-use auto-continuations
+    // (prior stop_reason was "tool_use") produce sub-second gaps that
+    // represent automated round-trips, not human think time. Recording
+    // these would skew the survival model toward very short return times.
+    const isToolUseContinuation = prevStopReason === "tool_use";
+    if (!isSubagentTurn && !isToolUseContinuation) {
+      if (sessionState.lastUserTurnTime > 0) {
+        const gap = now - sessionState.lastUserTurnTime;
+        recordGap(getSessionHistogram(sessionState), gap);
+        recordGlobalGap(sessionState.projectPath, gap);
+      }
+      // Update baseline for next gap measurement — only after recording.
+      sessionState.lastUserTurnTime = now;
+    }
+
+    // (B) Track warmup hits and TTL savings — valid for ALL turn types.
+    // A user returning after a warmup is a hit regardless of whether it's
+    // a subagent turn or tool-use continuation.
+    if (sessionState.lastRequestTime > 0) {
       // Track warmup hit: user returned after we warmed the cache
       if (sessionState.warmup?.lastWarmupAt) {
         const ttlMs = sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
@@ -1715,7 +1734,8 @@ function postResponse(
 
       // Track 1h TTL savings: if gap > 5m but we still got cache reads,
       // the 1h TTL saved a full cache write.
-      if (gap > 300_000) {
+      const requestGap = now - sessionState.lastRequestTime;
+      if (requestGap > 300_000) {
         const cacheRead = resp.usage.cacheReadInputTokens ?? 0;
         if (cacheRead > 0) {
           recordTTLSavings(sessionID, req.model, cacheRead);

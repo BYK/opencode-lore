@@ -26,8 +26,6 @@
 import { log, config as loreConfig, db, projectId } from "@loreai/core";
 import type {
   InterTurnHistogram,
-  SurvivalModel,
-  TimeSlot,
   WarmupResult,
   WarmupState,
   SessionState,
@@ -240,53 +238,19 @@ export function conditionalReturnProbability(
 }
 
 // ---------------------------------------------------------------------------
-// Time slot resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve the current time-of-day slot for survival analysis.
- *
- * - `work`:    Mon–Fri 08:00–18:00 local
- * - `evening`: Mon–Fri 18:00–23:00, weekends 08:00–23:00
- * - `night`:   23:00–08:00 any day
- */
-export function resolveTimeSlot(date: Date): TimeSlot {
-  const hour = date.getHours();
-  const day = date.getDay(); // 0=Sun, 6=Sat
-  const isWeekend = day === 0 || day === 6;
-
-  if (hour < 8 || hour >= 23) return "night";
-  if (isWeekend) return "evening";
-  if (hour >= 18) return "evening";
-  return "work";
-}
-
-// ---------------------------------------------------------------------------
 // Survival model helpers
 // ---------------------------------------------------------------------------
 
-/** Create an empty survival model with all three time slots. */
-export function createSurvivalModel(): SurvivalModel {
-  return {
-    slots: {
-      work: createHistogram(),
-      evening: createHistogram(),
-      night: createHistogram(),
-    },
-  };
-}
-
 /**
- * Get (or create) the session-level histogram for a given time slot.
+ * Get (or create) the session-level histogram.
  */
 export function getSessionHistogram(
   state: SessionState,
-  slot: TimeSlot,
 ): InterTurnHistogram {
   if (!state.survivalModel) {
-    state.survivalModel = createSurvivalModel();
+    state.survivalModel = createHistogram();
   }
-  return state.survivalModel.slots[slot];
+  return state.survivalModel;
 }
 
 /**
@@ -319,28 +283,26 @@ export function blendHistograms(
 // Global histograms (per-project, in-memory)
 // ---------------------------------------------------------------------------
 
-/** Global histograms keyed by projectPath → time slot. */
-const globalModels = new Map<string, SurvivalModel>();
+/** Global histograms keyed by projectPath. */
+const globalHistograms = new Map<string, InterTurnHistogram>();
 
 export function getGlobalHistogram(
   projectPath: string,
-  slot: TimeSlot,
 ): InterTurnHistogram {
-  let model = globalModels.get(projectPath);
-  if (!model) {
-    model = createSurvivalModel();
-    globalModels.set(projectPath, model);
+  let hist = globalHistograms.get(projectPath);
+  if (!hist) {
+    hist = createHistogram();
+    globalHistograms.set(projectPath, hist);
   }
-  return model.slots[slot];
+  return hist;
 }
 
-/** Get blended histogram for a session (session + global for current slot). */
+/** Get blended histogram for a session (session + global). */
 export function blendedHistogramForSession(
   state: SessionState,
-  slot: TimeSlot,
 ): InterTurnHistogram {
-  const sessionHist = getSessionHistogram(state, slot);
-  const globalHist = getGlobalHistogram(state.projectPath, slot);
+  const sessionHist = getSessionHistogram(state);
+  const globalHist = getGlobalHistogram(state.projectPath);
   return blendHistograms(sessionHist, globalHist);
 }
 
@@ -577,7 +539,6 @@ export type WarmingSnapshot = {
   disabled: boolean;
   forceKeepWarm: boolean;
   // Survival analysis
-  currentSlot: TimeSlot;
   sessionHistogram: InterTurnHistogram;
   globalHistogram: InterTurnHistogram;
   blendedHistogram: InterTurnHistogram;
@@ -604,13 +565,12 @@ export function computeWarmingSnapshot(
   now: number = Date.now(),
 ): WarmingSnapshot {
   const cfg = loreConfig();
-  const slot = resolveTimeSlot(new Date(now));
   const idleMs = now - state.lastRequestTime;
 
   // Histograms
-  const sessionHist = state.survivalModel?.slots[slot] ?? createHistogram();
+  const sessionHist = state.survivalModel ?? createHistogram();
   loadGlobalHistograms(state.projectPath);
-  const globalHist = getGlobalHistogram(state.projectPath, slot);
+  const globalHist = getGlobalHistogram(state.projectPath);
   const blendedHist = blendHistograms(sessionHist, globalHist);
   const sessionWeight = Math.min(sessionHist.total / BLEND_PSEUDOCOUNT, 1.0);
 
@@ -685,7 +645,6 @@ export function computeWarmingSnapshot(
     lastWarmupAt: state.warmup?.lastWarmupAt ?? 0,
     disabled: state.warmup?.disabled ?? false,
     forceKeepWarm: state.warmup?.forceKeepWarm ?? false,
-    currentSlot: slot,
     sessionHistogram: sessionHist,
     globalHistogram: globalHist,
     blendedHistogram: blendedHist,
@@ -877,27 +836,27 @@ export async function executeWarmup(
 // Global histogram persistence (SQLite)
 // ---------------------------------------------------------------------------
 
-/** Tracks which project×slot combos have been modified since last flush. */
-const dirtyHistograms = new Set<string>();
-
-function dirtyKey(projectPath: string, slot: TimeSlot): string {
-  return `${projectPath}\0${slot}`;
-}
+/** Tracks which projects have been modified since last flush. */
+const dirtyProjects = new Set<string>();
 
 /**
  * Load persisted global histograms for a project from SQLite.
  *
  * Called once per project on first access. Populates the in-memory
- * globalModels map so survival analysis has data immediately after
+ * globalHistograms map so survival analysis has data immediately after
  * a gateway restart.
+ *
+ * Backward compatibility: if the DB contains old time-slot-segmented rows
+ * (work/evening/night), they are merged by summing bin counts into a single
+ * histogram. New data is written under the "all" time_slot key.
  */
 export function loadGlobalHistograms(projectPath: string): void {
-  if (globalModels.has(projectPath)) return; // already loaded
+  if (globalHistograms.has(projectPath)) return; // already loaded
 
-  const model = createSurvivalModel();
+  const merged = createHistogram();
   const pid = projectId(projectPath);
   if (!pid) {
-    globalModels.set(projectPath, model);
+    globalHistograms.set(projectPath, merged);
     return;
   }
 
@@ -907,36 +866,30 @@ export function loadGlobalHistograms(projectPath: string): void {
       .all(pid) as Array<{ time_slot: string; counts: string; total: number }>;
 
     for (const row of rows) {
-      const slot = row.time_slot as TimeSlot;
-      if (!(slot in model.slots)) continue;
-
       try {
         const counts = JSON.parse(row.counts) as number[];
         if (Array.isArray(counts) && counts.length === BIN_COUNT) {
-          model.slots[slot] = { counts, total: row.total };
+          // Merge this row into the single histogram (handles both old
+          // slot-segmented rows and the new "all" row).
+          for (let i = 0; i < BIN_COUNT; i++) {
+            merged.counts[i] += counts[i];
+          }
+          merged.total += row.total;
         }
       } catch {
-        // Corrupt JSON — start fresh for this slot
+        // Corrupt JSON — skip this row
       }
     }
 
     log.info(
-      `cache-warmer: loaded global histograms for project=${projectPath.slice(-30)} ` +
-        `(work=${model.slots.work.total} evening=${model.slots.evening.total} night=${model.slots.night.total})`,
+      `cache-warmer: loaded global histogram for project=${projectPath.slice(-30)} ` +
+        `(${merged.total} observations)`,
     );
   } catch (e) {
     log.warn("cache-warmer: failed to load global histograms:", e);
   }
 
-  globalModels.set(projectPath, model);
-}
-
-/**
- * Mark a global histogram as dirty (modified since last flush).
- * Called internally by recordGap when targeting a global histogram.
- */
-function markDirty(projectPath: string, slot: TimeSlot): void {
-  dirtyHistograms.add(dirtyKey(projectPath, slot));
+  globalHistograms.set(projectPath, merged);
 }
 
 /**
@@ -945,43 +898,55 @@ function markDirty(projectPath: string, slot: TimeSlot): void {
  * Designed to be called periodically (e.g. every 60s from the idle
  * scheduler) rather than on every recordGap call, to avoid write
  * amplification on a hot path.
+ *
+ * Writes a single row per project under time_slot="all". Old slot-segmented
+ * rows (work/evening/night) are deleted on first flush to avoid double-counting
+ * on the next load.
  */
 export function flushGlobalHistograms(): void {
-  if (dirtyHistograms.size === 0) return;
+  if (dirtyProjects.size === 0) return;
 
   const d = db();
   const now = Date.now();
 
-  for (const key of dirtyHistograms) {
-    const [projectPath, slot] = key.split("\0") as [string, TimeSlot];
+  for (const projectPath of dirtyProjects) {
     const pid = projectId(projectPath);
     if (!pid) continue;
 
-    const model = globalModels.get(projectPath);
-    if (!model) continue;
-
-    const hist = model.slots[slot];
+    const hist = globalHistograms.get(projectPath);
     if (!hist) continue;
 
     try {
-      d.query(
-        `INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(project_id, time_slot) DO UPDATE SET
-           counts = excluded.counts,
-           total = excluded.total,
-           updated_at = excluded.updated_at`,
-      ).run(pid, slot, JSON.stringify(hist.counts), hist.total, now);
+      // Atomic: delete old slot rows + upsert the unified "all" row.
+      // Without the transaction, a crash between DELETE and INSERT
+      // would lose all histogram data for this project.
+      d.exec("BEGIN");
+      try {
+        // Delete old slot-segmented rows (backward compat cleanup)
+        d.query(
+          "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot != 'all'",
+        ).run(pid);
+
+        d.query(
+          `INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at)
+           VALUES (?, 'all', ?, ?, ?)
+           ON CONFLICT(project_id, time_slot) DO UPDATE SET
+             counts = excluded.counts,
+             total = excluded.total,
+             updated_at = excluded.updated_at`,
+        ).run(pid, JSON.stringify(hist.counts), hist.total, now);
+        d.exec("COMMIT");
+      } catch (e) {
+        d.exec("ROLLBACK");
+        throw e;
+      }
     } catch (e) {
-      log.warn(`cache-warmer: failed to flush histogram ${slot}:`, e);
+      log.warn(`cache-warmer: failed to flush histogram:`, e);
     }
   }
 
-  dirtyHistograms.clear();
+  dirtyProjects.clear();
 }
-
-// Override getGlobalHistogram to load from DB on first access and mark dirty on write
-const _originalGetGlobalHistogram = getGlobalHistogram;
 
 /**
  * Record an inter-turn gap in a global histogram, with dirty tracking.
@@ -991,22 +956,21 @@ const _originalGetGlobalHistogram = getGlobalHistogram;
  */
 export function recordGlobalGap(
   projectPath: string,
-  slot: TimeSlot,
   gapMs: number,
 ): void {
   loadGlobalHistograms(projectPath); // ensure loaded
-  const hist = getGlobalHistogram(projectPath, slot);
+  const hist = getGlobalHistogram(projectPath);
   recordGap(hist, gapMs);
-  markDirty(projectPath, slot);
+  dirtyProjects.add(projectPath);
 }
 
 // ---------------------------------------------------------------------------
 // Dashboard helpers
 // ---------------------------------------------------------------------------
 
-/** Read-only snapshot of all loaded global survival models (for dashboard). */
-export function getGlobalModelsSnapshot(): ReadonlyMap<string, SurvivalModel> {
-  return globalModels;
+/** Read-only snapshot of all loaded global histograms (for dashboard). */
+export function getGlobalHistogramsSnapshot(): ReadonlyMap<string, InterTurnHistogram> {
+  return globalHistograms;
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +981,6 @@ export function getGlobalModelsSnapshot(): ReadonlyMap<string, SurvivalModel> {
 export function _resetForTest(): void {
   circuitBreakerFailures = 0;
   circuitBreakerTripped = false;
-  globalModels.clear();
-  dirtyHistograms.clear();
+  globalHistograms.clear();
+  dirtyProjects.clear();
 }

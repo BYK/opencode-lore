@@ -4,8 +4,6 @@ import {
   recordGap,
   survivalFunction,
   conditionalReturnProbability,
-  resolveTimeSlot,
-  createSurvivalModel,
   blendHistograms,
   prepareAnthropicWarmupBody,
   buildAnthropicProfile,
@@ -43,6 +41,7 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
     projectPath: "/tmp/test-project",
     fingerprint: "abc123",
     lastRequestTime: Date.now() - 270_000, // 4.5 min ago (inside 5m warmup window)
+    lastUserTurnTime: Date.now() - 270_000,
     messageCount: 10,
     turnsSinceCuration: 2,
     consecutiveTextOnlyTurns: 0,
@@ -195,48 +194,6 @@ describe("conditionalReturnProbability", () => {
     // (can't distinguish any time range)
     expect(p).toBeGreaterThanOrEqual(0);
     expect(p).toBeLessThanOrEqual(1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Time slot resolution
-// ---------------------------------------------------------------------------
-
-describe("resolveTimeSlot", () => {
-  test("weekday morning → work", () => {
-    // Wednesday 10:00
-    const d = new Date(2025, 0, 8, 10, 0); // Jan 8 2025 is a Wednesday
-    expect(resolveTimeSlot(d)).toBe("work");
-  });
-
-  test("weekday evening → evening", () => {
-    // Wednesday 20:00
-    const d = new Date(2025, 0, 8, 20, 0);
-    expect(resolveTimeSlot(d)).toBe("evening");
-  });
-
-  test("weekday night → night", () => {
-    // Wednesday 02:00
-    const d = new Date(2025, 0, 8, 2, 0);
-    expect(resolveTimeSlot(d)).toBe("night");
-  });
-
-  test("late night → night", () => {
-    // Wednesday 23:30
-    const d = new Date(2025, 0, 8, 23, 30);
-    expect(resolveTimeSlot(d)).toBe("night");
-  });
-
-  test("weekend daytime → evening", () => {
-    // Saturday 14:00
-    const d = new Date(2025, 0, 11, 14, 0); // Jan 11 2025 is a Saturday
-    expect(resolveTimeSlot(d)).toBe("evening");
-  });
-
-  test("weekend night → night", () => {
-    // Sunday 03:00
-    const d = new Date(2025, 0, 12, 3, 0);
-    expect(resolveTimeSlot(d)).toBe("night");
   });
 });
 
@@ -821,5 +778,304 @@ describe("buildAnthropicProfile", () => {
     // Should be around 0.08 (10% of base / 125% of base = 0.08)
     expect(threshold).toBeGreaterThan(0.03);
     expect(threshold).toBeLessThan(0.15);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gap recording filtering
+// ---------------------------------------------------------------------------
+
+import {
+  getSessionHistogram,
+  recordGlobalGap,
+  getGlobalHistogram,
+  loadGlobalHistograms,
+  flushGlobalHistograms,
+} from "../src/cache-warmer";
+
+describe("gap recording filtering", () => {
+  beforeEach(() => {
+    _resetForTest();
+  });
+
+  /**
+   * Helper to simulate the gap recording logic from pipeline.ts postResponse().
+   * This mirrors the guarded block that decides whether to record a gap.
+   */
+  function simulateGapRecording(
+    sessionState: SessionState,
+    opts: {
+      isSubagentTurn: boolean;
+      prevStopReason: string | undefined;
+      now: number;
+    },
+  ): void {
+    const { isSubagentTurn, prevStopReason, now } = opts;
+    const isToolUseContinuation = prevStopReason === "tool_use";
+
+    if (!isSubagentTurn && !isToolUseContinuation) {
+      if (sessionState.lastUserTurnTime > 0) {
+        const gap = now - sessionState.lastUserTurnTime;
+        recordGap(getSessionHistogram(sessionState), gap);
+        recordGlobalGap(sessionState.projectPath, gap);
+      }
+      sessionState.lastUserTurnTime = now;
+    }
+  }
+
+  test("subagent turns do not record gaps", () => {
+    const state = makeSessionState({ lastUserTurnTime: Date.now() - 60_000 });
+    const hist = getSessionHistogram(state);
+    expect(hist.total).toBe(0);
+
+    simulateGapRecording(state, {
+      isSubagentTurn: true,
+      prevStopReason: "end_turn",
+      now: Date.now(),
+    });
+
+    expect(hist.total).toBe(0);
+  });
+
+  test("tool-use continuation turns do not record gaps", () => {
+    const state = makeSessionState({ lastUserTurnTime: Date.now() - 60_000 });
+    const hist = getSessionHistogram(state);
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "tool_use",
+      now: Date.now(),
+    });
+
+    expect(hist.total).toBe(0);
+  });
+
+  test("lastUserTurnTime is not updated by subagent turns", () => {
+    const originalTime = Date.now() - 120_000;
+    const state = makeSessionState({ lastUserTurnTime: originalTime });
+
+    simulateGapRecording(state, {
+      isSubagentTurn: true,
+      prevStopReason: "end_turn",
+      now: Date.now(),
+    });
+
+    expect(state.lastUserTurnTime).toBe(originalTime);
+  });
+
+  test("lastUserTurnTime is not updated by tool-use continuations", () => {
+    const originalTime = Date.now() - 120_000;
+    const state = makeSessionState({ lastUserTurnTime: originalTime });
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "tool_use",
+      now: Date.now(),
+    });
+
+    expect(state.lastUserTurnTime).toBe(originalTime);
+  });
+
+  test("gap is computed from lastUserTurnTime, not lastRequestTime", () => {
+    const now = Date.now();
+    // lastRequestTime was updated 5s ago by a subagent, but the last
+    // actual user turn was 60s ago.
+    const state = makeSessionState({
+      lastRequestTime: now - 5_000,
+      lastUserTurnTime: now - 60_000,
+    });
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "end_turn",
+      now,
+    });
+
+    const hist = getSessionHistogram(state);
+    expect(hist.total).toBe(1);
+    // 60_000ms is NOT < HISTOGRAM_BINS[4] (60_000), so it falls through to
+    // the next bin where 60_000 < 90_000 (HISTOGRAM_BINS[5]), landing in bin 5.
+    expect(hist.counts[5]).toBe(1);
+  });
+
+  test("first turn of session records no gap but sets lastUserTurnTime", () => {
+    const now = Date.now();
+    const state = makeSessionState({ lastUserTurnTime: 0 });
+    const hist = getSessionHistogram(state);
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: undefined,
+      now,
+    });
+
+    expect(hist.total).toBe(0); // No gap recorded (no prior user turn)
+    expect(state.lastUserTurnTime).toBe(now); // But timestamp was set
+  });
+
+  test("normal user turn records gap correctly", () => {
+    const now = Date.now();
+    const state = makeSessionState({ lastUserTurnTime: now - 180_000 }); // 3 min ago
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "end_turn",
+      now,
+    });
+
+    const hist = getSessionHistogram(state);
+    expect(hist.total).toBe(1);
+    expect(state.lastUserTurnTime).toBe(now);
+  });
+
+  test("global histogram also records gap for user turns", () => {
+    const now = Date.now();
+    const state = makeSessionState({ lastUserTurnTime: now - 120_000 }); // 2 min ago
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "end_turn",
+      now,
+    });
+
+    const globalHist = getGlobalHistogram(state.projectPath);
+    expect(globalHist.total).toBe(1);
+  });
+
+  test("global histogram is not polluted by subagent turns", () => {
+    const now = Date.now();
+    const state = makeSessionState({ lastUserTurnTime: now - 120_000 });
+
+    simulateGapRecording(state, {
+      isSubagentTurn: true,
+      prevStopReason: "end_turn",
+      now,
+    });
+
+    const globalHist = getGlobalHistogram(state.projectPath);
+    expect(globalHist.total).toBe(0);
+  });
+
+  test("single histogram: no time-slot segmentation", () => {
+    const state = makeSessionState({ lastUserTurnTime: 0 });
+
+    // The session's survivalModel should be a single InterTurnHistogram,
+    // not a slot-segmented record.
+    const hist = getSessionHistogram(state);
+    expect(hist).toBeDefined();
+    expect(hist.counts).toBeInstanceOf(Array);
+    expect(hist.total).toBe(0);
+
+    // survivalModel is the histogram itself, not a { slots: ... } wrapper
+    expect(state.survivalModel).toBe(hist);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Global histogram persistence: backward-compat migration
+// ---------------------------------------------------------------------------
+
+import { db, projectId } from "@loreai/core";
+
+describe("global histogram persistence", () => {
+  const TEST_PROJECT_PATH = "/tmp/test-histogram-project";
+  let pid: string;
+
+  beforeEach(() => {
+    _resetForTest();
+
+    // Ensure the project exists in the DB so projectId() returns a value.
+    const d = db();
+    const now = Date.now();
+    d.query(
+      "INSERT OR IGNORE INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).run("test-hist-pid", TEST_PROJECT_PATH, "test-hist", null, now);
+    pid = projectId(TEST_PROJECT_PATH)!;
+    expect(pid).toBe("test-hist-pid");
+
+    // Clean any leftover rows from previous test runs.
+    d.query("DELETE FROM warmup_histograms WHERE project_id = ?").run(pid);
+  });
+
+  test("merges old slot-segmented rows into single histogram on load", () => {
+    const d = db();
+    const now = Date.now();
+    const binCount = HISTOGRAM_BINS.length + 1;
+
+    // Simulate old-format DB rows: work (10 obs in bin 0), evening (5 obs in bin 3)
+    const workCounts = new Array(binCount).fill(0);
+    workCounts[0] = 10;
+    const eveningCounts = new Array(binCount).fill(0);
+    eveningCounts[3] = 5;
+
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "work", JSON.stringify(workCounts), 10, now);
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "evening", JSON.stringify(eveningCounts), 5, now);
+
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+
+    const hist = getGlobalHistogram(TEST_PROJECT_PATH);
+    expect(hist.total).toBe(15); // 10 + 5
+    expect(hist.counts[0]).toBe(10);
+    expect(hist.counts[3]).toBe(5);
+  });
+
+  test("flush writes 'all' row and deletes old slot rows", () => {
+    const d = db();
+    const now = Date.now();
+    const binCount = HISTOGRAM_BINS.length + 1;
+
+    // Insert old-format rows
+    const workCounts = new Array(binCount).fill(0);
+    workCounts[0] = 10;
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "work", JSON.stringify(workCounts), 10, now);
+
+    // Load, record a gap, then flush
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+    recordGlobalGap(TEST_PROJECT_PATH, 120_000); // 2 min gap
+    flushGlobalHistograms();
+
+    // Verify: old "work" row deleted, "all" row exists
+    const rows = d
+      .query("SELECT time_slot, total FROM warmup_histograms WHERE project_id = ?")
+      .all(pid) as Array<{ time_slot: string; total: number }>;
+
+    expect(rows.length).toBe(1);
+    expect(rows[0].time_slot).toBe("all");
+    expect(rows[0].total).toBe(11); // 10 from old work + 1 new gap
+  });
+
+  test("reload after flush does not double-count", () => {
+    const d = db();
+    const now = Date.now();
+    const binCount = HISTOGRAM_BINS.length + 1;
+
+    // Insert old-format rows
+    const workCounts = new Array(binCount).fill(0);
+    workCounts[0] = 7;
+    const nightCounts = new Array(binCount).fill(0);
+    nightCounts[5] = 3;
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "work", JSON.stringify(workCounts), 7, now);
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "night", JSON.stringify(nightCounts), 3, now);
+
+    // Load → flush → reset → reload
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+    flushGlobalHistograms();
+    _resetForTest(); // clears in-memory state
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+
+    const hist = getGlobalHistogram(TEST_PROJECT_PATH);
+    expect(hist.total).toBe(10); // 7 + 3, no double-count
+    expect(hist.counts[0]).toBe(7);
+    expect(hist.counts[5]).toBe(3);
   });
 });

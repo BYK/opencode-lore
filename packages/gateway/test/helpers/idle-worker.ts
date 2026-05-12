@@ -74,7 +74,6 @@ mock.module("@loreai/core", () => ({
 mock.module("../../src/cache-warmer", () => ({
   isCircuitBreakerTripped: () => false,
   resolveProfile: () => null,
-  resolveTimeSlot: () => 0,
   blendedHistogramForSession: () => null,
   shouldWarm: () => false,
   executeWarmup: async () => ({}),
@@ -118,6 +117,7 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
     projectPath: overrides.projectPath ?? "/test/default/project",
     fingerprint: "",
     lastRequestTime: Date.now(),
+    lastUserTurnTime: Date.now(),
     messageCount: 5,
     turnsSinceCuration: 0,
     consecutiveTextOnlyTurns: 0,

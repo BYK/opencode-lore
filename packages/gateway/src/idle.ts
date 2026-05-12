@@ -32,7 +32,6 @@ import { getWorkerModel } from "./worker-model";
 import {
   isCircuitBreakerTripped,
   resolveProfile,
-  resolveTimeSlot,
   blendedHistogramForSession,
   shouldWarm,
   executeWarmup,
@@ -97,8 +96,7 @@ export function startIdleScheduler(
       );
       if (!profile) continue;
 
-      const slot = resolveTimeSlot(new Date(now));
-      const blendedHist = blendedHistogramForSession(state, slot);
+      const blendedHist = blendedHistogramForSession(state);
       if (!shouldWarm(state, profile, blendedHist, now)) continue;
 
       warmupInProgress.add(sessionID);

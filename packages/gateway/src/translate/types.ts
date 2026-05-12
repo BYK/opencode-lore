@@ -223,6 +223,10 @@ export type SessionState = {
   fingerprint: string;
   /** Unix timestamp (ms) of the last request in this session. */
   lastRequestTime: number;
+  /** Unix timestamp (ms) of the last user-initiated turn — excludes subagent
+   *  turns and tool-use auto-continuations. Used exclusively for inter-turn
+   *  gap histogram recording (survival analysis). */
+  lastUserTurnTime: number;
   /** Total user+assistant messages seen in this session. */
   messageCount: number;
   /** Turns since last curation run — triggers background curation. */
@@ -274,8 +278,8 @@ export type SessionState = {
 
   /** Cache warming state for speculative keep-alive pings. */
   warmup?: WarmupState;
-  /** Per-session survival model (inter-turn gap histogram by time slot). */
-  survivalModel?: SurvivalModel;
+  /** Per-session survival model (inter-turn gap histogram). */
+  survivalModel?: InterTurnHistogram;
   /** Model name from the last real request (for warming profile resolution). */
   lastModel?: string;
   /** Protocol from the last real request (for warming profile resolution). */
@@ -286,20 +290,12 @@ export type SessionState = {
 // Cache warming types
 // ---------------------------------------------------------------------------
 
-/** Time-of-day slot for survival analysis — captures circadian work patterns. */
-export type TimeSlot = "work" | "evening" | "night";
-
 /** Binned histogram of inter-turn gaps for survival analysis. */
 export type InterTurnHistogram = {
   /** Count per bin (length = number of bin edges + 1 for overflow). */
   counts: number[];
   /** Total observations (sum of counts). */
   total: number;
-};
-
-/** Per-session survival model with time-slot segmented histograms. */
-export type SurvivalModel = {
-  slots: Record<TimeSlot, InterTurnHistogram>;
 };
 
 /** Per-session cache warming state. */
