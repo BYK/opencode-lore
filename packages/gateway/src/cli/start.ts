@@ -17,16 +17,46 @@ export interface StartOptions {
   quiet?: boolean;
 }
 
+export interface GatewayHandle {
+  config: GatewayConfig;
+  port: number;
+  /** Whether this process owns the server (started it). False when reusing an existing instance. */
+  owned: boolean;
+  /** Shut down the gateway. No-op when `owned` is false. */
+  shutdown: () => Promise<void>;
+}
+
+/**
+ * Probe a running gateway at the given URL via its `/health` endpoint.
+ * Returns `true` if the response is 2xx, `false` on any error or timeout.
+ */
+export async function probeGateway(
+  baseURL: string,
+  timeoutMs = 1500,
+): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(`${baseURL}/health`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Start the gateway server, returning the actual port and a shutdown function.
  *
  * Merges CLI options on top of env-var config (CLI takes precedence).
+ *
+ * If the port is already in use by another lore gateway (verified via
+ * `/health` probe), returns a handle with `owned: false` so the caller
+ * can reuse the existing instance instead of failing.
  */
-export function startGateway(opts: StartOptions = {}): {
-  config: GatewayConfig;
-  port: number;
-  shutdown: () => Promise<void>;
-} {
+export async function startGateway(opts: StartOptions = {}): Promise<GatewayHandle> {
   const config = loadConfig();
 
   // CLI overrides
@@ -34,21 +64,44 @@ export function startGateway(opts: StartOptions = {}): {
   if (opts.hosts?.length) config.hosts = opts.hosts;
   if (opts.debug !== undefined) config.debug = opts.debug;
 
-  const server = startServer(config);
-  const actualPort = server.port;
+  try {
+    const server = startServer(config);
+    const actualPort = server.port;
 
-  const shutdown = async () => {
-    console.error("[lore] Shutting down…");
-    server.stop();
-    await resetPipelineState();
-    // Shut down the embedding worker thread gracefully. Done after
-    // resetPipelineState (which clears sessions/timers) but before
-    // safeExit — gives the worker time to exit cleanly via its
-    // "shutdown" message handler rather than being killed by _exit().
-    await embedding.resetProvider();
-  };
+    const shutdown = async () => {
+      console.error("[lore] Shutting down…");
+      server.stop();
+      await resetPipelineState();
+      // Shut down the embedding worker thread gracefully. Done after
+      // resetPipelineState (which clears sessions/timers) but before
+      // safeExit — gives the worker time to exit cleanly via its
+      // "shutdown" message handler rather than being killed by _exit().
+      await embedding.resetProvider();
+    };
 
-  return { config, port: actualPort, shutdown };
+    return { config, port: actualPort, owned: true, shutdown };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/port\b.*\bin use/i.test(msg) || /EADDRINUSE/i.test(msg)) {
+      // Port is occupied — check if it's a lore gateway we can reuse
+      const probeUrl = `http://${config.hosts[0]}:${config.port}`;
+      const alive = await probeGateway(probeUrl);
+      if (alive) {
+        return {
+          config,
+          port: config.port,
+          owned: false,
+          shutdown: async () => {},
+        };
+      }
+      // Port is taken by something else — not a lore gateway
+      throw new Error(
+        `Port ${config.port} is already in use by another process (not a lore gateway). ` +
+          `Use --port / LORE_LISTEN_PORT to pick a different port.`,
+      );
+    }
+    throw e;
+  }
 }
 
 /**
@@ -56,22 +109,19 @@ export function startGateway(opts: StartOptions = {}): {
  * SIGINT/SIGTERM.
  */
 export async function commandStart(opts: StartOptions): Promise<never> {
-  let result: ReturnType<typeof startGateway>;
-  try {
-    result = startGateway(opts);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/port\b.*\bin use/i.test(msg) || /EADDRINUSE/i.test(msg)) {
-      if (!opts.quiet) {
-        console.error(`[lore] ${msg}`);
-      }
-      process.exit(1);
-    }
-    throw e;
-  }
-  const { config, port, shutdown } = result;
+  const { config, port, owned, shutdown } = await startGateway(opts);
 
   const addrs = config.hosts.map((h) => `http://${h}:${port}`);
+
+  if (!owned) {
+    // Another lore gateway is already running — nothing to do.
+    console.error(`[lore] Gateway already running on ${addrs.join(", ")}`);
+    if (!opts.quiet) {
+      console.error("[lore] Use that instance, or stop it first to start a new one.");
+    }
+    safeExit(0);
+  }
+
   console.error(`[lore] Gateway listening on ${addrs.join(", ")}`);
 
   if (!opts.quiet) {
