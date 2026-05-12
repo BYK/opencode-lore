@@ -483,8 +483,13 @@ export function shouldWarm(
   const { ttlMs, warmupMarginMs } = profile;
   const forced = state.warmup?.forceKeepWarm === true;
 
-  // Already warmed in this TTL window (prevents double-warming even with /keep)
-  if (state.warmup?.lastWarmupAt && (now - state.warmup.lastWarmupAt) < ttlMs) {
+  // Already warmed recently — prevent double-warming.
+  // For /keep mode, use a tighter cooldown (ttlMs - warmupMarginMs) so the
+  // next warmup fires before the current cache expires. Without this, the
+  // full-ttlMs guard combined with margin positioning produces a ~2x TTL
+  // cadence (e.g. 10 min on a 5 min TTL), leaving a dead zone each cycle.
+  const cooldownMs = forced ? ttlMs - warmupMarginMs : ttlMs;
+  if (state.warmup?.lastWarmupAt && (now - state.warmup.lastWarmupAt) < cooldownMs) {
     return false;
   }
 

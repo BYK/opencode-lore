@@ -693,6 +693,60 @@ describe("shouldWarm", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(true);
   });
 
+  test("forceKeepWarm uses tighter cooldown (ttlMs - warmupMarginMs) to prevent 2x cadence", () => {
+    const now = Date.now();
+    // Last warmup was 4m20s ago (260s). With the full ttlMs (300s) cooldown
+    // this would be blocked. With the tighter cooldown (300s - 45s = 255s)
+    // it should be allowed, provided we're in the warmup margin of a window.
+    const state = makeSessionState({
+      lastRequestTime: now - 560_000, // 9m20s ago — into_window = 560%300 = 260s (>255 → in margin)
+      warmup: {
+        lastWarmupAt: now - 260_000, // 4m20s ago — past tighter cooldown (255s) but within full TTL (300s)
+        warmupCount: 1,
+        warmupHits: 0,
+        disabled: false,
+        forceKeepWarm: true,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"test": true}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    // With old code (cooldown = ttlMs = 300s): 260s < 300s → blocked
+    // With fix (cooldown = ttlMs - margin = 255s): 260s > 255s → allowed
+    // intoWindow = 560_000 % 300_000 = 260_000 >= 255_000 → in margin → true
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("non-forced mode still uses full ttlMs cooldown", () => {
+    const now = Date.now();
+    // Same timing as above but without forceKeepWarm — should be blocked
+    // by the full ttlMs cooldown since 260s < 300s.
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000, // 4.5 min ago — in warmup margin
+      warmup: {
+        lastWarmupAt: now - 260_000, // 4m20s ago — within full TTL cooldown
+        warmupCount: 1,
+        warmupHits: 0,
+        disabled: false,
+        // no forceKeepWarm
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    // 260s < 300s (full TTL cooldown) → blocked
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
   test("forceKeepWarm still respects circuit breaker", () => {
     const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
     checkCircuitBreaker(bad);

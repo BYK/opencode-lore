@@ -1971,8 +1971,13 @@ async function handlePassthrough(
  * different bytes and bust the cache the warmer just paid to preserve.
  */
 function isCacheWarm(state: SessionState): boolean {
-  const lastWarmup = state.warmup?.lastWarmupAt;
-  if (!lastWarmup) return false;
+  const warmup = state.warmup;
+  if (!warmup?.lastWarmupAt) return false;
+
+  // /keep sessions are always considered warm — the warmer is actively
+  // maintaining the cache on a schedule, so post-idle compaction would
+  // just bust the prefix the warmer is preserving.
+  if (warmup.forceKeepWarm) return true;
 
   const profile = resolveWarmingProfile(
     state.lastModel,
@@ -1981,7 +1986,7 @@ function isCacheWarm(state: SessionState): boolean {
   );
   if (!profile) return false;
 
-  return (Date.now() - lastWarmup) < profile.ttlMs;
+  return (Date.now() - warmup.lastWarmupAt) < profile.ttlMs;
 }
 
 // ---------------------------------------------------------------------------
