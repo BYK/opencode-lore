@@ -151,13 +151,17 @@ export async function accumulateResponsesSSEStream(
             stopReason = mapStatusToStopReason(resp.status);
           }
 
-          const respUsage = resp.usage as Record<string, number> | undefined;
+          const respUsage = resp.usage as Record<string, unknown> | undefined;
           if (respUsage) {
             if (typeof respUsage.input_tokens === "number") {
               usage.inputTokens = respUsage.input_tokens;
             }
             if (typeof respUsage.output_tokens === "number") {
-              usage.outputTokens = respUsage.output_tokens;
+              usage.outputTokens = respUsage.output_tokens as number;
+            }
+            const promptDetails = respUsage.prompt_tokens_details as Record<string, number> | undefined;
+            if (promptDetails?.cached_tokens !== undefined) {
+              usage.cacheReadInputTokens = promptDetails.cached_tokens;
             }
           }
         }

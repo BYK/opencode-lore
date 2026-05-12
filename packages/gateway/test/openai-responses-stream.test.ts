@@ -418,4 +418,84 @@ describe("accumulateResponsesSSEStream", () => {
       text: "final complete text",
     });
   });
+
+  test("captures prompt_tokens_details.cached_tokens as cacheReadInputTokens", async () => {
+    const response = buildSSEResponse([
+      {
+        event: "response.created",
+        data: {
+          type: "response.created",
+          response: { id: "resp_cache", model: "gpt-4o", status: "in_progress" },
+        },
+      },
+      {
+        event: "response.output_item.added",
+        data: {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { type: "message", id: "msg_1", role: "assistant" },
+        },
+      },
+      {
+        event: "response.output_text.done",
+        data: {
+          type: "response.output_text.done",
+          output_index: 0,
+          content_index: 0,
+          text: "Hello",
+        },
+      },
+      {
+        event: "response.completed",
+        data: {
+          type: "response.completed",
+          response: {
+            id: "resp_cache",
+            model: "gpt-4o",
+            status: "completed",
+            usage: {
+              input_tokens: 100,
+              output_tokens: 10,
+              prompt_tokens_details: {
+                cached_tokens: 80,
+              },
+            },
+          },
+        },
+      },
+    ]);
+
+    const result = await accumulateResponsesSSEStream(response);
+    expect(result.usage.inputTokens).toBe(100);
+    expect(result.usage.outputTokens).toBe(10);
+    expect(result.usage.cacheReadInputTokens).toBe(80);
+  });
+
+  test("cacheReadInputTokens is undefined when no cached_tokens in usage", async () => {
+    const response = buildSSEResponse([
+      {
+        event: "response.created",
+        data: {
+          type: "response.created",
+          response: { id: "resp_nc", model: "gpt-4o", status: "in_progress" },
+        },
+      },
+      {
+        event: "response.completed",
+        data: {
+          type: "response.completed",
+          response: {
+            id: "resp_nc",
+            model: "gpt-4o",
+            status: "completed",
+            usage: { input_tokens: 50, output_tokens: 5 },
+          },
+        },
+      },
+    ]);
+
+    const result = await accumulateResponsesSSEStream(response);
+    expect(result.usage.inputTokens).toBe(50);
+    expect(result.usage.cacheReadInputTokens).toBeUndefined();
+  });
 });

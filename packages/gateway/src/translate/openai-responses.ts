@@ -380,6 +380,13 @@ function buildOpenAIResponsesNonStreamResponse(resp: GatewayResponse): Response 
       input_tokens: resp.usage.inputTokens,
       output_tokens: resp.usage.outputTokens,
       total_tokens: resp.usage.inputTokens + resp.usage.outputTokens,
+      ...(resp.usage.cacheReadInputTokens != null
+        ? {
+            prompt_tokens_details: {
+              cached_tokens: resp.usage.cacheReadInputTokens,
+            },
+          }
+        : {}),
     },
   };
 
@@ -623,6 +630,13 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
             input_tokens: resp.usage.inputTokens,
             output_tokens: resp.usage.outputTokens,
             total_tokens: resp.usage.inputTokens + resp.usage.outputTokens,
+            ...(resp.usage.cacheReadInputTokens != null
+              ? {
+                  prompt_tokens_details: {
+                    cached_tokens: resp.usage.cacheReadInputTokens,
+                  },
+                }
+              : {}),
           },
         },
       });
