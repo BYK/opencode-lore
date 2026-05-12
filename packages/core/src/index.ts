@@ -19,6 +19,7 @@ export * as embeddingVendor from "./embedding-vendor";
 export * as latReader from "./lat-reader";
 export * as patternExtract from "./pattern-extract";
 export * as log from "./log";
+export * as conversationImport from "./import";
 
 export {
   runRecall,

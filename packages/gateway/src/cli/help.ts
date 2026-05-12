@@ -12,6 +12,7 @@ Usage:
 Commands:
   run [command...]    Start gateway and launch an AI agent (default)
   start               Start the gateway server only
+  import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
   recall <query>      Search project memory from the command line
   upgrade [version]   Update lore to the latest (or specified) version
@@ -34,6 +35,13 @@ Data subcommands:
 
   Data flags: --project <path>, --limit <n>, --json, --yes/-y
   Clear flags: --knowledge, --temporal, --distillations, --all
+
+Import options:
+  --yes / -y                    Skip confirmation prompt
+  --agent <name>                Import from specific agent only
+                                (claude-code, codex, opencode, cline, continue, pi, aider)
+  --project <path>              Target project (default: cwd)
+  --dry-run                     Show what would be imported, no LLM calls
 
 Recall options:
   --project <path>              Target project (default: cwd)
@@ -61,6 +69,9 @@ Examples:
   lore data list knowledge      # List knowledge entries for current project
   lore data clear --project .   # Clear all data for the current project
   lore data clear --all         # Wipe the entire database
+  lore import                   # Import knowledge from prior AI conversations
+  lore import --dry-run         # Show what would be imported
+  lore import --agent claude-code  # Import from Claude Code only
   lore recall "error handling"  # Search project memory from CLI
 
 Environment variables:

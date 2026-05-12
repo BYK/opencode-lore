@@ -11,9 +11,9 @@ import type { LLMClient } from "./types";
  * The curator prompt also instructs the model to stay within this limit,
  * so truncation is a last-resort safety net.
  */
-const MAX_ENTRY_CONTENT_LENGTH = 1200;
+export const MAX_ENTRY_CONTENT_LENGTH = 1200;
 
-type CuratorOp =
+export type CuratorOp =
   | {
       op: "create";
       category: string;
@@ -25,7 +25,11 @@ type CuratorOp =
   | { op: "update"; id: string; content?: string; confidence?: number }
   | { op: "delete"; id: string; reason: string };
 
-function parseOps(text: string): CuratorOp[] {
+/**
+ * Parse the LLM's JSON response into typed curator ops.
+ * Handles markdown fences and filters invalid entries.
+ */
+export function parseOps(text: string): CuratorOp[] {
   const cleaned = text
     .trim()
     .replace(/^```json?\s*/i, "")
@@ -43,6 +47,74 @@ function parseOps(text: string): CuratorOp[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Apply a list of curator ops (create/update/delete) to the knowledge DB.
+ * Shared by both the live curator and the conversation import system.
+ *
+ * @returns Counts of applied operations.
+ */
+export function applyOps(
+  ops: CuratorOp[],
+  input: {
+    projectPath?: string;
+    sessionID?: string;
+    /** If true, skip "create" ops (used by consolidation). */
+    skipCreate?: boolean;
+  },
+): { created: number; updated: number; deleted: number } {
+  let created = 0;
+  let updated = 0;
+  let deleted = 0;
+  const idsToSync: string[] = [];
+
+  for (const op of ops) {
+    if (op.op === "create") {
+      if (input.skipCreate) continue;
+      const content =
+        op.content.length > MAX_ENTRY_CONTENT_LENGTH
+          ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
+            " [truncated — entry too long]"
+          : op.content;
+      const id = ltm.create({
+        projectPath: op.scope === "project" ? input.projectPath : undefined,
+        category: op.category,
+        title: op.title,
+        content,
+        session: input.sessionID,
+        scope: op.scope,
+        crossProject: op.crossProject ?? true,
+      });
+      idsToSync.push(id);
+      created++;
+    } else if (op.op === "update") {
+      const entry = ltm.get(op.id);
+      if (entry) {
+        const content =
+          op.content !== undefined && op.content.length > MAX_ENTRY_CONTENT_LENGTH
+            ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
+              " [truncated — entry too long]"
+            : op.content;
+        ltm.update(op.id, { content, confidence: op.confidence });
+        if (op.content !== undefined) idsToSync.push(op.id);
+        updated++;
+      }
+    } else if (op.op === "delete") {
+      const entry = ltm.get(op.id);
+      if (entry) {
+        ltm.remove(op.id);
+        deleted++;
+      }
+    }
+  }
+
+  // Sync cross-references for created/updated entries
+  for (const id of idsToSync) {
+    ltm.syncRefs(id);
+  }
+
+  return { created, updated, deleted };
 }
 
 // Track which messages we've already curated — per session to prevent
@@ -87,60 +159,13 @@ export async function run(input: {
   if (!responseText) return { created: 0, updated: 0, deleted: 0 };
 
   const ops = parseOps(responseText);
-  let created = 0;
-  let updated = 0;
-  let deleted = 0;
-
-  const idsToSync: string[] = [];
-
-  for (const op of ops) {
-    if (op.op === "create") {
-      // Truncate oversized content — the model should stay within the prompt's
-      // 500-word limit, but enforce it here as a hard safety net.
-      const content =
-        op.content.length > MAX_ENTRY_CONTENT_LENGTH
-          ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
-            " [truncated — entry too long]"
-          : op.content;
-      const id = ltm.create({
-        projectPath: op.scope === "project" ? input.projectPath : undefined,
-        category: op.category,
-        title: op.title,
-        content,
-        session: input.sessionID,
-        scope: op.scope,
-        crossProject: op.crossProject ?? true,
-      });
-      idsToSync.push(id);
-      created++;
-    } else if (op.op === "update") {
-      const entry = ltm.get(op.id);
-      if (entry) {
-        const content =
-          op.content !== undefined && op.content.length > MAX_ENTRY_CONTENT_LENGTH
-            ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
-              " [truncated — entry too long]"
-            : op.content;
-        ltm.update(op.id, { content, confidence: op.confidence });
-        if (op.content !== undefined) idsToSync.push(op.id);
-        updated++;
-      }
-    } else if (op.op === "delete") {
-      const entry = ltm.get(op.id);
-      if (entry) {
-        ltm.remove(op.id);
-        deleted++;
-      }
-    }
-  }
-
-  // Sync cross-references for created/updated entries
-  for (const id of idsToSync) {
-    ltm.syncRefs(id);
-  }
+  const result = applyOps(ops, {
+    projectPath: input.projectPath,
+    sessionID: input.sessionID,
+  });
 
   lastCuratedAt.set(input.sessionID, Date.now());
-  return { created, updated, deleted };
+  return result;
 }
 
 export function resetCurationTracker(sessionID?: string) {
@@ -190,31 +215,11 @@ export async function consolidate(input: {
   if (!responseText) return { updated: 0, deleted: 0 };
 
   const ops = parseOps(responseText);
-  let updated = 0;
-  let deleted = 0;
+  const result = applyOps(ops, {
+    projectPath: input.projectPath,
+    sessionID: input.sessionID,
+    skipCreate: true, // Consolidation must not add entries.
+  });
 
-  for (const op of ops) {
-    // Consolidation only applies update and delete — never create.
-    if (op.op === "update") {
-      const entry = ltm.get(op.id);
-      if (entry) {
-        const content =
-          op.content !== undefined && op.content.length > MAX_ENTRY_CONTENT_LENGTH
-            ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
-              " [truncated — entry too long]"
-            : op.content;
-        ltm.update(op.id, { content, confidence: op.confidence });
-        updated++;
-      }
-    } else if (op.op === "delete") {
-      const entry = ltm.get(op.id);
-      if (entry) {
-        ltm.remove(op.id);
-        deleted++;
-      }
-    }
-    // "create" ops are silently ignored — consolidation must not add entries.
-  }
-
-  return { updated, deleted };
+  return { updated: result.updated, deleted: result.deleted };
 }

@@ -453,6 +453,23 @@ const MIGRATIONS: string[] = [
   ALTER TABLE session_state ADD COLUMN ttl_hits INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE session_state ADD COLUMN batch_savings REAL NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 19: Import history for conversation import idempotency.
+  -- Tracks which external agent sessions have been imported to prevent
+  -- re-importing unchanged sources and to record user-declined imports.
+  CREATE TABLE IF NOT EXISTS import_history (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    agent_name TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    entries_created INTEGER NOT NULL DEFAULT 0,
+    entries_updated INTEGER NOT NULL DEFAULT 0,
+    imported_at INTEGER NOT NULL,
+    UNIQUE(project_id, agent_name, source_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_import_history_project ON import_history(project_id);
+  `,
 ];
 
 function dataDir() {
