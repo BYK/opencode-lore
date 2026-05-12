@@ -22,16 +22,17 @@ Usage: install [options]
 
 Options:
     -h, --help              Display this help message
-    -v, --version <version> Install a specific version (e.g., 0.14.0)
+    -v, --version <version> Install a specific version (e.g., 0.14.0) or "nightly"
         --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
 
 Environment Variables:
     LORE_INSTALL_DIR        Override the installation directory
-    LORE_VERSION            Install a specific version (e.g., 0.14.0)
+    LORE_VERSION            Install a specific version (e.g., 0.14.0, nightly)
 
 Examples:
     curl -fsSL https://withlore.ai/install | bash
     curl -fsSL https://withlore.ai/install | bash -s -- --version 0.14.0
+    LORE_VERSION=nightly curl -fsSL https://withlore.ai/install | bash
     LORE_INSTALL_DIR=~/.local/bin curl -fsSL https://withlore.ai/install | bash
 EOF
 }
@@ -84,28 +85,7 @@ if [[ "$os" == "windows" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Resolve version
-# ---------------------------------------------------------------------------
-
-version=""
-if [[ -z "$requested_version" ]]; then
-  echo -e "${MUTED}Fetching latest version...${NC}"
-  version=$(curl -fsSL https://api.github.com/repos/BYK/loreai/releases/latest \
-    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
-  if [[ -z "$version" ]]; then
-    die "Failed to fetch latest version from GitHub"
-  fi
-else
-  version="$requested_version"
-fi
-
-# Strip leading 'v' if present
-version="${version#v}"
-
-echo -e "${MUTED}Installing lore v${version} (${os}-${arch})...${NC}"
-
-# ---------------------------------------------------------------------------
-# Download binary
+# Resolve version & download binary
 # ---------------------------------------------------------------------------
 
 tmpdir="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
@@ -113,14 +93,95 @@ tmp_binary="${tmpdir}/lore-install-$$${suffix}"
 
 trap 'rm -f "$tmp_binary"' EXIT
 
-filename="lore-${os}-${arch}${suffix}"
-url="https://github.com/BYK/loreai/releases/download/${version}/${filename}"
+version=""
+if [[ "$requested_version" == "nightly" ]]; then
+  # --- Nightly: download from GHCR via OCI blob protocol ---
+  # ghcr.io blob downloads redirect to Azure Blob Storage. curl -L would
+  # forward the Authorization header to Azure, which returns 404. Instead,
+  # extract the redirect URL and follow it without the auth header.
 
-# Try gzip-compressed first (~60% smaller), fall back to raw binary
-if curl -fsSL "${url}.gz" 2>/dev/null | gunzip > "$tmp_binary" 2>/dev/null; then
-  : # Compressed download succeeded
+  echo -e "${MUTED}Fetching nightly build from GHCR...${NC}"
+
+  # Step 1: Get anonymous pull token
+  GHCR_TOKEN=$(curl -sf \
+    "https://ghcr.io/token?scope=repository:byk/loreai:pull" \
+    | awk -F'"' '{for(i=1;i<=NF;i++) if($i=="token"){print $(i+2);exit}}')
+  if [[ -z "$GHCR_TOKEN" ]]; then
+    die "Failed to get GHCR token"
+  fi
+
+  # Step 2: Fetch the OCI manifest for the :nightly tag
+  MANIFEST=$(curl -sf \
+    -H "Authorization: Bearer $GHCR_TOKEN" \
+    -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+    "https://ghcr.io/v2/byk/loreai/manifests/nightly")
+  if [[ -z "$MANIFEST" ]]; then
+    die "Failed to fetch nightly manifest from GHCR"
+  fi
+
+  # Step 3: Extract version from manifest annotation
+  version=$(echo "$MANIFEST" \
+    | awk -F'"' '{for(i=1;i<=NF;i++) if($i=="version"){print $(i+2);exit}}')
+  if [[ -z "$version" ]]; then
+    die "Failed to extract version from nightly manifest"
+  fi
+
+  echo -e "${MUTED}Installing lore nightly ${version} (${os}-${arch})...${NC}"
+
+  # Step 4: Find the blob digest for this platform's .gz file
+  gz_filename="lore-${os}-${arch}${suffix}.gz"
+  digest=$(echo "$MANIFEST" \
+    | awk -F'"' -v target="$gz_filename" '{
+        for(i=1;i<=NF;i++){
+          if($i=="digest") d=$(i+2)
+          if($i=="org.opencontainers.image.title"&&$(i+2)==target){print d;exit}
+        }
+      }')
+  if [[ -z "$digest" ]]; then
+    die "No nightly build found for ${gz_filename}"
+  fi
+
+  # Step 5: Get the redirect URL (don't follow — auth must not reach Azure)
+  redir_url=$(curl -s -w '\n%{redirect_url}' -o /dev/null \
+    -H "Authorization: Bearer $GHCR_TOKEN" \
+    "https://ghcr.io/v2/byk/loreai/blobs/${digest}" | tail -1)
+  if [[ -z "$redir_url" ]]; then
+    die "Failed to get blob redirect URL from GHCR"
+  fi
+
+  # Step 6: Download the .gz blob and decompress (without auth header)
+  if ! curl -sf "$redir_url" | gunzip > "$tmp_binary"; then
+    die "Failed to download or decompress nightly binary for ${gz_filename}"
+  fi
+
 else
-  curl -fsSL --progress-bar "$url" -o "$tmp_binary"
+  # --- Stable: resolve version and download from GitHub Releases ---
+
+  if [[ -z "$requested_version" ]]; then
+    echo -e "${MUTED}Fetching latest version...${NC}"
+    version=$(curl -fsSL https://api.github.com/repos/BYK/loreai/releases/latest \
+      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+    if [[ -z "$version" ]]; then
+      die "Failed to fetch latest version from GitHub"
+    fi
+  else
+    version="$requested_version"
+  fi
+
+  # Strip leading 'v' if present
+  version="${version#v}"
+
+  echo -e "${MUTED}Installing lore v${version} (${os}-${arch})...${NC}"
+
+  filename="lore-${os}-${arch}${suffix}"
+  url="https://github.com/BYK/loreai/releases/download/${version}/${filename}"
+
+  # Try gzip-compressed first (~60% smaller), fall back to raw binary
+  if curl -fsSL "${url}.gz" 2>/dev/null | gunzip > "$tmp_binary" 2>/dev/null; then
+    : # Compressed download succeeded
+  else
+    curl -fsSL --progress-bar "$url" -o "$tmp_binary"
+  fi
 fi
 
 chmod +x "$tmp_binary"
