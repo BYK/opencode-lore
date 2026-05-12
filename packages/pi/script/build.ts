@@ -31,6 +31,7 @@ mkdirSync(distDir, { recursive: true });
 const external = [
   "node:*",
   "@loreai/core",
+  "@loreai/gateway",
   "@mariozechner/pi-coding-agent",
   "@mariozechner/pi-tui",
 ];

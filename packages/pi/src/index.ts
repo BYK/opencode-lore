@@ -1,15 +1,17 @@
 /**
  * @loreai/pi — Lore memory engine as a Pi coding-agent extension.
  *
- * Gateway-only mode: the extension detects the Lore gateway, redirects
- * compatible provider URLs through it, and registers a single Pi-specific
- * hook (session_before_compact) that the gateway cannot handle via HTTP
- * interception. All other memory features (LTM injection, gradient
- * transforms, temporal capture, recall, idle work) are handled
- * exclusively by the gateway pipeline.
+ * On startup, the extension probes for an existing Lore gateway and, if
+ * none is found, starts one in-process by importing @loreai/gateway.
+ * It then redirects compatible provider URLs through the gateway and
+ * registers a single Pi-specific hook (session_before_compact) that the
+ * gateway cannot handle via HTTP interception. All other memory features
+ * (LTM injection, gradient transforms, temporal capture, recall, idle
+ * work) are handled exclusively by the gateway pipeline.
  *
- * If the gateway is not running, the extension logs an error and becomes
- * inert — no hooks are registered and Pi runs without memory features.
+ * If the gateway cannot be started, the extension logs an error and
+ * becomes inert — no hooks are registered and Pi runs without memory
+ * features.
  *
  * Installation (in user's `~/.pi/agent/extensions/`):
  *   import lore from "@loreai/pi";
@@ -78,6 +80,41 @@ async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean>
 }
 
 /**
+ * Start the gateway server in-process by importing @loreai/gateway as a library.
+ * The published CJS bundle includes Node.js polyfills that shim Bun.serve()
+ * to node:http.createServer(), so this works under both Bun and Node.js.
+ */
+async function startInProcess(gatewayBase: string): Promise<boolean> {
+  try {
+    // Dynamic import — the gateway may be resolved from src (workspace) or
+    // dist/index.cjs (npm). Use a variable to prevent tsc from resolving the
+    // module at compile time (the .d.cts only exists after building).
+    const gw = "@loreai/gateway";
+    const { loadConfig, startServer } = await import(/* webpackIgnore: true */ gw);
+    const config = loadConfig();
+
+    // Parse the expected port from gatewayBase so the server binds there.
+    const url = new URL(gatewayBase);
+    if (url.port) config.port = Number(url.port);
+
+    startServer(config);
+    // startServer is synchronous — if it didn't throw, the server is
+    // listening. Verify with a quick health check.
+    return await probeGateway(gatewayBase, 1000);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Port-in-use means something is already on that port but our probe
+    // didn't detect it (race). Treat as success — the proxy is available.
+    // Match both Node's EADDRINUSE and Bun's "Is port N in use?" format.
+    if (/EADDRINUSE/i.test(msg) || /port\b.*\bin use/i.test(msg)) {
+      return await probeGateway(gatewayBase, 1000);
+    }
+    log.info("pi: failed to start gateway in-process:", msg);
+    return false;
+  }
+}
+
+/**
  * Derive a stable session identifier from Pi's current session file path.
  */
 function sessionIDFor(sessionFile: string | undefined): string {
@@ -102,13 +139,22 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     process.env.LORE_GATEWAY_MODE === "test";
 
   if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
-    gatewayActive = await probeGateway(gatewayBase);
+    if (await probeGateway(gatewayBase)) {
+      log.info(`pi: gateway detected at ${gatewayBase}`);
+      gatewayActive = true;
+    } else {
+      log.info(`pi: starting gateway in-process at ${gatewayBase}…`);
+      if (await startInProcess(gatewayBase)) {
+        log.info(`pi: gateway started in-process at ${gatewayBase}`);
+        gatewayActive = true;
+      }
+    }
   }
 
   if (!gatewayActive && !inTestEnv && process.env.LORE_GATEWAY_MODE !== "0") {
     const msg =
-      "Lore gateway not detected — memory features are unavailable. " +
-      "Run Pi through the gateway with `lore run pi`, or start the gateway separately.";
+      "Lore gateway failed to start — memory features are unavailable. " +
+      "Ensure @loreai/gateway is installed or start the gateway manually.";
     log.error("pi:", msg);
     return;
   }

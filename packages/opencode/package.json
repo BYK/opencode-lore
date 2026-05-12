@@ -21,7 +21,8 @@
     "@opencode-ai/plugin": ">=1.1.0"
   },
   "dependencies": {
-    "@loreai/core": "workspace:*"
+    "@loreai/core": "workspace:*",
+    "@loreai/gateway": "workspace:*"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.1.39",

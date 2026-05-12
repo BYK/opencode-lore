@@ -22,7 +22,8 @@
     "build": "bun run script/build.ts"
   },
   "dependencies": {
-    "@loreai/core": "workspace:*"
+    "@loreai/core": "workspace:*",
+    "@loreai/gateway": "workspace:*"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*"
@@ -42,7 +43,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.15"
   },
   "repository": {
     "type": "git",

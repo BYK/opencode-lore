@@ -46,6 +46,7 @@
       "version": "0.17.0",
       "dependencies": {
         "@loreai/core": "workspace:*",
+        "@loreai/gateway": "workspace:*",
       },
       "devDependencies": {
         "@opencode-ai/plugin": "^1.1.39",
@@ -60,6 +61,7 @@
       "version": "0.17.0",
       "dependencies": {
         "@loreai/core": "workspace:*",
+        "@loreai/gateway": "workspace:*",
       },
       "devDependencies": {
         "@mariozechner/pi-coding-agent": "^0.73.1",

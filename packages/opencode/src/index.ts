@@ -11,14 +11,11 @@ const GATEWAY_PROVIDERS: string[] = [
   "google",
 ];
 
-/** Absolute path to the gateway entry point (src/index.ts in the workspace). */
-const GATEWAY_ENTRY = new URL("../../gateway/src/index.ts", import.meta.url).pathname;
-
 /**
  * Check if the Lore gateway is reachable at the given base URL.
  * Short timeout so this doesn't delay OpenCode startup noticeably.
  */
-async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean> {
+export async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -31,43 +28,36 @@ async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean>
 }
 
 /**
- * Spawn the gateway as a background child process and wait for it to be ready.
- * Returns true if the gateway started and is healthy, false otherwise.
+ * Start the gateway server in-process by importing @loreai/gateway as a library.
+ * Uses Bun.serve() under the hood — non-blocking, lives for the duration of the
+ * host process. No subprocess management needed.
  */
-async function spawnGateway(gatewayBase: string): Promise<boolean> {
+export async function startInProcess(gatewayBase: string): Promise<boolean> {
   try {
-    const child = Bun.spawn(["bun", "run", GATEWAY_ENTRY], {
-      stdout: "ignore",
-      stderr: "pipe",
-      // Detach from the plugin process group so it keeps running
-      // even if the parent signal handler fires.
-    });
+    // Dynamic import — the gateway may be resolved from src (workspace) or
+    // dist/index.cjs (npm). Use a variable to prevent tsc from resolving the
+    // module at compile time (the .d.cts only exists after building).
+    const gw = "@loreai/gateway";
+    const { loadConfig, startServer } = await import(/* webpackIgnore: true */ gw);
+    const config = loadConfig();
 
-    // Pipe gateway stderr to our own stderr so it's visible.
-    if (child.stderr) {
-      const reader = child.stderr.getReader();
-      const decoder = new TextDecoder();
-      const pump = async () => {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          process.stderr.write(decoder.decode(value));
-        }
-      };
-      pump().catch(() => {});
-    }
+    // Parse the expected port from gatewayBase so the server binds there.
+    const url = new URL(gatewayBase);
+    if (url.port) config.port = Number(url.port);
 
-    // Poll until healthy or timeout (5s max, 100ms intervals).
-    for (let i = 0; i < 50; i += 1) {
-      await Bun.sleep(100);
-      if (await probeGateway(gatewayBase, 500)) return true;
-    }
-
-    log.info("gateway did not become healthy within 5s");
-    child.kill();
-    return false;
+    startServer(config);
+    // startServer is synchronous (Bun.serve) — if it didn't throw, the
+    // server is listening. Verify with a quick health check.
+    return await probeGateway(gatewayBase, 1000);
   } catch (e) {
-    log.info("failed to spawn gateway:", e instanceof Error ? e.message : String(e));
+    const msg = e instanceof Error ? e.message : String(e);
+    // Port-in-use means something is already on that port but our probe
+    // didn't detect it (race). Treat as success — the proxy is available.
+    // Match both Node's EADDRINUSE and Bun's "Is port N in use?" format.
+    if (/EADDRINUSE/i.test(msg) || /port\b.*\bin use/i.test(msg)) {
+      return await probeGateway(gatewayBase, 1000);
+    }
+    log.info("failed to start gateway in-process:", msg);
     return false;
   }
 }
@@ -104,9 +94,9 @@ export const LorePlugin: Plugin = async (ctx) => {
             log.info(`gateway detected at ${gatewayBase}`);
             return true;
           }
-          log.info(`starting gateway at ${gatewayBase}…`);
-          if (await spawnGateway(gatewayBase)) {
-            log.info(`gateway started at ${gatewayBase}`);
+          log.info(`starting gateway in-process at ${gatewayBase}…`);
+          if (await startInProcess(gatewayBase)) {
+            log.info(`gateway started in-process at ${gatewayBase}`);
             return true;
           }
           return false;
@@ -125,7 +115,7 @@ export const LorePlugin: Plugin = async (ctx) => {
       process.argv.some((a) => a.includes(".test."));
     if (!inTestEnv) {
       const msg = "Lore gateway failed to start — memory features are unavailable. " +
-        "Check that Bun is installed and the gateway entry point exists.";
+        "Ensure @loreai/gateway is installed or start the gateway manually.";
       process.stderr.write(`[lore] ERROR: ${msg}\n`);
       log.error(msg);
     }
