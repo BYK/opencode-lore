@@ -139,6 +139,15 @@ export const LoreConfig = z.object({
        *  When enabled, the configured model generates 2–3 alternative query phrasings
        *  before search, improving recall for ambiguous queries. */
       queryExpansion: z.boolean().default(false),
+      /** RRF weight multiplier for vector search lists. Applied when the query
+       *  has >= `vectorBoostMinTerms` meaningful terms (after stopword removal).
+       *  Boosts semantic/vector results relative to keyword-based BM25 lists.
+       *  Default: 1.5. Set to 1.0 to disable. */
+      vectorBoostWeight: z.number().min(1).max(5).default(1.5),
+      /** Minimum meaningful query terms (after stopword removal) to activate
+       *  vector boost. Short keyword queries (1-2 terms) are left unweighted
+       *  since BM25 excels there. Default: 3. */
+      vectorBoostMinTerms: z.number().min(1).max(10).default(3),
       /** Vector embedding search.
        *  Supports multiple providers:
        *  - "local" (default): fastembed + ONNX Runtime, no API key needed.
@@ -187,6 +196,8 @@ export const LoreConfig = z.object({
       ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
       recallLimit: 10,
       queryExpansion: false,
+      vectorBoostWeight: 1.5,
+      vectorBoostMinTerms: 3,
       embeddings: { enabled: true, provider: "local" as const, model: "BGESmallENV15", dimensions: 384 },
       recall: { charBudget: 8000, relevanceFloor: 0.15, maxResults: 15 },
     }),

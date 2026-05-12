@@ -475,12 +475,21 @@ export async function searchRecall(
     }
   }
 
+  // Determine vector boost weight: for queries with enough meaningful terms,
+  // boost vector search lists so semantic similarity outweighs keyword noise.
+  const queryTermCount = filterTerms(query).length;
+  const vectorWeight =
+    queryTermCount >= (searchConfig?.vectorBoostMinTerms ?? 3)
+      ? (searchConfig?.vectorBoostWeight ?? 1.5)
+      : 1;
+
   // Collect per-query RRF lists. Original query is always first; if expansion
   // produced extras, we still weight the original twice by adding both original
   // and expanded lists (RRF naturally weights items appearing in more lists).
   const allRrfLists: Array<{
     items: TaggedResult[];
     key: (r: TaggedResult) => string;
+    weight?: number;
   }> = [];
 
   for (const q of queries) {
@@ -593,6 +602,7 @@ export async function searchRecall(
           allRrfLists.push({
             items: vectorTagged,
             key: (r) => `k:${r.item.id}`,
+            weight: vectorWeight,
           });
         }
       }
@@ -618,6 +628,7 @@ export async function searchRecall(
           allRrfLists.push({
             items: distVectorTagged,
             key: (r) => `d:${r.item.id}`,
+            weight: vectorWeight,
           });
         }
       }
@@ -648,6 +659,7 @@ export async function searchRecall(
           allRrfLists.push({
             items: temporalVectorTagged,
             key: (r) => `t:${r.item.id}`,
+            weight: vectorWeight,
           });
         }
       }
