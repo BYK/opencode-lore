@@ -26,7 +26,6 @@ import type {
   SessionBeforeCompactEvent,
   SessionStartEvent,
 } from "@mariozechner/pi-coding-agent";
-import { distillation, log } from "@loreai/core";
 
 // Pi doesn't re-export these event result types at the top level — inline their
 // minimal shape here to avoid depending on an internal package path.
@@ -117,7 +116,7 @@ async function startInProcess(gatewayBase: string): Promise<boolean> {
     if (/EADDRINUSE/i.test(msg) || /port\b.*\bin use/i.test(msg)) {
       return await probeGateway(gatewayBase, 1000);
     }
-    log.info("pi: failed to start gateway in-process:", msg);
+    console.info("pi: failed to start gateway in-process:", msg);
     return false;
   }
 }
@@ -148,12 +147,12 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
 
   if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
     if (await probeGateway(gatewayBase)) {
-      log.info(`pi: gateway detected at ${gatewayBase}`);
+      console.info(`pi: gateway detected at ${gatewayBase}`);
       gatewayActive = true;
     } else {
-      log.info(`pi: starting gateway in-process at ${gatewayBase}…`);
+      console.info(`pi: starting gateway in-process at ${gatewayBase}…`);
       if (await startInProcess(gatewayBase)) {
-        log.info(`pi: gateway started in-process at ${gatewayBase}`);
+        console.info(`pi: gateway started in-process at ${gatewayBase}`);
         gatewayActive = true;
       }
     }
@@ -163,29 +162,47 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     const msg =
       "Lore gateway failed to start — memory features are unavailable. " +
       "Ensure @loreai/gateway is installed or start the gateway manually.";
-    log.error("pi:", msg);
+    console.error("pi:", msg);
     return;
   }
 
   if (!gatewayActive) return;
 
-  log.info(`pi: gateway active — routing providers through ${gatewayBase}`);
-
-  // Redirect all gateway-compatible providers through the proxy.
-  for (const provider of GATEWAY_PROVIDERS) {
-    pi.registerProvider(provider, { baseUrl: gatewayBase });
-  }
+  console.info(`pi: gateway active — routing providers through ${gatewayBase}`);
 
   // ---------------------------------------------------------------------------
-  // Minimal session tracking — only needed by session_before_compact below.
+  // Session tracking — used for provider header injection and compaction.
   // ---------------------------------------------------------------------------
 
   let projectPath = process.cwd();
   let currentSessionID = sessionIDFor(undefined);
 
+  /**
+   * Register (or re-register) all gateway-compatible providers with the
+   * current session header. Called on startup and again on session_start
+   * once the real session ID is known.
+   */
+  function registerProviders(): void {
+    for (const provider of GATEWAY_PROVIDERS) {
+      pi.registerProvider(provider, {
+        baseUrl: gatewayBase,
+        headers: { "x-lore-session-id": currentSessionID },
+      });
+    }
+  }
+
+  // Initial registration with ephemeral session ID.
+  registerProviders();
+
   pi.on("session_start", async (_event: SessionStartEvent, ctx) => {
     projectPath = ctx.cwd;
-    currentSessionID = sessionIDFor(ctx.sessionManager.getSessionFile());
+    const newID = sessionIDFor(ctx.sessionManager.getSessionFile());
+    if (newID !== currentSessionID) {
+      currentSessionID = newID;
+      // Re-register with the real session ID so all subsequent provider
+      // requests carry the correct x-lore-session-id header.
+      registerProviders();
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -193,8 +210,9 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   //
   // Pi's compaction goes through its extension API, not HTTP. The gateway
   // intercepts compaction via HTTP request patterns (Claude Code-specific),
-  // which don't match Pi's internal compaction flow. The extension provides
-  // Lore's distillation-aware summaries directly.
+  // which don't match Pi's internal compaction flow. This hook calls the
+  // gateway's POST /v1/compact endpoint to get a full LLM-synthesized
+  // compaction summary (force-distill + knowledge + compact prompt).
   // ---------------------------------------------------------------------------
 
   pi.on(
@@ -204,25 +222,39 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       _ctx,
     ): Promise<SessionBeforeCompactResult | undefined> => {
       try {
-        const summaries = distillation.loadForSession(
-          projectPath,
-          currentSessionID,
-        );
-        if (summaries.length === 0) return undefined;
+        const res = await fetch(`${gatewayBase}/v1/compact`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-lore-session-id": currentSessionID,
+          },
+          body: JSON.stringify({
+            project_path: projectPath,
+            previous_summary: event.preparation.previousSummary,
+          }),
+        });
 
-        const summaryText = summaries
-          .map((s) => s.observations)
-          .join("\n\n---\n\n");
+        if (!res.ok) {
+          // Gateway returned an error — fall back to Pi's default compaction.
+          const errBody = await res.text().catch(() => "");
+          console.error(
+            `pi: compaction endpoint returned ${res.status}: ${errBody}`,
+          );
+          return undefined;
+        }
+
+        const { summary } = (await res.json()) as { summary: string };
+        if (!summary) return undefined;
 
         return {
           compaction: {
-            summary: summaryText,
+            summary,
             firstKeptEntryId: event.preparation.firstKeptEntryId,
             tokensBefore: event.preparation.tokensBefore,
           },
         };
       } catch (err) {
-        log.error("pi: custom compaction failed, falling back to default:", err);
+        console.error("pi: custom compaction failed, falling back to default:", err);
         return undefined;
       }
     },

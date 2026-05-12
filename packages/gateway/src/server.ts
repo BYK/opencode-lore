@@ -5,6 +5,7 @@
  *   POST /v1/messages          → Anthropic protocol
  *   POST /v1/chat/completions  → OpenAI Chat Completions protocol
  *   POST /v1/responses         → OpenAI Responses API protocol
+ *   POST /v1/compact           → Explicit compaction summary (Pi plugin, etc.)
  *   GET  /v1/models            → Passthrough to upstream
  *   GET  /health               → Health check
  *
@@ -20,7 +21,7 @@ import {
   buildOpenAIResponsesResponse,
 } from "./translate/openai-responses";
 import { translateAnthropicStreamToResponses } from "./stream/openai-responses";
-import { handleRequest } from "./pipeline";
+import { handleRequest, handleCompactEndpoint } from "./pipeline";
 
 // ---------------------------------------------------------------------------
 // Version — best-effort from package.json, falls back gracefully
@@ -289,6 +290,11 @@ export function startServer(config: GatewayConfig): {
       // POST /v1/responses — OpenAI Responses API protocol
       if (method === "POST" && pathname === "/v1/responses") {
         return await handleOpenAIResponses(req, config);
+      }
+
+      // POST /v1/compact — explicit compaction summary (Pi plugin, etc.)
+      if (method === "POST" && pathname === "/v1/compact") {
+        return withCors(await handleCompactEndpoint(req, config));
       }
 
       // GET /v1/models — passthrough

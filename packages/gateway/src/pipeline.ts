@@ -1851,24 +1851,26 @@ function scheduleBackgroundWork(
 }
 
 // ---------------------------------------------------------------------------
-// Case 1: Compaction interception
+// Compaction summary generation — shared by HTTP interception and /v1/compact
 // ---------------------------------------------------------------------------
 
-async function handleCompaction(
-  req: GatewayRequest,
-  config: GatewayConfig,
-): Promise<Response> {
-  // Identify session
-  const projectPath = getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(projectPath, config);
-
-  const { sessionID } = await identifySession(req, projectPath);
-  const sessionState = getOrCreateSession(sessionID, projectPath);
+/**
+ * Generate a compaction summary for a session. Force-distills any pending
+ * messages, loads existing distillation summaries, builds a knowledge block,
+ * and calls the LLM to produce a compaction summary.
+ *
+ * This is the core logic shared by both:
+ *  - `handleCompaction` (HTTP-intercepted compaction from Claude Code / OpenCode)
+ *  - `handleCompactEndpoint` (explicit POST /v1/compact from Pi plugin)
+ */
+export async function generateCompactionSummary(opts: {
+  projectPath: string;
+  sessionID: string;
+  config: GatewayConfig;
+  previousSummary?: string;
+}): Promise<string> {
+  const { projectPath, sessionID, config, previousSummary } = opts;
   const llm = getLLMClient(config);
-
-  setSentryLightContext({ model: req.model, projectPath });
-
-  log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
 
   // 1. Force-distill all undistilled messages.
   // Mark urgent: true — client is blocking on the compaction response.
@@ -1886,10 +1888,7 @@ async function handleCompaction(
   // 2. Load distillation summaries
   const distillations = distillation.loadForSession(projectPath, sessionID);
 
-  // 3. Extract previous summary from the request (if any)
-  const previousSummary = extractPreviousSummary(req);
-
-  // 4. Build knowledge block
+  // 3. Build knowledge block
   const cfg = loreConfig();
   const entries = cfg.knowledge.enabled
     ? ltm.forProject(projectPath, cfg.crossProject)
@@ -1904,14 +1903,14 @@ async function handleCompaction(
       )
     : "";
 
-  // 5. Build the compact prompt
+  // 4. Build the compact prompt
   const compactPrompt = buildCompactPrompt({
     hasDistillations: distillations.length > 0,
     knowledge,
     previousSummary,
   });
 
-  // 6. Build context with distillation summaries
+  // 5. Build context with distillation summaries
   let context = "";
   if (distillations.length > 0) {
     context =
@@ -1926,7 +1925,7 @@ async function handleCompaction(
         .join("\n\n");
   }
 
-  // 7. Generate the compaction summary via LLM
+  // 6. Generate the compaction summary via LLM
   const userContent = context
     ? `${context}\n\n---\n\n${compactPrompt}`
     : compactPrompt;
@@ -1936,13 +1935,37 @@ async function handleCompaction(
   const summaryText = await llm.prompt(compactPrompt, userContent, {
     model: getWorkerModel(),
     workerID: "lore-compact",
-    urgent: true, // Client is blocking on this response
+    urgent: true,
     maxTokens: compactMaxTokens,
   });
 
-  const summary = summaryText ?? "(Compaction failed — no summary generated.)";
+  return summaryText ?? "(Compaction failed — no summary generated.)";
+}
 
-  // 8. Build and return the response
+// ---------------------------------------------------------------------------
+// Case 1: Compaction interception
+// ---------------------------------------------------------------------------
+
+async function handleCompaction(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): Promise<Response> {
+  const projectPath = getProjectPath(req.system, req.rawHeaders);
+  await initIfNeeded(projectPath, config);
+
+  const { sessionID } = await identifySession(req, projectPath);
+  const sessionState = getOrCreateSession(sessionID, projectPath);
+
+  setSentryLightContext({ model: req.model, projectPath });
+  log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
+
+  const summary = await generateCompactionSummary({
+    projectPath,
+    sessionID,
+    config,
+    previousSummary: extractPreviousSummary(req),
+  });
+
   const resp = buildCompactionResponse(sessionID, summary, req.model);
 
   // Clear the cached warmup body — post-compaction the client will send
@@ -1953,6 +1976,111 @@ async function handleCompaction(
     return streamHttpResponse(resp);
   }
   return nonStreamHttpResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// Case 1b: Explicit compaction endpoint (POST /v1/compact)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle an explicit compaction summary request from a plugin (e.g. Pi).
+ * Unlike `handleCompaction` which detects compaction from request patterns,
+ * this endpoint accepts a direct JSON body with project path and optional
+ * previous summary.
+ *
+ * The caller must include a session-identifying header (e.g. x-lore-session-id)
+ * so the gateway can resolve the correct internal session.
+ */
+export async function handleCompactEndpoint(
+  req: Request,
+  config: GatewayConfig,
+): Promise<Response> {
+  let body: { project_path?: string; previous_summary?: string };
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    return new Response(
+      JSON.stringify({ error: "invalid_request", message: "Invalid JSON body" }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  const projectPath = body.project_path;
+  if (!projectPath || typeof projectPath !== "string") {
+    return new Response(
+      JSON.stringify({ error: "invalid_request", message: "project_path is required" }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  await initIfNeeded(projectPath, config);
+
+  // Build a minimal GatewayRequest for session identification.
+  // Only rawHeaders and messages are used by identifySession().
+  const rawHeaders: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    rawHeaders[key] = value;
+  });
+
+  const minimalReq: GatewayRequest = {
+    protocol: "anthropic",
+    system: "",
+    messages: [],
+    tools: [],
+    model: "",
+    maxTokens: 0,
+    stream: false,
+    metadata: {},
+    rawHeaders,
+  };
+
+  const { sessionID, isNew } = await identifySession(minimalReq, projectPath);
+
+  if (isNew) {
+    // No prior session found — the caller's session header didn't match any
+    // existing session. This typically means no conversation turns have gone
+    // through the gateway yet, so there's nothing to compact.
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No active session found for the given headers. " +
+          "Ensure at least one conversation turn has been routed through the gateway.",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  log.info(`compact endpoint: generating summary for session ${sessionID.slice(0, 16)}`);
+
+  try {
+    const summary = await generateCompactionSummary({
+      projectPath,
+      sessionID,
+      config,
+      previousSummary: typeof body.previous_summary === "string"
+        ? body.previous_summary
+        : undefined,
+    });
+
+    // Clear the cached warmup body — post-compaction the client will send
+    // entirely different messages, so the pre-compaction body is stale.
+    const sessionState = sessions.get(sessionID);
+    if (sessionState) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+    }
+
+    return new Response(
+      JSON.stringify({ summary }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Compaction failed";
+    log.error("compact endpoint error:", err);
+    return new Response(
+      JSON.stringify({ error: "compaction_failed", message: msg }),
+      { status: 500, headers: { "content-type": "application/json" } },
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
