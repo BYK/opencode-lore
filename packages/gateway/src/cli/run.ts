@@ -122,11 +122,15 @@ export async function commandRun(
   opts: StartOptions,
   cmdArgs: string[],
 ): Promise<void> {
-  // 1. Start gateway
-  const { config, port, shutdown } = startGateway(opts);
+  // 1. Start gateway (or reuse an existing one)
+  const { config, port, owned, shutdown } = await startGateway(opts);
   const gatewayUrl = `http://${config.hosts[0]}:${port}`;
 
-  console.error(`[lore] Gateway listening on ${gatewayUrl}`);
+  if (owned) {
+    console.error(`[lore] Gateway listening on ${gatewayUrl}`);
+  } else {
+    console.error(`[lore] Reusing existing gateway at ${gatewayUrl}`);
+  }
 
   // 2. Resolve what to launch
   const target = await resolveLaunchTarget(gatewayUrl, cmdArgs);
@@ -136,15 +140,17 @@ export async function commandRun(
     console.error("[lore] Running in server-only mode. Point your agent at the gateway manually.");
     console.error(`[lore]   export ANTHROPIC_BASE_URL=${gatewayUrl}`);
 
-    let shuttingDown = false;
-    const onSignal = async () => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      await shutdown();
-      safeExit(0);
-    };
-    process.on("SIGINT", () => onSignal());
-    process.on("SIGTERM", () => onSignal());
+    if (owned) {
+      let shuttingDown = false;
+      const onSignal = async () => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        await shutdown();
+        safeExit(0);
+      };
+      process.on("SIGINT", () => onSignal());
+      process.on("SIGTERM", () => onSignal());
+    }
 
     // Block forever
     return new Promise(() => {});
@@ -162,10 +168,10 @@ export async function commandRun(
   process.on("SIGINT", () => forwardSignal("SIGINT"));
   process.on("SIGTERM", () => forwardSignal("SIGTERM"));
 
-  // Wait for child to exit, then tear down gateway
+  // Wait for child to exit, then tear down gateway (only if we own it)
   return new Promise<void>((resolve) => {
     child.on("exit", async (code, signal) => {
-      await shutdown();
+      if (owned) await shutdown();
       // Exit with the child's code (or 128 + signal number for signal deaths)
       if (signal) {
         const SIGNAL_CODES: Record<string, number> = {
@@ -178,7 +184,7 @@ export async function commandRun(
 
     child.on("error", async (err) => {
       console.error(`[lore] Failed to launch ${target.command}: ${err.message}`);
-      await shutdown();
+      if (owned) await shutdown();
       safeExit(1);
     });
   });
