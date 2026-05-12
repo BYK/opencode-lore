@@ -827,6 +827,50 @@ export function vectorSearchDistillations(
 }
 
 // ---------------------------------------------------------------------------
+// Vector search — all distillations (including archived)
+// ---------------------------------------------------------------------------
+
+export type DistillationVectorHit = {
+  id: string;
+  session_id: string;
+  similarity: number;
+};
+
+/**
+ * Search ALL distillations (including archived) with embeddings by cosine
+ * similarity, scoped to a single project. Returns session_id alongside
+ * similarity for cross-session counting.
+ *
+ * Unlike vectorSearchDistillations() which filters to non-archived only,
+ * this searches the full distillation archive — necessary for detecting
+ * repeated instructions across sessions where older distillations have
+ * been archived after meta-distillation.
+ *
+ * Pure brute-force — fine for ~200 entries per project.
+ */
+export function vectorSearchAllDistillations(
+  queryEmbedding: Float32Array,
+  projectId: string,
+  limit = 20,
+): DistillationVectorHit[] {
+  const rows = db()
+    .query(
+      "SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ?",
+    )
+    .all(projectId) as Array<{ id: string; session_id: string; embedding: Buffer }>;
+
+  const scored: DistillationVectorHit[] = [];
+  for (const row of rows) {
+    const vec = fromBlob(row.embedding);
+    const sim = cosineSimilarity(queryEmbedding, vec);
+    scored.push({ id: row.id, session_id: row.session_id, similarity: sim });
+  }
+
+  scored.sort((a, b) => b.similarity - a.similarity);
+  return scored.slice(0, limit);
+}
+
+// ---------------------------------------------------------------------------
 // Fire-and-forget embedding
 // ---------------------------------------------------------------------------
 

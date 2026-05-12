@@ -12,6 +12,13 @@
  *   - "prefers X for Y"
  *   - "going with X because Y"
  *
+ * Also matches process instruction patterns from distilled observations
+ * where the observer normalizes user assertions:
+ *   - "User stated always X"
+ *   - "User said never Y"
+ *   - "User stated make sure to X"
+ *   - "User stated don't forget to X"
+ *
  * Extracted entries participate in the normal curator cycle — the curator
  * can consolidate or remove them based on actual value. The extraction is
  * a cheap seed, not a permanent fixture.
@@ -75,6 +82,33 @@ const PATTERNS: PatternDef[] = [
       /(?:user |team |we )(?:always |usually |typically )(?:use|prefer|go with) (.+?)(?:\.|,|$)/gi,
     category: "preference",
     titleFn: (m) => `Typically uses ${m[1].trim()}`,
+  },
+
+  // Process instruction patterns — match distilled observations recording
+  // user assertions about workflow/process rules. The distillation observer
+  // normalizes user instructions into "User stated always X" phrasing.
+  // These require "stated/asserted/said" to avoid overlapping with the
+  // existing "typically uses" pattern above (which already handles
+  // "user always use/prefer/go with X").
+  {
+    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?always (.+?)(?:\.|,|$)/gi,
+    category: "preference",
+    titleFn: (m) => `Always ${m[1].trim()}`,
+  },
+  {
+    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?never (.+?)(?:\.|,|$)/gi,
+    category: "preference",
+    titleFn: (m) => `Never ${m[1].trim()}`,
+  },
+  {
+    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?make sure (?:to )?(.+?)(?:\.|,|$)/gi,
+    category: "preference",
+    titleFn: (m) => `Make sure to ${m[1].trim()}`,
+  },
+  {
+    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?(?:don't|do not) forget (?:to )?(.+?)(?:\.|,|$)/gi,
+    category: "preference",
+    titleFn: (m) => `Always ${m[1].trim()}`,
   },
 ];
 

@@ -3,6 +3,7 @@ import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
+import { detectAndFormat } from "./instruction-detect";
 import type { LLMClient } from "./types";
 
 /**
@@ -146,10 +147,25 @@ export async function run(input: {
     content: e.content,
   }));
 
-  const userContent = curatorUser({
+  const baseUserContent = curatorUser({
     messages: text,
     existing: existingForPrompt,
   });
+
+  // Detect repeated instructions across prior sessions and append as
+  // additional context for the curator. This is async (may embed candidates)
+  // but fast — typically <250ms for 5 candidates with local embeddings.
+  let crossSessionContext = "";
+  try {
+    crossSessionContext = await detectAndFormat({
+      projectPath: input.projectPath,
+      sessionID: input.sessionID,
+    });
+  } catch (err) {
+    log.info("instruction-detect failed (non-fatal):", err);
+  }
+
+  const userContent = baseUserContent + crossSessionContext;
   const model = input.model ?? cfg.model;
   const responseText = await input.llm.prompt(
     CURATOR_SYSTEM,
