@@ -811,7 +811,8 @@ async function distillSegment(input: {
 
   // Fire-and-forget: extract decision/preference patterns → knowledge entries
   if (config().knowledge.enabled) {
-    for (const pat of extractPatterns(result.observations)) {
+    const patterns = extractPatterns(result.observations);
+    for (const pat of patterns) {
       try {
         ltm.create({
           projectPath: input.projectPath,
@@ -824,6 +825,9 @@ async function distillSegment(input: {
       } catch {
         // Dedup guard in ltm.create() handles duplicates — swallow errors
       }
+    }
+    if (patterns.length > 0) {
+      log.info(`pattern extraction: ${patterns.length} entries from distillation`);
     }
   }
 
@@ -928,7 +932,8 @@ export async function metaDistill(input: {
 
   // Fire-and-forget: extract decision/preference patterns → knowledge entries
   if (config().knowledge.enabled) {
-    for (const pat of extractPatterns(result.observations)) {
+    const patterns = extractPatterns(result.observations);
+    for (const pat of patterns) {
       try {
         ltm.create({
           projectPath: input.projectPath,
@@ -941,6 +946,9 @@ export async function metaDistill(input: {
       } catch {
         // Dedup guard in ltm.create() handles duplicates — swallow errors
       }
+    }
+    if (patterns.length > 0) {
+      log.info(`pattern extraction: ${patterns.length} entries from meta-distillation`);
     }
   }
 

@@ -430,3 +430,44 @@ export function emitSessionCostMetrics(sessionID: string): void {
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Curation metrics
+// ---------------------------------------------------------------------------
+
+/**
+ * Emit curation result metrics to Sentry.
+ *
+ * Called after `curator.run()` or `curator.consolidate()` completes with
+ * at least one operation. Tracks create/update/delete counts by trigger
+ * source (in-flight background work vs. idle scheduler).
+ */
+export function emitCurationMetrics(result: {
+  created: number;
+  updated: number;
+  deleted: number;
+  trigger: "in-flight" | "idle" | "consolidation";
+}): void {
+  if (!Sentry.isInitialized()) return;
+  const total = result.created + result.updated + result.deleted;
+  if (total === 0) return;
+
+  Sentry.metrics.distribution("lore.curator_ops", total, {
+    attributes: { trigger: result.trigger },
+  });
+  if (result.created > 0) {
+    Sentry.metrics.distribution("lore.curator_created", result.created, {
+      attributes: { trigger: result.trigger },
+    });
+  }
+  if (result.updated > 0) {
+    Sentry.metrics.distribution("lore.curator_updated", result.updated, {
+      attributes: { trigger: result.trigger },
+    });
+  }
+  if (result.deleted > 0) {
+    Sentry.metrics.distribution("lore.curator_deleted", result.deleted, {
+      attributes: { trigger: result.trigger },
+    });
+  }
+}
