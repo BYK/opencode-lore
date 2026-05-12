@@ -183,12 +183,10 @@ export function setUpstreamInterceptor(
  *
  * Intended for test harnesses only — allows multiple independent gateway
  * instances to run sequentially in the same Bun process without leaking
- * session state, initialization flags, or cached project paths across test
- * suites.
+ * session state or initialization flags across test suites.
  */
 export async function resetPipelineState(): Promise<void> {
   initialized = false;
-  cachedProjectPath = null;
   sessions.clear();
   ltmSessionCache.clear();
   ltmPinnedText.clear();
@@ -209,9 +207,6 @@ export async function resetPipelineState(): Promise<void> {
   lastSeenSessionModel = null;
   resetWorkerModelState();
 }
-
-/** Cached project path from the first request that carried a system prompt. */
-let cachedProjectPath: string | null = null;
 
 /** Per-session state tracked across requests. */
 const sessions = new Map<string, SessionState>();
@@ -508,7 +503,6 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
   await load(projectPath);
   ensureProject(projectPath);
   initialized = true;
-  cachedProjectPath = projectPath;
 
   // Import knowledge from .lore.md at startup (picks up user/git edits
   // since last session). Falls back to agents file for backward compat.
@@ -554,10 +548,7 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
   // session whose lastRequestTime exceeds the idle timeout.
   if (config && !stopIdleScheduler) {
     const llm = getLLMClient(config);
-    const idleHandler = buildIdleWorkHandler(
-      projectPath,
-      llm,
-    );
+    const idleHandler = buildIdleWorkHandler(llm);
     stopIdleScheduler = startIdleScheduler(config, sessions, idleHandler);
   }
 
@@ -1594,7 +1585,7 @@ async function handleCompaction(
   config: GatewayConfig,
 ): Promise<Response> {
   // Identify session
-  const projectPath = cachedProjectPath ?? getProjectPath(req.system, req.rawHeaders);
+  const projectPath = getProjectPath(req.system, req.rawHeaders);
   await initIfNeeded(projectPath, config);
 
   const { sessionID } = await identifySession(req, projectPath);
