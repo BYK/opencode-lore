@@ -70,6 +70,9 @@ const GATEWAY_PROVIDERS = [
   "openai",
 ];
 
+/** Default ports to probe when looking for a running gateway (must match gateway defaults). */
+const KNOWN_GATEWAY_PORTS = [3207, 5673];
+
 /**
  * Check if the Lore gateway is reachable at the given base URL.
  * Short timeout so this doesn't delay Pi startup noticeably.
@@ -87,37 +90,68 @@ async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean>
 }
 
 /**
+ * Resolve the gateway URL by probing known ports and reading the port file.
+ *
+ * Order: LORE_GATEWAY_URL env var → port file → known default ports (3207, 5673).
+ * Returns the URL of a running gateway, or null if none found.
+ */
+async function resolveGatewayUrl(): Promise<string | null> {
+  // 1. Explicit env var — probe it to verify it's actually reachable.
+  if (process.env.LORE_GATEWAY_URL) {
+    const url = process.env.LORE_GATEWAY_URL.replace(/\/$/, "");
+    if (await probeGateway(url)) return url;
+    // env var set but gateway unreachable — fall through to discovery
+  }
+
+  // 2. Build probe list: port file first (handles random port), then known defaults.
+  const probePorts = new Set<number>();
+  try {
+    const gw = "@loreai/gateway";
+    const { readPortFile } = await import(/* webpackIgnore: true */ gw);
+    const portfilePort = readPortFile();
+    if (portfilePort) probePorts.add(portfilePort);
+  } catch {
+    /* gateway package not available — skip port file */
+  }
+  for (const p of KNOWN_GATEWAY_PORTS) probePorts.add(p);
+
+  // 3. Probe each port.
+  for (const port of probePorts) {
+    const url = `http://127.0.0.1:${port}`;
+    if (await probeGateway(url)) return url;
+  }
+
+  return null;
+}
+
+/**
  * Start the gateway server in-process by importing @loreai/gateway as a library.
  * The published CJS bundle includes Node.js polyfills that shim Bun.serve()
  * to node:http.createServer(), so this works under both Bun and Node.js.
+ *
+ * Uses startGateway() which handles the full port fallback chain
+ * (3207 → 5673 → random) and port file management automatically.
+ * Returns the URL of the started gateway, or null on failure.
  */
-async function startInProcess(gatewayBase: string): Promise<boolean> {
+async function startInProcess(): Promise<string | null> {
   try {
     // Dynamic import — the gateway may be resolved from src (workspace) or
     // dist/index.cjs (npm). Use a variable to prevent tsc from resolving the
     // module at compile time (the .d.cts only exists after building).
     const gw = "@loreai/gateway";
-    const { loadConfig, startServer } = await import(/* webpackIgnore: true */ gw);
-    const config = loadConfig();
+    const { startGateway } = await import(/* webpackIgnore: true */ gw);
+    const handle = await startGateway({ quiet: true });
+    const url = `http://127.0.0.1:${handle.port}`;
 
-    // Parse the expected port from gatewayBase so the server binds there.
-    const url = new URL(gatewayBase);
-    if (url.port) config.port = Number(url.port);
+    if (!handle.owned) {
+      console.info(`pi: reusing existing gateway at ${url}`);
+    }
 
-    startServer(config);
-    // startServer is synchronous — if it didn't throw, the server is
-    // listening. Verify with a quick health check.
-    return await probeGateway(gatewayBase, 1000);
+    return url;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // Port-in-use means something is already on that port but our probe
-    // didn't detect it (race). Treat as success — the proxy is available.
-    // Match both Node's EADDRINUSE and Bun's "Is port N in use?" format.
-    if (/EADDRINUSE/i.test(msg) || /port\b.*\bin use/i.test(msg)) {
-      return await probeGateway(gatewayBase, 1000);
-    }
     console.info("pi: failed to start gateway in-process:", msg);
-    return false;
+    return null;
   }
 }
 
@@ -137,22 +171,26 @@ function sessionIDFor(sessionFile: string | undefined): string {
  * redirects provider URLs and registers compaction override.
  */
 export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
-  const gatewayBase =
-    (process.env.LORE_GATEWAY_URL ?? "http://127.0.0.1:6969").replace(/\/$/, "");
-
+  let gatewayBase = "";
   let gatewayActive = false;
   const inTestEnv =
     process.env.NODE_ENV === "test" ||
     process.env.LORE_GATEWAY_MODE === "test";
 
   if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
-    if (await probeGateway(gatewayBase)) {
-      console.info(`pi: gateway detected at ${gatewayBase}`);
+    // Try to find a running gateway first (probes port file + known ports).
+    const existingUrl = await resolveGatewayUrl();
+    if (existingUrl) {
+      console.info(`pi: gateway detected at ${existingUrl}`);
+      gatewayBase = existingUrl;
       gatewayActive = true;
     } else {
-      console.info(`pi: starting gateway in-process at ${gatewayBase}…`);
-      if (await startInProcess(gatewayBase)) {
-        console.info(`pi: gateway started in-process at ${gatewayBase}`);
+      // No running gateway — start one in-process (handles fallback chain).
+      console.info("pi: starting gateway in-process…");
+      const startedUrl = await startInProcess();
+      if (startedUrl) {
+        console.info(`pi: gateway started in-process at ${startedUrl}`);
+        gatewayBase = startedUrl;
         gatewayActive = true;
       }
     }

@@ -16,10 +16,13 @@ import "../instrument";
 // Library API
 // ---------------------------------------------------------------------------
 
-export { loadConfig } from "./config";
+export { loadConfig, DEFAULT_PORTS, DEFAULT_PORT } from "./config";
 export type { GatewayConfig } from "./config";
 export { startServer } from "./server";
 export { handleRequest, resetPipelineState } from "./pipeline";
+export { readPortFile } from "./portfile";
+export { startGateway, probeGateway } from "./cli/start";
+export type { GatewayHandle } from "./cli/start";
 
 // ---------------------------------------------------------------------------
 // CLI entry — called by dist/bin.cjs or `bun run src/index.ts`

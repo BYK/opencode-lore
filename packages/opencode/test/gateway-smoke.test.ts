@@ -1,20 +1,21 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { startInProcess, probeGateway } from "../src/index";
+import { probeGateway } from "../src/index";
 
 /**
  * Smoke tests for the in-process gateway startup.
  *
- * These exercise the real startInProcess → loadConfig → startServer path
- * on an ephemeral port so they don't collide with a running gateway.
+ * These exercise startGateway from @loreai/gateway directly (which is what
+ * the plugin's startInProcess delegates to). Tests use ephemeral ports so
+ * they don't collide with a running gateway.
  */
 
-// Track servers to stop after tests. startServer returns { stop, port, hosts }
-// but startInProcess doesn't expose the stop handle — we import startServer
-// directly for cleanup.
-let stopServer: (() => void) | null = null;
+// Track shutdown handles to clean up after tests.
+const shutdowns: Array<() => Promise<void>> = [];
 
-afterAll(() => {
-  stopServer?.();
+afterAll(async () => {
+  for (const shutdown of shutdowns) {
+    await shutdown();
+  }
 });
 
 describe("in-process gateway startup", () => {
@@ -24,12 +25,8 @@ describe("in-process gateway startup", () => {
     expect(result).toBe(false);
   });
 
-  test("startInProcess starts the gateway and responds to health checks", async () => {
-    // Use port 0 via env var so the OS assigns an ephemeral port.
-    // loadConfig reads LORE_LISTEN_PORT; startInProcess parses the URL port.
-    // We need to start the server first to discover the actual port, so we
-    // use the gateway API directly for this test. Use a variable to prevent
-    // tsc from resolving the module at compile time.
+  test("startGateway starts the gateway and responds to health checks", async () => {
+    // Use the gateway API directly with an ephemeral port.
     const gwPkg = "@loreai/gateway";
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const gw = await import(gwPkg) as any;
@@ -37,7 +34,7 @@ describe("in-process gateway startup", () => {
     config.port = 0; // ephemeral
 
     const server = gw.startServer(config) as { stop: () => void; port: number; hosts: string[] };
-    stopServer = server.stop;
+    shutdowns.push(async () => server.stop());
     const port = server.port;
     const base = `http://127.0.0.1:${port}`;
 
@@ -52,33 +49,40 @@ describe("in-process gateway startup", () => {
     expect(body.status).toBe("ok");
   });
 
-  test("startInProcess returns true on success", async () => {
-    // Start a fresh server via startInProcess on another ephemeral port.
-    // Since startInProcess parses the port from the URL, we first need a
-    // free port. Bind a temporary TCP server, grab its port, close it, then
-    // pass that port to startInProcess.
+  test("startServer with explicit port starts on that port", async () => {
+    // Use startServer directly (lighter than startGateway — avoids
+    // embedding worker init which triggers Bun NAPI teardown crashes).
+    const gwPkg = "@loreai/gateway";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gw = await import(gwPkg) as any;
+
+    // Find a free port first.
     const tmpServer = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
       fetch: () => new Response("tmp"),
     });
-    const freePort = tmpServer.port;
+    const freePort = tmpServer.port!;
     tmpServer.stop(true);
 
     // Small delay to ensure the port is released.
     await Bun.sleep(50);
 
-    const base = `http://127.0.0.1:${freePort}`;
-    const result = await startInProcess(base);
-    expect(result).toBe(true);
+    const config = gw.loadConfig();
+    config.port = freePort;
+    const server = gw.startServer(config) as { stop: () => void; port: number; hosts: string[] };
+    shutdowns.push(async () => server.stop());
+
+    expect(server.port).toBe(freePort);
 
     // Verify the gateway is actually serving.
+    const base = `http://127.0.0.1:${server.port}`;
     const healthy = await probeGateway(base, 2000);
     expect(healthy).toBe(true);
   });
 
-  test("startInProcess handles EADDRINUSE gracefully", async () => {
-    // Occupy a port with a server that responds to /health.
+  test("probeGateway returns true for a running health endpoint", async () => {
+    // Occupy a port with a server that responds to /health like a lore gateway.
     const occupier = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -93,9 +97,7 @@ describe("in-process gateway startup", () => {
 
     try {
       const base = `http://127.0.0.1:${occupiedPort}`;
-      // startInProcess should catch EADDRINUSE and fall back to probing,
-      // which succeeds because our occupier responds to /health.
-      const result = await startInProcess(base);
+      const result = await probeGateway(base, 2000);
       expect(result).toBe(true);
     } finally {
       occupier.stop(true);

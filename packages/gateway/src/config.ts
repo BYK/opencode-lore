@@ -4,12 +4,29 @@
  */
 
 // ---------------------------------------------------------------------------
+// Port defaults
+// ---------------------------------------------------------------------------
+
+/**
+ * Default port preference order when LORE_LISTEN_PORT is not set.
+ *
+ * - 3207: flip upside-down → 7=L, 0=O, 2=R, 3=E → LORE (calculator-word)
+ * - 5673: T9 phone keypad → 5=L, 6=O, 7=R, 3=E → LORE
+ */
+export const DEFAULT_PORTS = [3207, 5673] as const;
+
+/** The primary default port (first in the fallback chain). */
+export const DEFAULT_PORT = DEFAULT_PORTS[0];
+
+// ---------------------------------------------------------------------------
 // Config shape
 // ---------------------------------------------------------------------------
 
 export interface GatewayConfig {
-  /** Port to listen on. Default: 6969. Env: LORE_LISTEN_PORT */
+  /** Port to listen on. Default: 3207. Env: LORE_LISTEN_PORT */
   port: number;
+  /** True when the port was explicitly set via LORE_LISTEN_PORT or --port. */
+  portExplicit: boolean;
   /**
    * Hosts to bind to. Default: ["127.0.0.1"].
    * Env: LORE_LISTEN_HOST (comma-separated for multiple addresses).
@@ -34,7 +51,8 @@ export interface GatewayConfig {
 export function loadConfig(): GatewayConfig {
   const env = process.env;
   return {
-    port: parsePort(env.LORE_LISTEN_PORT, 6969),
+    port: parsePort(env.LORE_LISTEN_PORT, DEFAULT_PORT),
+    portExplicit: !!env.LORE_LISTEN_PORT,
     hosts: parseHosts(env.LORE_LISTEN_HOST),
     upstreamAnthropic: trimTrailingSlash(
       env.LORE_UPSTREAM_ANTHROPIC || "https://api.anthropic.com",

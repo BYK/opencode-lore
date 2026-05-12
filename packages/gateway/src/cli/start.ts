@@ -3,9 +3,10 @@
  *
  * Extracted from the old top-level index.ts boot logic.
  */
-import { loadConfig, type GatewayConfig } from "../config";
+import { loadConfig, DEFAULT_PORTS, type GatewayConfig } from "../config";
 import { startServer } from "../server";
 import { resetPipelineState } from "../pipeline";
+import { writePortFile, removePortFile } from "../portfile";
 import { embedding } from "@loreai/core";
 import { safeExit } from "./exit";
 
@@ -52,56 +53,101 @@ export async function probeGateway(
  *
  * Merges CLI options on top of env-var config (CLI takes precedence).
  *
- * If the port is already in use by another lore gateway (verified via
- * `/health` probe), returns a handle with `owned: false` so the caller
- * can reuse the existing instance instead of failing.
+ * When the port is not explicitly set (no `--port` / `LORE_LISTEN_PORT`),
+ * the server tries a fallback chain: 3207 → 5673 → OS-assigned random port.
+ * At each step, if the port is occupied by an existing lore gateway
+ * (verified via `/health` probe), returns a handle with `owned: false`
+ * so the caller can reuse the existing instance.
  */
 export async function startGateway(opts: StartOptions = {}): Promise<GatewayHandle> {
   const config = loadConfig();
 
   // CLI overrides
-  if (opts.port !== undefined) config.port = opts.port;
+  if (opts.port !== undefined) {
+    config.port = opts.port;
+    config.portExplicit = true;
+  }
   if (opts.hosts?.length) config.hosts = opts.hosts;
   if (opts.debug !== undefined) config.debug = opts.debug;
 
-  try {
-    const server = startServer(config);
-    const actualPort = server.port;
+  // Build the list of ports to try.
+  // Explicit port: single attempt, fail hard on conflict.
+  // Default: 3207 → 5673 → 0 (OS-assigned random).
+  const portsToTry: number[] = config.portExplicit
+    ? [config.port]
+    : [...DEFAULT_PORTS, 0];
 
-    const shutdown = async () => {
-      console.error("[lore] Shutting down…");
-      server.stop();
-      await resetPipelineState();
-      // Shut down the embedding worker thread gracefully. Done after
-      // resetPipelineState (which clears sessions/timers) but before
-      // safeExit — gives the worker time to exit cleanly via its
-      // "shutdown" message handler rather than being killed by _exit().
-      await embedding.resetProvider();
-    };
+  for (const candidatePort of portsToTry) {
+    config.port = candidatePort;
+    try {
+      const server = startServer(config);
+      const actualPort = server.port;
 
-    return { config, port: actualPort, owned: true, shutdown };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/port\b.*\bin use/i.test(msg) || /EADDRINUSE/i.test(msg)) {
-      // Port is occupied — check if it's a lore gateway we can reuse
-      const probeUrl = `http://${config.hosts[0]}:${config.port}`;
-      const alive = await probeGateway(probeUrl);
-      if (alive) {
-        return {
-          config,
-          port: config.port,
-          owned: false,
-          shutdown: async () => {},
-        };
+      // Write port file so plugins can discover us (even on random port).
+      writePortFile(actualPort);
+
+      const shutdown = async () => {
+        console.error("[lore] Shutting down…");
+        server.stop();
+        removePortFile(actualPort);
+        await resetPipelineState();
+        // Shut down the embedding worker thread gracefully. Done after
+        // resetPipelineState (which clears sessions/timers) but before
+        // safeExit — gives the worker time to exit cleanly via its
+        // "shutdown" message handler rather than being killed by _exit().
+        await embedding.resetProvider();
+      };
+
+      if (candidatePort === 0) {
+        console.error(
+          `[lore] Preferred ports (${DEFAULT_PORTS.join(", ")}) were unavailable; using port ${actualPort}`,
+        );
       }
-      // Port is taken by something else — not a lore gateway
-      throw new Error(
-        `Port ${config.port} is already in use by another process (not a lore gateway). ` +
-          `Use --port / LORE_LISTEN_PORT to pick a different port.`,
-      );
+
+      return { config, port: actualPort, owned: true, shutdown };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!(/port\b.*\bin use/i.test(msg) || /EADDRINUSE/i.test(msg))) {
+        throw e; // Not a port conflict — don't retry
+      }
+
+      // Port is occupied — check if it's a lore gateway we can reuse.
+      // (Skip probe for port 0 — it can't EADDRINUSE.)
+      if (candidatePort !== 0) {
+        const probeUrl = `http://${config.hosts[0]}:${candidatePort}`;
+        const alive = await probeGateway(probeUrl);
+        if (alive) {
+          return {
+            config,
+            port: candidatePort,
+            owned: false,
+            shutdown: async () => {},
+          };
+        }
+      }
+
+      // Port is taken by something else — try next candidate if available.
+      if (config.portExplicit) {
+        throw new Error(
+          `Port ${candidatePort} is already in use by another process (not a lore gateway). ` +
+            `Use --port / LORE_LISTEN_PORT to pick a different port.`,
+        );
+      }
+
+      // Log the fallback (not for port 0 since that always succeeds).
+      const nextIdx = portsToTry.indexOf(candidatePort) + 1;
+      if (nextIdx < portsToTry.length) {
+        const nextPort = portsToTry[nextIdx];
+        const nextLabel = nextPort === 0 ? "random port" : String(nextPort);
+        console.error(
+          `[lore] Port ${candidatePort} in use (not a lore gateway), trying ${nextLabel}…`,
+        );
+      }
     }
-    throw e;
   }
+
+  // Unreachable — port 0 always succeeds or throws a non-EADDRINUSE error.
+  throw new Error("Failed to bind to any port.");
 }
 
 /**

@@ -287,7 +287,7 @@ lore recall "migration error" --project /path/to/project --json
 
 ### Web dashboard
 
-When the gateway is running, visit **http://localhost:6969/ui** for a web-based dashboard that lets you:
+When the gateway is running, visit **http://localhost:3207/ui** for a web-based dashboard that lets you:
 
 - Browse all projects, their knowledge entries, sessions, and distillations
 - View full detail for any entry

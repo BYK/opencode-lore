@@ -15,7 +15,7 @@
  * Environment variables (set before running):
  *   ANTHROPIC_API_KEY   — required; forwarded to upstream Anthropic
  *   LORE_DB_PATH        — override Lore's SQLite DB path (optional)
- *   LORE_LISTEN_PORT    — gateway listen port (default 6969)
+ *   LORE_LISTEN_PORT    — gateway listen port (default 3207)
  *   LORE_LISTEN_HOST    — gateway listen host (default 127.0.0.1)
  *   LORE_UPSTREAM_ANTHROPIC — upstream URL (default https://api.anthropic.com)
  *   LORE_DEBUG          — set to "1" to enable request logging
