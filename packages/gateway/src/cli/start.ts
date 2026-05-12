@@ -116,6 +116,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
   if (!owned) {
     // Another lore gateway is already running — nothing to do.
     console.log(`[lore] Gateway already running on ${addrs.join(", ")}`);
+    console.log(`[lore] Dashboard: ${addrs[0]}/ui`);
     if (!opts.quiet) {
       console.log("[lore] Use that instance, or stop it first to start a new one.");
     }
@@ -123,6 +124,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
   }
 
   console.log(`[lore] Gateway listening on ${addrs.join(", ")}`);
+  console.log(`[lore] Dashboard: ${addrs[0]}/ui`);
 
   if (!opts.quiet) {
     const localAddr = addrs[0];

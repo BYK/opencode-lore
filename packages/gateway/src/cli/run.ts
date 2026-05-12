@@ -132,6 +132,7 @@ export async function commandRun(
   } else {
     console.log(`[lore] Reusing existing gateway at ${gatewayUrl}`);
   }
+  console.log(`[lore] Dashboard: ${gatewayUrl}/ui`);
 
   // 2. Resolve what to launch
   const target = await resolveLaunchTarget(gatewayUrl, cmdArgs);

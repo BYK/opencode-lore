@@ -172,6 +172,7 @@ export const LorePlugin: Plugin = async (ctx) => {
 
     if (gatewayActive) {
       process.stderr.write(`[lore] gateway mode — routing through ${gatewayBase}\n`);
+      process.stderr.write(`[lore] dashboard: ${gatewayBase}/ui\n`);
     }
 
     processInitDone = true;

@@ -32,6 +32,11 @@ const OPTIONS = {
   debug: { type: "boolean" as const, short: "d" },
   version: { type: "boolean" as const, short: "v" },
   help: { type: "boolean" as const, short: "h" },
+  // `lore logs` flags
+  follow: { type: "boolean" as const, short: "f" },
+  n: { type: "string" as const },
+  lines: { type: "string" as const },
+  path: { type: "boolean" as const },
   // Hidden diagnostic: prints the vendored-fastembed registration set by
   // the binary build wrapper (or "none" in npm mode). Used by CI to verify
   // the embed-asset pipeline actually wired up. Not in help text.
@@ -183,6 +188,12 @@ export async function _cli(): Promise<void> {
       case "recall": {
         const { commandRecall } = await import("./recall-cmd");
         await commandRecall(rest, values as Record<string, unknown>);
+        break;
+      }
+
+      case "logs": {
+        const { commandLogs } = await import("./logs");
+        await commandLogs(rest, values as Record<string, unknown>);
         break;
       }
 
