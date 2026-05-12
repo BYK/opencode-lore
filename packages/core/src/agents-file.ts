@@ -559,6 +559,10 @@ export function shouldImportLoreFile(projectPath: string): boolean {
 /**
  * Import knowledge entries from `.lore.md` into the local DB.
  * Parses the full file content (no section markers to split on).
+ *
+ * After a successful import, updates the file cache so that
+ * `shouldImportLoreFile()` fast-paths on the next check — the file
+ * content hasn't changed, only the DB was updated to match it.
  */
 export function importLoreFile(projectPath: string): void {
   const fp = join(projectPath, LORE_FILE);
@@ -569,4 +573,14 @@ export function importLoreFile(projectPath: string): void {
   if (!fileEntries.length) return;
 
   _importEntries(fileEntries, projectPath);
+
+  // Update cache: DB now matches the file, so shouldImportLoreFile() can
+  // fast-path on the next check.  We re-stat after import because the file
+  // hasn't changed — only the DB was updated to match it.
+  try {
+    const { mtimeMs } = statSync(fp);
+    setCache(fp, { mtimeMs, hash: hashSection(fileContent) });
+  } catch {
+    // stat failure is non-fatal — worst case we re-import next time
+  }
 }
