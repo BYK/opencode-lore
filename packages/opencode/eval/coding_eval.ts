@@ -1,6 +1,6 @@
 import { parseArgs } from "util";
 import { Database } from "bun:sqlite";
-import { DISTILLATION_SYSTEM, distillationUser } from "@loreai/core";
+import { DISTILLATION_SYSTEM, distillationUser, dbPath } from "@loreai/core";
 
 const BASE_URL = "http://localhost:4096";
 const MODEL = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
@@ -30,9 +30,7 @@ type Question = {
 };
 
 // --- DB access ---
-const DB_PATH =
-  process.env.NUUM_DB ??
-  `${process.env.HOME}/.local/share/opencode-lore/lore.db`;
+const DB_PATH = dbPath();
 
 function getTemporalMessages(sessionID: string): Array<{
   role: string;

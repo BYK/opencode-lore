@@ -34,7 +34,7 @@ If none of the above are set and fastembed isn't available, recall falls back to
 
 ## Companion packages
 
-Lore ships as three packages sharing the same SQLite database at `~/.local/share/opencode-lore/lore.db`:
+Lore ships as three packages sharing the same SQLite database at `~/.local/share/lore/lore.db`:
 
 - **`@loreai/opencode`** (you are here) — OpenCode plugin
 - [`@loreai/pi`](https://www.npmjs.com/package/@loreai/pi) — [Pi coding-agent](https://github.com/badlogic/pi-mono) extension

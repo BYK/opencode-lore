@@ -10,7 +10,7 @@ Lore is a **three-tier memory architecture** for AI coding agents. It intercepts
 
 **Runtime:** Bun (development/tests) and Node.js >= 22.5 (production npm bundles).
 **Language:** TypeScript (monorepo with `bun workspaces`).
-**Database:** SQLite with WAL mode, FTS5 full-text search. Stored at `~/.local/share/opencode-lore/lore.db`.
+**Database:** SQLite with WAL mode, FTS5 full-text search. Stored at `~/.local/share/lore/lore.db`.
 
 ## Monorepo Structure
 
