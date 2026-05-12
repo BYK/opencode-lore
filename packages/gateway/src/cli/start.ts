@@ -136,6 +136,9 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log(`  export ANTHROPIC_BASE_URL=${localAddr}`);
     console.log(`  export OPENAI_BASE_URL=${localAddr}/v1`);
     console.log("");
+    console.log("[lore] IMPORTANT: When using Claude Code, also set:");
+    console.log("  export DISABLE_AUTO_COMPACT=1");
+    console.log("");
     console.log("[lore] Configuration (environment variables):");
     console.log(`  LORE_LISTEN_PORT        Port to listen on (current: ${port})`);
     console.log(`  LORE_LISTEN_HOST        Hosts to bind to, comma-separated (current: ${config.hosts.join(",")})`);
@@ -144,9 +147,6 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log(`  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`);
     console.log(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
     console.log(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
-    console.log("");
-    console.log("[lore] When using Claude Code, also set:");
-    console.log("  export DISABLE_AUTO_COMPACT=1");
   }
   // Block until signal
   let shuttingDown = false;

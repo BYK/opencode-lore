@@ -17,6 +17,7 @@ import {
   closeSync,
 } from "node:fs";
 import { log } from "@loreai/core";
+import { safeExit } from "./exit";
 
 // ---------------------------------------------------------------------------
 // Command entry point
@@ -95,7 +96,7 @@ export async function commandLogs(
   // Clean up on signal
   const cleanup = () => {
     unwatchFile(path);
-    process.exit(0);
+    safeExit(0);
   };
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);

@@ -169,8 +169,15 @@ export function getProjectPath(
   const inferred = inferProjectPath(systemPrompt);
   if (inferred) return inferred;
 
-  // 3. Fall back to gateway's own cwd
-  return process.cwd();
+  // 3. Fall back to gateway's own cwd — log a warning since this may
+  // misattribute data when the gateway runs as a hosted service.
+  const cwd = process.cwd();
+  console.error(
+    `[lore] warning: project path falling back to process.cwd() (${cwd}). ` +
+    `Data may be misattributed. Set X-Lore-Project header or include a working ` +
+    `directory in the system prompt to fix this.`,
+  );
+  return cwd;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +187,12 @@ export function getProjectPath(
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const n = Number.parseInt(value, 10);
-  if (Number.isNaN(n) || n < 0 || n > 65535) return fallback;
+  if (Number.isNaN(n) || n < 0 || n > 65535) {
+    console.error(
+      `[lore] warning: invalid port "${value}", using default ${fallback}`,
+    );
+    return fallback;
+  }
   return n;
 }
 
@@ -190,7 +202,12 @@ function parsePositiveInt(
 ): number {
   if (!value) return fallback;
   const n = Number.parseInt(value, 10);
-  if (Number.isNaN(n) || n <= 0) return fallback;
+  if (Number.isNaN(n) || n <= 0) {
+    console.error(
+      `[lore] warning: invalid value "${value}", using default ${fallback}`,
+    );
+    return fallback;
+  }
   return n;
 }
 

@@ -935,6 +935,7 @@ function buildStreamingResponse(
               recallBlock,
               recallContext.sessionState.projectPath,
               recallContext.sessionState.sessionID,
+              getLLMClient(recallContext.config),
             );
 
             const scope = input.scope ?? "all";
@@ -1007,7 +1008,10 @@ function buildStreamingResponse(
                 followUp,
                 recallContext.config,
                 undefined,
-                recallContext.cacheOptions,
+                // Disable conversation caching on follow-up: the appended
+                // tool_result makes the prefix diverge from the next real turn,
+                // so the cache write would be wasted money.
+                { ...recallContext.cacheOptions, cacheConversation: false },
               ));
             } catch (fetchErr) {
               log.error(
@@ -1813,9 +1817,9 @@ function scheduleBackgroundWork(
     )
       .then((result) => {
         sessionState.turnsSinceCuration = 0;
-        // Invalidate LTM cache after curation changes knowledge entries
-        ltmSessionCache.delete(sessionID);
         if (result.created > 0 || result.updated > 0 || result.deleted > 0) {
+          // Invalidate LTM cache only when curation actually changed entries
+          ltmSessionCache.delete(sessionID);
           log.info(
             `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
           );
@@ -1920,6 +1924,10 @@ async function handleCompaction(
 
   // 8. Build and return the response
   const resp = buildCompactionResponse(sessionID, summary, req.model);
+
+  // Clear the cached warmup body — post-compaction the client will send
+  // entirely different messages, so the pre-compaction body is stale.
+  sessionState.cacheAnalytics.lastRequestBody = null;
 
   if (req.stream) {
     return streamHttpResponse(resp);
@@ -2339,17 +2347,38 @@ async function handleConversationTurn(
     if (window && window.length >= 5) {
       const coldFraction = window.filter(Boolean).length / window.length;
       if (coldFraction > 0.4 && resolvedConversationTTL === "5m") {
+        // Upgrade immediately — switching to 1h is always beneficial
         resolvedConversationTTL = "1h";
+        sessionState.ttlDowngradeStreak = 0;
         log.info(
           `auto-upgrade conversation TTL to 1h: session=${sessionID.slice(0, 16)}` +
           ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
         );
       } else if (coldFraction < 0.2 && resolvedConversationTTL === "1h") {
-        resolvedConversationTTL = "5m";
-        log.info(
-          `auto-downgrade conversation TTL to 5m: session=${sessionID.slice(0, 16)}` +
-          ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
-        );
+        // Hysteresis: require 3 consecutive qualifying turns before downgrading.
+        // A single fluctuation below 20% shouldn't trigger a downgrade because
+        // the TTL change modifies the cached bytes AND drops the idle threshold
+        // from 60min to 5min, causing a compounding cache bust.
+        const streak = (sessionState.ttlDowngradeStreak ?? 0) + 1;
+        sessionState.ttlDowngradeStreak = streak;
+        if (streak >= 3) {
+          resolvedConversationTTL = "5m";
+          sessionState.ttlDowngradeStreak = 0;
+          log.info(
+            `auto-downgrade conversation TTL to 5m: session=${sessionID.slice(0, 16)}` +
+            ` coldFraction=${(coldFraction * 100).toFixed(0)}% streak=${streak}`,
+          );
+        } else {
+          log.info(
+            `TTL downgrade deferred (streak ${streak}/3): session=${sessionID.slice(0, 16)}` +
+            ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
+          );
+        }
+      } else {
+        // Cold fraction not qualifying for downgrade — reset streak
+        if (resolvedConversationTTL === "1h") {
+          sessionState.ttlDowngradeStreak = 0;
+        }
       }
     }
   }
@@ -2443,6 +2472,7 @@ async function handleConversationTurn(
       recallBlock,
       sessionState.projectPath,
       sessionState.sessionID,
+      getLLMClient(config),
     );
 
     // Store recall result for marker round-trip expansion
@@ -2478,7 +2508,10 @@ async function handleConversationTurn(
       followUp,
       config,
       undefined,
-      cacheOptions,
+      // Disable conversation caching on follow-up: the appended
+      // tool_result makes the prefix diverge from the next real turn,
+      // so the cache write would be wasted money.
+      { ...cacheOptions, cacheConversation: false },
     ));
 
     if (!followUpResponse.ok) {

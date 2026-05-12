@@ -24,6 +24,7 @@ import {
   log,
   config as loreConfig,
   type RecallScope,
+  type LLMClient,
 } from "@loreai/core";
 
 import type {
@@ -338,6 +339,7 @@ export async function executeRecall(
   block: GatewayToolUseBlock,
   projectPath: string,
   sessionID: string,
+  llm?: LLMClient,
 ): Promise<{ result: string; input: { query: string; scope?: RecallScope; id?: string } }> {
   const { query, scope, id } = parseRecallInput(block);
   const cfg = loreConfig();
@@ -350,6 +352,7 @@ export async function executeRecall(
       projectPath,
       sessionID,
       knowledgeEnabled: cfg.knowledge?.enabled ?? true,
+      llm,
       searchConfig: cfg.search,
     });
 

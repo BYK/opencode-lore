@@ -798,6 +798,16 @@ export async function searchRecall(
     }
   }
 
+  // Cap the number of RRF lists to prevent score inflation from marginal items.
+  // With query expansion (3 queries × 4 sources + supplemental lists), the list
+  // count can exceed 12. Each list gives marginal items enough cumulative RRF
+  // score to clear the relevance floor. Trim lowest-priority lists (those added
+  // last — supplemental boosters) when over the cap.
+  const MAX_RRF_LISTS = 10;
+  if (allRrfLists.length > MAX_RRF_LISTS) {
+    allRrfLists.length = MAX_RRF_LISTS;
+  }
+
   const fused = reciprocalRankFusion<TaggedResult>(allRrfLists);
 
   // Cap output: return at most 3x the per-source limit. With 7+ RRF sources
@@ -895,11 +905,6 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
   // ID-based detail retrieval — bypass search entirely.
   if (input.id) {
     return recallById(input.id);
-  }
-
-  // Short-circuit vague queries — stopwords-only would match everything.
-  if (ftsQuery(input.query) === EMPTY_QUERY) {
-    return "Query too vague — try using specific keywords, file names, or technical terms.";
   }
 
   const fused = await searchRecall(input);

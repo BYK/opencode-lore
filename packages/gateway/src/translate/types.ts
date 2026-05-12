@@ -240,6 +240,10 @@ export type SessionState = {
   /** Resolved conversation TTL for this session ("5m" | "1h"). Updated by
    *  the auto-upgrade logic each turn. */
   resolvedConversationTTL?: "5m" | "1h";
+  /** Consecutive turns where cold fraction < 0.2 while TTL is "1h".
+   *  Used for hysteresis: only downgrade after N consecutive qualifying turns
+   *  to avoid compounding cache busts from a single fluctuation. */
+  ttlDowngradeStreak?: number;
 
   // --- Tier 1/2 session header identification ---
 

@@ -83,7 +83,7 @@ describe("LoreConfig — search schema", () => {
     expect(cfg.search.ftsWeights.content).toBe(2.0);
     expect(cfg.search.ftsWeights.category).toBe(3.0);
     expect(cfg.search.recallLimit).toBe(10);
-    expect(cfg.search.queryExpansion).toBe(false);
+    expect(cfg.search.queryExpansion).toBe(true);
     expect(cfg.search.embeddings.enabled).toBe(true);
     expect(cfg.search.embeddings.provider).toBe("local");
     expect(cfg.search.embeddings.model).toBe("BGESmallENV15");
@@ -117,7 +117,7 @@ describe("LoreConfig — search schema", () => {
     const cfg = LoreConfig.parse({ curator: { enabled: false } });
     expect(cfg.search.ftsWeights.title).toBe(6.0);
     expect(cfg.search.recallLimit).toBe(10);
-    expect(cfg.search.queryExpansion).toBe(false);
+    expect(cfg.search.queryExpansion).toBe(true);
   });
 
   test("partial search config merges with defaults", () => {
@@ -125,7 +125,7 @@ describe("LoreConfig — search schema", () => {
     // ftsWeights should still have defaults
     expect(cfg.search.ftsWeights.title).toBe(6.0);
     expect(cfg.search.recallLimit).toBe(20);
-    expect(cfg.search.queryExpansion).toBe(false);
+    expect(cfg.search.queryExpansion).toBe(true);
     expect(cfg.search.embeddings.enabled).toBe(true);
   });
 

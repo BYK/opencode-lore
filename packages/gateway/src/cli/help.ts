@@ -38,6 +38,8 @@ Data subcommands:
   data show <type> <id>         Show full detail for an entry
   data clear [options]          Clear data for a project or wipe the database
   data delete <type> <id>       Delete a single entry
+  data merge <id1> <id2>        Merge two projects (moves data from id2 into id1)
+  data recover                  Recover orphaned data from deleted projects
 
   Data flags: --project <path>, --limit <n>, --json, --yes/-y
   Clear flags: --knowledge, --temporal, --distillations, --all

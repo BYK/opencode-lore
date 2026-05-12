@@ -32,6 +32,7 @@ const OPTIONS = {
   debug: { type: "boolean" as const, short: "d" },
   version: { type: "boolean" as const, short: "v" },
   help: { type: "boolean" as const, short: "h" },
+  yes: { type: "boolean" as const, short: "y" },
   // `lore logs` flags
   follow: { type: "boolean" as const, short: "f" },
   n: { type: "string" as const },
@@ -214,9 +215,26 @@ export async function _cli(): Promise<void> {
         break;
 
       default:
-        // Unknown first arg — treat it as `lore run <unknown> ...`
+        // Check if the unknown command matches a known agent binary.
         // This allows `lore claude` as shorthand for `lore run claude`.
         {
+          const { AGENTS } = await import("./agents");
+          const knownBinaries = AGENTS.map((a) => a.binary);
+          if (!knownBinaries.includes(command)) {
+            // Not a known agent — likely a typo. Show a helpful error.
+            const knownCommands = [
+              "start", "run", "data", "recall", "logs", "import", "upgrade", "help",
+              ...knownBinaries,
+            ];
+            // Simple "did you mean?" — find closest match by common prefix
+            const suggestion = knownCommands.find(
+              (c) => c.startsWith(command.slice(0, 2)) || command.startsWith(c.slice(0, 2)),
+            );
+            const hint = suggestion ? ` Did you mean "lore ${suggestion}"?` : "";
+            console.error(`Unknown command "${command}".${hint}\nRun "lore help" for available commands.`);
+            process.exitCode = 1;
+            break;
+          }
           const { commandRun } = await import("./run");
           await commandRun(startOpts, [command, ...rest]);
         }

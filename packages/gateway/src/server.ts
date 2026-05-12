@@ -14,12 +14,12 @@ import type { GatewayConfig } from "./config";
 import type { GatewayRequest } from "./translate/types";
 import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest, buildOpenAIResponse } from "./translate/openai";
+import { translateAnthropicStreamToOpenAI } from "./stream/openai";
 import {
   parseOpenAIResponsesRequest,
   buildOpenAIResponsesResponse,
 } from "./translate/openai-responses";
-import { accumulateSSEResponse } from "./stream/anthropic";
-import { accumulateResponsesSSEStream } from "./stream/openai-responses";
+import { translateAnthropicStreamToResponses } from "./stream/openai-responses";
 import { handleRequest } from "./pipeline";
 
 // ---------------------------------------------------------------------------
@@ -123,10 +123,21 @@ async function handleAnthropicMessages(
   }
 }
 
-async function handleModelsPassthrough(config: GatewayConfig): Promise<Response> {
+async function handleModelsPassthrough(req: Request, config: GatewayConfig): Promise<Response> {
   try {
+    // Forward auth headers from the original request so upstream
+    // providers that require authentication don't reject with 401.
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    const apiKey = req.headers.get("x-api-key");
+    const auth = req.headers.get("authorization");
+    if (apiKey) headers["x-api-key"] = apiKey;
+    if (auth) headers["authorization"] = auth;
+    // Anthropic requires the version header
+    const anthropicVersion = req.headers.get("anthropic-version");
+    if (anthropicVersion) headers["anthropic-version"] = anthropicVersion;
+
     const upstream = await fetch(`${config.upstreamAnthropic}/v1/models`, {
-      headers: { "content-type": "application/json" },
+      headers,
     });
     // Clone to a new Response so we can append CORS headers
     const response = new Response(upstream.body, {
@@ -182,9 +193,8 @@ async function handleOpenAIChatCompletions(
 
   const contentType = pipelineResp.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
-    // Streaming: accumulate the internal SSE then re-emit as OpenAI SSE
-    const accumulated = await accumulateSSEResponse(pipelineResp);
-    return withCors(buildOpenAIResponse(accumulated, true));
+    // True streaming: translate Anthropic SSE → OpenAI Chat Completions SSE incrementally
+    return withCors(translateAnthropicStreamToOpenAI(pipelineResp));
   }
 
   // Non-streaming: translate JSON body
@@ -228,9 +238,8 @@ async function handleOpenAIResponses(
 
   const contentType = pipelineResp.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
-    // Streaming: accumulate the internal SSE then re-emit as Responses API SSE
-    const accumulated = await accumulateSSEResponse(pipelineResp);
-    return withCors(buildOpenAIResponsesResponse(accumulated, true));
+    // True streaming: translate Anthropic SSE → Responses API SSE incrementally
+    return withCors(translateAnthropicStreamToResponses(pipelineResp));
   }
 
   // Non-streaming: translate JSON body
@@ -280,7 +289,7 @@ export function startServer(config: GatewayConfig): {
 
       // GET /v1/models — passthrough
       if (method === "GET" && pathname === "/v1/models") {
-        return await handleModelsPassthrough(config);
+        return await handleModelsPassthrough(req, config);
       }
 
       // GET /health — health check

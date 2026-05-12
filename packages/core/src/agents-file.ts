@@ -438,8 +438,10 @@ function _importEntries(
       }
     } else {
       // Hand-written entry — create with a new UUIDv7
-      // Check for a near-duplicate by title to avoid double-import on re-runs
-      const existing = ltm.forProject(projectPath, true);
+      // Check for a near-duplicate by title to avoid double-import on re-runs.
+      // Scope to project-only entries (false) — cross-project entries from other
+      // projects should not silently suppress a hand-written entry in this project.
+      const existing = ltm.forProject(projectPath, false);
       const titleMatch = existing.find(
         (e) => e.title.toLowerCase() === entry.title.toLowerCase(),
       );

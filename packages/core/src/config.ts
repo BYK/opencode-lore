@@ -135,10 +135,11 @@ export const LoreConfig = z.object({
         .default({ title: 6.0, content: 2.0, category: 3.0 }),
       /** Max results per source in recall tool before fusion. Default: 10. */
       recallLimit: z.number().min(1).max(50).default(10),
-      /** Enable LLM-based query expansion for the recall tool. Default: false.
-       *  When enabled, the configured model generates 2–3 alternative query phrasings
-       *  before search, improving recall for ambiguous queries. */
-      queryExpansion: z.boolean().default(false),
+      /** Enable LLM-based query expansion for the recall tool. Default: true.
+       *  The configured model generates 2–3 alternative query phrasings before
+       *  search, improving recall for ambiguous queries. Guarded by a 3-second
+       *  timeout — if expansion fails or times out, the original query is used. */
+      queryExpansion: z.boolean().default(true),
       /** RRF weight multiplier for vector search lists. Applied when the query
        *  has >= `vectorBoostMinTerms` meaningful terms (after stopword removal).
        *  Boosts semantic/vector results relative to keyword-based BM25 lists.
@@ -195,7 +196,7 @@ export const LoreConfig = z.object({
     .default({
       ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
       recallLimit: 10,
-      queryExpansion: false,
+      queryExpansion: true,
       vectorBoostWeight: 1.5,
       vectorBoostMinTerms: 3,
       embeddings: { enabled: true, provider: "local" as const, model: "BGESmallENV15", dimensions: 384 },

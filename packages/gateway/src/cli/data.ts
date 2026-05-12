@@ -349,48 +349,35 @@ async function cmdClear(
   const specific = onlyKnowledge || onlyTemporal || onlyDistillations;
 
   if (specific) {
-    // Clear specific data types
-    if (onlyKnowledge) {
-      const counts = data.countForProject(projectPath);
-      if (!skipConfirm) {
-        const confirmed = await confirm(
-          `\nThis will delete ${counts.knowledge} knowledge entries for project at:\n  ${projectPath}\n` +
-            `The .lore.md file will be regenerated.`,
-        );
-        if (!confirmed) {
-          console.log("Cancelled.");
-          return;
-        }
+    // Collect counts once and build a single confirmation prompt
+    const counts = data.countForProject(projectPath);
+    const targets: string[] = [];
+    if (onlyKnowledge) targets.push(`${counts.knowledge} knowledge entries`);
+    if (onlyTemporal) targets.push(`${counts.messages} temporal messages`);
+    if (onlyDistillations) targets.push(`${counts.distillations} distillations`);
+
+    if (!skipConfirm) {
+      const confirmed = await confirm(
+        `\nThis will delete the following for project at:\n  ${projectPath}\n` +
+          targets.map((t) => `  - ${t}`).join("\n") +
+          (onlyKnowledge ? "\n  The .lore.md file will be regenerated." : ""),
+      );
+      if (!confirmed) {
+        console.log("Cancelled.");
+        return;
       }
+    }
+
+    if (onlyKnowledge) {
       const deleted = data.clearKnowledge(projectPath);
       console.log(`Deleted ${deleted} knowledge entries.`);
       console.log("Regenerated .lore.md \u2014 commit the change to prevent re-import from git.");
     }
     if (onlyTemporal) {
-      const counts = data.countForProject(projectPath);
-      if (!skipConfirm) {
-        const confirmed = await confirm(
-          `\nThis will delete ${counts.messages} temporal messages for project at:\n  ${projectPath}`,
-        );
-        if (!confirmed) {
-          console.log("Cancelled.");
-          return;
-        }
-      }
       const deleted = data.clearTemporal(projectPath);
       console.log(`Deleted ${deleted} temporal messages.`);
     }
     if (onlyDistillations) {
-      const counts = data.countForProject(projectPath);
-      if (!skipConfirm) {
-        const confirmed = await confirm(
-          `\nThis will delete ${counts.distillations} distillations for project at:\n  ${projectPath}`,
-        );
-        if (!confirmed) {
-          console.log("Cancelled.");
-          return;
-        }
-      }
       const deleted = data.clearDistillations(projectPath);
       console.log(`Deleted ${deleted} distillations.`);
     }

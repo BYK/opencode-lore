@@ -50,6 +50,10 @@ export function create(input: {
       ? ensureProject(input.projectPath)
       : null;
 
+  // IF-2: Global entries (pid=null) must be cross-project to avoid a data hole
+  // where forSession() can't find them in either the project or cross-project pool.
+  const crossProject = pid === null ? true : (input.crossProject ?? false);
+
   // Dedup guard: if an entry with the same project_id + title already exists,
   // update its content instead of inserting a duplicate. This prevents the
   // curator from creating multiple entries for the same concept across sessions.
@@ -106,7 +110,7 @@ export function create(input: {
       input.title,
       input.content,
       input.session ?? null,
-      (input.crossProject ?? false) ? 1 : 0,
+      crossProject ? 1 : 0,
       now,
       now,
     );
@@ -130,8 +134,10 @@ export function update(
     params.push(input.content);
   }
   if (input.confidence !== undefined) {
+    // Clamp to [0.0, 1.0] — an LLM-provided value outside this range would
+    // give disproportionate scoring weight (>1) or silently soft-delete (<0.2).
     sets.push("confidence = ?");
-    params.push(input.confidence);
+    params.push(Math.max(0, Math.min(1, input.confidence)));
   }
   sets.push("updated_at = ?");
   params.push(Date.now());
