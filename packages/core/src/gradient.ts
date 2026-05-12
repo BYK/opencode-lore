@@ -354,11 +354,19 @@ function getSessionState(sessionID: string): SessionState {
  *
  * Set `thresholdMs <= 0` to disable. Returns true if a reset fired so the
  * caller can log/observe.
+ *
+ * @param skipCompact  When true, perform all idle-resume housekeeping
+ *   (clear caches, set cameOutOfIdle) but do NOT set postIdleCompact.
+ *   Used when the caller knows the upstream prompt cache is still warm
+ *   (e.g. cache warmer recently refreshed it) — compacting would produce
+ *   a different prompt body that doesn't match the warmed prefix, causing
+ *   a cache bust and wasting the warming cost.
  */
 export function onIdleResume(
   sessionID: string,
   thresholdMs: number,
   now: number = Date.now(),
+  skipCompact: boolean = false,
 ): { triggered: false } | { triggered: true; idleMs: number } {
   if (thresholdMs <= 0) return { triggered: false };
   const state = getSessionState(sessionID);
@@ -369,7 +377,7 @@ export function onIdleResume(
   state.rawWindowCache = null;
   state.distillationSnapshot = null;
   state.cameOutOfIdle = true;
-  state.postIdleCompact = true;
+  state.postIdleCompact = !skipCompact;
   return { triggered: true, idleMs };
 }
 

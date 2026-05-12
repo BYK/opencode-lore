@@ -336,10 +336,11 @@ describe("vectorSearch", () => {
   const PROJECT = "/test/embedding/vectorsearch";
 
   beforeEach(() => {
-    // Clean test project's knowledge to avoid cross-test leaks.
-    // IMPORTANT: scope to project_id — unscoped DELETE wipes ALL projects' entries.
-    const pid = ensureProject(PROJECT);
-    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    // vectorSearch() queries ALL projects (no project_id filter), so we must
+    // clear ALL knowledge entries to avoid cross-test leaks from other suites
+    // (e.g. LocalProvider integration, checkConfigChange) that insert entries
+    // with embeddings into different projects.
+    db().query("DELETE FROM knowledge").run();
   });
 
   test("returns entries sorted by similarity descending", () => {

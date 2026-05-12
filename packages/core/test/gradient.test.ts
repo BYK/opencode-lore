@@ -1944,6 +1944,37 @@ describe("onIdleResume", () => {
     const result = onIdleResume(SID, ONE_HOUR_MS);
     expect(result.triggered).toBe(false);
   });
+
+  test("skipCompact=true skips postIdleCompact but still does housekeeping", () => {
+    const now = 1_000_000_000_000;
+    setLastTurnAtForTest(SID, now - 2 * ONE_HOUR_MS);
+
+    const result = onIdleResume(SID, ONE_HOUR_MS, now, /* skipCompact */ true);
+    expect(result.triggered).toBe(true);
+    if (result.triggered) {
+      expect(result.idleMs).toBe(2 * ONE_HOUR_MS);
+    }
+
+    const state = inspectSessionState(SID);
+    // Housekeeping still happens:
+    expect(state!.hasPrefixCache).toBe(false);
+    expect(state!.hasRawWindowCache).toBe(false);
+    expect(state!.cameOutOfIdle).toBe(true);
+    expect(state!.distillationSnapshot).toBeNull();
+    // But compaction is skipped:
+    expect(state!.postIdleCompact).toBe(false);
+  });
+
+  test("skipCompact=false (default) sets postIdleCompact when idle", () => {
+    const now = 1_000_000_000_000;
+    setLastTurnAtForTest(SID, now - 2 * ONE_HOUR_MS);
+
+    const result = onIdleResume(SID, ONE_HOUR_MS, now, /* skipCompact */ false);
+    expect(result.triggered).toBe(true);
+    const state = inspectSessionState(SID);
+    expect(state!.postIdleCompact).toBe(true);
+    expect(state!.cameOutOfIdle).toBe(true);
+  });
 });
 
 describe("reasoning preservation (F-REASONING-AUDIT mini-pin)", () => {

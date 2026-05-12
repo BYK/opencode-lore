@@ -118,6 +118,7 @@ import {
   recordGap,
   getSessionHistogram,
   recordGlobalGap,
+  resolveProfile as resolveWarmingProfile,
 } from "./cache-warmer";
 import {
    setSentryRequestContext,
@@ -1719,6 +1720,29 @@ async function handlePassthrough(
   });
 }
 
+/**
+ * Check whether the upstream prompt cache is likely still warm for this
+ * session. Returns true when a warmup ping was successfully sent within
+ * the current cache TTL window.
+ *
+ * When true, post-idle compaction should be skipped: the warmer replayed
+ * the full (uncompacted) request body, so compacting now would produce
+ * different bytes and bust the cache the warmer just paid to preserve.
+ */
+function isCacheWarm(state: SessionState): boolean {
+  const lastWarmup = state.warmup?.lastWarmupAt;
+  if (!lastWarmup) return false;
+
+  const profile = resolveWarmingProfile(
+    state.lastModel,
+    state.lastProtocol,
+    state.resolvedConversationTTL,
+  );
+  if (!profile) return false;
+
+  return (Date.now() - lastWarmup) < profile.ttlMs;
+}
+
 // ---------------------------------------------------------------------------
 // Case 3: Normal conversation turn — full pipeline
 // ---------------------------------------------------------------------------
@@ -1905,12 +1929,17 @@ async function handleConversationTurn(
       ? 60
       : cfg.idleResumeMinutes;
   const thresholdMs = effectiveIdleMinutes * 60_000;
-  const idleResult = onIdleResume(sessionID, thresholdMs);
+  // If the cache warmer recently refreshed this session's prompt cache,
+  // skip post-idle compaction — compacting would produce a different prompt
+  // body that doesn't match the warmed prefix, causing a cache bust.
+  const cacheWarm = isCacheWarm(sessionState);
+  const idleResult = onIdleResume(sessionID, thresholdMs, Date.now(), cacheWarm);
   sessionState.lastTurnWasIdle = idleResult.triggered;
   if (idleResult.triggered) {
     ltmSessionCache.delete(sessionID);
     log.info(
-      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches`,
+      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
+        (cacheWarm ? " (cache warm — skipping compact)" : ""),
     );
   }
 
