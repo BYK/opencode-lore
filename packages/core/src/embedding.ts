@@ -211,8 +211,9 @@ function localProviderKnownUnavailable(): boolean {
 class LocalProvider implements EmbeddingProvider {
   // With inference off the main thread, large batches no longer block
   // the event loop. 256 maximises throughput per round-trip to the
-  // worker. Backfill callers use a smaller BACKFILL_CHUNK_SIZE to give
-  // the worker's priority queue breathing room for recall queries.
+  // worker. Backfill callers use token-budget-based batching (see
+  // nextBatch) to give the worker's priority queue breathing room
+  // for recall queries and prevent OOM on long texts.
   readonly maxBatchSize = 256;
 
   private worker: import("node:worker_threads").Worker | null = null;
@@ -1083,18 +1084,52 @@ export async function runStartupBackfill(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Chunk size for backfill embed requests. Each chunk becomes a separate
- * message to the embedding worker. Keeping chunks small gives the
- * worker's priority queue natural gaps to interleave high-priority recall
- * queries between backfill batches. The provider's `maxBatchSize` (256)
- * is the upper limit for any single embed call; this is intentionally
- * smaller for backfill-vs-live interleaving.
- *
- * Batch size of 8 prevents OOM when long texts (up to ~1200 chars each)
- * get padded to the longest sequence in the batch — a [32, 1383] tensor
- * caused a ~287 MB allocation failure in onnxruntime.
+ * Maximum chunk size for backfill embed requests. Each chunk becomes a
+ * separate message to the embedding worker. Keeping chunks small gives
+ * the worker's priority queue natural gaps to interleave high-priority
+ * recall queries between backfill batches.
  */
-const BACKFILL_CHUNK_SIZE = 8;
+const MAX_BACKFILL_CHUNK = 8;
+
+/**
+ * Maximum total "token area" (batch_size × max_sequence_length) per
+ * backfill batch. ONNX runtime pads all texts to the longest sequence,
+ * so the peak tensor size is proportional to this product. A budget of
+ * 4096 tokens allows e.g. 8 × 512-token texts, or 2 × 2048-token texts.
+ * Prevents OOM on batches with long distillation observations (~4000+
+ * chars) that were blowing up at fixed batch sizes.
+ */
+const MAX_BATCH_TOKEN_AREA = 4096;
+
+/**
+ * Rough chars-per-token ratio for budget estimation. Nomic v1.5 uses a
+ * WordPiece tokenizer; English text averages ~4 chars/token.
+ */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Partition `rows` into batches that respect both MAX_BACKFILL_CHUNK and
+ * MAX_BATCH_TOKEN_AREA. Each batch's estimated token area is
+ * `batch.length × max_tokens_in_batch`. We greedily add rows until the
+ * next row would push the area over budget.
+ */
+function nextBatch<T extends { text: string }>(rows: T[], start: number): T[] {
+  const batch: T[] = [];
+  let maxTokens = 0;
+
+  for (let i = start; i < rows.length && batch.length < MAX_BACKFILL_CHUNK; i++) {
+    const estTokens = Math.ceil(rows[i].text.length / CHARS_PER_TOKEN);
+    const newMax = Math.max(maxTokens, estTokens);
+    const newArea = (batch.length + 1) * newMax;
+
+    if (batch.length > 0 && newArea > MAX_BATCH_TOKEN_AREA) break;
+
+    batch.push(rows[i]);
+    maxTokens = newMax;
+  }
+
+  return batch;
+}
 
 /**
  * Embed all knowledge entries that are missing embeddings.
@@ -1116,14 +1151,18 @@ export async function backfillEmbeddings(): Promise<number> {
 
   if (!rows.length) return 0;
 
-  let embedded = 0;
+  // Pre-compute text for token-budget batching
+  const items = rows.map((r) => ({ ...r, text: `${r.title}\n${r.content}` }));
 
-  for (let i = 0; i < rows.length; i += BACKFILL_CHUNK_SIZE) {
-    const batch = rows.slice(i, i + BACKFILL_CHUNK_SIZE);
-    const texts = batch.map((r) => `${r.title}\n${r.content}`);
+  let embedded = 0;
+  let i = 0;
+
+  while (i < items.length) {
+    const batch = nextBatch(items, i);
+    i += batch.length;
 
     try {
-      const vectors = await embed(texts, "document");
+      const vectors = await embed(batch.map((b) => b.text), "document");
       const update = db().prepare(
         "UPDATE knowledge SET embedding = ? WHERE id = ?",
       );
@@ -1134,7 +1173,7 @@ export async function backfillEmbeddings(): Promise<number> {
       }
     } catch (err) {
       // log.error sends to Sentry via captureException
-      log.error(`embedding backfill batch ${i}-${i + batch.length} failed:`, err);
+      log.error(`embedding backfill batch failed (${batch.length} items):`, err);
     }
     // No yieldToEventLoop() needed — embed() is truly async (worker thread).
   }
@@ -1174,12 +1213,16 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
   const PROGRESS_INTERVAL = 256;
   let nextProgressAt = PROGRESS_INTERVAL;
 
-  for (let i = 0; i < rows.length; i += BACKFILL_CHUNK_SIZE) {
-    const batch = rows.slice(i, i + BACKFILL_CHUNK_SIZE);
-    const texts = batch.map((r) => r.observations);
+  // Pre-compute text for token-budget batching
+  const items = rows.map((r) => ({ ...r, text: r.observations }));
+  let i = 0;
+
+  while (i < items.length) {
+    const batch = nextBatch(items, i);
+    i += batch.length;
 
     try {
-      const vectors = await embed(texts, "document");
+      const vectors = await embed(batch.map((b) => b.text), "document");
       const update = db().prepare(
         "UPDATE distillations SET embedding = ? WHERE id = ?",
       );
@@ -1190,7 +1233,7 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
       }
     } catch (err) {
       // log.error sends to Sentry via captureException
-      log.error(`distillation embedding backfill batch ${i}-${i + batch.length} failed:`, err);
+      log.error(`distillation embedding backfill batch failed (${batch.length} items):`, err);
     }
 
     if (embedded >= nextProgressAt) {
