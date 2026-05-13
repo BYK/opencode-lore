@@ -199,12 +199,12 @@ const FUZZY_DEDUP_THRESHOLD = 0.7;
 const FUZZY_DEDUP_MIN_OVERLAP = 4;
 /** Minimum cosine similarity for embedding-based dedup. Empirically tuned
  *  against 312 Nomic v1.5 entries:
- *  - 0.93+: all genuine duplicates (same topic, different wording)
- *  - 0.92–0.93: mostly dupes but some false positives from same-subsystem
- *    entries (e.g. "batching for OOM" ↔ "BGE Small unusable" at 0.922)
- *  - 0.88–0.92: mixed — many related-but-distinct entries
- *  - <0.88: noise — cross-project unrelated pairs */
-const EMBEDDING_DEDUP_THRESHOLD = 0.93;
+ *  - 0.935+: all genuine duplicates (same topic, different wording)
+ *  - 0.92–0.935: contains false positives from same-subsystem entries
+ *    (e.g. "BGE Small unusable" ↔ "Nomic OOM" scored 0.9326 — related
+ *    but distinct bugs). Star clustering amplifies this by bridging.
+ *  - <0.92: mixed or unrelated entries */
+const EMBEDDING_DEDUP_THRESHOLD = 0.935;
 
 /**
  * Find an existing knowledge entry whose title is fuzzy-similar to the given title.
@@ -979,8 +979,9 @@ export type DedupResult = {
  * 2. **Embedding cosine similarity** (when embeddings are available) — catches
  *    entries with different titles but semantically identical content. Nomic
  *    v1.5 produces a same-domain spread of 0.46–0.70 for distinct entries,
- *    making threshold-based dedup viable at 0.93+ (0.85 was too aggressive,
- *    catching related-but-distinct entries as false positives).
+ *    making threshold-based dedup viable at 0.935+ (lower thresholds catch
+ *    related-but-distinct entries as false positives, especially via star
+ *    clustering where a hub entry bridges two distinct topics).
  *
  * Pairs matching either signal are clustered together. For each cluster,
  * picks a survivor (highest confidence, then most recently updated, then
@@ -1001,7 +1002,7 @@ export async function deduplicate(
   // --- Build neighbor map using title overlap + embedding similarity ---
   // Two entries are considered neighbors (potential duplicates) if EITHER:
   //   (a) title word-overlap ≥ 0.7 with ≥ 4 shared words, OR
-  //   (b) embedding cosine similarity ≥ 0.93
+  //   (b) embedding cosine similarity ≥ 0.935
   // Star clustering (no transitivity) prevents snowball merging.
   // O(n²) pairwise comparison — acceptable for n ≤ 25 (maxEntries cap).
 
