@@ -1809,7 +1809,9 @@ function postResponse(
     // Reset warming state if session was marked dead or had active warming.
     // Dead flag is cleared so the next break gets a fresh ROI analysis.
     // warmupCount is reset so the break-even cap starts from 0 on the next break.
-    if (sessionState.warmup) {
+    // Guard: only real user turns should reset — subagent turns would falsely
+    // clear the break-even counter and re-enable dead sessions.
+    if (!isSubagentTurn && sessionState.warmup) {
       if (sessionState.warmup.disabled) {
         sessionState.warmup.disabled = false;
         log.info(

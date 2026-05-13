@@ -947,12 +947,12 @@ describe("pSessionFinished", () => {
 });
 
 describe("expectedWarmupCycles", () => {
-  test("all short gaps → max cycles (nobody returns late)", () => {
+  test("all short gaps → exceeds max cycles (nobody returns late)", () => {
     const hist = createHistogram();
     for (let i = 0; i < 100; i++) recordGap(hist, 5_000);
-    // At 270s idle, survival is ~0 → max cycles (worst case)
+    // At 270s idle, survival is ~0 → returns maxCycles+1 to trigger cap
     const cycles = expectedWarmupCycles(hist, 270_000, 300_000, 11);
-    expect(cycles).toBe(11);
+    expect(cycles).toBe(12); // maxCycles + 1
   });
 
   test("all long gaps → low expected cycles (user returns soon)", () => {
@@ -970,9 +970,10 @@ describe("expectedWarmupCycles", () => {
     expect(cycles).toBeLessThanOrEqual(5);
   });
 
-  test("empty histogram returns max cycles (optimistic survival)", () => {
+  test("empty histogram returns max cycles (flat survival = 1.0 everywhere)", () => {
     const hist = createHistogram();
-    // Empty → survival is 1.0 everywhere → user never returns → max cycles
+    // Empty → survival is 1.0 everywhere → P(still idle) = 1.0 for each
+    // future window → we pay for every cycle → accumulates to maxCycles
     const cycles = expectedWarmupCycles(hist, 270_000, 300_000, 11);
     expect(cycles).toBe(11);
   });
