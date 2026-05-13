@@ -597,8 +597,10 @@ describe("exported constants", () => {
 describe("resolveSeed", () => {
   // Derive known versions sorted ascending so tests adapt to any VERSION_SEEDS
   const knownVersions = Object.keys(VERSION_SEEDS)
-    .map((v) => ({ version: v, parsed: _parseSemver(v)! }))
-    .filter((e) => e.parsed !== null)
+    .map((v) => ({ version: v, parsed: _parseSemver(v) }))
+    .filter((e): e is { version: string; parsed: [number, number, number] } =>
+      e.parsed !== null,
+    )
     .sort((a, b) => _compareSemver(a.parsed, b.parsed));
 
   const oldest = knownVersions[0];
@@ -628,6 +630,19 @@ describe("resolveSeed", () => {
     const result = resolveSeed(`${maj + 1}.0.0`);
     expect(result.exact).toBe(false);
     expect(result.version).toBe(latest.version);
+  });
+
+  test("falls back to closest known version, not necessarily latest", () => {
+    if (knownVersions.length < 2) return; // need at least 2 seeds
+    // Construct a version 1 patch above the oldest — closer to oldest than latest
+    const [maj, min, patch] = oldest.parsed;
+    const nearOldest = `${maj}.${min}.${patch + 1}`;
+    // Only test if nearOldest isn't itself a known version
+    if (!VERSION_SEEDS[nearOldest]) {
+      const result = resolveSeed(nearOldest);
+      expect(result.exact).toBe(false);
+      expect(result.version).toBe(oldest.version);
+    }
   });
 
   test("falls back to oldest for a much older unknown version", () => {

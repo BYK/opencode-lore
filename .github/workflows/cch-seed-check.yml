@@ -184,9 +184,7 @@ jobs:
           git commit -m "feat(cch): add seeds for Claude Code up to ${LATEST_VERSION}"
           git push -u origin "$BRANCH"
 
-          gh pr create \
-            --title "feat(cch): add seeds for Claude Code up to ${LATEST_VERSION}" \
-            --body "$(cat <<EOF
+          cat > /tmp/pr-body.md <<EOF
           ## Summary
 
           Automated cch seed extraction for ${EXTRACTED_COUNT} Claude Code version(s).
@@ -199,4 +197,7 @@ jobs:
           This PR updates \`VERSION_SEEDS\` and \`WORKER_VERSION\` in \`packages/gateway/src/cch.ts\`
           so the gateway can sign billing headers for these Claude Code versions.
           EOF
-          )"
+
+          gh pr create \
+            --title "feat(cch): add seeds for Claude Code up to ${LATEST_VERSION}" \
+            --body-file /tmp/pr-body.md

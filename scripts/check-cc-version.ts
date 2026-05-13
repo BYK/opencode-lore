@@ -100,7 +100,7 @@ async function main() {
   const missingVersions = allPublished
     .map(baseVersion)
     .filter((v) => {
-      if (VERSION_SEEDS[v]) return false; // already known
+      if (v in VERSION_SEEDS) return false; // already known
       if (!_parseSemver(v)) return false; // skip unparseable
       return cmpVersions(v, highestKnown) > 0 && cmpVersions(v, latestTag) <= 0;
     })
