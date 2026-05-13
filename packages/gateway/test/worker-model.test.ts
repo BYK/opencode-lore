@@ -151,6 +151,40 @@ describe("fetchModelData", () => {
     expect(data.size).toBe(0);
   });
 
+  test("deduplicates concurrent in-flight requests", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(() => {
+      callCount++;
+      return Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+      );
+    }) as unknown as typeof fetch;
+
+    const [a, b, c] = await Promise.all([
+      fetchModelData(),
+      fetchModelData(),
+      fetchModelData(),
+    ]);
+
+    expect(callCount).toBe(1);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+  });
+
+  test("deduplicates concurrent calls even on network error", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(() => {
+      callCount++;
+      return Promise.reject(new Error("Network error"));
+    }) as unknown as typeof fetch;
+
+    const [a, b] = await Promise.all([fetchModelData(), fetchModelData()]);
+
+    expect(callCount).toBe(1);
+    expect(a).toBe(b);
+    expect(a.size).toBe(0);
+  });
+
   test("handles missing providers gracefully", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
