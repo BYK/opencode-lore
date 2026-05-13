@@ -30,6 +30,7 @@ const MODELS_DEV_API = "https://models.dev/api.json";
 /** Cached models.dev data: model entries for all supported providers. */
 let cachedModelData: Map<string, ModelsDevEntry> | null = null;
 let cachedModelDataAt = 0;
+let inflightFetch: Promise<Map<string, ModelsDevEntry>> | null = null;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /** Providers to fetch pricing data for from models.dev. */
@@ -99,53 +100,62 @@ function fallbackEntry(modelID: string): ModelsDevEntry {
  * Single HTTP request, cached for 1 hour. Returns a map of
  * modelID → entry with cost and limit data across all supported providers.
  */
-export async function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
+export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
   // Return cache if fresh
   if (cachedModelData && Date.now() - cachedModelDataAt < CACHE_TTL_MS) {
-    return cachedModelData;
+    return Promise.resolve(cachedModelData);
   }
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10_000);
+  // Deduplicate concurrent calls: return the in-flight promise if one exists
+  if (inflightFetch) return inflightFetch;
 
-    const response = await fetch(MODELS_DEV_API, { signal: controller.signal });
-    clearTimeout(timeout);
+  inflightFetch = (async () => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
 
-    if (!response.ok) {
-      log.warn(`models.dev API failed: ${response.status} ${response.statusText}`);
-      return cachedModelData ?? new Map();
-    }
+      const response = await fetch(MODELS_DEV_API, { signal: controller.signal });
+      clearTimeout(timeout);
 
-    const data = (await response.json()) as ModelsDevResponse;
-    const modelData = new Map<string, ModelsDevEntry>();
-
-    for (const providerName of SUPPORTED_PROVIDERS) {
-      const providerModels = data[providerName]?.models;
-      if (!providerModels) {
-        log.warn(`models.dev API: no ${providerName} provider found`);
-        continue;
+      if (!response.ok) {
+        log.warn(`models.dev API failed: ${response.status} ${response.statusText}`);
+        return cachedModelData ?? new Map();
       }
 
-      for (const [modelId, entry] of Object.entries(providerModels)) {
-        const e: ModelsDevEntry = { ...entry, id: modelId };
-        // Compute cache_write cost if not provided (typically 1.25× input price)
-        if (e.cost && e.cost.cache_write == null && e.cost.input != null) {
-          e.cost.cache_write = e.cost.input * 1.25;
+      const data = (await response.json()) as ModelsDevResponse;
+      const modelData = new Map<string, ModelsDevEntry>();
+
+      for (const providerName of SUPPORTED_PROVIDERS) {
+        const providerModels = data[providerName]?.models;
+        if (!providerModels) {
+          log.warn(`models.dev API: no ${providerName} provider found`);
+          continue;
         }
-        modelData.set(modelId, e);
+
+        for (const [modelId, entry] of Object.entries(providerModels)) {
+          const e: ModelsDevEntry = { ...entry, id: modelId };
+          // Compute cache_write cost if not provided (typically 1.25× input price)
+          if (e.cost && e.cost.cache_write == null && e.cost.input != null) {
+            e.cost.cache_write = e.cost.input * 1.25;
+          }
+          modelData.set(modelId, e);
+        }
       }
+
+      cachedModelData = modelData;
+      cachedModelDataAt = Date.now();
+
+      log.info(`models.dev: loaded data for ${modelData.size} models across ${SUPPORTED_PROVIDERS.join(", ")}`);
+      return modelData;
+    } catch (e) {
+      log.warn("models.dev API error:", e);
+      return cachedModelData ?? new Map();
+    } finally {
+      inflightFetch = null;
     }
+  })();
 
-    cachedModelData = modelData;
-    cachedModelDataAt = Date.now();
-
-    log.info(`models.dev: loaded data for ${modelData.size} models across ${SUPPORTED_PROVIDERS.join(", ")}`);
-    return modelData;
-  } catch (e) {
-    log.warn("models.dev API error:", e);
-    return cachedModelData ?? new Map();
-  }
+  return inflightFetch;
 }
 
 /**
@@ -206,6 +216,7 @@ export function getModelEntrySync(modelID: string): ModelsDevEntry {
 export function clearModelDataCache(): void {
   cachedModelData = null;
   cachedModelDataAt = 0;
+  inflightFetch = null;
 }
 
 // ---------------------------------------------------------------------------
