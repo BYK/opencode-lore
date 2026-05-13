@@ -86,13 +86,10 @@ jobs:
             packages/gateway/package.json > packages/gateway/package.json.tmp
           mv packages/gateway/package.json.tmp packages/gateway/package.json
 
-      # The vendor staging tree (`.vendor-build/<target>/node_modules/`) is
-      # what `bun build --compile` walks at binary build time to bundle
-      # fastembed + onnxruntime-node + @anush008/tokenizers-* (incl. native
-      # bindings) per target. Plus a shared bge-small model cache. They
-      # depend only on the fastembed pin in @loreai/core's package.json
-      # and the vendor scripts themselves, so cache aggressively —
-      # rebuilding only when those change.
+      # The vendor staging tree (`.vendor-build/.model-cache/`) contains the
+      # nomic-embed-text-v1.5 ONNX model files that get embedded in the
+      # binary. They depend on @loreai/core's package.json and the vendor
+      # scripts, so cache aggressively — rebuilding only when those change.
       - name: Cache vendor staging dirs
         id: vendor-cache
         uses: actions/cache@v5
@@ -121,13 +118,13 @@ jobs:
           # silently ship a binary without local embeddings.
           info=$(./packages/gateway/dist-bin/lore-linux-x64 --print-vendor-info)
           echo "Vendor info: $info"
-          echo "$info" | jq -e '.target == "linux-x64" and .modelAbsoluteDirPath != null and .modelName == "model_quantized.onnx"' \
+          echo "$info" | jq -e '.target == "linux-x64" and .localModelPath != null and .version != null' \
             || (echo "::error::vendor not embedded in linux-x64 binary"; exit 1)
 
           # End-to-end: run an actual embedding through the bundled
-          # fastembed. Catches model-load regressions (tokenizer file
-          # naming, ONNX layout, side-load lib preload) that the registration
-          # check alone wouldn't surface.
+          # transformers.js + nomic-embed-text-v1.5. Catches model-load
+          # regressions (tokenizer files, ONNX layout) that the
+          # registration check alone wouldn't surface.
           ./packages/gateway/dist-bin/lore-linux-x64 --check-embeddings \
             || (echo "::error::--check-embeddings failed in linux-x64 binary"; exit 1)
 
@@ -244,13 +241,8 @@ jobs:
   #
   # The test job above only builds and runs the linux-x64 binary. Cross-
   # compiled darwin / windows binaries can't be exercised on a Linux
-  # runner — and dylib install_name / DLL import-name mismatches between
-  # what we hardcode in vendor-paths.ts and what onnxruntime-node 1.21
-  # actually ships will silently produce a binary that fails at runtime
-  # (the wrapper's bun:ffi.dlopen seats the lib but the addon's RPATH
-  # dlopen looks for a different name). This job catches that by
-  # building each native binary on its own runner and running
-  # `--check-embeddings` end-to-end.
+  # runner. This job catches runtime failures by building each native
+  # binary on its own runner and running `--check-embeddings` end-to-end.
   #
   # Only on PRs (and main pushes) — release builds are gated separately.
   # ---------------------------------------------------------------------------
@@ -298,8 +290,7 @@ jobs:
         run: bun run --filter '@loreai/gateway' build:binary -- --target ${{ matrix.target }}
 
       # End-to-end smoke. The native runner can actually execute its own
-      # binary, which is what catches dylib install_name / DLL import-
-      # name drift that the linux-x64 job can't.
+      # binary, catching runtime failures that the linux-x64 job can't.
       - name: Smoke-test
         shell: bash
         run: |
@@ -307,7 +298,7 @@ jobs:
           "$BIN" --version
           info=$("$BIN" --print-vendor-info)
           echo "Vendor info: $info"
-          echo "$info" | jq -e '.target == "${{ matrix.target }}" and .modelAbsoluteDirPath != null and .modelName == "model_quantized.onnx"' \
+          echo "$info" | jq -e '.target == "${{ matrix.target }}" and .localModelPath != null and .version != null' \
             || (echo "::error::vendor not embedded in ${{ matrix.target }} binary"; exit 1)
           "$BIN" --check-embeddings \
             || (echo "::error::--check-embeddings failed in ${{ matrix.target }} binary"; exit 1)
