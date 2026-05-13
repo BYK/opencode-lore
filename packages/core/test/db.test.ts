@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts } from "../src/db";
+import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt } from "../src/db";
 
 
 describe("db", () => {
@@ -23,7 +23,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(21);
+    expect(row.version).toBe(22);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -407,6 +407,37 @@ describe("db", () => {
 
   test("loadSessionCosts returns null for unknown session", () => {
     expect(loadSessionCosts("nonexistent-session")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Migration v22: last_import_at on projects
+  // -------------------------------------------------------------------------
+
+  test("projects table has last_import_at column (migration v22)", () => {
+    const cols = db()
+      .query("PRAGMA table_info(projects)")
+      .all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toContain("last_import_at");
+  });
+
+  test("getLastImportAt returns null for new project", () => {
+    const result = getLastImportAt("/test/import-tracking/new");
+    expect(result).toBeNull();
+  });
+
+  test("setLastImportAt and getLastImportAt round-trip", () => {
+    const path = "/test/import-tracking/roundtrip";
+    const ts = Date.now();
+    setLastImportAt(path, ts);
+    expect(getLastImportAt(path)).toBe(ts);
+  });
+
+  test("setLastImportAt updates existing value", () => {
+    const path = "/test/import-tracking/update";
+    setLastImportAt(path, 1000);
+    expect(getLastImportAt(path)).toBe(1000);
+    setLastImportAt(path, 2000);
+    expect(getLastImportAt(path)).toBe(2000);
   });
 
   test("loadAllSessionCosts returns only sessions with cost data", () => {

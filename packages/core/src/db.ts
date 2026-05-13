@@ -494,6 +494,27 @@ const MIGRATIONS: string[] = [
   ALTER TABLE session_state ADD COLUMN avoided_compactions INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE session_state ADD COLUMN avoided_compaction_cost REAL NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 22: Track when conversation import was last offered/run.
+  -- NULL means import has never been offered for this project.
+  -- Used by auto-import to avoid re-prompting, and by explicit
+  -- \`lore import\` for incremental imports (only newer conversations).
+  ALTER TABLE projects ADD COLUMN last_import_at INTEGER;
+
+  -- Backfill: migrate legacy __declined__ sentinel rows so existing
+  -- users who previously declined are not re-prompted after upgrading.
+  UPDATE projects SET last_import_at = (
+    SELECT ih.imported_at FROM import_history ih
+    WHERE ih.project_id = projects.id
+      AND ih.source_id = '__declined__'
+    LIMIT 1
+  )
+  WHERE EXISTS (
+    SELECT 1 FROM import_history ih
+    WHERE ih.project_id = projects.id
+      AND ih.source_id = '__declined__'
+  );
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -840,6 +861,33 @@ export function isFirstRun(): boolean {
     .query("SELECT COUNT(*) as count FROM projects")
     .get() as { count: number };
   return row.count === 0;
+}
+
+// ---------------------------------------------------------------------------
+// Conversation import tracking
+// ---------------------------------------------------------------------------
+
+/**
+ * Get the timestamp of the last conversation import offer/run for a project.
+ * Returns null if import has never been offered for this project.
+ */
+export function getLastImportAt(projectPath: string): number | null {
+  const id = ensureProject(projectPath);
+  const row = db()
+    .query("SELECT last_import_at FROM projects WHERE id = ?")
+    .get(id) as { last_import_at: number | null } | null;
+  return row?.last_import_at ?? null;
+}
+
+/**
+ * Record that conversation import was offered/run for a project.
+ * Prevents auto-import from re-prompting, and enables incremental imports.
+ */
+export function setLastImportAt(projectPath: string, timestamp: number): void {
+  const id = ensureProject(projectPath);
+  db()
+    .query("UPDATE projects SET last_import_at = ? WHERE id = ?")
+    .run(timestamp, id);
 }
 
 // ---------------------------------------------------------------------------

@@ -134,7 +134,10 @@ export async function commandRun(
   }
   console.log(`[lore] Dashboard: ${gatewayUrl}/ui`);
 
-  // 2. Resolve what to launch
+  // 2. Auto-detect prior conversations (first run only)
+  await maybeAutoImport(config);
+
+  // 3. Resolve what to launch
   const target = await resolveLaunchTarget(gatewayUrl, cmdArgs);
 
   if (!target) {
@@ -158,10 +161,7 @@ export async function commandRun(
     return new Promise(() => {});
   }
 
-  // 2b. Auto-detect prior conversations (first run only)
-  await maybeAutoImport(config);
-
-  // 3. Launch agent child process
+  // 4. Launch agent child process
   console.log(`[lore] Launching: ${target.command} ${target.args.join(" ")}`.trimEnd());
 
   const child = launchChild(target);
