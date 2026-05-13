@@ -85,7 +85,10 @@ async function ensurePipeline(): Promise<void> {
       const wasmPaths = (globalThis as Record<string, unknown>).__LORE_VENDOR_WASM_PATHS__ as
         { mjs: string; wasm: string } | undefined;
       if (wasmPaths) {
-        const ort = await import("onnxruntime-node");
+        // Dynamic string prevents tsc from resolving the module at typecheck
+        // time. In the binary, esbuild redirects onnxruntime-node → onnxruntime-web.
+        const ortModuleId = "onnxruntime-" + "node";
+        const ort = await import(/* @vite-ignore */ ortModuleId);
         const ortEnv = ((ort as any).default ?? ort).env;
         if (ortEnv?.wasm) {
           ortEnv.wasm.wasmPaths = wasmPaths;
