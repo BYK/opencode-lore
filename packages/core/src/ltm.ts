@@ -991,12 +991,8 @@ export type DedupResult = {
  * @param opts.dryRun   If true (default), report clusters without deleting
  * @returns             Cluster report and count of removed entries
  */
-export async function deduplicate(
-  projectPath: string,
-  opts?: { dryRun?: boolean },
-): Promise<DedupResult> {
-  const dryRun = opts?.dryRun ?? true;
-  const entries = forProject(projectPath, false);
+/** Core dedup logic — operates on an arbitrary list of entries. */
+function _dedup(entries: KnowledgeEntry[], dryRun: boolean): DedupResult {
   if (entries.length < 2) return { clusters: [], totalRemoved: 0 };
 
   // --- Build neighbor map using title overlap + embedding similarity ---
@@ -1006,13 +1002,13 @@ export async function deduplicate(
   // Star clustering (no transitivity) prevents snowball merging.
   // O(n²) pairwise comparison — acceptable for n ≤ 25 (maxEntries cap).
 
-  // Load embeddings for project entries (if available).
+  // Load embeddings for the given entries (if available).
   // We query directly rather than using vectorSearch() because we need
-  // pairwise comparison among project entries, not a query-vs-all search.
+  // pairwise comparison among entries, not a query-vs-all search.
   const embeddingMap = new Map<string, Float32Array>();
   {
     const entryIds = entries.map((e) => e.id);
-    // Build parameterized IN clause for the project's entry IDs
+    // Build parameterized IN clause for the entry IDs
     const placeholders = entryIds.map(() => "?").join(",");
     const rows = db()
       .query(`SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`)
@@ -1125,4 +1121,27 @@ export async function deduplicate(
   result.sort((a, b) => b.merged.length - a.merged.length);
 
   return { clusters: result, totalRemoved };
+}
+
+export async function deduplicate(
+  projectPath: string,
+  opts?: { dryRun?: boolean },
+): Promise<DedupResult> {
+  const entries = forProject(projectPath, false);
+  return _dedup(entries, opts?.dryRun ?? true);
+}
+
+/** Deduplicate global (cross-project) entries that have no project_id. */
+export async function deduplicateGlobal(
+  opts?: { dryRun?: boolean },
+): Promise<DedupResult> {
+  const entries = db()
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+       WHERE project_id IS NULL
+       AND confidence > 0.2
+       ORDER BY confidence DESC, updated_at DESC`,
+    )
+    .all() as KnowledgeEntry[];
+  return _dedup(entries, opts?.dryRun ?? true);
 }

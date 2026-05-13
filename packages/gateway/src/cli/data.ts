@@ -736,6 +736,14 @@ async function cmdDedup(
     }
   }
 
+  // Also dedup global (cross-project) entries
+  const globalResult = await ltm.deduplicateGlobal({ dryRun: !apply });
+  if (globalResult.clusters.length > 0) {
+    allResults.push({ name: "Global", result: globalResult });
+    grandTotalRemoved += globalResult.totalRemoved;
+    grandTotalClusters += globalResult.clusters.length;
+  }
+
   if (grandTotalClusters === 0) {
     console.log("No duplicates found.");
     return;
