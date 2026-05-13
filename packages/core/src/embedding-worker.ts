@@ -160,12 +160,28 @@ async function drain(): Promise<void> {
 // Embed processing
 // ---------------------------------------------------------------------------
 
+/**
+ * Detect ONNX runtime out-of-memory errors. The runtime throws opaque
+ * numeric error codes (e.g. "287180544") for allocation failures rather
+ * than a readable message. We match on large numeric-only strings and
+ * known OOM patterns.
+ */
+function isOomError(msg: string): boolean {
+  // Pure numeric error codes ≥ 6 digits are ORT allocation failures
+  if (/^\d{6,}$/.test(msg)) return true;
+  // Explicit OOM messages from various ONNX backends
+  if (/out.of.memory|alloc.*fail|oom/i.test(msg)) return true;
+  return false;
+}
+
 async function processEmbed(req: EmbedRequest): Promise<void> {
   try {
     await ensurePipeline();
 
     // Run feature extraction with mean pooling.
-    const output = await pipe!(req.texts, { pooling: "mean" });
+    // truncation: true caps each text at the model's max length (8192 tokens
+    // for Nomic v1.5), preventing oversized inputs from causing OOM.
+    const output = await pipe!(req.texts, { pooling: "mean", truncation: true });
 
     // Post-process following Nomic's recipe:
     //   1. Layer normalization over the full hidden dimension
@@ -202,7 +218,12 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
   } catch (err) {
     // Don't re-post init-error — it was already sent in ensurePipeline().
     if (!initFailed) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = isOomError(raw)
+        ? `ONNX runtime out of memory (batch=${req.texts.length}, ` +
+          `longest≈${Math.max(...req.texts.map((t) => t.length))} chars). ` +
+          `Try reducing batch size. Raw: ${raw}`
+        : raw;
       post({ type: "error", id: req.id, error: msg });
     }
   }
