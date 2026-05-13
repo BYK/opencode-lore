@@ -422,7 +422,7 @@ export function expectedWarmupCycles(
 ): number {
   // S(elapsed) — probability of still being idle at current time
   const sNow = survivalFunction(hist, elapsedMs);
-  if (sNow < 0.001) return maxCycles; // essentially dead — assume worst case
+  if (sNow < 0.001) return maxCycles + 1; // essentially dead — exceeds budget to trigger cap
 
   let expected = 0;
 
@@ -866,9 +866,16 @@ export function computeWarmingSnapshot(
     } else if (!profile) {
       notWarmingReason = "No warming profile (non-Anthropic or unknown model)";
     } else if (state.warmup?.forceKeepWarm) {
-      const intoWindow = idleMs % ttlMs;
-      if (intoWindow < ttlMs - warmupMarginMs) {
-        notWarmingReason = "Force-keep: not in warmup window yet";
+      const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+      if (cyclesSpent >= maxCyc) {
+        notWarmingReason = `Force-keep: break-even exceeded (${cyclesSpent} >= ${maxCyc} cycles)`;
+      } else {
+        const intoWindow = idleMs % ttlMs;
+        if (intoWindow < ttlMs - warmupMarginMs) {
+          notWarmingReason = "Force-keep: not in warmup window yet";
+        } else {
+          notWarmingReason = "Force-keep: cooldown active";
+        }
       }
     } else if (state.warmup?.lastWarmupAt && now - state.warmup.lastWarmupAt < cooldownFor(state, ttlMs, warmupMarginMs)) {
       notWarmingReason = "Already warmed in this TTL window";

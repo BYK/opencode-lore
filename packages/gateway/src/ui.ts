@@ -1228,7 +1228,7 @@ function pageWarming(): string {
         <th data-sort="num">Idle</th>
         <th data-sort="text">TTL</th>
         <th data-sort="num">S(t)</th>
-        <th data-sort="num">P(return)</th>
+        <th data-sort="num">P(returns)</th>
         <th data-sort="text">Status</th>
         <th data-sort="num">Warmups</th>
         <th data-sort="num">Hits</th>
@@ -1240,7 +1240,7 @@ function pageWarming(): string {
         <td>${formatDuration(snap.idleMs)}</td>
         <td>${snap.ttl ?? "5m"}</td>
         <td>${(snap.survivalAtIdle * 100).toFixed(1)}%</td>
-        <td>${(snap.pReturnDampened * 100).toFixed(1)}%</td>
+        <td>${(snap.pReturns * 100).toFixed(1)}%</td>
         <td>${warmingStatusBadge(snap)}</td>
         <td>${snap.warmupCount}</td>
         <td>${snap.warmupHits}</td>
