@@ -28,6 +28,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
   renameSync,
   unlinkSync,
@@ -169,6 +170,74 @@ function prepareVendorModelCache(target: CompileTarget): string | null {
   return modelDir;
 }
 
+/**
+ * esbuild plugin that resolves `onnxruntime-node` and `onnxruntime-common`
+ * from their actual paths (Bun hoists them into `.bun/` which `require.resolve`
+ * can't reach from the build script). The JS parts are bundled inline; `.node`
+ * native binary files are marked as external — the dynamic
+ * `require(\`../bin/napi-v3/...\`)` in binding.js is preserved as-is for
+ * Bun `--compile` to handle at binary build time.
+ */
+function onnxResolvePlugin(): esbuild.Plugin {
+  // Find packages inside Bun's internal .bun/ store by scanning for their
+  // package.json. Prefers stable versions over pre-release.
+  function findBunPackage(name: string): string {
+    const bunDir = join(repoRoot, "node_modules/.bun");
+    const entries = readdirSync(bunDir);
+    const prefix = `${name}@`;
+    const matches = entries.filter((e) => e.startsWith(prefix));
+    if (matches.length === 0) {
+      throw new Error(`onnxResolvePlugin: cannot find ${name} in node_modules/.bun/`);
+    }
+    // Prefer stable versions (no -dev/-alpha/-beta) over pre-release
+    const stable = matches.filter((m) => !m.includes("-", prefix.length));
+    const pick = (stable.length > 0 ? stable : matches).sort().reverse()[0];
+    const pkgJsonPath = join(bunDir, pick, "node_modules", name, "package.json");
+    const pkgDir = dirname(pkgJsonPath);
+    const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+    const main = pkgJson.main || "index.js";
+    return join(pkgDir, main);
+  }
+
+  return {
+    name: "onnx-resolve",
+    setup(build) {
+      // Resolve bare specifiers to their real paths so esbuild can bundle them.
+      for (const pkg of ["onnxruntime-node", "onnxruntime-common"]) {
+        const resolvedPath = findBunPackage(pkg);
+        build.onResolve({ filter: new RegExp(`^${pkg}$`) }, () => ({
+          path: resolvedPath,
+        }));
+      }
+
+      // sharp is used by transformers.js for vision model image processing —
+      // not needed for text embeddings. Resolve to an empty module.
+      build.onResolve({ filter: /^sharp$/ }, (args) => ({
+        path: args.path,
+        namespace: "empty-module",
+      }));
+      build.onLoad({ filter: /.*/, namespace: "empty-module" }, () => ({
+        contents: "module.exports = {};",
+        loader: "js",
+      }));
+
+      // Intercept onnxruntime-node/dist/binding.js which contains a dynamic
+      // `require(\`../bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node\`)`
+      // that esbuild tries to resolve for all platforms. Wrap the require in
+      // an indirect call so esbuild can't statically analyze it — the dynamic
+      // require is preserved as-is for Bun --compile to handle at runtime.
+      build.onLoad({ filter: /onnxruntime-node.*[/\\]binding\.js$/ }, (args) => {
+        const src = readFileSync(args.path, "utf8");
+        const patched = src.replace(
+          /require\(`\.\.\/bin\/napi-v3\/\$\{process\.platform\}\/\$\{process\.arch\}\/onnxruntime_binding\.node`\)/,
+          '(function(p){return require(p)})(`../bin/napi-v3/${process.platform}/${process.arch}/onnxruntime_binding.node`)',
+        );
+        return { contents: patched, loader: "js", resolveDir: dirname(args.path) };
+      });
+    },
+  };
+}
+
 async function buildBinary() {
   const target = (flags.target ?? currentTarget()) as CompileTarget;
 
@@ -196,11 +265,11 @@ async function buildBinary() {
     target: "esnext",
     platform: "node",
     conditions: ["bun"],
-    // Bun built-ins + native binary packages that esbuild can't bundle.
-    // onnxruntime-node: .node native binaries (Bun --compile handles natively)
-    // sharp: image processing lib only used by transformers.js vision models,
-    //   not needed for text embeddings. Externalizing removes ~60KB + native deps.
-    external: ["bun:*", "onnxruntime-node", "sharp"],
+    // Bun built-ins stay external. onnxruntime-node/common are resolved to
+    // their actual paths by onnxResolvePlugin so esbuild can bundle the JS;
+    // .node binaries are kept as dynamic requires for Bun --compile to handle.
+    external: ["bun:*"],
+    plugins: [onnxResolvePlugin()],
     outfile: bundlePath,
     // "linked" produces an external .map file with a //# sourceMappingURL=
     // comment in the JS. This map is uploaded to Sentry (never shipped to users).
@@ -237,7 +306,8 @@ async function buildBinary() {
     target: "esnext",
     platform: "node",
     conditions: ["bun"],
-    external: ["bun:*", "onnxruntime-node", "sharp"],
+    external: ["bun:*"],
+    plugins: [onnxResolvePlugin()],
     outfile: workerBundlePath,
     minify: true,
     logLevel: "info",
