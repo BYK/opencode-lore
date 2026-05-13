@@ -197,6 +197,10 @@ const FUZZY_DEDUP_THRESHOLD = 0.7;
  *  Prevents false positives on short titles where 2-3 common words produce
  *  a high overlap coefficient despite being genuinely different entries. */
 const FUZZY_DEDUP_MIN_OVERLAP = 4;
+/** Minimum cosine similarity for embedding-based dedup. Set high (0.85) because
+ *  Nomic v1.5 same-domain distinct entries score 0.46–0.70 — only genuinely
+ *  duplicate content should score above 0.85. */
+const EMBEDDING_DEDUP_THRESHOLD = 0.85;
 
 /**
  * Find an existing knowledge entry whose title is fuzzy-similar to the given title.
@@ -963,14 +967,19 @@ export type DedupResult = {
 /**
  * Deduplicate knowledge entries for a project.
  *
- * Uses title word-overlap with "star" clustering (no transitive chains) to
- * prevent snowball merging. Embedding-based similarity was evaluated but
- * rejected — small embedding models produce a high similarity floor (0.85+)
- * for same-domain entries, making it impossible to separate real duplicates
- * from merely related entries.
+ * Uses two complementary signals with "star" clustering (no transitive
+ * chains) to prevent snowball merging:
  *
- * For each cluster of duplicates, picks a survivor (highest confidence, then
- * most recently updated, then shortest title) and removes the rest.
+ * 1. **Title word-overlap** (Jaccard on meaningful words) — catches entries
+ *    with similar titles regardless of content wording.
+ * 2. **Embedding cosine similarity** (when embeddings are available) — catches
+ *    entries with different titles but semantically identical content. Nomic
+ *    v1.5 produces a same-domain spread of 0.46–0.70 for distinct entries,
+ *    making threshold-based dedup viable at 0.85+.
+ *
+ * Pairs matching either signal are clustered together. For each cluster,
+ * picks a survivor (highest confidence, then most recently updated, then
+ * shortest title) and removes the rest.
  *
  * @param projectPath   Project root path
  * @param opts.dryRun   If true (default), report clusters without deleting
@@ -984,25 +993,66 @@ export async function deduplicate(
   const entries = forProject(projectPath, false);
   if (entries.length < 2) return { clusters: [], totalRemoved: 0 };
 
-  // --- Star clustering via title word-overlap (no transitivity) ---
-  // Each unclaimed entry becomes a cluster center; all unclaimed entries
-  // with title overlap above threshold are added to that cluster.
-  // Process entries with the most potential matches first for better clusters.
+  // --- Build neighbor map using title overlap + embedding similarity ---
+  // Two entries are considered neighbors (potential duplicates) if EITHER:
+  //   (a) title word-overlap ≥ 0.7 with ≥ 4 shared words, OR
+  //   (b) embedding cosine similarity ≥ 0.85
+  // Star clustering (no transitivity) prevents snowball merging.
+  // O(n²) pairwise comparison — acceptable for n ≤ 25 (maxEntries cap).
 
-  // Pre-compute overlap for all pairs
-  type OverlapHit = { id: string; coefficient: number };
-  const neighborMap = new Map<string, OverlapHit[]>();
-
-  for (const entry of entries) {
-    const neighbors: OverlapHit[] = [];
-    for (const other of entries) {
-      if (other.id === entry.id) continue;
-      const { coefficient, intersectionSize } = titleOverlap(entry.title, other.title);
-      if (coefficient >= FUZZY_DEDUP_THRESHOLD && intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP) {
-        neighbors.push({ id: other.id, coefficient });
+  // Load embeddings for project entries (if available).
+  // We query directly rather than using vectorSearch() because we need
+  // pairwise comparison among project entries, not a query-vs-all search.
+  const embeddingMap = new Map<string, Float32Array>();
+  {
+    const entryIds = entries.map((e) => e.id);
+    // Build parameterized IN clause for the project's entry IDs
+    const placeholders = entryIds.map(() => "?").join(",");
+    const rows = db()
+      .query(`SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`)
+      .all(...entryIds) as Array<{ id: string; embedding: Buffer }>;
+    for (const row of rows) {
+      try {
+        embeddingMap.set(row.id, embedding.fromBlob(row.embedding));
+      } catch {
+        // Skip corrupted embeddings — entry falls back to title-overlap only.
+        log.info(`skipping corrupted embedding for entry ${row.id}`);
       }
     }
-    neighbors.sort((a, b) => b.coefficient - a.coefficient);
+  }
+
+  // Pre-compute neighbors for all pairs
+  type DedupHit = { id: string; score: number };
+  const neighborMap = new Map<string, DedupHit[]>();
+
+  for (const entry of entries) {
+    const neighbors: DedupHit[] = [];
+    const entryVec = embeddingMap.get(entry.id);
+
+    for (const other of entries) {
+      if (other.id === entry.id) continue;
+
+      // Signal 1: title word-overlap
+      const { coefficient, intersectionSize } = titleOverlap(entry.title, other.title);
+      const titleMatch = coefficient >= FUZZY_DEDUP_THRESHOLD && intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP;
+
+      // Signal 2: embedding cosine similarity
+      let embeddingMatch = false;
+      let similarity = 0;
+      if (entryVec) {
+        const otherVec = embeddingMap.get(other.id);
+        if (otherVec && entryVec.length === otherVec.length) {
+          similarity = embedding.cosineSimilarity(entryVec, otherVec);
+          embeddingMatch = similarity >= EMBEDDING_DEDUP_THRESHOLD;
+        }
+      }
+
+      if (titleMatch || embeddingMatch) {
+        // Use the stronger signal as the match score for cluster priority
+        neighbors.push({ id: other.id, score: Math.max(coefficient, similarity) });
+      }
+    }
+    neighbors.sort((a, b) => b.score - a.score);
     neighborMap.set(entry.id, neighbors);
   }
 
