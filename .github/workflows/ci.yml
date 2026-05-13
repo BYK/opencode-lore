@@ -99,7 +99,7 @@ jobs:
 
       - name: Populate vendor staging (cache miss)
         if: steps.vendor-cache.outputs.cache-hit != 'true'
-        run: bun run packages/gateway/script/vendor-embeddings.ts --all
+        run: bun run packages/gateway/script/vendor-embeddings.ts
 
       - name: Build linux-x64 binary
         run: bun run --filter '@loreai/gateway' build:binary
@@ -271,10 +271,8 @@ jobs:
       - run: bun install
 
       # Reuse the cache the test job populated (same key). The
-      # `.vendor-build/<target>/` tree contains platform-specific
-      # native bindings downloaded via `bun install --os=<os> --cpu=<cpu>`,
-      # which are valid regardless of the host that ran the install —
-      # cross-OS cache reuse is safe here.
+      # `.vendor-build/.model-cache/` tree contains the shared ONNX model
+      # files (platform-independent) — safe to reuse across OS runners.
       - name: Restore vendor staging
         id: vendor-cache
         uses: actions/cache@v5
@@ -284,7 +282,7 @@ jobs:
 
       - name: Populate vendor staging (cache miss)
         if: steps.vendor-cache.outputs.cache-hit != 'true'
-        run: bun run packages/gateway/script/vendor-embeddings.ts --target ${{ matrix.target }}
+        run: bun run packages/gateway/script/vendor-embeddings.ts
 
       - name: Build ${{ matrix.target }} binary
         run: bun run --filter '@loreai/gateway' build:binary -- --target ${{ matrix.target }}
@@ -340,7 +338,7 @@ jobs:
 
       - name: Populate vendor staging (cache miss)
         if: steps.vendor-cache.outputs.cache-hit != 'true'
-        run: bun run packages/gateway/script/vendor-embeddings.ts --all
+        run: bun run packages/gateway/script/vendor-embeddings.ts
 
       - name: Build all platform binaries
         run: |
