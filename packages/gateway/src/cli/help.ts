@@ -10,7 +10,8 @@ Usage:
   lore [command] [options]
 
 Commands:
-  run [command...]    Start gateway and launch an AI agent (default)
+  run [command] [args...]  Start gateway and launch an AI agent (default)
+                           Extra arguments are forwarded to the launched agent
   start               Start the gateway server (without launching an agent)
   logs                Show lore activity log
   import              Import knowledge from prior AI agent conversations
@@ -51,6 +52,16 @@ Import options:
   --project <path>              Target project (default: cwd)
   --dry-run                     Show what would be imported, no LLM calls
 
+Agent arguments:
+  Arguments after the agent name are forwarded to the launched agent:
+    lore run claude --dangerously-skip-permissions
+    lore claude --model gpt-4
+  Without an agent name, unknown flags are forwarded to the auto-detected agent:
+    lore --dangerously-skip-permissions
+  Use -- to also forward flags that share names with lore's own options:
+    lore -- --verbose --debug
+    lore run -- --port 8080
+
 Recall options:
   --project <path>              Target project (default: cwd)
   --scope <scope>               all (default), session, project, knowledge
@@ -62,6 +73,10 @@ Examples:
   lore                          # Auto-detect agent and launch with gateway
   lore run claude               # Launch Claude Code through the gateway
   lore run opencode             # Launch OpenCode through the gateway
+  lore --dangerously-skip-permissions          # Forward flags to auto-detected agent
+  lore claude --dangerously-skip-permissions  # Forward flags to Claude Code
+  lore run claude --model gpt-4              # Forward --model gpt-4 to claude
+  lore -- --verbose --debug                  # Use -- to forward lore-like flags
   lore start                    # Start gateway without launching an agent
   lore start -p 8080            # Start gateway on a custom port
   lore start -H 127.0.0.1 -H 100.69.65.125  # Bind to multiple interfaces

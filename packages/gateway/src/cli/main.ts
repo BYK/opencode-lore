@@ -25,6 +25,66 @@ import {
 // Argument parsing
 // ---------------------------------------------------------------------------
 
+/** Token from `parseArgs` with `tokens: true`. */
+interface ParseToken {
+  kind: "option" | "positional" | "option-terminator";
+  index: number;
+  name?: string;
+  rawName?: string;
+  value?: string;
+  inlineValue?: boolean;
+}
+
+/** Set of option names defined in OPTIONS — used to detect unknown flags. */
+const KNOWN_OPTIONS = new Set<string>();
+
+/**
+ * Extract arguments that should be forwarded to the launched agent.
+ *
+ * Strategy:
+ * 1. If `--` is present, everything after it is the agent's.
+ * 2. If an agent/command positional is found, slice raw `argv` from one past
+ *    it — everything after the agent name is the agent's. This avoids
+ *    parseArgs's inability to handle unknown value-bearing flags
+ *    (e.g. `--model gpt-4`).
+ * 3. In auto-detect mode (no agent name, no `--`), reconstruct unknown option
+ *    tokens (flags not in OPTIONS) and forward them. This handles cases like
+ *    `lore --dangerously-skip-permissions` where the flag should reach the
+ *    auto-detected agent.
+ *
+ * Caveat: lore's own known options (--port, --debug, etc.) are consumed by
+ * parseArgs regardless of position. Place them before the agent name, or use
+ * `--` to prevent lore from consuming them.
+ */
+function extractAgentArgs(argv: string[], tokens: ParseToken[]): string[] {
+  // 1. If there is a `--` (option-terminator), everything after it is for the agent.
+  const terminator = tokens.find((t) => t.kind === "option-terminator");
+  if (terminator) {
+    return argv.slice(terminator.index + 1);
+  }
+
+  // 2. Find the agent/command positional — the first positional that is NOT "run".
+  const positionalTokens = tokens.filter((t) => t.kind === "positional");
+  for (const pt of positionalTokens) {
+    if (pt.value === "run") continue;
+    // This is the agent/command name. Everything after it in raw argv is the agent's.
+    return argv.slice(pt.index + 1);
+  }
+
+  // 3. Auto-detect with no agent name — collect unknown option tokens.
+  //    Unknown flags (not in OPTIONS) are reconstructed from their rawName
+  //    and forwarded to the agent. parseArgs treats all unknown flags as
+  //    booleans, so value-bearing flags like `--model gpt-4` cannot be
+  //    reconstructed here — use `--` for those cases.
+  const unknownArgs: string[] = [];
+  for (const t of tokens) {
+    if (t.kind === "option" && t.name && !KNOWN_OPTIONS.has(t.name)) {
+      unknownArgs.push(t.rawName ?? `--${t.name}`);
+    }
+  }
+  return unknownArgs;
+}
+
 /** Options shared by all commands. */
 const OPTIONS = {
   port: { type: "string" as const, short: "p" },
@@ -48,6 +108,13 @@ const OPTIONS = {
   // regressions that --print-vendor-info alone wouldn't surface.
   "check-embeddings": { type: "boolean" as const },
 } as const;
+
+// Populate the set used by extractAgentArgs to distinguish lore's own flags
+// from unknown flags that should be forwarded to the agent.
+for (const [name, def] of Object.entries(OPTIONS)) {
+  KNOWN_OPTIONS.add(name);
+  if ("short" in def && def.short) KNOWN_OPTIONS.add(def.short);
+}
 
 function parsePort(value: string): number {
   const n = Number.parseInt(value, 10);
@@ -78,19 +145,24 @@ function buildStartOptions(values: {
 // ---------------------------------------------------------------------------
 
 export async function _cli(): Promise<void> {
-  // Parse known options, allow positional args for command + pass-through
+  // Parse known options, allow positional args for command + pass-through.
+  // `tokens: true` gives us index information needed to extract agent args.
   let values: ReturnType<typeof parseArgs>["values"];
   let positionals: string[];
+  let tokens: ParseToken[];
+  const argv = process.argv.slice(2);
 
   try {
     const parsed = parseArgs({
-      args: process.argv.slice(2),
+      args: argv,
       options: OPTIONS,
       allowPositionals: true,
       strict: false,
+      tokens: true,
     });
     values = parsed.values;
     positionals = parsed.positionals;
+    tokens = parsed.tokens as ParseToken[];
   } catch (e) {
     console.error(`Error: ${e instanceof Error ? e.message : e}`);
     printHelp();
@@ -176,7 +248,10 @@ export async function _cli(): Promise<void> {
         // Lazy-import to avoid pulling in child_process + agent detection
         // when only `lore start` or `lore help` is needed.
         const { commandRun } = await import("./run");
-        await commandRun(startOpts, rest);
+        const agentArgs = extractAgentArgs(argv, tokens);
+        // Pass only the agent name (if any) as cmdArgs; extra flags go via agentArgs.
+        const agentName = rest.length > 0 ? [rest[0]] : [];
+        await commandRun(startOpts, agentName, agentArgs);
         break;
       }
 
@@ -259,7 +334,8 @@ export async function _cli(): Promise<void> {
             break;
           }
           const { commandRun } = await import("./run");
-          await commandRun(startOpts, [command, ...rest]);
+          const agentArgs = extractAgentArgs(argv, tokens);
+          await commandRun(startOpts, [command], agentArgs);
         }
         break;
     }
