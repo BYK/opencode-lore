@@ -71,6 +71,27 @@ async function ensurePipeline(): Promise<void> {
 
   if (!initPromise) {
     initPromise = (async () => {
+      // In the compiled binary, onnxruntime-node is redirected to
+      // onnxruntime-web (WASM backend). The WASM runtime files (.wasm/.mjs)
+      // are embedded as Bun assets in $bunfs. We must set wasmPaths BEFORE
+      // transformers.js imports onnxruntime, so the CDN fallback URL is
+      // never used. Bun hashes filenames in $bunfs, so we pass exact file
+      // paths as an object { mjs, wasm } rather than a directory string.
+      //
+      // We import onnxruntime-node (which the build plugin redirects to
+      // onnxruntime-web) to get the same module instance that transformers.js
+      // will use — importing onnxruntime-web directly would create a second
+      // instance with a duplicate backend registration conflict.
+      const wasmPaths = (globalThis as Record<string, unknown>).__LORE_VENDOR_WASM_PATHS__ as
+        { mjs: string; wasm: string } | undefined;
+      if (wasmPaths) {
+        const ort = await import("onnxruntime-node");
+        const ortEnv = ((ort as any).default ?? ort).env;
+        if (ortEnv?.wasm) {
+          ortEnv.wasm.wasmPaths = wasmPaths;
+        }
+      }
+
       const transformers = await import("@huggingface/transformers");
       const { pipeline, env, layer_norm } = transformers;
 
@@ -87,9 +108,13 @@ async function ensurePipeline(): Promise<void> {
       // Create feature-extraction pipeline with ONNX quantized model.
       // dtype: 'q8' selects the INT8 quantized ONNX variant (model_quantized.onnx)
       // which is ~137MB for Nomic v1.5 vs ~547MB for the full FP32 model.
+      //
+      // device: "cpu" — in npm mode, transformers.js uses onnxruntime-node
+      // (native CPU). In the compiled binary, onnxruntime-node is redirected
+      // to onnxruntime-web by the build plugin, which handles "cpu" via its
+      // WASM+SIMD backend (API-compatible, ~2x faster on batch workloads).
       pipe = (await pipeline("feature-extraction", modelId, {
         dtype: "q8",
-        // Use ONNX Runtime for Node.js (not WASM)
         device: "cpu",
       })) as unknown as FeatureExtractionPipeline;
 

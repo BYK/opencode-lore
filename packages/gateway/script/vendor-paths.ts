@@ -35,10 +35,11 @@ export const VENDOR_TARGETS: VendorTarget[] = [
 export const MODEL_ID = "nomic-ai/nomic-embed-text-v1.5";
 
 /**
- * Directory name for the model cache. Uses the HF model ID with
- * slashes replaced by `--` (matching transformers.js cache convention).
+ * Directory name for the model inside localModelPath. Uses the HF model
+ * ID directly — transformers.js resolves local paths as
+ * `pathJoin(env.localModelPath, modelId, filename)`.
  */
-export const MODEL_DIR_NAME = "nomic-ai--nomic-embed-text-v1.5";
+export const MODEL_DIR_NAME = "nomic-ai/nomic-embed-text-v1.5";
 
 /**
  * Filename of the ONNX weights. We use the INT8 quantized variant

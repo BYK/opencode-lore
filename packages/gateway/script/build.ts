@@ -171,47 +171,48 @@ function prepareVendorModelCache(target: CompileTarget): string | null {
 }
 
 /**
- * esbuild plugin that resolves `onnxruntime-node` and `onnxruntime-common`
- * from their actual paths (Bun hoists them into `.bun/` which `require.resolve`
- * can't reach from the build script). The JS parts are bundled inline; `.node`
- * native binary files are marked as external — the dynamic
- * `require(\`../bin/napi-v3/...\`)` in binding.js is preserved as-is for
- * Bun `--compile` to handle at binary build time.
+ * esbuild plugin for binary builds that:
+ *
+ * 1. Redirects `onnxruntime-node` → `onnxruntime-web` (node entry). The native
+ *    backend's `.node` NAPI binaries can't be loaded from Bun's `$bunfs`.
+ *    onnxruntime-web's WASM+SIMD backend is API-compatible and actually ~2x
+ *    faster on batch embedding workloads due to avoiding N-API overhead.
+ *    transformers.js's `IS_NODE_ENV` branch uses it transparently — it populates
+ *    `supportedDevices` with `cpu` (which onnxruntime-web handles via WASM).
+ *
+ * 2. Stubs `sharp` as empty — image processing for vision models, unused for
+ *    text embeddings.
+ *
+ * 3. Resolves `onnxruntime-common` and `onnxruntime-web` from Bun's `.bun/`
+ *    store (transitive deps not hoisted to `node_modules/`).
  */
-function onnxResolvePlugin(): esbuild.Plugin {
-  // Find packages inside Bun's internal .bun/ store by scanning for their
-  // package.json. Prefers stable versions over pre-release.
-  function findBunPackage(name: string): string {
-    const bunDir = join(repoRoot, "node_modules/.bun");
-    const entries = readdirSync(bunDir);
-    const prefix = `${name}@`;
-    const matches = entries.filter((e) => e.startsWith(prefix));
-    if (matches.length === 0) {
-      throw new Error(`onnxResolvePlugin: cannot find ${name} in node_modules/.bun/`);
-    }
-    // Prefer stable versions (no -dev/-alpha/-beta) over pre-release
-    const stable = matches.filter((m) => !m.includes("-", prefix.length));
-    const pick = (stable.length > 0 ? stable : matches).sort().reverse()[0];
-    const pkgJsonPath = join(bunDir, pick, "node_modules", name, "package.json");
-    const pkgDir = dirname(pkgJsonPath);
-    const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
-    const main = pkgJson.main || "index.js";
-    return join(pkgDir, main);
+/** Find a package directory inside Bun's `.bun/` store. Prefers stable versions. */
+function findBunPackageDir(name: string): string {
+  const bunDir = join(repoRoot, "node_modules/.bun");
+  const prefix = `${name}@`;
+  const entries = readdirSync(bunDir).filter((e) => e.startsWith(prefix));
+  if (entries.length === 0) {
+    throw new Error(`findBunPackageDir: cannot find ${name} in node_modules/.bun/`);
   }
+  const stable = entries.filter((m) => !m.includes("-", prefix.length));
+  const pick = (stable.length > 0 ? stable : entries).sort().reverse()[0];
+  return join(bunDir, pick, "node_modules", name);
+}
+
+/** Find a package's main entry inside Bun's `.bun/` store. Prefers stable versions. */
+function findBunPackageEntry(name: string, entryOverride?: string): string {
+  const pkgDir = findBunPackageDir(name);
+  if (entryOverride) return join(pkgDir, entryOverride);
+  const pkgJson = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+  return join(pkgDir, pkgJson.main || "index.js");
+}
+
+function binaryExternalsPlugin(): esbuild.Plugin {
 
   return {
-    name: "onnx-resolve",
+    name: "binary-externals",
     setup(build) {
-      // Resolve bare specifiers to their real paths so esbuild can bundle them.
-      for (const pkg of ["onnxruntime-node", "onnxruntime-common"]) {
-        const resolvedPath = findBunPackage(pkg);
-        build.onResolve({ filter: new RegExp(`^${pkg}$`) }, () => ({
-          path: resolvedPath,
-        }));
-      }
-
-      // sharp is used by transformers.js for vision model image processing —
-      // not needed for text embeddings. Resolve to an empty module.
+      // Stub sharp as an empty module.
       build.onResolve({ filter: /^sharp$/ }, (args) => ({
         path: args.path,
         namespace: "empty-module",
@@ -221,19 +222,20 @@ function onnxResolvePlugin(): esbuild.Plugin {
         loader: "js",
       }));
 
-      // Intercept onnxruntime-node/dist/binding.js which contains a dynamic
-      // `require(\`../bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node\`)`
-      // that esbuild tries to resolve for all platforms. Wrap the require in
-      // an indirect call so esbuild can't statically analyze it — the dynamic
-      // require is preserved as-is for Bun --compile to handle at runtime.
-      build.onLoad({ filter: /onnxruntime-node.*[/\\]binding\.js$/ }, (args) => {
-        const src = readFileSync(args.path, "utf8");
-        const patched = src.replace(
-          /require\(`\.\.\/bin\/napi-v3\/\$\{process\.platform\}\/\$\{process\.arch\}\/onnxruntime_binding\.node`\)/,
-          '(function(p){return require(p)})(`../bin/napi-v3/${process.platform}/${process.arch}/onnxruntime_binding.node`)',
-        );
-        return { contents: patched, loader: "js", resolveDir: dirname(args.path) };
-      });
+      // Redirect onnxruntime-node → onnxruntime-web's Node.js entry.
+      // The WASM runtime is API-compatible with the native one.
+      const ortWebNodeEntry = findBunPackageEntry("onnxruntime-web", "dist/ort.node.min.mjs");
+      build.onResolve({ filter: /^onnxruntime-node$/ }, () => ({
+        path: ortWebNodeEntry,
+      }));
+
+      // Resolve transitive deps from .bun/ so esbuild can bundle them.
+      for (const pkg of ["onnxruntime-common", "onnxruntime-web"]) {
+        const resolved = findBunPackageEntry(pkg);
+        build.onResolve({ filter: new RegExp(`^${pkg}$`) }, () => ({
+          path: resolved,
+        }));
+      }
     },
   };
 }
@@ -265,11 +267,11 @@ async function buildBinary() {
     target: "esnext",
     platform: "node",
     conditions: ["bun"],
-    // Bun built-ins stay external. onnxruntime-node/common are resolved to
-    // their actual paths by onnxResolvePlugin so esbuild can bundle the JS;
-    // .node binaries are kept as dynamic requires for Bun --compile to handle.
+    // Bun built-ins stay external. onnxruntime-node and sharp are stubbed
+    // as empty modules — transformers.js falls back to the bundled WASM
+    // ONNX runtime, and sharp is only used for vision models.
     external: ["bun:*"],
-    plugins: [onnxResolvePlugin()],
+    plugins: [binaryExternalsPlugin()],
     outfile: bundlePath,
     // "linked" produces an external .map file with a //# sourceMappingURL=
     // comment in the JS. This map is uploaded to Sentry (never shipped to users).
@@ -307,7 +309,7 @@ async function buildBinary() {
     platform: "node",
     conditions: ["bun"],
     external: ["bun:*"],
-    plugins: [onnxResolvePlugin()],
+    plugins: [binaryExternalsPlugin()],
     outfile: workerBundlePath,
     minify: true,
     logLevel: "info",
@@ -352,7 +354,7 @@ async function buildBinary() {
   //
   //   (a) Materialises the nomic-embed-text-v1.5 model files from Bun
   //       assets to a stable on-disk dir (`~/.lore/embeddings-vendored/
-  //       v{ver}-{tgt}/nomic-ai--nomic-embed-text-v1.5/`) —
+  //       v{ver}-{tgt}/nomic-ai/nomic-embed-text-v1.5/`) —
   //       @huggingface/transformers reads them via ONNX Runtime's native
   //       fs, which can't see Bun's $bunfs.
   //   (b) Sets `globalThis.__LORE_VENDOR_MODEL__` so the LocalProvider
@@ -375,10 +377,24 @@ async function buildBinary() {
     const modelEntries = MODEL_FILES.map(
       (f, i) => `  [${JSON.stringify(f)}, _model_${i}],`,
     ).join("\n");
+
+    // WASM runtime files from onnxruntime-web. In the compiled binary,
+    // onnxruntime-node is redirected to onnxruntime-web (WASM backend).
+    // The WASM files are embedded as Bun assets — onnxruntime-web's node
+    // entry loads them via readFile(), which can read from Bun's $bunfs.
+    const ortWebDistDir = findBunPackageDir("onnxruntime-web") + "/dist";
+    const wasmFiles = [
+      "ort-wasm-simd-threaded.mjs",
+      "ort-wasm-simd-threaded.wasm",
+    ];
+    const wasmImports = wasmFiles.map(
+      (f, i) => `import _wasm_${i} from ${JSON.stringify(join(ortWebDistDir, f))} with { type: "file" };`,
+    ).join("\n");
+
     const wrapperSrc = [
       `// AUTO-GENERATED by packages/gateway/script/build.ts. Do not commit.`,
-      `// Embeds the nomic-embed-text-v1.5 model files as Bun assets,`,
-      `// materialises them at process start, and hands off to bin.js.`,
+      `// Embeds the nomic-embed-text-v1.5 model files + WASM runtime as Bun`,
+      `// assets, materialises model files at process start, and hands off to bin.js.`,
       ``,
       `// --- Static imports (must be top-level in ESM) ---`,
       `import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";`,
@@ -386,12 +402,17 @@ async function buildBinary() {
       `import { join } from "node:path";`,
       `import { isMainThread } from "node:worker_threads";`,
       modelImports,
+      wasmImports,
       ``,
       `// --- Worker thread shortcut ---`,
       `// When spawned as a worker thread, run the embedding worker code path`,
       `// directly. This avoids needing a separate worker entrypoint — Bun's`,
       `// --compile silently drops additional entrypoints on macOS and Windows.`,
       `if (!isMainThread) {`,
+      `  // Register WASM file paths for the worker — onnxruntime-web's node entry`,
+      `  // uses readFile() which can read from Bun's $bunfs virtual filesystem.`,
+      `  // Bun hashes filenames in $bunfs, so we pass exact paths (not a directory).`,
+      `  (globalThis as Record<string, unknown>).__LORE_VENDOR_WASM_PATHS__ = { mjs: _wasm_0, wasm: _wasm_1 };`,
       `  await import("./embedding-worker.js");`,
       `} else {`,
       `  // --- Main thread: materialise vendor assets and hand off ---`,
