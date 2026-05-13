@@ -56,6 +56,7 @@ interface LaunchTarget {
 async function resolveLaunchTarget(
   gatewayUrl: string,
   cmdArgs: string[],
+  extraArgs: string[],
 ): Promise<LaunchTarget | null> {
   // --- Explicit command given: inject all known env vars ---
   if (cmdArgs.length > 0) {
@@ -63,7 +64,7 @@ async function resolveLaunchTarget(
     for (const agent of AGENTS) {
       Object.assign(env, agent.envVars(gatewayUrl));
     }
-    return { command: cmdArgs[0], args: cmdArgs.slice(1), env };
+    return { command: cmdArgs[0], args: [...cmdArgs.slice(1), ...extraArgs], env };
   }
 
   // --- No command: auto-detect agents ---
@@ -95,7 +96,7 @@ async function resolveLaunchTarget(
 
   return {
     command: agent.def.binary,
-    args: [],
+    args: [...extraArgs],
     env: agent.def.envVars(gatewayUrl),
   };
 }
@@ -122,6 +123,7 @@ function launchChild(target: LaunchTarget): ChildProcess {
 export async function commandRun(
   opts: StartOptions,
   cmdArgs: string[],
+  extraArgs: string[] = [],
 ): Promise<void> {
   // 1. Start gateway (or reuse an existing one)
   const { config, port, owned, shutdown } = await startGateway(opts);
@@ -138,7 +140,7 @@ export async function commandRun(
   await maybeAutoImport(config);
 
   // 3. Resolve what to launch
-  const target = await resolveLaunchTarget(gatewayUrl, cmdArgs);
+  const target = await resolveLaunchTarget(gatewayUrl, cmdArgs, extraArgs);
 
   if (!target) {
     // No agent found — start server without launching an agent
