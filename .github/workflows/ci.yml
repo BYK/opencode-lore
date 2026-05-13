@@ -22,13 +22,13 @@ jobs:
     outputs:
       nightly-version: ${{ steps.nightly.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
@@ -95,7 +95,7 @@ jobs:
       # rebuilding only when those change.
       - name: Cache vendor staging dirs
         id: vendor-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .vendor-build
           key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
@@ -142,7 +142,7 @@ jobs:
       # Upload the uncompressed binary for downstream jobs (generate-patches)
       - name: Upload binary artifact
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lore-linux-x64
           path: packages/gateway/dist-bin/lore-linux-x64
@@ -217,14 +217,14 @@ jobs:
 
       - name: Upload tarballs
         if: startsWith(github.ref, 'refs/heads/release/')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: npm-tarball
           path: dist-tarballs/*.tgz
 
       - name: Upload binaries
         if: startsWith(github.ref, 'refs/heads/release/')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-binaries
           path: packages/gateway/dist-bin/*.gz
@@ -232,7 +232,7 @@ jobs:
       # Also upload uncompressed release binaries (needed for patch generation)
       - name: Upload uncompressed release binaries
         if: startsWith(github.ref, 'refs/heads/release/')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-binaries-raw
           path: |
@@ -270,7 +270,7 @@ jobs:
             ext: ".exe"
     runs-on: ${{ matrix.runs-on }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -285,7 +285,7 @@ jobs:
       # cross-OS cache reuse is safe here.
       - name: Restore vendor staging
         id: vendor-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .vendor-build
           key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
@@ -323,7 +323,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -342,7 +342,7 @@ jobs:
       # keyed on package.json + the vendor scripts' contents).
       - name: Cache vendor staging dirs
         id: vendor-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .vendor-build
           key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
@@ -364,13 +364,13 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
       - name: Upload compressed artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-binaries-gz
           path: packages/gateway/dist-bin/*.gz
 
       - name: Upload uncompressed artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-binaries-raw
           path: |
@@ -407,13 +407,13 @@ jobs:
           rm "$TARBALL"
 
       - name: Download current binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nightly-binaries-raw
           path: new-binaries
 
       - name: Download current compressed binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nightly-binaries-gz
           path: new-binaries
@@ -503,7 +503,7 @@ jobs:
 
       - name: Upload patch artifacts
         if: env.HAS_PREV == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-patches
           path: patches/*.patch
@@ -515,19 +515,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download compressed artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nightly-binaries-gz
           path: artifacts
 
       - name: Download uncompressed artifacts (for SHA-256 computation)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nightly-binaries-raw
           path: binaries
 
       - name: Download patch artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         id: download-patches
         with:
@@ -645,13 +645,13 @@ jobs:
           rm "$TARBALL"
 
       - name: Download current binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-binaries
           path: new-binaries-gz
 
       - name: Download current raw binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-binaries-raw
           path: new-binaries
@@ -732,7 +732,7 @@ jobs:
 
       - name: Upload release patches
         if: startsWith(github.ref, 'refs/heads/release/')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-patches
           # Always upload so Craft's artifact provider finds the artifact.
