@@ -39,9 +39,10 @@ mkdirSync(distDir, { recursive: true });
 // Runtime built-ins. `platform: "node"` auto-externalizes `fs`, `path`, etc.
 // We list `node:*` and `bun:*` explicitly so any `node:` or `bun:` prefixed
 // import is preserved as-is in the output (important for bun:sqlite).
-// onnxruntime-node contains platform-specific .node native binaries that
-// esbuild can't bundle — it's a transitive dep of @huggingface/transformers.
-const external = ["node:*", "bun:*", "onnxruntime-node"];
+// onnxruntime-node: .node native binaries that esbuild can't bundle (transitive
+//   dep of @huggingface/transformers).
+// sharp: image processing for vision models, not needed for text embeddings.
+const external = ["node:*", "bun:*", "onnxruntime-node", "sharp"];
 
 /** @type {esbuild.BuildOptions} */
 const commonOptions: esbuild.BuildOptions = {

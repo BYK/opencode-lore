@@ -196,10 +196,11 @@ async function buildBinary() {
     target: "esnext",
     platform: "node",
     conditions: ["bun"],
-    // Bun built-ins + onnxruntime-node (contains .node native binaries
-    // that esbuild can't bundle). Bun's --compile step handles .node
-    // files natively when it processes the final binary.
-    external: ["bun:*", "onnxruntime-node"],
+    // Bun built-ins + native binary packages that esbuild can't bundle.
+    // onnxruntime-node: .node native binaries (Bun --compile handles natively)
+    // sharp: image processing lib only used by transformers.js vision models,
+    //   not needed for text embeddings. Externalizing removes ~60KB + native deps.
+    external: ["bun:*", "onnxruntime-node", "sharp"],
     outfile: bundlePath,
     // "linked" produces an external .map file with a //# sourceMappingURL=
     // comment in the JS. This map is uploaded to Sentry (never shipped to users).
@@ -236,7 +237,7 @@ async function buildBinary() {
     target: "esnext",
     platform: "node",
     conditions: ["bun"],
-    external: ["bun:*", "onnxruntime-node"],
+    external: ["bun:*", "onnxruntime-node", "sharp"],
     outfile: workerBundlePath,
     minify: true,
     logLevel: "info",
