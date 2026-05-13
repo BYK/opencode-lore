@@ -45,9 +45,11 @@ mkdirSync(distDir, { recursive: true });
 // esbuild: single CJS bundle with polyfills injected
 // ---------------------------------------------------------------------------
 
-// External: Node built-ins only — everything else is bundled.
+// External: Node built-ins + onnxruntime-node (contains .node native
+// binaries that esbuild can't handle — transitive dep of @huggingface/transformers).
 const external = [
   "node:*",
+  "onnxruntime-node",
 ];
 
 // Remap @sentry/bun → @sentry/node so the CJS bundle gets Node-native

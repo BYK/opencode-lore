@@ -196,9 +196,10 @@ async function buildBinary() {
     target: "esnext",
     platform: "node",
     conditions: ["bun"],
-    // Bun built-ins stay external; everything else (including
-    // @huggingface/transformers) is bundled by esbuild.
-    external: ["bun:*"],
+    // Bun built-ins + onnxruntime-node (contains .node native binaries
+    // that esbuild can't bundle). Bun's --compile step handles .node
+    // files natively when it processes the final binary.
+    external: ["bun:*", "onnxruntime-node"],
     outfile: bundlePath,
     // "linked" produces an external .map file with a //# sourceMappingURL=
     // comment in the JS. This map is uploaded to Sentry (never shipped to users).
@@ -235,7 +236,7 @@ async function buildBinary() {
     target: "esnext",
     platform: "node",
     conditions: ["bun"],
-    external: ["bun:*"],
+    external: ["bun:*", "onnxruntime-node"],
     outfile: workerBundlePath,
     minify: true,
     logLevel: "info",

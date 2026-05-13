@@ -39,7 +39,9 @@ mkdirSync(distDir, { recursive: true });
 // Runtime built-ins. `platform: "node"` auto-externalizes `fs`, `path`, etc.
 // We list `node:*` and `bun:*` explicitly so any `node:` or `bun:` prefixed
 // import is preserved as-is in the output (important for bun:sqlite).
-const external = ["node:*", "bun:*"];
+// onnxruntime-node contains platform-specific .node native binaries that
+// esbuild can't bundle — it's a transitive dep of @huggingface/transformers.
+const external = ["node:*", "bun:*", "onnxruntime-node"];
 
 /** @type {esbuild.BuildOptions} */
 const commonOptions: esbuild.BuildOptions = {
