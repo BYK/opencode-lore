@@ -1806,12 +1806,19 @@ function postResponse(
         ? "openai-responses"
         : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic");
 
-    // Reset dead flag if session was marked dead but user returned
-    if (sessionState.warmup?.disabled) {
-      sessionState.warmup.disabled = false;
-      log.info(
-        `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
-      );
+    // Reset warming state if session was marked dead or had active warming.
+    // Dead flag is cleared so the next break gets a fresh ROI analysis.
+    // warmupCount is reset so the break-even cap starts from 0 on the next break.
+    if (sessionState.warmup) {
+      if (sessionState.warmup.disabled) {
+        sessionState.warmup.disabled = false;
+        log.info(
+          `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
+        );
+      }
+      if (sessionState.warmup.warmupCount > 0 && !sessionState.warmup.forceKeepWarm) {
+        sessionState.warmup.warmupCount = 0;
+      }
     }
 
     // --- Shadow context tracking for counterfactual compaction estimation ---

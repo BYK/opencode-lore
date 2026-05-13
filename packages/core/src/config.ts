@@ -219,9 +219,9 @@ export const LoreConfig = z.object({
         .object({
           /** Enable cache warming. Default: true. */
           enabled: z.boolean().default(true),
-          /** Override the survival probability threshold below which warming is
-           *  skipped. Default: auto-derived from cache read/write cost ratio
-           *  (~0.08 for 5m TTL, ~0.05 for 1h TTL). */
+          /** Override the return probability threshold below which warming is
+           *  skipped. Default: auto-derived from corrected cost ratio
+           *  read/(write-read) (~0.087 for 5m TTL, ~0.042 for 1h TTL). */
           minReturnProbability: z.number().min(0).max(1).optional(),
         })
         .default({ enabled: true }),

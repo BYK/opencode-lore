@@ -84,6 +84,11 @@ export const MIN_TURNS_FOR_WARMING = 3;
 /** Max uncached warmup responses before the global circuit breaker trips. */
 const CIRCUIT_BREAKER_MAX_FAILURES = 3;
 
+/** Gap duration floor (ms) separating "active coding turns" from "breaks".
+ *  3 minutes is well past typical agent think time (10s–60s) but before
+ *  the 5m TTL warmup window (4:15–5:00). */
+export const BREAK_FLOOR_MS = 180_000;
+
 // ---------------------------------------------------------------------------
 // Global circuit breaker
 // ---------------------------------------------------------------------------
@@ -307,6 +312,168 @@ export function blendedHistogramForSession(
 }
 
 // ---------------------------------------------------------------------------
+// Break-commitment model helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Fraction of observed inter-turn gaps that are "breaks" (≥ BREAK_FLOOR_MS).
+ *
+ * Logically splits the histogram at query time — no structural changes to
+ * the histogram itself. Uses linear interpolation within the floor bin,
+ * same technique as survivalFunction().
+ *
+ * For an empty histogram, returns 0.3 (prior: ~30% of gaps are breaks).
+ */
+export function breakFraction(hist: InterTurnHistogram): number {
+  if (hist.total === 0) return 0.3;
+
+  const floorIdx = binIndex(BREAK_FLOOR_MS);
+
+  // Sum all observations in bins strictly above the floor bin
+  let breakCount = 0;
+  for (let i = floorIdx + 1; i < BIN_COUNT; i++) {
+    breakCount += hist.counts[i];
+  }
+
+  // Fractional inclusion of the floor bin via linear interpolation
+  const binStart = floorIdx > 0 ? HISTOGRAM_BINS[floorIdx - 1] : 0;
+  const binEnd = floorIdx < HISTOGRAM_BINS.length ? HISTOGRAM_BINS[floorIdx] : Infinity;
+  const binWidth = binEnd - binStart;
+  if (binWidth > 0 && isFinite(binWidth)) {
+    const fractionAbove = Math.max(0, Math.min(1, (binEnd - BREAK_FLOOR_MS) / binWidth));
+    breakCount += hist.counts[floorIdx] * fractionAbove;
+  }
+
+  return breakCount / hist.total;
+}
+
+/**
+ * Signals used by the session-finished estimator.
+ */
+export type SessionEndSignals = {
+  /** Survival function value S(elapsed) from the blended histogram. */
+  survivalAtIdle: number;
+  /** Consecutive assistant turns ending with text-only (no tool calls). */
+  consecutiveTextOnlyTurns: number;
+  /** Fraction of all observed gaps that are breaks (≥ BREAK_FLOOR_MS). */
+  breakFraction: number;
+  /** Total completed turns (messageCount / 2). */
+  totalTurns: number;
+};
+
+/**
+ * Estimate P(session is finished | signals).
+ *
+ * Log-linear model combining four independent signals into a probability
+ * via sigmoid(logOdds). Conservative bias (low base rate) because the cost
+ * of a false positive (one unnecessary warmup, ~$0.01) is much smaller
+ * than the cost of a false negative (cache miss, ~$0.70 at 200K tokens).
+ */
+export function pSessionFinished(signals: SessionEndSignals): number {
+  // Base rate: ~12% — most checks happen when the session is NOT finished
+  let logOdds = -2.0;
+
+  // Signal 1: Survival function — low survival = unprecedented idle
+  //   S ≈ 0    → +4.0 (almost certainly done)
+  //   S ≈ 0.5  → +0.5
+  //   S ≈ 1.0  → -0.5 (no evidence of end)
+  if (signals.survivalAtIdle < 0.01) {
+    logOdds += 4.0;
+  } else {
+    logOdds += 2.0 * (1.0 - signals.survivalAtIdle) - 0.5;
+  }
+
+  // Signal 2: Consecutive text-only turns — task wrapping up
+  //   0 runs → 0, 1 run → +0.5, capped at +3.5
+  //   At 5 runs: +2.5, at 7 runs: +3.5 (strong signal — model finished with text repeatedly)
+  logOdds += Math.min(3.5, signals.consecutiveTextOnlyTurns * 0.5);
+
+  // Signal 3: Break fraction from histogram
+  //   If breaks are rare for this user/project, a long idle is more
+  //   likely a session end than a break.
+  //   breakFraction = 0   → +1.5 (no breaks ever observed — very likely session end)
+  //   breakFraction = 5%  → +0.85
+  //   breakFraction = 40% → -0.2
+  logOdds += 1.5 - 3.0 * Math.min(signals.breakFraction, 0.5);
+
+  // Signal 4: Very short sessions are more likely one-shots
+  if (signals.totalTurns <= 2) {
+    logOdds += 1.0;
+  } else if (signals.totalTurns <= 5) {
+    logOdds += 0.3;
+  }
+
+  // Sigmoid: p = 1 / (1 + exp(-logOdds))
+  return 1.0 / (1.0 + Math.exp(-logOdds));
+}
+
+/**
+ * Expected number of warmup cycles during a break, given elapsed idle time.
+ *
+ * Uses the survival function conditioned on the current idle time to walk
+ * forward through TTL windows and accumulate the expected cycle count.
+ * Stops when P(still idle) drops below 1% or maxCycles is reached.
+ */
+export function expectedWarmupCycles(
+  hist: InterTurnHistogram,
+  elapsedMs: number,
+  ttlMs: number,
+  maxCycles: number,
+): number {
+  // S(elapsed) — probability of still being idle at current time
+  const sNow = survivalFunction(hist, elapsedMs);
+  if (sNow < 0.001) return maxCycles; // essentially dead — assume worst case
+
+  let expected = 0;
+
+  for (let k = 1; k <= maxCycles; k++) {
+    const futureMs = elapsedMs + k * ttlMs;
+    const sFuture = survivalFunction(hist, futureMs);
+
+    // P(still idle at window k | idle at elapsed) = S(futureMs) / S(elapsedMs)
+    const pStillIdle = sFuture / sNow;
+
+    // We pay for this cycle if we're still idle when it fires
+    expected += pStillIdle;
+
+    // Negligible probability of reaching further windows
+    if (pStillIdle < 0.01) break;
+  }
+
+  return Math.min(expected, maxCycles);
+}
+
+/**
+ * Compute the corrected cost threshold for a warming decision.
+ *
+ * Accounts for the fact that a successful warmup sequence costs
+ * cache_read twice: once for the keepalive and once when the user
+ * returns. Break-even: read / (write - read).
+ */
+export function costThreshold(
+  cacheReadCostPerMTok: number,
+  cacheMissCostPerMTok: number,
+): number {
+  const denominator = cacheMissCostPerMTok - cacheReadCostPerMTok;
+  if (denominator <= 0) return 1.0; // degenerate — never warm
+  return cacheReadCostPerMTok / denominator;
+}
+
+/**
+ * Maximum profitable warmup cycles before total warming cost exceeds
+ * the savings from avoiding a cache write on user return.
+ *
+ * maxCycles = floor((write - read) / read)
+ */
+export function maxProfitableCycles(
+  cacheReadCostPerMTok: number,
+  cacheMissCostPerMTok: number,
+): number {
+  if (cacheReadCostPerMTok <= 0) return 0;
+  return Math.floor((cacheMissCostPerMTok - cacheReadCostPerMTok) / cacheReadCostPerMTok);
+}
+
+// ---------------------------------------------------------------------------
 // Cache warming profiles
 // ---------------------------------------------------------------------------
 
@@ -369,7 +536,9 @@ export function buildAnthropicProfile(
 ): CacheWarmingProfile {
   const entry = getModelEntrySync(model);
   const cacheReadCost = entry.cost?.cache_read ?? (entry.cost?.input ?? 3) * 0.1;
-  const cacheWriteCost = entry.cost?.cache_write ?? (entry.cost?.input ?? 3) * 1.25;
+  // Base cache_write is the 5m TTL price. Anthropic charges 2× for 1h TTL writes.
+  const baseCacheWrite = entry.cost?.cache_write ?? (entry.cost?.input ?? 3) * 1.25;
+  const cacheWriteCost = ttl === "1h" ? baseCacheWrite * 2 : baseCacheWrite;
 
   const ttlMs = ttl === "1h" ? 3_600_000 : 300_000;
   // For 5m TTL: warm in the last 45s (4:15–5:00)
@@ -417,14 +586,16 @@ export function resolveProfile(
 /**
  * Determine whether to warm a session's cache right now.
  *
- * Returns true if all conditions are met:
- *  1. Cache is about to expire (within warmupMargin of TTL)
- *  2. Cache hasn't already expired (past TTL)
- *  3. Session has enough turns (≥3) for reliable survival prediction
- *  4. Session is not marked dead
- *  5. Session hasn't been warmed in this TTL window
- *  6. Survival probability exceeds cost threshold
- *  7. Global circuit breaker hasn't tripped
+ * Uses a commitment-based model instead of per-window survival analysis:
+ *  1. Asks "Is this session finished?" via signal fusion (pSessionFinished)
+ *  2. Computes expected warming cost across a potential break
+ *  3. Compares P(returns) against the corrected cost threshold
+ *
+ * Gate checks (circuit breaker, config, body, /keep, cooldown) are unchanged.
+ *
+ * Two phases for the normal path:
+ *  - Initial commitment (first TTL window): full ROI analysis
+ *  - Continuation (subsequent windows): check break-even cap + re-evaluate
  */
 export function shouldWarm(
   state: SessionState,
@@ -442,7 +613,7 @@ export function shouldWarm(
   if (!state.cacheAnalytics.lastRequestBody) return false;
 
   const elapsed = now - state.lastRequestTime;
-  const { ttlMs, warmupMarginMs } = profile;
+  const { ttlMs, warmupMarginMs, cacheReadCostPerMTok, cacheMissCostPerMTok } = profile;
   const forced = state.warmup?.forceKeepWarm === true;
 
   // Already warmed recently — prevent double-warming.
@@ -456,22 +627,20 @@ export function shouldWarm(
   }
 
   if (forced) {
-    // /keep mode: only requirement is that we're within the warmup margin
-    // of *some* TTL window. Compute which window we're in relative to
-    // lastRequestTime (each window is ttlMs wide) and check if we're in
-    // the last warmupMarginMs of that window.
+    // /keep mode: skip survival/signal analysis but still respect the
+    // break-even cap — warming beyond maxCycles is always unprofitable,
+    // even when the user explicitly asked for /keep.
+    const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
+    const cyclesSpent = state.warmup?.warmupCount ?? 0;
+    if (cyclesSpent >= maxCycles) return false;
+
+    // Check we're in the warmup margin of *some* TTL window.
     const intoWindow = elapsed % ttlMs;
     if (intoWindow < ttlMs - warmupMarginMs) return false;
     return true;
   }
 
-  // --- Normal (non-forced) path ---
-
-  // Cache still fresh — no warmup needed yet
-  if (elapsed < ttlMs - warmupMarginMs) return false;
-
-  // Cache already expired — warmup is pointless (would cause a write, not a read)
-  if (elapsed >= ttlMs) return false;
+  // --- Normal (non-forced) commitment-based path ---
 
   // Not enough turns — survival model has insufficient data and the
   // session may be a one-shot question not worth warming ($0.30 per
@@ -481,42 +650,90 @@ export function shouldWarm(
   // Session marked dead
   if (state.warmup?.disabled) return false;
 
-  // Survival check: P(return within next TTL window | idle for `elapsed`)
-  let pReturn = conditionalReturnProbability(blendedHist, elapsed, ttlMs);
-
-  // Dampen survival estimate based on consecutive text-only end_turn
-  // responses. Each consecutive text-only turn halves the probability —
-  // the model finishing with text (no tool calls) multiple times in a
-  // row suggests the task is wrapping up.
+  // Compute commitment model signals
+  const survivalAtIdle = survivalFunction(blendedHist, elapsed);
+  const breakFrac = breakFraction(blendedHist);
   const textOnlyRuns = state.consecutiveTextOnlyTurns ?? 0;
-  if (textOnlyRuns > 0) {
-    pReturn *= Math.pow(0.5, textOnlyRuns);
-  }
+  const totalTurns = Math.floor(state.messageCount / 2);
 
-  // Cost threshold: warm if P(return) > cacheReadCost / cacheMissCost
-  // This is the break-even point where expected savings = 0.
-  const autoThreshold =
-    profile.cacheReadCostPerMTok / profile.cacheMissCostPerMTok;
+  const pFinished = pSessionFinished({
+    survivalAtIdle,
+    consecutiveTextOnlyTurns: textOnlyRuns,
+    breakFraction: breakFrac,
+    totalTurns,
+  });
+  const pReturns = 1.0 - pFinished;
+
+  // Corrected cost threshold: read / (write - read)
+  const autoThreshold = costThreshold(cacheReadCostPerMTok, cacheMissCostPerMTok);
   const threshold = cfg.cache.warming.minReturnProbability ?? autoThreshold;
 
-  if (pReturn <= threshold) {
-    // Check if session should be marked dead
-    const survival = survivalFunction(blendedHist, elapsed);
-    if (survival < DEAD_SESSION_THRESHOLD) {
-      if (!state.warmup) {
-        state.warmup = { lastWarmupAt: 0, warmupCount: 0, warmupHits: 0, disabled: true };
-      } else {
-        state.warmup.disabled = true;
-      }
-      log.info(
-        `cache-warmer: session=${state.sessionID.slice(0, 16)} marked dead ` +
-          `(survival=${(survival * 100).toFixed(1)}% < ${(DEAD_SESSION_THRESHOLD * 100).toFixed(0)}%)`,
-      );
-    }
-    return false;
-  }
+  // Max cycles before warming becomes unprofitable
+  const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
 
-  return true;
+  // Determine if this is the initial commitment or a continuation
+  const cyclesSpent = state.warmup?.warmupCount ?? 0;
+  const isFirstWindow = elapsed < ttlMs;
+
+  if (isFirstWindow) {
+    // --- Phase A: Initial commitment ---
+    // Cache is about to expire for the first time.
+
+    // Cache still fresh — no warmup needed yet
+    if (elapsed < ttlMs - warmupMarginMs) return false;
+
+    // P(returns) too low to justify even one warmup
+    if (pReturns <= threshold) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
+    }
+
+    return true;
+  } else {
+    // --- Phase B: Continuation ---
+    // Cache already expired at least once. We're maintaining warmth
+    // across a longer break. Check if still profitable.
+
+    // Hard break-even cap: stop if we've spent too many cycles
+    if (cyclesSpent >= maxCycles) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
+    }
+
+    // Session almost certainly finished — stop warming
+    if (pFinished > 0.95) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
+    }
+
+    // Re-evaluate: expected remaining cycles must keep total under maxCycles
+    const remaining = expectedWarmupCycles(blendedHist, elapsed, ttlMs, maxCycles - cyclesSpent);
+    if (cyclesSpent + remaining > maxCycles) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
+    }
+
+    // Check we're in the warmup margin of the current TTL window
+    const intoWindow = elapsed % ttlMs;
+    if (intoWindow < ttlMs - warmupMarginMs) return false;
+
+    return true;
+  }
+}
+
+/** Mark session dead if survival is below the dead session threshold. */
+function markDeadIfSurvivalLow(state: SessionState, survivalAtIdle: number): void {
+  if (survivalAtIdle < DEAD_SESSION_THRESHOLD) {
+    if (!state.warmup) {
+      state.warmup = { lastWarmupAt: 0, warmupCount: 0, warmupHits: 0, disabled: true };
+    } else {
+      state.warmup.disabled = true;
+    }
+    log.info(
+      `cache-warmer: session=${state.sessionID.slice(0, 16)} marked dead ` +
+        `(survival=${(survivalAtIdle * 100).toFixed(1)}% < ${(DEAD_SESSION_THRESHOLD * 100).toFixed(0)}%)`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -544,6 +761,16 @@ export type WarmingSnapshot = {
   blendedHistogram: InterTurnHistogram;
   sessionWeight: number;
   survivalAtIdle: number;
+  // Commitment model
+  pSessionFinished: number;
+  pReturns: number;
+  breakFrac: number;
+  expectedCycles: number;
+  maxCycles: number;
+  cyclesSpent: number;
+  warmingPhase: "initial" | "continuation" | "none";
+  threshold: number;
+  // Legacy (kept for backward compat in dashboard)
   pReturn: number;
   pReturnDampened: number;
   costThreshold: number;
@@ -585,16 +812,43 @@ export function computeWarmingSnapshot(
   const ttlMs = profile?.ttlMs ?? 300_000;
   const warmupMarginMs = profile?.warmupMarginMs ?? 45_000;
 
+  // Legacy: conditional return probability (kept for dashboard backward compat)
   const pReturn = conditionalReturnProbability(blendedHist, idleMs, ttlMs);
   const textOnlyRuns = state.consecutiveTextOnlyTurns ?? 0;
   const pReturnDampened =
     textOnlyRuns > 0 ? pReturn * Math.pow(0.5, textOnlyRuns) : pReturn;
 
-  // Threshold
+  // Commitment model signals
+  const breakFrac = breakFraction(blendedHist);
+  const totalTurns = Math.floor(state.messageCount / 2);
+  const pFinished = pSessionFinished({
+    survivalAtIdle,
+    consecutiveTextOnlyTurns: textOnlyRuns,
+    breakFraction: breakFrac,
+    totalTurns,
+  });
+  const pReturns = 1.0 - pFinished;
+
+  // Corrected threshold
   const autoThreshold = profile
-    ? profile.cacheReadCostPerMTok / profile.cacheMissCostPerMTok
+    ? costThreshold(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok)
     : 0.1;
-  const costThreshold = cfg.cache.warming.minReturnProbability ?? autoThreshold;
+  const thresholdVal = cfg.cache.warming.minReturnProbability ?? autoThreshold;
+
+  // Commitment model cost analysis
+  const maxCyclesVal = profile
+    ? maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok)
+    : 0;
+  const cyclesSpent = state.warmup?.warmupCount ?? 0;
+  const expectedCycles = profile
+    ? expectedWarmupCycles(blendedHist, idleMs, ttlMs, maxCyclesVal)
+    : 0;
+
+  // Determine warming phase
+  const isFirstWindow = idleMs < ttlMs;
+  const hasWarmed = cyclesSpent > 0;
+  const warmingPhase: "initial" | "continuation" | "none" =
+    isFirstWindow ? "initial" : hasWarmed ? "continuation" : "none";
 
   // Decision + reason
   const warmNow =
@@ -616,18 +870,20 @@ export function computeWarmingSnapshot(
       if (intoWindow < ttlMs - warmupMarginMs) {
         notWarmingReason = "Force-keep: not in warmup window yet";
       }
-    } else if (state.warmup?.lastWarmupAt && now - state.warmup.lastWarmupAt < ttlMs) {
+    } else if (state.warmup?.lastWarmupAt && now - state.warmup.lastWarmupAt < cooldownFor(state, ttlMs, warmupMarginMs)) {
       notWarmingReason = "Already warmed in this TTL window";
-    } else if (idleMs < ttlMs - warmupMarginMs) {
-      notWarmingReason = "Cache still fresh";
-    } else if (idleMs >= ttlMs) {
-      notWarmingReason = "Cache already expired";
     } else if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
       notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
     } else if (state.warmup?.disabled) {
       notWarmingReason = "Session marked dead";
-    } else if (pReturnDampened <= costThreshold) {
-      notWarmingReason = `P(return) ${(pReturnDampened * 100).toFixed(1)}% <= threshold ${(costThreshold * 100).toFixed(1)}%`;
+    } else if (isFirstWindow && idleMs < ttlMs - warmupMarginMs) {
+      notWarmingReason = "Cache still fresh";
+    } else if (pReturns <= thresholdVal) {
+      notWarmingReason = `P(returns) ${(pReturns * 100).toFixed(1)}% <= threshold ${(thresholdVal * 100).toFixed(1)}%`;
+    } else if (!isFirstWindow && cyclesSpent >= maxCyclesVal) {
+      notWarmingReason = `Break-even exceeded (${cyclesSpent} >= ${maxCyclesVal} cycles)`;
+    } else if (!isFirstWindow && pFinished > 0.95) {
+      notWarmingReason = `Session finished (P=${(pFinished * 100).toFixed(0)}%)`;
     } else {
       notWarmingReason = "Unknown";
     }
@@ -640,7 +896,7 @@ export function computeWarmingSnapshot(
     idleMs,
     consecutiveTextOnlyTurns: textOnlyRuns,
     ttl: state.resolvedConversationTTL,
-    warmupCount: state.warmup?.warmupCount ?? 0,
+    warmupCount: cyclesSpent,
     warmupHits: state.warmup?.warmupHits ?? 0,
     lastWarmupAt: state.warmup?.lastWarmupAt ?? 0,
     disabled: state.warmup?.disabled ?? false,
@@ -650,13 +906,31 @@ export function computeWarmingSnapshot(
     blendedHistogram: blendedHist,
     sessionWeight,
     survivalAtIdle,
+    // Commitment model
+    pSessionFinished: pFinished,
+    pReturns,
+    breakFrac,
+    expectedCycles,
+    maxCycles: maxCyclesVal,
+    cyclesSpent,
+    warmingPhase,
+    threshold: thresholdVal,
+    // Legacy
     pReturn,
     pReturnDampened,
-    costThreshold,
+    costThreshold: thresholdVal,
+    // Decision
     shouldWarmNow: warmNow,
     notWarmingReason,
     circuitBreaker: getCircuitBreakerStatus(),
   };
+}
+
+/** Compute cooldown based on forced/normal mode. */
+function cooldownFor(state: SessionState, ttlMs: number, warmupMarginMs: number): number {
+  return state.warmup?.forceKeepWarm
+    ? Math.max(ttlMs - warmupMarginMs, 0)
+    : ttlMs;
 }
 
 // ---------------------------------------------------------------------------

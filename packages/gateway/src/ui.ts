@@ -864,7 +864,8 @@ function renderWarmingSection(sessionId: string): string {
     <div class="stat"><div class="label">Status</div><div class="value">${warmingStatusBadge(snap)}</div></div>
     <div class="stat"><div class="label">Warmups</div><div class="value">${snap.warmupCount}</div></div>
     <div class="stat"><div class="label">Hits</div><div class="value">${hitRate}</div></div>
-    <div class="stat"><div class="label">P(return)</div><div class="value">${(snap.pReturnDampened * 100).toFixed(1)}%</div></div>
+    <div class="stat"><div class="label">P(returns)</div><div class="value">${(snap.pReturns * 100).toFixed(1)}%</div></div>
+    <div class="stat"><div class="label">P(finished)</div><div class="value">${(snap.pSessionFinished * 100).toFixed(1)}%</div></div>
     <div class="stat"><div class="label">S(t)</div><div class="value">${(snap.survivalAtIdle * 100).toFixed(1)}%</div></div>
   </div>`;
 
@@ -873,11 +874,15 @@ function renderWarmingSection(sessionId: string): string {
     <div class="card">
       <div class="field"><span class="key">Idle:</span> ${formatDuration(snap.idleMs)}</div>
       <div class="field"><span class="key">TTL:</span> ${snap.ttl ?? "5m (default)"}</div>
+      <div class="field"><span class="key">Phase:</span> ${snap.warmingPhase}</div>
       <div class="field"><span class="key">Turns:</span> ${snap.messageCount}</div>
       <div class="field"><span class="key">Text-only runs:</span> ${snap.consecutiveTextOnlyTurns}</div>
-      <div class="field"><span class="key">Threshold:</span> ${(snap.costThreshold * 100).toFixed(1)}%</div>
-      <div class="field"><span class="key">P(return) raw:</span> ${(snap.pReturn * 100).toFixed(1)}%</div>
-      <div class="field"><span class="key">P(return) dampened:</span> ${(snap.pReturnDampened * 100).toFixed(1)}%</div>
+      <div class="field"><span class="key">Break fraction:</span> ${(snap.breakFrac * 100).toFixed(1)}%</div>
+      <div class="field"><span class="key">Threshold:</span> ${(snap.threshold * 100).toFixed(1)}%</div>
+      <div class="field"><span class="key">P(session finished):</span> ${(snap.pSessionFinished * 100).toFixed(1)}%</div>
+      <div class="field"><span class="key">P(returns):</span> ${(snap.pReturns * 100).toFixed(1)}%</div>
+      <div class="field"><span class="key">Cycles spent:</span> ${snap.cyclesSpent} / ${snap.maxCycles} max</div>
+      <div class="field"><span class="key">Expected cycles:</span> ${snap.expectedCycles.toFixed(1)}</div>
       <div class="field"><span class="key">Session weight:</span> ${snap.sessionWeight.toFixed(2)} (${snap.sessionHistogram.total} obs / ${BLEND_PSEUDOCOUNT} pseudocount)</div>
       ${snap.notWarmingReason ? `<div class="field"><span class="key">Not warming:</span> ${esc(snap.notWarmingReason)}</div>` : ""}
       <div class="field"><span class="key">Circuit breaker:</span> ${snap.circuitBreaker.tripped ? '<span style="color:var(--danger)">TRIPPED</span>' : `OK (${snap.circuitBreaker.failures}/${snap.circuitBreaker.maxFailures})`}</div>
