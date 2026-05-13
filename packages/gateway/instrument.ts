@@ -20,6 +20,13 @@
  * does not support top-level await. The modules are loaded but
  * Sentry.init() only runs when the gate passes.
  */
+// Bun's internal fetch creates a zlib.Gunzip stream for gzip-compressed
+// upstream responses. The Web Streams adapter + OpenCode's Effect-TS runtime
+// attach 11 listeners (1 above the default limit of 10), triggering a benign
+// MaxListenersExceededWarning once per process. Raise the default slightly.
+import { setMaxListeners } from "node:events";
+setMaxListeners(15);
+
 import * as Sentry from "@sentry/bun";
 import { log } from "@loreai/core";
 import { VERSION } from "./src/cli/version";
