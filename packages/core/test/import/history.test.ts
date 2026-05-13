@@ -3,8 +3,6 @@ import { ensureProject } from "../../src/db";
 import {
   isImported,
   recordImport,
-  recordDeclined,
-  wasDeclined,
   listImports,
   computeHash,
 } from "../../src/import/history";
@@ -61,20 +59,6 @@ describe("import history", () => {
     });
   });
 
-  describe("declined", () => {
-    const DECLINED_PROJECT = "/test/declined-project";
-
-    test("wasDeclined returns false for new project", () => {
-      ensureProject(DECLINED_PROJECT);
-      expect(wasDeclined(DECLINED_PROJECT)).toBe(false);
-    });
-
-    test("recordDeclined + wasDeclined round-trip", () => {
-      recordDeclined(DECLINED_PROJECT);
-      expect(wasDeclined(DECLINED_PROJECT)).toBe(true);
-    });
-  });
-
   describe("listImports", () => {
     test("lists import records excluding declined entries", () => {
       const LIST_PROJECT = "/test/list-project";
@@ -82,12 +66,9 @@ describe("import history", () => {
 
       recordImport(LIST_PROJECT, "agent-a", "src-a", "h1", { created: 5, updated: 0 });
       recordImport(LIST_PROJECT, "agent-b", "src-b", "h2", { created: 2, updated: 1 });
-      recordDeclined(LIST_PROJECT);
 
       const imports = listImports(LIST_PROJECT);
       expect(imports.length).toBe(2);
-      // Should not include the declined marker
-      expect(imports.every((r) => r.source_id !== "__declined__")).toBe(true);
     });
   });
 

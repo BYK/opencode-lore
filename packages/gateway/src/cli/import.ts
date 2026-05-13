@@ -10,6 +10,7 @@ import {
   conversationImport,
   config as loreConfig,
   ensureProject,
+  setLastImportAt,
   load,
 } from "@loreai/core";
 import { loadConfig } from "../config";
@@ -25,7 +26,6 @@ const {
   getProvider,
   isImported,
   recordImport,
-  recordDeclined,
   computeHash,
 } = conversationImport;
 
@@ -72,20 +72,20 @@ export async function commandImport(
   ensureProject(projectPath);
 
   // Detect conversation history
-  console.error("[lore] Scanning for conversation history...\n");
+  console.log("[lore] Scanning for conversation history...\n");
 
   let results = detectAll(projectPath);
 
   if (agentFilter) {
     results = results.filter((r) => r.agentName === agentFilter);
     if (results.length === 0) {
-      console.error(`[lore] No conversation history found from "${agentFilter}" for this project.`);
+      console.log(`[lore] No conversation history found from "${agentFilter}" for this project.`);
       return;
     }
   }
 
   if (results.length === 0) {
-    console.error("[lore] No prior AI conversation history found for this project.");
+    console.log("[lore] No prior AI conversation history found for this project.");
     return;
   }
 
@@ -110,7 +110,7 @@ export async function commandImport(
   results = results.filter((r) => r.sessions.length > 0);
 
   if (results.length === 0) {
-    console.error("[lore] All detected conversations have already been imported.");
+    console.log("[lore] All detected conversations have already been imported.");
     return;
   }
 
@@ -118,24 +118,24 @@ export async function commandImport(
   const totalMessages = results.reduce((s, r) => s + r.totalMessages, 0);
   const totalSessions = results.reduce((s, r) => s + r.sessions.length, 0);
 
-  console.error("Found prior conversations for this project:\n");
+  console.log("Found prior conversations for this project:\n");
   for (const result of results) {
-    console.error(`  ${result.agentDisplayName}`);
-    console.error(`    ${result.sessions.length} sessions, ~${result.totalMessages} messages`);
+    console.log(`  ${result.agentDisplayName}`);
+    console.log(`    ${result.sessions.length} sessions, ~${result.totalMessages} messages`);
     if (result.sessions.length > 0) {
       const latest = result.sessions[0];
-      console.error(`    Most recent: ${formatDate(latest.lastActivityAt)}`);
+      console.log(`    Most recent: ${formatDate(latest.lastActivityAt)}`);
     }
-    console.error();
+    console.log();
   }
 
   // Estimate LLM calls (one per ~12K token chunk)
   const totalTokens = results.reduce((s, r) => s + r.totalTokens, 0);
   const estimatedChunks = Math.ceil(totalTokens / 12288);
-  console.error(`  Total: ${totalSessions} sessions, ~${totalMessages} messages (~${estimatedChunks} LLM calls)\n`);
+  console.log(`  Total: ${totalSessions} sessions, ~${totalMessages} messages (~${estimatedChunks} LLM calls)\n`);
 
   if (dryRun) {
-    console.error("[lore] Dry run — no imports performed.");
+    console.log("[lore] Dry run — no imports performed.");
     return;
   }
 
@@ -143,13 +143,13 @@ export async function commandImport(
   if (!yes) {
     const ok = await confirm("[lore] Import knowledge from these conversations?");
     if (!ok) {
-      console.error("[lore] Import cancelled.");
+      console.log("[lore] Import cancelled.");
       return;
     }
   }
 
   // Start gateway for LLM access
-  console.error("\n[lore] Starting gateway for LLM access...");
+  console.log("\n[lore] Starting gateway for LLM access...");
 
   const startOpts: StartOptions = { quiet: true };
   const { config, port, owned, shutdown } = await startGateway(startOpts);
@@ -176,15 +176,15 @@ export async function commandImport(
       if (!provider) continue;
 
       const sessionIds = result.sessions.map((s) => s.id);
-      console.error(`[lore] Reading ${result.agentDisplayName} conversations...`);
+      console.log(`[lore] Reading ${result.agentDisplayName} conversations...`);
 
       const chunks = provider.readChunks(projectPath, sessionIds);
       if (chunks.length === 0) {
-        console.error(`[lore] No extractable content from ${result.agentDisplayName}.`);
+        console.log(`[lore] No extractable content from ${result.agentDisplayName}.`);
         continue;
       }
 
-      console.error(`[lore] Extracting knowledge from ${chunks.length} chunks (${result.agentDisplayName})...`);
+      console.log(`[lore] Extracting knowledge from ${chunks.length} chunks (${result.agentDisplayName})...`);
 
       const extractResult = await extractKnowledge({
         llm,
@@ -220,6 +220,9 @@ export async function commandImport(
       totalFailed += extractResult.chunksFailed;
     }
 
+    // Record import timestamp (prevents auto-import re-prompting on `lore run`)
+    setLastImportAt(projectPath, Date.now());
+
     // Export .lore.md
     try {
       exportLoreFile(projectPath);
@@ -228,13 +231,13 @@ export async function commandImport(
     }
 
     // Summary
-    console.error(
+    console.log(
       `\n[lore] Import complete: ${totalCreated} entries created, ${totalUpdated} updated` +
         (totalDeleted ? `, ${totalDeleted} deleted` : "") +
         (totalFailed ? ` (${totalFailed} chunks failed)` : "") +
         ".",
     );
-    console.error("[lore] Run `lore data list knowledge` to review.");
+    console.log("[lore] Run `lore data list knowledge` to review.");
   } finally {
     if (owned) await shutdown();
   }

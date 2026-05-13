@@ -61,6 +61,8 @@ export {
   db,
   dbPath,
   ensureProject,
+  getLastImportAt,
+  setLastImportAt,
   isFirstRun,
   projectId,
   projectName,

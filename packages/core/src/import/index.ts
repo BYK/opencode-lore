@@ -29,9 +29,8 @@ export { extractKnowledge, type ExtractionProgress, type ExtractionResult } from
 export {
   isImported,
   recordImport,
-  recordDeclined,
-  wasDeclined,
   computeHash,
+  listImports,
   type ImportRecord,
 } from "./history";
 

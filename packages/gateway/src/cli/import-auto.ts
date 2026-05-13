@@ -2,16 +2,16 @@
  * Auto-detection and background import of prior AI agent conversations.
  *
  * Called from `lore run` between gateway startup and agent launch.
- * Only triggers on fresh projects (no existing temporal/knowledge data).
+ * Only triggers once per project (tracks via last_import_at on the projects table).
  * Prompts once, then runs import in the background if confirmed.
  */
 import { createInterface } from "node:readline";
 import {
   conversationImport,
-  temporal,
-  ltm,
   config as loreConfig,
   ensureProject,
+  getLastImportAt,
+  setLastImportAt,
   exportLoreFile,
 } from "@loreai/core";
 import { createGatewayLLMClient } from "../llm-adapter";
@@ -24,24 +24,8 @@ const {
   getProvider,
   isImported,
   recordImport,
-  recordDeclined,
-  wasDeclined,
   computeHash,
 } = conversationImport;
-
-/**
- * Check if this project is "fresh" — no prior lore data.
- * A project with existing knowledge entries or temporal messages is not fresh.
- */
-function isFreshProject(projectPath: string): boolean {
-  const knowledge = ltm.forProject(projectPath, false);
-  if (knowledge.length > 0) return false;
-
-  const messages = temporal.bySession(projectPath, "");
-  // bySession with empty sessionID returns nothing; check count instead
-  const count = temporal.count(projectPath);
-  return count === 0;
-}
 
 async function promptYesNo(message: string): Promise<boolean> {
   if (!process.stdin.isTTY) return false;
@@ -74,11 +58,8 @@ export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<voi
     return; // Can't determine project — skip
   }
 
-  // Only trigger for fresh projects
-  if (!isFreshProject(projectPath)) return;
-
-  // Don't ask if the user already declined
-  if (wasDeclined(projectPath)) return;
+  // Skip if import was already offered/run for this project
+  if (getLastImportAt(projectPath) !== null) return;
 
   // Detect conversation history
   let results = detectAll(projectPath);
@@ -108,13 +89,13 @@ export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<voi
       "[lore] Import knowledge from them?",
   );
 
-  if (!ok) {
-    recordDeclined(projectPath);
-    return;
-  }
+  // Record that import was offered — prevents re-prompting regardless of answer
+  setLastImportAt(projectPath, Date.now());
+
+  if (!ok) return;
 
   // Run import in the background (fire-and-forget)
-  console.error("[lore] Importing knowledge in background...");
+  console.log("[lore] Importing knowledge in background...");
 
   const cfg = loreConfig();
   const defaultModel = cfg.model ?? {
@@ -181,7 +162,7 @@ async function runBackgroundImport(
   }
 
   if (totalCreated > 0 || totalUpdated > 0) {
-    console.error(
+    console.log(
       `[lore] Background import complete: ${totalCreated} entries created, ${totalUpdated} updated.`,
     );
   }
