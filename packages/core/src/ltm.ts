@@ -998,29 +998,35 @@ export async function deduplicate(
   //   (a) title word-overlap ≥ 0.7 with ≥ 4 shared words, OR
   //   (b) embedding cosine similarity ≥ 0.85
   // Star clustering (no transitivity) prevents snowball merging.
+  // O(n²) pairwise comparison — acceptable for n ≤ 25 (maxEntries cap).
 
-  // Load embeddings for all project entries (if available).
+  // Load embeddings for project entries (if available).
   // We query directly rather than using vectorSearch() because we need
   // pairwise comparison among project entries, not a query-vs-all search.
   const embeddingMap = new Map<string, Float32Array>();
   {
-    const entryIds = new Set(entries.map((e) => e.id));
+    const entryIds = entries.map((e) => e.id);
+    // Build parameterized IN clause for the project's entry IDs
+    const placeholders = entryIds.map(() => "?").join(",");
     const rows = db()
-      .query("SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL")
-      .all() as Array<{ id: string; embedding: Buffer }>;
+      .query(`SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`)
+      .all(...entryIds) as Array<{ id: string; embedding: Buffer }>;
     for (const row of rows) {
-      if (entryIds.has(row.id)) {
+      try {
         embeddingMap.set(row.id, embedding.fromBlob(row.embedding));
+      } catch {
+        // Skip corrupted embeddings — entry falls back to title-overlap only.
+        log.info(`skipping corrupted embedding for entry ${row.id}`);
       }
     }
   }
 
   // Pre-compute neighbors for all pairs
-  type OverlapHit = { id: string; coefficient: number };
-  const neighborMap = new Map<string, OverlapHit[]>();
+  type DedupHit = { id: string; score: number };
+  const neighborMap = new Map<string, DedupHit[]>();
 
   for (const entry of entries) {
-    const neighbors: OverlapHit[] = [];
+    const neighbors: DedupHit[] = [];
     const entryVec = embeddingMap.get(entry.id);
 
     for (const other of entries) {
@@ -1042,11 +1048,11 @@ export async function deduplicate(
       }
 
       if (titleMatch || embeddingMatch) {
-        // Use the stronger signal as the match score
-        neighbors.push({ id: other.id, coefficient: Math.max(coefficient, similarity) });
+        // Use the stronger signal as the match score for cluster priority
+        neighbors.push({ id: other.id, score: Math.max(coefficient, similarity) });
       }
     }
-    neighbors.sort((a, b) => b.coefficient - a.coefficient);
+    neighbors.sort((a, b) => b.score - a.score);
     neighborMap.set(entry.id, neighbors);
   }
 

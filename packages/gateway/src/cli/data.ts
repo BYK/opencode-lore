@@ -700,15 +700,20 @@ async function cmdDedup(
   }
 
   // Auto-reindex if embedding config changed (e.g. model migration)
-  // or if there are entries missing embeddings.
+  // or if there are entries missing embeddings. backfillEmbeddings()
+  // calls checkConfigChange() internally — no need to call it separately.
   if (emb.isAvailable()) {
-    const changed = emb.checkConfigChange();
-    if (changed) {
-      console.log("Embedding config changed — rebuilding vectors...");
-    }
-    const count = await emb.backfillEmbeddings();
-    if (count > 0) {
-      console.log(`Embedded ${count} knowledge entries.\n`);
+    try {
+      const knowledgeCount = await emb.backfillEmbeddings();
+      // Also backfill distillations — checkConfigChange() inside
+      // backfillEmbeddings() may have NULLed their embeddings too.
+      const distillCount = await emb.backfillDistillationEmbeddings();
+      const total = knowledgeCount + distillCount;
+      if (total > 0) {
+        console.log(`Re-indexed ${total} entries (${knowledgeCount} knowledge, ${distillCount} distillations).\n`);
+      }
+    } catch (err) {
+      console.error("Warning: embedding reindex failed, dedup will use title-overlap only:", err);
     }
   }
 
@@ -769,24 +774,26 @@ async function cmdReindex(): Promise<void> {
     process.exit(1);
   }
 
-  const changed = embedding.checkConfigChange();
-  if (changed) {
-    console.log("Embedding config changed — cleared stale embeddings.");
-  }
+  try {
+    // backfillEmbeddings() calls checkConfigChange() internally —
+    // it detects config changes, clears stale embeddings, then re-embeds.
+    console.log("Re-indexing knowledge entries...");
+    const knowledgeCount = await embedding.backfillEmbeddings();
+    console.log(`  ✓ ${knowledgeCount} knowledge entries embedded`);
 
-  console.log("Re-indexing knowledge entries...");
-  const knowledgeCount = await embedding.backfillEmbeddings();
-  console.log(`  ✓ ${knowledgeCount} knowledge entries embedded`);
+    console.log("Re-indexing distillations...");
+    const distillCount = await embedding.backfillDistillationEmbeddings();
+    console.log(`  ✓ ${distillCount} distillations embedded`);
 
-  console.log("Re-indexing distillations...");
-  const distillCount = await embedding.backfillDistillationEmbeddings();
-  console.log(`  ✓ ${distillCount} distillations embedded`);
-
-  const total = knowledgeCount + distillCount;
-  if (total === 0 && !changed) {
-    console.log("\nAll embeddings are up to date.");
-  } else {
-    console.log(`\nDone — ${total} entries re-indexed.`);
+    const total = knowledgeCount + distillCount;
+    if (total === 0) {
+      console.log("\nAll embeddings are up to date.");
+    } else {
+      console.log(`\nDone — ${total} entries re-indexed.`);
+    }
+  } catch (err) {
+    console.error("Re-indexing failed:", err);
+    process.exit(1);
   }
 }
 
