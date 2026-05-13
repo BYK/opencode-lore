@@ -39,10 +39,7 @@ mkdirSync(distDir, { recursive: true });
 // Runtime built-ins. `platform: "node"` auto-externalizes `fs`, `path`, etc.
 // We list `node:*` and `bun:*` explicitly so any `node:` or `bun:` prefixed
 // import is preserved as-is in the output (important for bun:sqlite).
-// fastembed + its native transitive deps (onnxruntime-node, @anush008/tokenizers)
-// must stay external — they contain platform-specific native binaries that
-// esbuild cannot bundle. npm installs them alongside @loreai/core.
-const external = ["node:*", "bun:*", "fastembed", "onnxruntime-*", "@anush008/*"];
+const external = ["node:*", "bun:*"];
 
 /** @type {esbuild.BuildOptions} */
 const commonOptions: esbuild.BuildOptions = {

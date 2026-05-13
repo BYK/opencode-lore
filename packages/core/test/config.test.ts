@@ -86,8 +86,8 @@ describe("LoreConfig — search schema", () => {
     expect(cfg.search.queryExpansion).toBe(true);
     expect(cfg.search.embeddings.enabled).toBe(true);
     expect(cfg.search.embeddings.provider).toBe("local");
-    expect(cfg.search.embeddings.model).toBe("BGESmallENV15");
-    expect(cfg.search.embeddings.dimensions).toBe(384);
+    expect(cfg.search.embeddings.model).toBe("nomic-ai/nomic-embed-text-v1.5");
+    expect(cfg.search.embeddings.dimensions).toBe(768);
   });
 
   test("search.ftsWeights can be customised", () => {
@@ -134,8 +134,8 @@ describe("LoreConfig — search schema", () => {
       search: { embeddings: { enabled: false } },
     });
     expect(cfg.search.embeddings.enabled).toBe(false);
-    expect(cfg.search.embeddings.model).toBe("BGESmallENV15");
-    expect(cfg.search.embeddings.dimensions).toBe(384);
+    expect(cfg.search.embeddings.model).toBe("nomic-ai/nomic-embed-text-v1.5");
+    expect(cfg.search.embeddings.dimensions).toBe(768);
   });
 
   test("search.embeddings model and dimensions can be customised", () => {

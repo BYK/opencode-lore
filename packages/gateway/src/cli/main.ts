@@ -98,14 +98,14 @@ const OPTIONS = {
   n: { type: "string" as const },
   lines: { type: "string" as const },
   path: { type: "boolean" as const },
-  // Hidden diagnostic: prints the vendored-fastembed registration set by
+  // Hidden diagnostic: prints the vendored-model registration set by
   // the binary build wrapper (or "none" in npm mode). Used by CI to verify
   // the embed-asset pipeline actually wired up. Not in help text.
   "print-vendor-info": { type: "boolean" as const },
   // Hidden diagnostic: actually exercises the local embedding provider
-  // (extracts vendor → loads fastembed → embeds a sample string) and
-  // prints success or the failure reason. Used by CI to catch model-load
-  // regressions that --print-vendor-info alone wouldn't surface.
+  // (loads transformers.js → embeds a sample string) and prints success
+  // or the failure reason. Used by CI to catch model-load regressions
+  // that --print-vendor-info alone wouldn't surface.
   "check-embeddings": { type: "boolean" as const },
 } as const;
 
@@ -187,12 +187,10 @@ export async function _cli(): Promise<void> {
   }
 
   // --check-embeddings (hidden). End-to-end smoke for the embedding
-  // pipeline: materialises the bundled side-load lib + model files,
-  // loads fastembed, runs one embedding through the local provider,
-  // prints `ok dim=N` or a clear failure message. Used by CI to catch
-  // regressions in the model load path that --print-vendor-info
-  // wouldn't surface (e.g. ONNX file mismatches, tokenizer file naming
-  // issues, dlopen install_name drift on macOS/Windows).
+  // pipeline: loads transformers.js + the model, runs one embedding
+  // through the local provider, prints `ok dim=N` or a clear failure
+  // message. Used by CI to catch regressions in the model load path
+  // that --print-vendor-info wouldn't surface.
    if (values["check-embeddings"]) {
     const { embedding } = await import("@loreai/core");
     try {
@@ -202,8 +200,7 @@ export async function _cli(): Promise<void> {
         process.exit(1);
       }
       console.log(`ok dim=${vec.length}`);
-      // Force-exit to avoid Bun NAPI teardown crash — fastembed is loaded
-      // on the main thread in this diagnostic path.
+      // Force-exit to avoid potential ONNX Runtime teardown issues.
       const { safeExit } = await import("./exit");
       safeExit(0);
     } catch (err: unknown) {

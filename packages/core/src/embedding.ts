@@ -1,17 +1,22 @@
 /**
  * Embedding integration for vector search.
  *
- * Supports multiple embedding providers (Voyage AI, OpenAI) behind a common
- * interface. Provides embedding generation, pure-JS cosine similarity, and
- * vector search over the knowledge and distillation tables. All operations
- * are gated behind `search.embeddings.enabled` config + the provider's API
- * key env var — falls back silently to FTS-only when unavailable.
+ * Supports multiple embedding providers behind a common interface:
+ *   - "local" (default): @huggingface/transformers + nomic-embed-text-v1.5
+ *     (768 dims, Matryoshka-capable). Runs ONNX inference in a worker thread.
+ *   - "voyage": Voyage AI API (voyage-code-3, 1024 dims)
+ *   - "openai": OpenAI API (text-embedding-3-small, 1536 dims)
+ *
+ * Provides embedding generation, pure-JS cosine similarity, and vector search
+ * over the knowledge and distillation tables. All operations are gated behind
+ * `search.embeddings.enabled` config + the provider's API key env var — falls
+ * back silently to FTS-only when unavailable.
  */
 
 import { db } from "./db";
 import { config } from "./config";
 import * as log from "./log";
-import { isVendoredBinary, vendorModelInfo } from "./embedding-vendor";
+import { vendorModelInfo } from "./embedding-vendor";
 import type {
   WorkerInbound,
   WorkerOutbound,
@@ -139,146 +144,69 @@ class OpenAIProvider implements EmbeddingProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Local provider (fastembed + ONNX Runtime)
+// Local provider (@huggingface/transformers + nomic-embed-text-v1.5)
 // ---------------------------------------------------------------------------
 
 /**
- * Thrown when `LocalProvider` is requested but `fastembed` cannot be loaded.
- * `fastembed` is an optionalDependency of `@loreai/core`: if its postinstall
- * fails (e.g. CUDA 13 hits the upstream `onnxruntime-node` bug — see #185),
- * the package install still succeeds but local embeddings are disabled.
- * Callers in `recall.ts` / `ltm.ts` / `distillation.ts` already gate on
- * `isAvailable()`, which flips to `false` after this error fires once.
+ * Thrown when `LocalProvider` cannot initialize (e.g. ONNX runtime fails
+ * to load). Callers in `recall.ts` / `ltm.ts` / `distillation.ts` gate
+ * on `isAvailable()`, which flips to `false` after this error fires once.
  */
 export class LocalProviderUnavailableError extends Error {
   constructor(cause?: unknown) {
     super(
-      "Local embedding provider unavailable: 'fastembed' is not installed. " +
+      "Local embedding provider unavailable: '@huggingface/transformers' failed to initialize. " +
         "Configure search.embeddings.provider to 'voyage' or 'openai', or " +
-        "reinstall with ONNXRUNTIME_NODE_INSTALL_CUDA=skip to retry the optional fastembed install.",
+        "set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback.",
     );
     this.name = "LocalProviderUnavailableError";
     if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
   }
 }
 
-/** Cache of the fastembed module-load probe.
- *  null = not yet probed; module = imported successfully; false = import failed. */
-let fastembedModule: typeof import("fastembed") | null = null;
-let fastembedProbed: boolean = false;
-let fastembedAvailable: boolean = false;
-let fastembedLogged: boolean = false;
+/** Tracks whether the local provider has been probed and found unavailable.
+ *  Set to true after the first worker init failure so subsequent calls
+ *  to `isAvailable()` short-circuit. */
+let localProviderKnownBroken = false;
+let localProviderErrorLogged = false;
 
-/** For tests: reset the fastembed probe cache. */
-export function _resetFastembedProbe(): void {
-  fastembedModule = null;
-  fastembedProbed = false;
-  fastembedAvailable = false;
-  fastembedLogged = false;
+/** For tests: reset the local provider probe state. */
+export function _resetLocalProviderProbe(): void {
+  localProviderKnownBroken = false;
+  localProviderErrorLogged = false;
 }
 
-/** For tests: simulate fastembed being unresolvable, without mocking the
- *  dynamic import. After this call, `tryLoadFastembed()` short-circuits to
- *  `null` and `isAvailable()` returns false for the local provider. */
-export function _markFastembedUnavailable(): void {
-  fastembedModule = null;
-  fastembedProbed = true;
-  fastembedAvailable = false;
-  fastembedLogged = true; // suppress the info log in tests
+/** For tests: simulate the local provider being unavailable, without
+ *  actually spawning a worker. After this call, `isAvailable()` returns
+ *  false for the local provider. */
+export function _markLocalProviderUnavailable(): void {
+  localProviderKnownBroken = true;
+  localProviderErrorLogged = true; // suppress the info log in tests
 }
 
-/**
- * Probe `fastembed` once. Returns the module on success, `null` on failure.
- * Logs an info-level note exactly once on the first failure so users know
- * how to recover (switch provider, fix the install, or rely on the
- * VOYAGE/OPENAI auto-fallback in `embed()`).
- *
- * In binary mode `import("fastembed")` resolves to the bundle Bun packed
- * at compile time (the binary's wrapper has already preloaded the
- * side-load `libonnxruntime` lib so the addon's dlopen succeeds). In
- * npm mode it goes through standard module resolution and may fail if
- * the optional postinstall didn't run.
- */
-async function tryLoadFastembed(): Promise<typeof import("fastembed") | null> {
-  if (fastembedProbed) return fastembedAvailable ? fastembedModule : null;
-  try {
-    const mod = await loadFastembedModule();
-    // Re-check after the async boundary: another caller (e.g. a test helper
-    // like _markFastembedUnavailable) may have set the probe while we were
-    // awaiting. Their decision takes priority — don't overwrite it.
-    if (fastembedProbed) return fastembedAvailable ? fastembedModule : null;
-    fastembedModule = mod;
-    fastembedAvailable = true;
-  } catch (err) {
-    if (fastembedProbed) return fastembedAvailable ? fastembedModule : null;
-    fastembedAvailable = false;
-    if (!fastembedLogged) {
-      fastembedLogged = true;
-      const msg = err instanceof Error ? err.message : String(err);
-      // Binary mode: a load failure here is a real bug (everything was
-      // bundled at build time). npm mode: the optional dep didn't
-      // install — point the user at the standard recovery options.
-      const remediation = isVendoredBinary()
-        ? "this is a bug in the lore binary; please file an issue. " +
-          "Set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback in the meantime"
-        : "set search.embeddings.provider to 'voyage' or 'openai', " +
-          "set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback, " +
-          "or reinstall fastembed with ONNXRUNTIME_NODE_INSTALL_CUDA=skip";
-      log.info(
-        `local embedding provider unavailable (fastembed not installed: ${msg}) — ${remediation}`,
-      );
-    }
-  } finally {
-    fastembedProbed = true;
-  }
-  return fastembedAvailable ? fastembedModule : null;
+/** True iff the local provider has been probed and found broken. */
+function localProviderKnownUnavailable(): boolean {
+  return localProviderKnownBroken;
 }
 
 /**
- * Resolve and import the fastembed module.
- *
- * One bare import covers both modes:
- *
- *   - Binary mode: `bun build --compile` resolves "fastembed" against the
- *     per-target staging `node_modules/` at build time and bundles it
- *     (plus its transitive deps and `.node` addons) into the binary. The
- *     side-load `libonnxruntime.so.1` / `.dylib` / `.dll` is preloaded
- *     by the binary's wrapper before this import evaluates, so the
- *     bundled `onnxruntime_binding.node`'s dlopen finds the cached
- *     handle instead of failing with "shared object not found".
- *
- *   - npm mode: standard Node/Bun resolution — works for `@loreai/core`
- *     consumers whose `npm install` cleanly installed the optional dep.
- *     If the postinstall failed (CUDA-13 hosts), the import throws here
- *     and the caller logs + falls back to a remote provider.
- */
-async function loadFastembedModule(): Promise<typeof import("fastembed")> {
-  return (await import("fastembed")) as typeof import("fastembed");
-}
-
-/** True iff the fastembed probe has run and reported the module missing. */
-function fastembedKnownUnavailable(): boolean {
-  return fastembedProbed && !fastembedAvailable;
-}
-
-/**
- * Local embedding provider using fastembed (bge-small-en-v1.5 by default).
+ * Local embedding provider using @huggingface/transformers with
+ * nomic-embed-text-v1.5 by default.
  *
  * No API key required — runs entirely on-device via ONNX Runtime.
- * Model files are downloaded on first use (~33MB) and cached in
- * `~/.cache/fastembed`. Subsequent inits load from disk in ~350ms.
+ * Model files are downloaded on first use (~137MB for INT8 quantized)
+ * and cached locally. Subsequent inits load from cache.
  *
  * ONNX inference runs in a dedicated `node:worker_threads` Worker so the
  * main thread's event loop stays free. This class is a thin RPC client —
  * it posts `{ texts, inputType }` to the worker and awaits a reply.
- * The worker owns the `FlagEmbedding` model and processes requests
+ * The worker owns the transformers.js pipeline and processes requests
  * sequentially from a priority queue (recall queries jump ahead of
  * backfill batches).
  *
- * Uses dynamic import so the module is only loaded when the "local"
- * provider is actually selected — avoids startup cost and allows
- * graceful fallback when the optional `fastembed` peer isn't installed
- * (its native onnxruntime-node may fail to build, e.g. on CUDA 13).
+ * Task instruction prefixes are prepended automatically:
+ *   - "document" → "search_document: <text>"
+ *   - "query"    → "search_query: <text>"
  */
 class LocalProvider implements EmbeddingProvider {
   // With inference off the main thread, large batches no longer block
@@ -296,16 +224,16 @@ class LocalProvider implements EmbeddingProvider {
   >();
   private nextRequestId = 0;
   private initPromise: Promise<void> | null = null;
-  private modelName: string;
+  private modelId: string;
+  private dimensions: number;
 
-  constructor(modelName: string) {
-    this.modelName = modelName;
+  constructor(modelId: string, dimensions: number) {
+    this.modelId = modelId;
+    this.dimensions = dimensions;
   }
 
   /**
-   * Ensure the worker thread is running. Probes fastembed on the main
-   * thread first (fast, cached) as a fast-fail gate — the worker is only
-   * spawned if the module is known-loadable. Worker startup failure is
+   * Ensure the worker thread is running. Worker startup failure is
    * surfaced as `LocalProviderUnavailableError` to trigger the existing
    * auto-fallback to remote providers.
    */
@@ -315,10 +243,8 @@ class LocalProvider implements EmbeddingProvider {
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
-      // Fast-fail: probe fastembed on the main thread. This is cached
-      // after the first call and preserves the existing error flow.
-      const fastembed = await tryLoadFastembed();
-      if (!fastembed) throw new LocalProviderUnavailableError();
+      // Fast-fail if a previous attempt already marked local broken.
+      if (localProviderKnownBroken) throw new LocalProviderUnavailableError();
 
       const { Worker } = await import("node:worker_threads");
 
@@ -334,17 +260,10 @@ class LocalProvider implements EmbeddingProvider {
       // In dev (Bun running .ts directly): embedding-worker.ts
       // In dist (esbuild bundle): embedding-worker.js
       const vendorWorkerUrl = (globalThis as Record<string, unknown>).__LORE_VENDOR_WORKER_URL__ as string | undefined;
-      // On Windows, new Worker() with a file:// URL pointing to $bunfs
-      // fails with ENOENT. Pass the raw path instead (B:\~BUN\root\...).
-      // On macOS/Linux the file:// URL works fine with $bunfs paths.
       let workerUrl: string | URL;
       if (vendorWorkerUrl) {
         if (process.platform === "win32") {
-          // On Windows, new Worker() with a file:// URL pointing to $bunfs
-          // fails with ENOENT (Bun bug). Extract the raw path instead.
-          // URL.pathname keeps %7E encoded; decodeURIComponent restores ~.
           workerUrl = decodeURIComponent(new URL(vendorWorkerUrl).pathname);
-          // URL.pathname on Windows: /B:/~BUN/root/wrapper.js → strip leading /
           if (/^\/[A-Za-z]:/.test(workerUrl)) {
             workerUrl = workerUrl.slice(1);
           }
@@ -357,9 +276,10 @@ class LocalProvider implements EmbeddingProvider {
 
       const vendor = vendorModelInfo();
       const workerInitData: WorkerInitData = {
-        modelName: this.modelName,
+        modelId: this.modelId,
+        dimensions: this.dimensions,
         vendorModel: vendor
-          ? { modelAbsoluteDirPath: vendor.modelAbsoluteDirPath, modelName: vendor.modelName }
+          ? { localModelPath: vendor.localModelPath }
           : null,
       };
 
@@ -394,6 +314,14 @@ class LocalProvider implements EmbeddingProvider {
             // LocalProviderUnavailableError on all pending + future requests.
             this.workerInitError = msg.error;
             this.workerReady = false;
+            localProviderKnownBroken = true;
+            if (!localProviderErrorLogged) {
+              localProviderErrorLogged = true;
+              log.info(
+                `local embedding provider failed to init: ${msg.error}. ` +
+                  `Set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback.`,
+              );
+            }
             for (const [, p] of this.pendingRequests) {
               p.reject(new LocalProviderUnavailableError(msg.error));
             }
@@ -453,6 +381,10 @@ class LocalProvider implements EmbeddingProvider {
   async embed(texts: string[], inputType: "document" | "query"): Promise<Float32Array[]> {
     await this.ensureWorker();
 
+    // Prepend Nomic task instruction prefix.
+    const prefix = inputType === "document" ? "search_document: " : "search_query: ";
+    const prefixed = texts.map((t) => prefix + t);
+
     const id = this.nextRequestId++;
     // Recall queries (single query-type texts) get high priority so they
     // jump ahead of any queued backfill batches in the worker.
@@ -464,7 +396,7 @@ class LocalProvider implements EmbeddingProvider {
       this.worker!.postMessage({
         type: "embed",
         id,
-        texts,
+        texts: prefixed,
         inputType,
         priority,
       } satisfies WorkerInbound);
@@ -473,8 +405,6 @@ class LocalProvider implements EmbeddingProvider {
 
   /** Shut down the worker thread. Called by `resetProvider()` on config change.
    *  Sends a shutdown message so the worker calls `process.exit(0)` internally.
-   *  We avoid `worker.terminate()` because Bun's forced termination triggers a
-   *  NAPI fatal error when tearing down onnxruntime's native bindings.
    *
    *  Returns a promise that resolves once the worker has fully exited. Callers
    *  that need a clean teardown (tests, config change) should await the result.
@@ -507,7 +437,7 @@ class LocalProvider implements EmbeddingProvider {
 
 /** Default models per provider — used when config doesn't override. */
 const PROVIDER_DEFAULTS: Record<string, { model: string; dimensions: number }> = {
-  local: { model: "BGESmallENV15", dimensions: 384 },
+  local: { model: "nomic-ai/nomic-embed-text-v1.5", dimensions: 768 },
   voyage: { model: "voyage-code-3", dimensions: 1024 },
   openai: { model: "text-embedding-3-small", dimensions: 1536 },
 };
@@ -539,12 +469,11 @@ function getProvider(): EmbeddingProvider | null {
 
   switch (providerName) {
     case "local": {
-      // `fastembed` is an optionalDependency. We construct the provider
-      // optimistically here; the import + ONNX init happens lazily in
-      // `LocalProvider.getModel()`, which throws `LocalProviderUnavailableError`
-      // if the optional dep isn't installed. After that first failure
-      // `isAvailable()` short-circuits to false and callers fall back to FTS.
-      cachedProvider = new LocalProvider(model);
+      // Construct the provider optimistically — the ONNX model init
+      // happens lazily in the worker thread on first `embed()` call.
+      // If it fails, `LocalProviderUnavailableError` triggers the
+      // auto-fallback to a remote provider or FTS-only search.
+      cachedProvider = new LocalProvider(model, cfg.dimensions);
       break;
     }
     case "voyage": {
@@ -619,7 +548,7 @@ export function _saveAndClearProvider(): unknown {
 /** Restore a provider previously saved by `_saveAndClearProvider()`. Any
  *  provider created between save and restore is discarded (callers must
  *  ensure it's not a LocalProvider with a live worker — those suites only
- *  use `_markFastembedUnavailable()` so no worker is spawned). */
+ *  use `_markLocalProviderUnavailable()` so no worker is spawned). */
 export function _restoreProvider(token: unknown): void {
   const saved = token as { provider: EmbeddingProvider | null | undefined; remoteFallbackLogged: boolean };
   cachedProvider = saved.provider;
@@ -669,13 +598,13 @@ export function pickRemoteFallback(): {
  *  Active when the configured provider's API key is set, unless explicitly
  *  disabled via `search.embeddings.enabled: false` in .lore.json.
  *
- *  For the `local` provider, also returns false once we've discovered the
- *  optional `fastembed` peer is missing — callers (recall, ltm, distillation)
- *  use this gate to skip embedding work and fall back to FTS-only search. */
+ *  For the `local` provider, also returns false once the worker has reported
+ *  an init failure — callers (recall, ltm, distillation) use this gate to
+ *  skip embedding work and fall back to FTS-only search. */
 export function isAvailable(): boolean {
   const provider = getProvider();
   if (!provider) return false;
-  if (provider instanceof LocalProvider && fastembedKnownUnavailable()) return false;
+  if (provider instanceof LocalProvider && localProviderKnownUnavailable()) return false;
   return true;
 }
 
@@ -686,7 +615,7 @@ export function isAvailable(): boolean {
 /**
  * Generate embeddings for the given texts using the configured provider.
  *
- * If the configured provider is `local` and `fastembed` turns out to be
+ * If the configured provider is `local` and the local provider turns out to be
  * unavailable at runtime (failed install, vendor extraction blocked, etc.),
  * automatically swap to a remote provider when `VOYAGE_API_KEY` or
  * `OPENAI_API_KEY` is set in env. The swap is permanent for the rest of
@@ -717,7 +646,7 @@ export async function embed(
     if (!remoteFallbackLogged) {
       remoteFallbackLogged = true;
       log.info(
-        `fastembed unavailable; auto-switching to ${fallback.name} ` +
+        `local embedding provider unavailable; auto-switching to ${fallback.name} ` +
           `(set search.embeddings.provider in .lore.json to silence this)`,
       );
     }
@@ -1235,7 +1164,7 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
   let embedded = 0;
 
   // Progress logging: heartbeat every PROGRESS_INTERVAL embedded so a long
-  // backfill (e.g. 1000+ pending after a fastembed reinstall) doesn't look
+  // backfill (e.g. 1000+ pending after a model change) doesn't look
   // like a silent hang. Without this, only the final tally was logged.
   const PROGRESS_INTERVAL = 256;
   let nextProgressAt = PROGRESS_INTERVAL;
