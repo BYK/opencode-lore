@@ -1084,13 +1084,17 @@ export async function runStartupBackfill(): Promise<void> {
 
 /**
  * Chunk size for backfill embed requests. Each chunk becomes a separate
- * message to the embedding worker. Keeping chunks small (32) gives the
+ * message to the embedding worker. Keeping chunks small gives the
  * worker's priority queue natural gaps to interleave high-priority recall
  * queries between backfill batches. The provider's `maxBatchSize` (256)
  * is the upper limit for any single embed call; this is intentionally
  * smaller for backfill-vs-live interleaving.
+ *
+ * Batch size of 8 prevents OOM when long texts (up to ~1200 chars each)
+ * get padded to the longest sequence in the batch — a [32, 1383] tensor
+ * caused a ~287 MB allocation failure in onnxruntime.
  */
-const BACKFILL_CHUNK_SIZE = 32;
+const BACKFILL_CHUNK_SIZE = 8;
 
 /**
  * Embed all knowledge entries that are missing embeddings.
@@ -1129,7 +1133,8 @@ export async function backfillEmbeddings(): Promise<number> {
         embedded++;
       }
     } catch (err) {
-      log.info(`embedding backfill batch ${i}-${i + batch.length} failed:`, err);
+      // log.error sends to Sentry via captureException
+      log.error(`embedding backfill batch ${i}-${i + batch.length} failed:`, err);
     }
     // No yieldToEventLoop() needed — embed() is truly async (worker thread).
   }
@@ -1184,7 +1189,8 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
         embedded++;
       }
     } catch (err) {
-      log.info(`distillation embedding backfill batch ${i}-${i + batch.length} failed:`, err);
+      // log.error sends to Sentry via captureException
+      log.error(`distillation embedding backfill batch ${i}-${i + batch.length} failed:`, err);
     }
 
     if (embedded >= nextProgressAt) {
