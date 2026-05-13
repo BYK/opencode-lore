@@ -236,6 +236,24 @@ function binaryExternalsPlugin(): esbuild.Plugin {
           path: resolved,
         }));
       }
+
+      // Patch transformers.js onnx.js to read wasmPaths from globalThis
+      // instead of the CDN URL. The binary wrapper sets
+      // __LORE_VENDOR_WASM_PATHS__ = { mjs, wasm } with $bunfs paths
+      // before the worker evaluates. transformers.js checks
+      // `!ONNX_ENV.wasm.wasmPaths` and falls back to a CDN URL — we
+      // replace that fallback with a globalThis read.
+      build.onLoad({ filter: /transformers\.node\.mjs$/ }, (args) => {
+        let src = readFileSync(args.path, "utf8");
+        // The CDN default looks like:
+        //   ONNX_ENV.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/@huggingface/transformers@${env.version}/dist/`;
+        // Replace it to prefer __LORE_VENDOR_WASM_PATHS__ when available.
+        src = src.replace(
+          /ONNX_ENV\.wasm\.wasmPaths\s*=\s*`https:\/\/cdn\.jsdelivr\.net[^`]*`;/,
+          "ONNX_ENV.wasm.wasmPaths = globalThis.__LORE_VENDOR_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths;",
+        );
+        return { contents: src, loader: "js", resolveDir: dirname(args.path) };
+      });
     },
   };
 }
@@ -409,9 +427,10 @@ async function buildBinary() {
       `// directly. This avoids needing a separate worker entrypoint — Bun's`,
       `// --compile silently drops additional entrypoints on macOS and Windows.`,
       `if (!isMainThread) {`,
-      `  // Register WASM file paths for the worker — onnxruntime-web's node entry`,
-      `  // uses readFile() which can read from Bun's $bunfs virtual filesystem.`,
-      `  // Bun hashes filenames in $bunfs, so we pass exact paths (not a directory).`,
+      `  // Register WASM file paths for the esbuild-bundled worker. The`,
+      `  // binaryExternalsPlugin patches transformers.js to read wasmPaths`,
+      `  // from this globalThis key instead of the CDN fallback URL.`,
+      `  // Bun hashes $bunfs filenames, so we pass exact paths as an object.`,
       `  (globalThis as Record<string, unknown>).__LORE_VENDOR_WASM_PATHS__ = { mjs: _wasm_0, wasm: _wasm_1 };`,
       `  await import("./embedding-worker.js");`,
       `} else {`,

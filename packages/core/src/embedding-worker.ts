@@ -71,30 +71,6 @@ async function ensurePipeline(): Promise<void> {
 
   if (!initPromise) {
     initPromise = (async () => {
-      // In the compiled binary, onnxruntime-node is redirected to
-      // onnxruntime-web (WASM backend). The WASM runtime files (.wasm/.mjs)
-      // are embedded as Bun assets in $bunfs. We must set wasmPaths BEFORE
-      // transformers.js imports onnxruntime, so the CDN fallback URL is
-      // never used. Bun hashes filenames in $bunfs, so we pass exact file
-      // paths as an object { mjs, wasm } rather than a directory string.
-      //
-      // We import onnxruntime-node (which the build plugin redirects to
-      // onnxruntime-web) to get the same module instance that transformers.js
-      // will use — importing onnxruntime-web directly would create a second
-      // instance with a duplicate backend registration conflict.
-      const wasmPaths = (globalThis as Record<string, unknown>).__LORE_VENDOR_WASM_PATHS__ as
-        { mjs: string; wasm: string } | undefined;
-      if (wasmPaths) {
-        // Dynamic string prevents tsc from resolving the module at typecheck
-        // time. In the binary, esbuild redirects onnxruntime-node → onnxruntime-web.
-        const ortModuleId = "onnxruntime-" + "node";
-        const ort = await import(/* @vite-ignore */ ortModuleId);
-        const ortEnv = ((ort as any).default ?? ort).env;
-        if (ortEnv?.wasm) {
-          ortEnv.wasm.wasmPaths = wasmPaths;
-        }
-      }
-
       const transformers = await import("@huggingface/transformers");
       const { pipeline, env, layer_norm } = transformers;
 
