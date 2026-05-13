@@ -10,7 +10,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { dirname, join } from "path";
-import { db } from "./db";
+import { db, ensureProject } from "./db";
 import * as ltm from "./ltm";
 import { serialize, inline, h, ul, liph, strong, t, root, unescapeMarkdown } from "./markdown";
 
@@ -425,16 +425,28 @@ function _importEntries(
           ltm.update(entry.id, { content: entry.content });
         }
       } else {
-        // Unknown UUID — entry came from another machine, preserve its ID
-        ltm.create({
-          projectPath,
-          category: entry.category,
-          title: entry.title,
-          content: entry.content,
-          scope: "project",
-          crossProject: false,
-          id: entry.id,
-        });
+        // Unknown UUID — entry came from another machine.
+        // Check for a fuzzy title match before creating — prevents duplicates
+        // when two machines independently create entries for the same concept
+        // with different UUIDs but similar titles.
+        const pid = ensureProject(projectPath);
+        const fuzzyMatch = ltm.findFuzzyDuplicate({ title: entry.title, projectId: pid });
+        if (fuzzyMatch) {
+          // Title-similar entry exists locally — update it, discard foreign UUID
+          if (fuzzyMatch.title !== entry.title || ltm.get(fuzzyMatch.id)?.content !== entry.content) {
+            ltm.update(fuzzyMatch.id, { content: entry.content });
+          }
+        } else {
+          ltm.create({
+            projectPath,
+            category: entry.category,
+            title: entry.title,
+            content: entry.content,
+            scope: "project",
+            crossProject: false,
+            id: entry.id,
+          });
+        }
       }
     } else {
       // Hand-written entry — create with a new UUIDv7

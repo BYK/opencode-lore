@@ -180,6 +180,21 @@ export async function run(input: {
     sessionID: input.sessionID,
   });
 
+  // Post-curation dedup sweep: if the curator created new entries, check for
+  // and auto-merge any semantic duplicates it introduced. Uses embedding-based
+  // similarity when available, falls back to word-overlap.
+  if (result.created > 0) {
+    try {
+      const dupes = await ltm.deduplicate(input.projectPath, { dryRun: false });
+      if (dupes.totalRemoved > 0) {
+        log.info(`post-curation dedup: merged ${dupes.totalRemoved} duplicate entries`);
+        result.deleted += dupes.totalRemoved;
+      }
+    } catch (err) {
+      log.warn("post-curation dedup failed (non-fatal):", err);
+    }
+  }
+
   lastCuratedAt.set(input.sessionID, Date.now());
   return result;
 }

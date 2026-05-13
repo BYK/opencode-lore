@@ -657,6 +657,93 @@ async function cmdMerge(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// dedup — Deduplicate knowledge entries across all projects (or one)
+// ---------------------------------------------------------------------------
+
+function printDedupResult(
+  result: Awaited<ReturnType<typeof import("@loreai/core").ltm.deduplicate>>,
+  apply: boolean,
+  label?: string,
+): void {
+  if (label) console.log(`\n--- ${label} ---\n`);
+
+  for (let i = 0; i < result.clusters.length; i++) {
+    const cluster = result.clusters[i];
+    const total = 1 + cluster.merged.length;
+    console.log(`Cluster ${i + 1} (${total} entries → 1):`);
+    console.log(`  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`);
+    for (const m of cluster.merged) {
+      console.log(`  ${apply ? "Remove" : "Would remove"}: "${truncate(m.title, 60)}" (${m.id.slice(0, 8)}…)`);
+    }
+    console.log();
+  }
+}
+
+async function cmdDedup(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const { ltm, data } = await import("@loreai/core");
+  const apply = !!flags.yes;
+  const asJson = !!flags.json;
+  const explicitProject = typeof flags.project === "string" ? resolve(flags.project) : null;
+
+  // Determine which projects to process
+  const projects = explicitProject
+    ? [{ path: explicitProject, name: explicitProject }]
+    : data.listProjects().map((p) => ({ path: p.path, name: p.name ?? p.path }));
+
+  if (projects.length === 0) {
+    console.log("No projects found.");
+    return;
+  }
+
+  if (!apply) {
+    console.log("Scanning for duplicate knowledge entries (dry run)...\n");
+  } else {
+    console.log("Deduplicating knowledge entries...\n");
+  }
+
+  let grandTotalRemoved = 0;
+  let grandTotalClusters = 0;
+  const allResults: Array<{ name: string; result: Awaited<ReturnType<typeof ltm.deduplicate>> }> = [];
+
+  for (const project of projects) {
+    const result = await ltm.deduplicate(project.path, { dryRun: !apply });
+    if (result.clusters.length > 0) {
+      allResults.push({ name: project.name, result });
+      grandTotalRemoved += result.totalRemoved;
+      grandTotalClusters += result.clusters.length;
+    }
+  }
+
+  if (grandTotalClusters === 0) {
+    console.log("No duplicates found.");
+    return;
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify(allResults, null, 2));
+    return;
+  }
+
+  const multiProject = allResults.length > 1 || (!explicitProject && projects.length > 1);
+  for (const { name, result } of allResults) {
+    printDedupResult(result, apply, multiProject ? name : undefined);
+  }
+
+  console.log(
+    `${apply ? "Removed" : "Would remove"} ${grandTotalRemoved} duplicate entries ` +
+      `across ${grandTotalClusters} clusters` +
+      (multiProject ? ` in ${allResults.length} projects.` : "."),
+  );
+
+  if (!apply) {
+    console.log("\nRun with --yes to apply.");
+  }
+}
+
 // Main dispatch
 // ---------------------------------------------------------------------------
 
@@ -673,6 +760,7 @@ Subcommands:
   delete <type> <id>    Delete a single entry
   merge                 Scan git remotes and merge duplicate projects
   recover               Re-import knowledge from .lore.md / AGENTS.md files
+  dedup                 Find and remove duplicate knowledge entries (all projects)
 
 Options:
   --project <path>      Target project directory (default: current directory)
@@ -699,6 +787,9 @@ Examples:
   lore data merge --yes                    # skip confirmation
   lore data recover                        # re-import from .lore.md / AGENTS.md
   lore data recover --yes                  # skip confirmation
+  lore data dedup                          # dry-run: show duplicate clusters
+  lore data dedup --yes                    # apply: remove duplicates
+  lore data dedup --project /path/to/project
 `.trimStart();
 
 export async function commandData(
@@ -726,6 +817,9 @@ export async function commandData(
       break;
     case "recover":
       await cmdRecover(subArgs, values);
+      break;
+    case "dedup":
+      await cmdDedup(subArgs, values);
       break;
     case "help":
     case undefined:
