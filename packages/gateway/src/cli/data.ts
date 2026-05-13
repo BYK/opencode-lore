@@ -684,7 +684,7 @@ async function cmdDedup(
   _args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
-  const { ltm, data } = await import("@loreai/core");
+  const { ltm, data, embedding: emb } = await import("@loreai/core");
   const apply = !!flags.yes;
   const asJson = !!flags.json;
   const explicitProject = typeof flags.project === "string" ? resolve(flags.project) : null;
@@ -697,6 +697,19 @@ async function cmdDedup(
   if (projects.length === 0) {
     console.log("No projects found.");
     return;
+  }
+
+  // Auto-reindex if embedding config changed (e.g. model migration)
+  // or if there are entries missing embeddings.
+  if (emb.isAvailable()) {
+    const changed = emb.checkConfigChange();
+    if (changed) {
+      console.log("Embedding config changed — rebuilding vectors...");
+    }
+    const count = await emb.backfillEmbeddings();
+    if (count > 0) {
+      console.log(`Embedded ${count} knowledge entries.\n`);
+    }
   }
 
   if (!apply) {
@@ -744,6 +757,39 @@ async function cmdDedup(
   }
 }
 
+async function cmdReindex(): Promise<void> {
+  const { embedding } = await import("@loreai/core");
+
+  if (!embedding.isAvailable()) {
+    console.error("No embedding provider available.");
+    console.error(
+      "Set VOYAGE_API_KEY/OPENAI_API_KEY for remote embeddings, or ensure " +
+        "@huggingface/transformers is installed for local embeddings.",
+    );
+    process.exit(1);
+  }
+
+  const changed = embedding.checkConfigChange();
+  if (changed) {
+    console.log("Embedding config changed — cleared stale embeddings.");
+  }
+
+  console.log("Re-indexing knowledge entries...");
+  const knowledgeCount = await embedding.backfillEmbeddings();
+  console.log(`  ✓ ${knowledgeCount} knowledge entries embedded`);
+
+  console.log("Re-indexing distillations...");
+  const distillCount = await embedding.backfillDistillationEmbeddings();
+  console.log(`  ✓ ${distillCount} distillations embedded`);
+
+  const total = knowledgeCount + distillCount;
+  if (total === 0 && !changed) {
+    console.log("\nAll embeddings are up to date.");
+  } else {
+    console.log(`\nDone — ${total} entries re-indexed.`);
+  }
+}
+
 // Main dispatch
 // ---------------------------------------------------------------------------
 
@@ -761,6 +807,7 @@ Subcommands:
   merge                 Scan git remotes and merge duplicate projects
   recover               Re-import knowledge from .lore.md / AGENTS.md files
   dedup                 Find and remove duplicate knowledge entries (all projects)
+  reindex               Rebuild embedding vectors (after model/config change)
 
 Options:
   --project <path>      Target project directory (default: current directory)
@@ -790,6 +837,7 @@ Examples:
   lore data dedup                          # dry-run: show duplicate clusters
   lore data dedup --yes                    # apply: remove duplicates
   lore data dedup --project /path/to/project
+  lore data reindex                        # rebuild all embedding vectors
 `.trimStart();
 
 export async function commandData(
@@ -820,6 +868,9 @@ export async function commandData(
       break;
     case "dedup":
       await cmdDedup(subArgs, values);
+      break;
+    case "reindex":
+      await cmdReindex();
       break;
     case "help":
     case undefined:
