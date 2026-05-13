@@ -1,20 +1,25 @@
 #!/usr/bin/env bun
 /**
- * Check if the latest Claude Code version has a known cch seed.
+ * Check if recent Claude Code versions have known cch seeds.
  *
- * Compares the `latest` and `stable` npm dist-tags of @anthropic-ai/claude-code
- * against the VERSION_SEEDS map in cch.ts. Exits with code 1 if any published
- * version lacks a known seed.
+ * Fetches all published versions of @anthropic-ai/claude-code from npm,
+ * identifies every version between the highest known seed and the latest
+ * dist-tag that lacks a seed, and reports them for extraction.
  *
  * Usage:
  *   bun run scripts/check-cc-version.ts          # human-readable output
  *   bun run scripts/check-cc-version.ts --json    # machine-readable JSON
  *
+ * JSON output includes:
+ *   - latestVersion: the latest dist-tag version (becomes WORKER_VERSION)
+ *   - missingVersions: all versions between last known seed and latest (inclusive)
+ *     that don't have a seed yet, sorted ascending
+ *
  * Used by the cch-seed-check CI workflow to trigger automated seed extraction.
  */
 
 import { parseArgs } from "util";
-import { VERSION_SEEDS } from "../packages/gateway/src/cch";
+import { VERSION_SEEDS, _parseSemver, _compareSemver } from "../packages/gateway/src/cch";
 
 const { values: args } = parseArgs({
   args: Bun.argv.slice(2),
@@ -28,8 +33,14 @@ if (args.help) {
   console.log(`Usage:
   bun run scripts/check-cc-version.ts [--json]
 
-Checks if the latest Claude Code versions on npm have known cch seeds.
+Checks if recent Claude Code versions on npm have known cch seeds.
 Exits 0 if all versions are known, 1 if any needs extraction.
+
+JSON output fields:
+  needsExtraction   Whether any version needs seed extraction
+  latestVersion     The npm 'latest' dist-tag version
+  missingVersions   All versions needing extraction, sorted ascending
+  knownSeeds        Currently known seed versions
 
 Options:
   --json    Output machine-readable JSON
@@ -37,20 +48,17 @@ Options:
   process.exit(0);
 }
 
-interface DistTags {
-  latest?: string;
-  stable?: string;
-  next?: string;
-  [key: string]: string | undefined;
+interface NpmRegistryData {
+  "dist-tags"?: Record<string, string>;
+  versions?: Record<string, unknown>;
 }
 
-async function fetchDistTags(): Promise<DistTags> {
+async function fetchRegistry(): Promise<NpmRegistryData> {
   const res = await fetch("https://registry.npmjs.org/@anthropic-ai/claude-code");
   if (!res.ok) {
     throw new Error(`npm registry returned ${res.status}: ${await res.text()}`);
   }
-  const data = (await res.json()) as { "dist-tags"?: DistTags };
-  return data["dist-tags"] ?? {};
+  return (await res.json()) as NpmRegistryData;
 }
 
 /**
@@ -62,68 +70,71 @@ function baseVersion(v: string): string {
   return m ? m[1] : v;
 }
 
+/**
+ * Compare two semver strings. Returns negative if a < b, positive if a > b, 0 if equal.
+ */
+function cmpVersions(a: string, b: string): number {
+  const pa = _parseSemver(a);
+  const pb = _parseSemver(b);
+  if (!pa || !pb) return 0;
+  return _compareSemver(pa, pb);
+}
+
 async function main() {
-  const tags = await fetchDistTags();
+  const registry = await fetchRegistry();
+  const distTags = registry["dist-tags"] ?? {};
+  const allPublished = Object.keys(registry.versions ?? {});
 
-  // Check both latest and stable tags
-  const toCheck = new Map<string, string>(); // tag → version
-  for (const tag of ["latest", "stable"] as const) {
-    const v = tags[tag];
-    if (v) toCheck.set(tag, baseVersion(v));
-  }
-
-  if (toCheck.size === 0) {
-    console.error("No dist-tags found on npm for @anthropic-ai/claude-code");
+  const latestTag = distTags.latest ? baseVersion(distTags.latest) : null;
+  if (!latestTag) {
+    console.error("No 'latest' dist-tag found on npm for @anthropic-ai/claude-code");
     process.exit(1);
   }
 
-  const knownVersions = new Set(Object.keys(VERSION_SEEDS));
-  const results: Array<{
-    tag: string;
-    version: string;
-    known: boolean;
-  }> = [];
+  // Find the highest known seed version
+  const knownVersions = Object.keys(VERSION_SEEDS);
+  const sortedKnown = [...knownVersions].sort(cmpVersions);
+  const highestKnown = sortedKnown[sortedKnown.length - 1];
 
-  let needsExtraction = false;
-  let latestUnknown: string | null = null;
+  // Find all published versions > highestKnown and <= latest that lack seeds
+  const missingVersions = allPublished
+    .map(baseVersion)
+    .filter((v) => {
+      if (VERSION_SEEDS[v]) return false; // already known
+      if (!_parseSemver(v)) return false; // skip unparseable
+      return cmpVersions(v, highestKnown) > 0 && cmpVersions(v, latestTag) <= 0;
+    })
+    .sort(cmpVersions);
 
-  for (const [tag, version] of toCheck) {
-    const known = knownVersions.has(version);
-    results.push({ tag, version, known });
-    if (!known) {
-      needsExtraction = true;
-      // Prefer 'latest' for extraction; fall back to 'stable'
-      if (!latestUnknown || tag === "latest") {
-        latestUnknown = version;
-      }
-    }
-  }
+  // Deduplicate (baseVersion could collapse pre-release suffixes)
+  const uniqueMissing = [...new Set(missingVersions)];
+
+  const needsExtraction = uniqueMissing.length > 0;
 
   if (args.json) {
     const output = {
       needsExtraction,
-      latestVersion: latestUnknown ?? toCheck.get("latest") ?? "",
-      tags: results,
-      knownSeeds: Object.keys(VERSION_SEEDS),
+      latestVersion: latestTag,
+      missingVersions: uniqueMissing,
+      knownSeeds: knownVersions,
     };
     console.log(JSON.stringify(output));
   } else {
     console.log("Claude Code version check:");
-    console.log(`  Known seeds: ${[...knownVersions].join(", ")}`);
+    console.log(`  Known seeds: ${sortedKnown.join(", ")}`);
+    console.log(`  Highest known: ${highestKnown}`);
+    console.log(`  Latest on npm: ${latestTag}`);
     console.log();
-    for (const r of results) {
-      const status = r.known ? "✓ known" : "✗ NEEDS EXTRACTION";
-      console.log(`  ${r.tag}: ${r.version} — ${status}`);
-    }
     if (needsExtraction) {
+      console.log(`Missing seeds for ${uniqueMissing.length} version(s):`);
+      for (const v of uniqueMissing) {
+        console.log(`  ✗ ${v}`);
+      }
       console.log(
-        `\nNew version detected: ${latestUnknown}`,
-      );
-      console.log(
-        `Run: bun run scripts/extract-cch-seed.ts --version ${latestUnknown}`,
+        `\nRun: bun run scripts/extract-cch-seed.ts --version <VERSION>`,
       );
     } else {
-      console.log("\nAll published versions have known seeds.");
+      console.log("All published versions have known seeds.");
     }
   }
 

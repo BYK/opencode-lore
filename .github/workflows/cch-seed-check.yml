@@ -20,7 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       needs-extraction: ${{ steps.check.outputs.needs-extraction }}
-      cc-version: ${{ steps.check.outputs.cc-version }}
+      latest-version: ${{ steps.check.outputs.latest-version }}
+      missing-versions: ${{ steps.check.outputs.missing-versions }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,13 +31,15 @@ jobs:
 
       - run: bun install
 
-      - name: Check for new Claude Code version
+      - name: Check for new Claude Code versions
         id: check
         run: |
           if [ -n "${{ inputs.force-version }}" ]; then
+            VERSION="${{ inputs.force-version }}"
             echo "needs-extraction=true" >> "$GITHUB_OUTPUT"
-            echo "cc-version=${{ inputs.force-version }}" >> "$GITHUB_OUTPUT"
-            echo "Force extraction for version: ${{ inputs.force-version }}"
+            echo "latest-version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "missing-versions=[\"$VERSION\"]" >> "$GITHUB_OUTPUT"
+            echo "Force extraction for version: $VERSION"
           else
             # check-cc-version.ts exits 1 if extraction is needed
             set +e
@@ -48,18 +51,22 @@ jobs:
 
             if [ $exit_code -eq 0 ]; then
               echo "needs-extraction=false" >> "$GITHUB_OUTPUT"
-              echo "cc-version=" >> "$GITHUB_OUTPUT"
+              echo "latest-version=" >> "$GITHUB_OUTPUT"
+              echo "missing-versions=[]" >> "$GITHUB_OUTPUT"
               echo "All versions have known seeds"
             else
-              version=$(echo "$result" | jq -r '.latestVersion // empty')
-              if [ -n "$version" ]; then
+              latest=$(echo "$result" | jq -r '.latestVersion // empty')
+              missing=$(echo "$result" | jq -c '.missingVersions // []')
+              if [ -n "$latest" ] && [ "$missing" != "[]" ]; then
                 echo "needs-extraction=true" >> "$GITHUB_OUTPUT"
-                echo "cc-version=$version" >> "$GITHUB_OUTPUT"
-                echo "New version needs extraction: $version"
+                echo "latest-version=$latest" >> "$GITHUB_OUTPUT"
+                echo "missing-versions=$missing" >> "$GITHUB_OUTPUT"
+                echo "Missing versions: $missing"
               else
                 echo "needs-extraction=false" >> "$GITHUB_OUTPUT"
-                echo "cc-version=" >> "$GITHUB_OUTPUT"
-                echo "Check failed but no version to extract"
+                echo "latest-version=" >> "$GITHUB_OUTPUT"
+                echo "missing-versions=[]" >> "$GITHUB_OUTPUT"
+                echo "Check failed but no versions to extract"
               fi
             fi
           fi
@@ -82,28 +89,65 @@ jobs:
 
       - run: bun install
 
-      - name: Extract seed
+      - name: Extract and apply all missing seeds
         id: extract
-        timeout-minutes: 15
+        timeout-minutes: 30
+        env:
+          LATEST_VERSION: ${{ needs.check-version.outputs.latest-version }}
+          MISSING_VERSIONS: ${{ needs.check-version.outputs.missing-versions }}
         run: |
-          VERSION="${{ needs.check-version.outputs.cc-version }}"
-          echo "Extracting seed for Claude Code v${VERSION}..."
-          bun run scripts/extract-cch-seed.ts \
-            --version "$VERSION" \
-            --output /tmp/seed-result.json
+          EXTRACTED=()
 
-          echo "=== Result ==="
-          cat /tmp/seed-result.json
-          echo
+          # Parse the missing versions list, extract latest version first
+          # so WORKER_VERSION gets pinned to it
+          VERSIONS=$(echo "$MISSING_VERSIONS" | jq -r '.[]')
 
-          SEED=$(jq -r '.seed' /tmp/seed-result.json)
-          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+          # Reorder: latest first, then the rest
+          ORDERED=()
+          for v in $VERSIONS; do
+            if [ "$v" = "$LATEST_VERSION" ]; then
+              ORDERED=("$v" "${ORDERED[@]}")
+            else
+              ORDERED+=("$v")
+            fi
+          done
 
-      - name: Apply seed to cch.ts
-        run: |
-          VERSION="${{ needs.check-version.outputs.cc-version }}"
-          SEED="${{ steps.extract.outputs.seed }}"
-          bun run scripts/extract-cch-seed.ts --apply "$VERSION" "$SEED"
+          for VERSION in "${ORDERED[@]}"; do
+            echo ""
+            echo "========================================"
+            echo "Extracting seed for Claude Code v${VERSION}..."
+            echo "========================================"
+
+            OUTPUT="/tmp/seed-result-${VERSION}.json"
+            bun run scripts/extract-cch-seed.ts \
+              --version "$VERSION" \
+              --output "$OUTPUT"
+
+            echo "=== Result ==="
+            cat "$OUTPUT"
+            echo
+
+            SEED=$(jq -r '.seed' "$OUTPUT")
+
+            # Apply: pin WORKER_VERSION only for the latest version
+            if [ "$VERSION" = "$LATEST_VERSION" ]; then
+              echo "Applying seed for $VERSION (pinning as WORKER_VERSION)..."
+              bun run scripts/extract-cch-seed.ts --apply "$VERSION" "$SEED"
+            else
+              echo "Applying seed for $VERSION (backfill, no pin)..."
+              bun run scripts/extract-cch-seed.ts --apply --no-pin "$VERSION" "$SEED"
+            fi
+
+            EXTRACTED+=("$VERSION")
+          done
+
+          # Output summary
+          echo ""
+          echo "========================================"
+          echo "Extracted seeds for ${#EXTRACTED[@]} version(s): ${EXTRACTED[*]}"
+          echo "========================================"
+          echo "extracted-count=${#EXTRACTED[@]}" >> "$GITHUB_OUTPUT"
+          echo "extracted-versions=${EXTRACTED[*]}" >> "$GITHUB_OUTPUT"
 
       - name: Verify tests pass
         run: bun test packages/gateway/test/cch.test.ts
@@ -112,9 +156,9 @@ jobs:
         id: check-pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST_VERSION: ${{ needs.check-version.outputs.latest-version }}
         run: |
-          VERSION="${{ needs.check-version.outputs.cc-version }}"
-          BRANCH="cch-seed/${VERSION}"
+          BRANCH="cch-seed/${LATEST_VERSION}"
           existing=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
           if [ -n "$existing" ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -127,30 +171,32 @@ jobs:
         if: steps.check-pr.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST_VERSION: ${{ needs.check-version.outputs.latest-version }}
+          EXTRACTED_COUNT: ${{ steps.extract.outputs.extracted-count }}
+          EXTRACTED_VERSIONS: ${{ steps.extract.outputs.extracted-versions }}
         run: |
-          VERSION="${{ needs.check-version.outputs.cc-version }}"
-          SEED="${{ steps.extract.outputs.seed }}"
-          BRANCH="cch-seed/${VERSION}"
+          BRANCH="cch-seed/${LATEST_VERSION}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           git add packages/gateway/src/cch.ts
-          git commit -m "feat(cch): add seed for Claude Code ${VERSION}"
+          git commit -m "feat(cch): add seeds for Claude Code up to ${LATEST_VERSION}"
           git push -u origin "$BRANCH"
 
           gh pr create \
-            --title "feat(cch): add seed for Claude Code ${VERSION}" \
-            --body "$(cat <<'EOF'
+            --title "feat(cch): add seeds for Claude Code up to ${LATEST_VERSION}" \
+            --body "$(cat <<EOF
           ## Summary
 
-          Automated cch seed extraction for Claude Code v${VERSION}.
+          Automated cch seed extraction for ${EXTRACTED_COUNT} Claude Code version(s).
 
-          - **Seed:** \`${SEED}\`
+          - **Versions:** ${EXTRACTED_VERSIONS}
+          - **WORKER_VERSION pinned to:** ${LATEST_VERSION}
           - **Extracted by:** \`scripts/extract-cch-seed.ts\`
           - **Method:** Oracle pair generation via local capture server + binary scan
 
           This PR updates \`VERSION_SEEDS\` and \`WORKER_VERSION\` in \`packages/gateway/src/cch.ts\`
-          so the gateway can sign billing headers for the new Claude Code version.
+          so the gateway can sign billing headers for these Claude Code versions.
           EOF
           )"
