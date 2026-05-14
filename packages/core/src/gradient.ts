@@ -1146,9 +1146,9 @@ function buildPrefixMessages(formatted: string): MessageWithParts[] {
 //   - Architecture: "architecture"/"pattern" → +0.1
 //   - Meta-distilled (gen >= 1): +0.2 (consolidation = higher value density)
 
-const DECISION_RE = /\b(?:decision|decided|chose|chosen)\b/i;
-const GOTCHA_RE = /\b(?:gotcha|bug|fix(?:ed)?|error|broken|crash)\b/i;
-const ARCH_RE = /\b(?:architecture|pattern|design)\b/i;
+const DECISION_RE = /\b(?:decision|decided|chose|chosen|agreed)\b/i;
+const GOTCHA_RE = /\b(?:gotcha|(?:critical|known|subtle)\s+bug|broken|crash(?:ed|es)?|regression)\b/i;
+const ARCH_RE = /\b(?:architecture|design.(?:decision|pattern)|system.design)\b/i;
 
 function importanceBonus(d: Distillation): number {
   let bonus = 0;
@@ -1162,9 +1162,12 @@ function importanceBonus(d: Distillation): number {
 function selectDistillations(all: Distillation[], limit: number): Distillation[] {
   if (all.length <= limit) return all;
 
+  // Recency: normalize to [0, 0.7] where oldest = 0.0, newest = 0.7.
+  // Use (length - 1) as divisor so the last entry gets full recency weight.
+  const maxIdx = all.length - 1;
   const scored = all.map((d, i) => ({
     d,
-    score: (i / all.length) * 0.7 + importanceBonus(d) * 0.3,
+    score: (maxIdx > 0 ? (i / maxIdx) : 1) * 0.7 + importanceBonus(d) * 0.3,
   }));
 
   // Keep top N by score, then re-sort chronologically (cache-safe).
@@ -1468,6 +1471,25 @@ function tryFitStable(input: {
 
 export type SafetyLayer = 0 | 1 | 2 | 3 | 4;
 
+// --- Compression stage table ---
+// Defines the escalation path for layers 1-3. Each stage tries increasingly
+// aggressive compression: tool stripping, tighter budgets, distillation trimming.
+// Adding a new intermediate stage = one table entry.
+type CompressionStage = {
+  strip: "none" | "old-tools" | "all-tools";
+  rawFrac: number | null;     // fraction of usable; null = use default rawBudget
+  distFrac: number | null;    // fraction of usable; null = use default distilledBudget
+  distLimit: number;          // Infinity = all, 5 = last 5, etc.
+  protectedTurns: number;     // turns exempt from tool stripping
+  useStableWindow: boolean;   // use tryFitStable (Approach B pin cache)
+};
+
+const COMPRESSION_STAGES: CompressionStage[] = [
+  { strip: "none",      rawFrac: null, distFrac: null, distLimit: Infinity, protectedTurns: 0, useStableWindow: true },
+  { strip: "old-tools", rawFrac: 0.50, distFrac: null, distLimit: Infinity, protectedTurns: 2, useStableWindow: false },
+  { strip: "all-tools", rawFrac: 0.55, distFrac: 0.15, distLimit: 5,        protectedTurns: 0, useStableWindow: false },
+];
+
 export type TransformResult = {
   messages: MessageWithParts[];
   layer: SafetyLayer;
@@ -1688,21 +1710,6 @@ function transformInner(input: {
   // Stage 0 (layer 1): stable window (Approach B), no stripping
   // Stage 1 (layer 2): strip old tool outputs, protect last 2 turns
   // Stage 2 (layer 3): strip ALL tool outputs, keep only 5 distillations
-  type CompressionStage = {
-    strip: "none" | "old-tools" | "all-tools";
-    rawFrac: number | null;     // fraction of usable; null = use default rawBudget
-    distFrac: number | null;    // fraction of usable; null = use default distilledBudget
-    distLimit: number;          // Infinity = all, 5 = last 5, etc.
-    protectedTurns: number;     // turns exempt from tool stripping
-    useStableWindow: boolean;   // use tryFitStable (Approach B pin cache)
-  };
-
-  const COMPRESSION_STAGES: CompressionStage[] = [
-    { strip: "none",      rawFrac: null, distFrac: null, distLimit: Infinity, protectedTurns: 0, useStableWindow: true },
-    { strip: "old-tools", rawFrac: 0.50, distFrac: null, distLimit: Infinity, protectedTurns: 2, useStableWindow: false },
-    { strip: "all-tools", rawFrac: 0.55, distFrac: 0.15, distLimit: 5,        protectedTurns: 0, useStableWindow: false },
-  ];
-
   for (let s = 0; s < COMPRESSION_STAGES.length; s++) {
     const stageLayer = (s + 1) as SafetyLayer;
     if (effectiveMinLayer > stageLayer) continue;
@@ -1736,8 +1743,9 @@ function transformInner(input: {
       });
     } else {
       // Reset raw window cache when leaving stage 0 — higher stages use full
-      // scans and already break the prompt cache.
-      if (s === 1) sessState.rawWindowCache = null;
+      // scans and already break the prompt cache. Must fire even when stage 1
+      // is skipped via effectiveMinLayer (e.g. forceMinLayer = 3).
+      sessState.rawWindowCache = null;
       result = tryFit({
         messages: dedupMessages,
         prefix: stagePrefix,
@@ -1750,12 +1758,9 @@ function transformInner(input: {
     }
 
     if (fitsWithSafetyMargin(result)) {
-      // Stage 0 (layer 1) with no distillations = first time in gradient mode,
-      // trigger urgent distillation to populate the prefix.
-      if (s === 0 && cached.tokens === 0 && sid) {
-        urgentDistillationMap.set(sid, true);
-      } else if (s > 0 && sid) {
-        // Higher stages always trigger urgent distillation.
+      // Trigger urgent distillation when: (a) higher stages always need it, or
+      // (b) stage 0 with no distillations = first time in gradient mode.
+      if (sid && (s > 0 || cached.tokens === 0)) {
         urgentDistillationMap.set(sid, true);
       }
       return { ...result!, layer: stageLayer, usable, distilledBudget, rawBudget };
