@@ -177,6 +177,43 @@ describe("gradient", () => {
     calibrate(0);
   });
 
+  test("refreshLtm is true on Layer 4 and false on lower layers", () => {
+    // Layer 0: small messages fit easily
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    const smallMessages = [
+      makeMsg("ltm-flag-1", "user", "Hello"),
+      makeMsg("ltm-flag-2", "assistant", "Hi there"),
+    ];
+    const layer0Result = transform({
+      messages: smallMessages,
+      projectPath: PROJECT,
+      sessionID: "ltm-flag-sess",
+    });
+    expect(layer0Result.layer).toBe(0);
+    expect(layer0Result.refreshLtm).toBe(false);
+
+    // Layer 4: force emergency with tight context
+    setModelLimits({ context: 2_000, output: 500 });
+    calibrate(0);
+    const bigMessages = Array.from({ length: 10 }, (_, i) => {
+      const role = i % 2 === 0 ? "user" : "assistant";
+      const text = `Message ${i}: ${"detailed content about various topics and implementation details that span across multiple concerns ".repeat(40)}`;
+      return makeMsg(`ltm-flag-big-${i}`, role as "user" | "assistant", text, "ltm-flag-big-sess");
+    });
+    const layer4Result = transform({
+      messages: bigMessages,
+      projectPath: PROJECT,
+      sessionID: "ltm-flag-big-sess",
+    });
+    expect(layer4Result.layer).toBe(4);
+    expect(layer4Result.refreshLtm).toBe(true);
+
+    // Reset
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+  });
+
   test("returns valid token estimates", () => {
     const messages = [
       makeMsg("tok-1", "user", "Test message"),

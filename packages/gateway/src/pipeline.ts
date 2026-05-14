@@ -2607,6 +2607,51 @@ async function handleConversationTurn(
     result.messages.pop();
   }
 
+  // --- 7b. LTM refresh on emergency layer ---
+  // Layer 4 (emergency/transient reset) signals that the context was fully
+  // reset. Re-run forSession() to re-rank knowledge entries by relevance to
+  // the current conversation state — entries that became relevant mid-session
+  // (e.g. a gotcha discovered during debugging) are surfaced on the reset
+  // turn rather than waiting for the next session. The full cache bust from
+  // Layer 4 means there's no additional cost from changing the LTM text.
+  if (result.refreshLtm && cfg.knowledge.enabled) {
+    try {
+      ltmSessionCache.delete(sessionID);
+      const ltmFraction = cfg.budget.ltm;
+      const ltmBudget = getLtmBudget(ltmFraction);
+      const entries = ltm.forSession(projectPath, sessionID, ltmBudget);
+      if (entries.length) {
+        const formatted = formatKnowledge(
+          entries.map((e) => ({
+            category: e.category,
+            title: e.title,
+            content: e.content,
+          })),
+          ltmBudget,
+        );
+
+        if (formatted) {
+          const tokenCount = Math.ceil(formatted.length / 3);
+          ltmSessionCache.set(sessionID, { formatted, tokenCount });
+          // Bypass content-diff pinning — Layer 4 already busts the cache,
+          // so there's no benefit to preserving the old pinned text.
+          ltmPinnedText.set(sessionID, { formatted, tokenCount });
+          ltmText = formatted;
+          setLtmTokens(tokenCount, sessionID);
+          saveSessionTracking(sessionID, {
+            ltmCacheText: formatted,
+            ltmCacheTokens: tokenCount,
+            ltmPinText: formatted,
+            ltmPinTokens: tokenCount,
+          });
+          log.info("LTM refreshed on emergency layer (Layer 4) for session", sessionID);
+        }
+      }
+    } catch (e) {
+      log.error("LTM refresh on emergency layer failed:", e);
+    }
+  }
+
   // --- 8. Build the modified request ---
   // Reconstruct GatewayMessages from the transformed Lore messages.
   // loreMessagesToGateway reconstructs tool_result blocks from assistant's
