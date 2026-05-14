@@ -324,6 +324,16 @@ export function count(projectPath: string, sessionID?: string): number {
   ).count;
 }
 
+/** Quick existence check — true if any temporal messages exist for this session. */
+export function hasMessages(projectPath: string, sessionID: string): boolean {
+  const pid = ensureProject(projectPath);
+  return !!db()
+    .query(
+      "SELECT 1 FROM temporal_messages WHERE project_id = ? AND session_id = ? LIMIT 1",
+    )
+    .get(pid, sessionID);
+}
+
 export function undistilledCount(
   projectPath: string,
   sessionID?: string,
