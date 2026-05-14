@@ -2524,7 +2524,18 @@ async function handleConversationTurn(
       if (!cached) {
         const ltmFraction = cfg.budget.ltm;
         const ltmBudget = getLtmBudget(ltmFraction);
-        const entries = ltm.forSession(projectPath, sessionID, ltmBudget);
+        // Deferred LTM injection: on the first turn (no temporal messages yet),
+        // only inject preference-category entries (always-relevant coding style
+        // guidance). Context-dependent entries (gotchas, patterns, architecture)
+        // are deferred to turn 2+ when real session context exists for relevance
+        // scoring. This avoids polluting the agent's context with irrelevant
+        // entries selected by blind confidence fallback.
+        const isFirstTurn = sessionID != null && !temporal.hasMessages(projectPath, sessionID);
+        const contextHint = lastUserTextTrimmed(req);
+        const entries = await ltm.forSession(projectPath, sessionID, ltmBudget, {
+          ...(isFirstTurn ? { categories: ["preference"] } : {}),
+          ...(contextHint ? { contextHint } : {}),
+        });
         if (entries.length) {
           const formatted = formatKnowledge(
             entries.map((e) => ({
@@ -2626,7 +2637,10 @@ async function handleConversationTurn(
     try {
       const ltmFraction = cfg.budget.ltm;
       const ltmBudget = getLtmBudget(ltmFraction);
-      const entries = ltm.forSession(projectPath, sessionID, ltmBudget);
+      const contextHint = lastUserTextTrimmed(req);
+      const entries = await ltm.forSession(projectPath, sessionID, ltmBudget, {
+        ...(contextHint ? { contextHint } : {}),
+      });
       let refreshed = false;
 
       if (entries.length) {

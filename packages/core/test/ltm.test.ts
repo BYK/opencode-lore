@@ -379,7 +379,7 @@ describe("ltm.forSession", () => {
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
 
-  test("returns project-specific entries regardless of session context", () => {
+  test("returns project-specific entries regardless of session context", async () => {
     ltm.create({
       projectPath: PROJ,
       category: "decision",
@@ -389,7 +389,7 @@ describe("ltm.forSession", () => {
       crossProject: false,
     });
 
-    const result = ltm.forSession(PROJ, SESSION, 10_000);
+    const result = await ltm.forSession(PROJ, SESSION, 10_000);
     // Project-specific entry must be included
     const found = result.find((e) => e.title === "DB choice for forSession test");
     expect(found).toBeDefined();
@@ -397,7 +397,7 @@ describe("ltm.forSession", () => {
     expect(found!.cross_project).toBe(0);
   });
 
-  test("respects token budget — stops adding entries when budget exhausted", () => {
+  test("respects token budget — stops adding entries when budget exhausted", async () => {
     // Create many project entries
     for (let i = 0; i < 10; i++) {
       ltm.create({
@@ -411,12 +411,12 @@ describe("ltm.forSession", () => {
     }
 
     // Budget of 200 tokens — should fit only a few entries
-    const result = ltm.forSession(PROJ, SESSION, 200);
+    const result = await ltm.forSession(PROJ, SESSION, 200);
     expect(result.length).toBeLessThan(10);
     expect(result.length).toBeGreaterThan(0);
   });
 
-  test("includes relevant cross-project entries when session context matches", () => {
+  test("includes relevant cross-project entries when session context matches", async () => {
     // Create a cross-project entry about TypeScript
     ltm.create({
       category: "gotcha",
@@ -451,14 +451,14 @@ describe("ltm.forSession", () => {
         Date.now(),
       );
 
-    const result = ltm.forSession(PROJ, SESSION, 10_000);
+    const result = await ltm.forSession(PROJ, SESSION, 10_000);
     const titles = result.map((e) => e.title);
     expect(titles).toContain("TypeScript strict mode caveat");
     // Kubernetes entry should not appear (no match with TypeScript context)
     expect(titles).not.toContain("Kubernetes deployment pattern");
   });
 
-  test("falls back to top entries by confidence when no session context", () => {
+  test("falls back to top entries by confidence when no session context", async () => {
     // Create cross-project entries — no session messages to provide context
     ltm.create({
       category: "preference",
@@ -469,13 +469,13 @@ describe("ltm.forSession", () => {
     });
 
     // No session context (fresh session) — should still return top entries
-    const result = ltm.forSession(PROJ, "brand-new-session", 10_000);
+    const result = await ltm.forSession(PROJ, "brand-new-session", 10_000);
     // At minimum, the fallback path should return something (up to 10 entries)
     // (may be 0 if budget is exhausted by project entries, but shouldn't crash)
     expect(Array.isArray(result)).toBe(true);
   });
 
-  test("excludes irrelevant project entries when session context exists", () => {
+  test("excludes irrelevant project entries when session context exists", async () => {
     // Create a project entry about Kubernetes (irrelevant to TypeScript context)
     ltm.create({
       projectPath: PROJ,
@@ -512,7 +512,7 @@ describe("ltm.forSession", () => {
         Date.now(),
       );
 
-    const result = ltm.forSession(PROJ, SESSION, 10_000);
+    const result = await ltm.forSession(PROJ, SESSION, 10_000);
     const titles = result.map((e) => e.title);
 
     // TypeScript entry should be included (matches session context)
@@ -524,7 +524,7 @@ describe("ltm.forSession", () => {
     // For now, just verify the relevant entry is present.
   });
 
-  test("includes top-5 project entries by confidence as safety net even without term match", () => {
+  test("includes top-5 project entries by confidence as safety net even without term match", async () => {
     // Create 8 project entries — crafted so no words overlap session context.
     // Use made-up domain-specific jargon to avoid accidental term overlap.
     for (let i = 0; i < 8; i++) {
@@ -554,14 +554,14 @@ describe("ltm.forSession", () => {
         Date.now(),
       );
 
-    const result = ltm.forSession(PROJ, SESSION, 10_000);
+    const result = await ltm.forSession(PROJ, SESSION, 10_000);
     // Safety net should include up to 5 project entries even though none match
     const xEntries = result.filter((e) => e.title.startsWith("Xylophage plumbing"));
     expect(xEntries.length).toBeLessThanOrEqual(5);
     expect(xEntries.length).toBeGreaterThan(0);
   });
 
-  test("interleaves project and cross-project entries by relevance score", () => {
+  test("interleaves project and cross-project entries by relevance score", async () => {
     // Create a project entry that does NOT match session context
     ltm.create({
       projectPath: PROJ,
@@ -597,7 +597,7 @@ describe("ltm.forSession", () => {
         Date.now(),
       );
 
-    const result = ltm.forSession(PROJ, SESSION, 10_000);
+    const result = await ltm.forSession(PROJ, SESSION, 10_000);
     const titles = result.map((e) => e.title);
 
     // The relevant cross-project entry should be included
@@ -610,6 +610,106 @@ describe("ltm.forSession", () => {
     if (dockerIdx !== -1) {
       expect(reactIdx).toBeLessThan(dockerIdx);
     }
+  });
+
+  test("categories filter restricts to specified categories", async () => {
+    ltm.create({
+      projectPath: PROJ,
+      category: "preference",
+      title: "Code style preference",
+      content: "Use camelCase for variables and PascalCase for types",
+      scope: "project",
+      crossProject: false,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "Cache invalidation gotcha",
+      content: "LTM cache must be cleared when knowledge changes",
+      scope: "project",
+      crossProject: false,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "architecture",
+      title: "Three tier memory arch",
+      content: "Temporal, distillation, knowledge tiers",
+      scope: "project",
+      crossProject: false,
+    });
+
+    // Request only preference entries
+    const result = await ltm.forSession(PROJ, SESSION, 10_000, {
+      categories: ["preference"],
+    });
+    expect(result.length).toBeGreaterThan(0);
+    for (const entry of result) {
+      expect(entry.category).toBe("preference");
+    }
+  });
+
+  test("categories filter works with multiple categories", async () => {
+    ltm.create({
+      projectPath: PROJ,
+      category: "preference",
+      title: "Commit style preference",
+      content: "Use conventional commits format",
+      scope: "project",
+      crossProject: false,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "decision",
+      title: "DB engine decision",
+      content: "SQLite chosen for embedded use case",
+      scope: "project",
+      crossProject: false,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "Unrelated gotcha entry",
+      content: "Some gotcha that should be excluded",
+      scope: "project",
+      crossProject: false,
+    });
+
+    const result = await ltm.forSession(PROJ, SESSION, 10_000, {
+      categories: ["preference", "decision"],
+    });
+    expect(result.length).toBeGreaterThan(0);
+    for (const entry of result) {
+      expect(["preference", "decision"]).toContain(entry.category);
+    }
+  });
+
+  test("contextHint provides relevance signal when no session context exists", async () => {
+    // Create entries about different topics
+    ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "React useState returns stale state",
+      content: "React useState setter is async, reading immediately returns old value",
+      scope: "project",
+      crossProject: false,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "Docker networking bridge mode",
+      content: "Docker bridge networking requires explicit port mapping for container communication",
+      scope: "project",
+      crossProject: false,
+    });
+
+    // No temporal messages, but provide contextHint about React
+    const result = await ltm.forSession(PROJ, "no-temporal-session", 10_000, {
+      contextHint: "Fix the React component where useState returns stale value after async update",
+    });
+
+    // The React entry should appear — either via FTS5 fallback or vector scoring
+    const titles = result.map((e) => e.title);
+    expect(titles).toContain("React useState returns stale state");
   });
 });
 

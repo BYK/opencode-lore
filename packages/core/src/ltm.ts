@@ -355,6 +355,15 @@ function scoreEntriesFTS(sessionContext: string): Map<string, number> {
   }
 }
 
+/** Options for `forSession()` to control entry selection. */
+export type ForSessionOptions = {
+  /** Caller-provided context (e.g., user's current message) for relevance
+   *  scoring when no session context exists in the DB yet. */
+  contextHint?: string;
+  /** Restrict to these categories (e.g., `['preference']` for turn 1). */
+  categories?: string[];
+};
+
 /**
  * Build a relevance-ranked, budget-capped list of knowledge entries for injection
  * into the system prompt of a live session.
@@ -362,43 +371,54 @@ function scoreEntriesFTS(sessionContext: string): Map<string, number> {
  * Strategy:
  * 1. Both project-specific and cross-project entries are scored for relevance
  *    against recent session context (last distillation + recent raw messages).
- * 2. Project entries get a safety net: the top PROJECT_SAFETY_NET entries by
+ * 2. When embeddings are available, vector cosine similarity is used for scoring
+ *    (captures semantic matches that keyword overlap misses). Falls back to
+ *    FTS5 BM25 when embeddings are unavailable.
+ * 3. Project entries get a safety net: the top PROJECT_SAFETY_NET entries by
  *    confidence are always included even if they have zero relevance score.
  *    This ensures the most important project knowledge is never lost to
- *    coarse term-overlap scoring.
- * 3. All scored entries are merged into a single pool and greedily packed
+ *    coarse scoring.
+ * 4. All scored entries are merged into a single pool and greedily packed
  *    into the token budget by score descending.
- * 4. If there's no session context yet (first turn), fall back to top entries
+ * 5. If there's no session context yet (first turn), fall back to top entries
  *    by confidence only (capped at NO_CONTEXT_FALLBACK_CAP per pool).
  *
  * @param projectPath   Current project path
  * @param sessionID     Current session ID (for context extraction)
  * @param maxTokens     Hard token budget for the entire formatted block
+ * @param options       Optional category filter and context hint
  */
-export function forSession(
+export async function forSession(
   projectPath: string,
   sessionID: string | undefined,
   maxTokens: number,
-): KnowledgeEntry[] {
+  options?: ForSessionOptions,
+): Promise<KnowledgeEntry[]> {
   const pid = ensureProject(projectPath);
+  const categoryFilter = options?.categories;
+
+  // Build optional SQL category clause
+  const categoryClause = categoryFilter?.length
+    ? ` AND category IN (${categoryFilter.map(() => "?").join(",")})`
+    : "";
 
   // --- 1. Load project-specific entries ---
   const projectEntries = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge
-       WHERE project_id = ? AND cross_project = 0 AND confidence > 0.2
+       WHERE project_id = ? AND cross_project = 0 AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all(pid) as KnowledgeEntry[];
+    .all(pid, ...(categoryFilter ?? [])) as KnowledgeEntry[];
 
   // --- 2. Load cross-project candidates ---
   const crossEntries = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge
-       WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2
+       WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all() as KnowledgeEntry[];
+    .all(...(categoryFilter ?? [])) as KnowledgeEntry[];
 
   if (!crossEntries.length && !projectEntries.length) return [];
 
@@ -427,38 +447,82 @@ export function forSession(
     }
   }
 
+  // Fall back to caller-provided context hint (e.g., user's first message)
+  if (!sessionContext.trim() && options?.contextHint) {
+    sessionContext = options.contextHint;
+  }
+
   // --- 4. Score both pools by relevance ---
   let scoredProject: Scored[];
   let scoredCross: Scored[];
 
-  if (sessionContext.trim().length > 20) {
-    // Use FTS5 BM25 to score all knowledge entries against session context
+  if (sessionContext.trim().length > 20 && embedding.isAvailable()) {
+    // Vector scoring: embed session context, score entries by cosine similarity.
+    // Captures semantic matches (e.g., "OpenAI Batch API" ↔ "batch queue worker")
+    // that keyword-based FTS5 misses.
+    let vectorScores: Map<string, number>;
+    try {
+      const [contextVec] = await embedding.embed([sessionContext], "query");
+      const hits = embedding.vectorSearch(contextVec, 50);
+      vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
+    } catch (err) {
+      log.warn("Vector scoring failed, falling back to FTS5:", err);
+      vectorScores = new Map();
+    }
+
+    if (vectorScores.size > 0) {
+      // Hybrid scoring: vector search only covers entries with stored embeddings.
+      // Entries without embeddings (e.g. newly created, async embed not yet done)
+      // fall back to FTS5 so they aren't invisible to scoring.
+      const ftsScores = scoreEntriesFTS(sessionContext);
+
+      // Score project entries: prefer vector similarity, fall back to FTS5
+      const rawScored: Scored[] = projectEntries.map((entry) => {
+        const vecScore = vectorScores.get(entry.id);
+        const score = vecScore != null
+          ? vecScore * entry.confidence
+          : (ftsScores.get(entry.id) ?? 0) * entry.confidence;
+        return { entry, score };
+      });
+      const matched = rawScored.filter((s) => s.score > 0);
+      const matchedIds = new Set(matched.map((s) => s.entry.id));
+
+      // Safety net: top PROJECT_SAFETY_NET entries by confidence that weren't already matched.
+      // Given a tiny score (0.001 * confidence) so they sort below genuinely matched entries.
+      const safetyNet = projectEntries
+        .filter((e) => !matchedIds.has(e.id))
+        .slice(0, PROJECT_SAFETY_NET)
+        .map((e) => ({ entry: e, score: 0.001 * e.confidence }));
+
+      scoredProject = [...matched, ...safetyNet];
+
+      // Cross-project: include entries matched by vector OR FTS5
+      scoredCross = crossEntries
+        .filter((e) => vectorScores.has(e.id) || ftsScores.has(e.id))
+        .map((e) => {
+          const vecScore = vectorScores.get(e.id);
+          const score = vecScore != null
+            ? vecScore * e.confidence
+            : (ftsScores.get(e.id) ?? 0) * e.confidence;
+          return { entry: e, score };
+        });
+    } else {
+      // Vector failed — fall through to FTS5
+      const ftsScores = scoreEntriesFTS(sessionContext);
+      ({ scoredProject, scoredCross } = scoreFTS(
+        projectEntries,
+        crossEntries,
+        ftsScores,
+      ));
+    }
+  } else if (sessionContext.trim().length > 20) {
+    // Embeddings unavailable — use FTS5 BM25 as fallback
     const ftsScores = scoreEntriesFTS(sessionContext);
-
-    // Score project entries: FTS relevance × confidence, with safety net
-    const rawScored: Scored[] = projectEntries.map((entry) => ({
-      entry,
-      score: (ftsScores.get(entry.id) ?? 0) * entry.confidence,
-    }));
-    const matched = rawScored.filter((s) => s.score > 0);
-    const matchedIds = new Set(matched.map((s) => s.entry.id));
-
-    // Safety net: top PROJECT_SAFETY_NET entries by confidence that weren't already matched.
-    // Given a tiny score (0.001 * confidence) so they sort below genuinely matched entries.
-    const safetyNet = projectEntries
-      .filter((e) => !matchedIds.has(e.id))
-      .slice(0, PROJECT_SAFETY_NET)
-      .map((e) => ({ entry: e, score: 0.001 * e.confidence }));
-
-    scoredProject = [...matched, ...safetyNet];
-
-    // Score cross-project entries — only include entries with FTS match
-    scoredCross = crossEntries
-      .filter((e) => ftsScores.has(e.id))
-      .map((e) => ({
-        entry: e,
-        score: (ftsScores.get(e.id) ?? 0) * e.confidence,
-      }));
+    ({ scoredProject, scoredCross } = scoreFTS(
+      projectEntries,
+      crossEntries,
+      ftsScores,
+    ));
   } else {
     // No session context — fall back to top entries by confidence, capped
     scoredProject = projectEntries
@@ -518,6 +582,36 @@ export function forSession(
   }
 
   return result;
+}
+
+/** Score entries using FTS5 BM25 — extracted for reuse in the vector-fallback path. */
+function scoreFTS(
+  projectEntries: KnowledgeEntry[],
+  crossEntries: KnowledgeEntry[],
+  ftsScores: Map<string, number>,
+): { scoredProject: Scored[]; scoredCross: Scored[] } {
+  const rawScored: Scored[] = projectEntries.map((entry) => ({
+    entry,
+    score: (ftsScores.get(entry.id) ?? 0) * entry.confidence,
+  }));
+  const matched = rawScored.filter((s) => s.score > 0);
+  const matchedIds = new Set(matched.map((s) => s.entry.id));
+
+  const safetyNet = projectEntries
+    .filter((e) => !matchedIds.has(e.id))
+    .slice(0, PROJECT_SAFETY_NET)
+    .map((e) => ({ entry: e, score: 0.001 * e.confidence }));
+
+  const scoredProject = [...matched, ...safetyNet];
+
+  const scoredCross = crossEntries
+    .filter((e) => ftsScores.has(e.id))
+    .map((e) => ({
+      entry: e,
+      score: (ftsScores.get(e.id) ?? 0) * e.confidence,
+    }));
+
+  return { scoredProject, scoredCross };
 }
 
 export function all(): KnowledgeEntry[] {
