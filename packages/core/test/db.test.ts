@@ -717,12 +717,17 @@ describe("db", () => {
 
     test("allows non-test paths when LORE_DB_PATH is unset", () => {
       delete process.env.LORE_DB_PATH;
-      // Real-looking paths should not be blocked (guard only rejects /test/ prefix)
-      // Note: we don't actually call ensureProject here because the DB singleton
-      // is already initialized — this verifies the guard logic doesn't throw
-      // for normal paths. The DB call itself would succeed since the singleton
-      // is already open.
+      // The guard only rejects /test/ prefix — real-looking paths pass through.
+      // The DB singleton is already initialized (pointing at the temp test DB),
+      // so this call writes to the temp DB, not the production one.
       expect(() => ensureProject("/home/user/my-project")).not.toThrow();
+    });
+
+    test("does not match similar-but-different path prefixes", () => {
+      delete process.env.LORE_DB_PATH;
+      // /testing/... and /test (no trailing slash) should NOT be rejected
+      expect(() => ensureProject("/testing/something")).not.toThrow();
+      expect(() => ensureProject("/test")).not.toThrow();
     });
   });
 });

@@ -482,7 +482,7 @@ async function cmdDelete(
 
     case "project": {
       const { projectId: resolveProjectId } = await import("@loreai/core");
-      // rawId can be a project UUID or a project path
+      // rawId can be a project UUID or a filesystem path
       let id = rawId;
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId)) {
         const resolved = resolveProjectId(resolve(rawId));
@@ -492,27 +492,30 @@ async function cmdDelete(
         }
         id = resolved;
       }
+      // Validate existence before prompting for confirmation
+      const project = data.listProjects().find((p) => p.id === id);
+      if (!project) {
+        console.error(`Project not found: ${rawId}`);
+        process.exit(1);
+      }
       if (!skipConfirm) {
         const confirmed = await confirm(
-          `\nDelete project ${id.slice(0, 12)}... and ALL its data (knowledge, sessions, distillations)?`,
+          `\nDelete project ${project.name ?? id.slice(0, 12)}... and ALL its data ` +
+            `(${project.knowledge_count} knowledge, ${project.session_count} sessions, ` +
+            `${project.distillation_count} distillations)?`,
         );
         if (!confirmed) {
           console.log("Cancelled.");
           return;
         }
       }
-      const result = data.deleteProject(id);
-      if (result) {
-        console.log(
-          `Deleted project: ${result.knowledge_deleted} knowledge, ` +
-            `${result.temporal_deleted} messages, ` +
-            `${result.distillations_deleted} distillations, ` +
-            `${result.sessions_cleared} sessions.`,
-        );
-      } else {
-        console.error(`Project not found: ${rawId}`);
-        process.exit(1);
-      }
+      const result = data.deleteProject(id)!;
+      console.log(
+        `Deleted project: ${result.knowledge_deleted} knowledge, ` +
+          `${result.temporal_deleted} messages, ` +
+          `${result.distillations_deleted} distillations, ` +
+          `${result.sessions_cleared} sessions.`,
+      );
       break;
     }
 

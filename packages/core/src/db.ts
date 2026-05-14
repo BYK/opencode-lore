@@ -800,7 +800,10 @@ export function ensureProject(path: string, name?: string): string {
   // Test paths like "/test/ltm/project" are absolute paths that don't exist
   // on any real filesystem — they're only valid in test suites running against
   // a temp DB (LORE_DB_PATH set by test preload). If we see such a path
-  // without LORE_DB_PATH being set, a test is hitting the production DB.
+  // without LORE_DB_PATH being set, a test is likely hitting the production DB.
+  // Note: LORE_DB_PATH unset is used as a proxy for "production DB". This
+  // wouldn't catch the unlikely case of someone explicitly setting LORE_DB_PATH
+  // to the default production path, but that's not a realistic scenario.
   if (!process.env.LORE_DB_PATH && /^\/test\//.test(path)) {
     throw new Error(
       `Refusing to create project with test path "${path}" in the production DB. ` +
