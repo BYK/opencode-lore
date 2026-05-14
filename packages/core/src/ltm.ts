@@ -362,6 +362,9 @@ export type ForSessionOptions = {
   contextHint?: string;
   /** Restrict to these categories (e.g., `['preference']` for turn 1). */
   categories?: string[];
+  /** Exclude these categories (e.g., `['preference']` for context-bound
+   *  entries when preferences are already injected in a separate block). */
+  excludeCategories?: string[];
 };
 
 /**
@@ -396,11 +399,18 @@ export async function forSession(
 ): Promise<KnowledgeEntry[]> {
   const pid = ensureProject(projectPath);
   const categoryFilter = options?.categories;
+  const excludeFilter = options?.excludeCategories;
 
-  // Build optional SQL category clause
-  const categoryClause = categoryFilter?.length
-    ? ` AND category IN (${categoryFilter.map(() => "?").join(",")})`
-    : "";
+  // Build optional SQL category clauses (include / exclude are mutually exclusive)
+  let categoryClause = "";
+  let categoryParams: string[] = [];
+  if (categoryFilter?.length) {
+    categoryClause = ` AND category IN (${categoryFilter.map(() => "?").join(",")})`;
+    categoryParams = categoryFilter;
+  } else if (excludeFilter?.length) {
+    categoryClause = ` AND category NOT IN (${excludeFilter.map(() => "?").join(",")})`;
+    categoryParams = excludeFilter;
+  }
 
   // --- 1. Load project-specific entries ---
   const projectEntries = db()
@@ -409,7 +419,7 @@ export async function forSession(
        WHERE project_id = ? AND cross_project = 0 AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all(pid, ...(categoryFilter ?? [])) as KnowledgeEntry[];
+    .all(pid, ...categoryParams) as KnowledgeEntry[];
 
   // --- 2. Load cross-project candidates ---
   const crossEntries = db()
@@ -418,7 +428,7 @@ export async function forSession(
        WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all(...(categoryFilter ?? [])) as KnowledgeEntry[];
+    .all(...categoryParams) as KnowledgeEntry[];
 
   if (!crossEntries.length && !projectEntries.length) return [];
 

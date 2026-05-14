@@ -266,13 +266,22 @@ export type AnthropicCacheOptions = {
   systemTTL?: "5m" | "1h" | false;
 
   /**
-   * LTM knowledge text to inject as a separate system block after the host
-   * prompt. Keeping it in a separate block means the host prompt gets its
-   * own cache breakpoint (1h) and LTM changes don't bust the host prefix.
+   * Stable LTM text (preference entries) to inject as system[1] with an
+   * explicit 1h cache breakpoint. Pinned for ≥1h even through curation
+   * changes so the Anthropic prompt cache prefix stays warm.
    *
-   * When provided AND systemTTL is set, the system becomes a 2-block array:
-   *   system[0]: host prompt  — cache_control with systemTTL
-   *   system[1]: LTM content  — no cache_control (benefits from prefix)
+   * When provided AND systemTTL is set, the system becomes a 3-block array:
+   *   system[0]: host prompt        — no cache_control (covered by [1]'s prefix)
+   *   system[1]: stable LTM (prefs) — cache_control: 1h TTL
+   *   system[2]: context-bound LTM  — no cache_control (rides conversation cache)
+   */
+  stableLtmSystem?: string;
+
+  /**
+   * Context-bound LTM text (gotchas, patterns, architecture) injected as
+   * system[2]. No cache_control — benefits from the conversation cache
+   * breakpoint (5m/1h TTL on the last message). Changes on turn 2 and
+   * after curation without busting the stable prefix (system[0]+[1]).
    */
   ltmSystem?: string;
 
@@ -358,33 +367,58 @@ export function buildAnthropicRequest(
   // System — only include if non-empty
   if (req.system) {
     const systemTTL = cache?.systemTTL;
-    const ltmText = cache?.ltmSystem;
+    const stableLtm = cache?.stableLtmSystem;
+    const contextLtm = cache?.ltmSystem;
 
     if (systemTTL) {
-      // Send as block array with explicit cache_control breakpoint on the
-      // host prompt. The host prompt is the most stable part (changes only
-      // when the host mutates AGENTS.md, memory, etc.) so it gets a 1h TTL.
-      const cacheControl: Record<string, string> =
-        systemTTL === "1h"
-          ? { type: "ephemeral", ttl: "1h" }
-          : { type: "ephemeral" };
-
+      // 3-block system prompt for cache efficiency:
+      //   system[0]: Host prompt        — no cache_control (covered by prefix)
+      //   system[1]: Stable LTM (prefs) — cache_control: 1h TTL
+      //   system[2]: Context-bound LTM  — no cache_control (rides conversation cache)
+      //
+      // Anthropic prefix caching means system[1]'s 1h breakpoint covers
+      // system[0] too (prefix up to the breakpoint). The host prompt
+      // doesn't need its own breakpoint — one on system[1] is sufficient.
       const blocks: Record<string, unknown>[] = [
-        { type: "text", text: req.system, cache_control: cacheControl },
+        { type: "text", text: req.system },
       ];
 
-      // LTM knowledge as a separate block — no cache_control of its own,
-      // but benefits from the host prompt prefix cache. When LTM changes,
-      // only this block and everything after it is re-processed; the host
-      // prompt prefix is still a cache read.
-      if (ltmText) {
-        blocks.push({ type: "text", text: ltmText });
+      if (stableLtm) {
+        // Stable LTM always gets a 1h cache breakpoint regardless of the
+        // caller's systemTTL — preferences are pinned ≥1h by design so
+        // the prefix stays warm across turns and sessions. Even when
+        // context-bound LTM changes (turn 1→2, curation), system[0]+[1]
+        // remain cache reads at 0.1× cost. The host prompt (system[0])
+        // needs no cache_control — Anthropic prefix caching means
+        // system[1]'s breakpoint covers everything before it.
+        blocks.push({
+          type: "text",
+          text: stableLtm,
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        });
+      } else {
+        // No stable LTM — fall back to putting the cache breakpoint on
+        // the host prompt itself using the caller's requested TTL.
+        const cacheControl: Record<string, string> =
+          systemTTL === "1h"
+            ? { type: "ephemeral", ttl: "1h" }
+            : { type: "ephemeral" };
+        blocks[0].cache_control = cacheControl;
+      }
+
+      // system[2]: context-bound LTM — no cache_control of its own. It
+      // benefits from the conversation cache breakpoint on the last
+      // message (5m/1h TTL). When this block changes, only system[2] +
+      // messages are re-processed; system[0]+[1] are still cache reads.
+      if (contextLtm) {
+        blocks.push({ type: "text", text: contextLtm });
       }
 
       body.system = blocks;
     } else {
-      // No caching — concatenate LTM into a single string.
-      body.system = ltmText ? `${req.system}\n\n${ltmText}` : req.system;
+      // No caching — concatenate all LTM into a single string.
+      const allLtm = [stableLtm, contextLtm].filter(Boolean).join("\n\n");
+      body.system = allLtm ? `${req.system}\n\n${allLtm}` : req.system;
     }
   }
 

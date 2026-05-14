@@ -200,6 +200,7 @@ export async function resetPipelineState(): Promise<void> {
   headerSessionIndex.clear();
   ltmSessionCache.clear();
   ltmPinnedText.clear();
+  stableLtmCache.clear();
   // Shut down batch queue gracefully before clearing the client
   if (llmClient && "shutdown" in llmClient) {
     await (llmClient as LLMClient & { shutdown: () => Promise<void> }).shutdown();
@@ -236,7 +237,8 @@ export function getActiveSessions(): ReadonlyMap<string, SessionState> {
 const headerSessionIndex = new Map<string, string>();
 
 /**
- * Per-session LTM cache for byte-stability.
+ * Per-session LTM cache for byte-stability of **context-bound** entries
+ * (gotchas, patterns, architecture — everything except preferences).
  *
  * Without caching, `ltm.forSession()` re-scores entries against evolving
  * session context every turn, producing different formatted text → system
@@ -248,12 +250,29 @@ const ltmSessionCache = new Map<
 >();
 
 /**
- * Pinned LTM text per session — the text currently being injected into the
- * system prompt. When ltmSessionCache is invalidated and recomputed, we
- * compare the new text against the pin. Only update if >5% character
- * difference to avoid cache busts from minor BM25 re-ranking changes.
+ * Pinned context-bound LTM text per session — the text currently being
+ * injected as system[2]. When ltmSessionCache is invalidated and
+ * recomputed, we compare the new text against the pin. Only update if
+ * >5% character difference to avoid cache busts from minor re-ranking.
  */
 const ltmPinnedText = new Map<
+  string,
+  { formatted: string; tokenCount: number }
+>();
+
+/**
+ * Stable LTM (preference entries) per session — injected as system[1]
+ * with a 1h cache breakpoint. Computed once per session and pinned for ≥1h
+ * even through curation changes, so the Anthropic prompt cache prefix
+ * (system[0] host prompt + system[1] stable LTM) stays warm across turns
+ * and sessions.
+ *
+ * Only rebuilt on new session start (cache miss). NOT invalidated by
+ * curation, idle resume, or Layer 4 emergency — the stale preferences
+ * are kept to preserve the 1h cache investment. On process restart the
+ * cache is recomputed (cheap, preferences are small).
+ */
+const stableLtmCache = new Map<
   string,
   { formatted: string; tokenCount: number }
 >();
@@ -2511,84 +2530,124 @@ async function handleConversationTurn(
     );
   }
 
-  // --- 6. LTM injection (kept separate from host system prompt for caching) ---
-  let ltmText: string | undefined;
+  // --- 6. LTM injection (3-block system prompt for cache efficiency) ---
+  // system[0]: Host prompt              [no cache_control]
+  // system[1]: Stable LTM (preferences) [cache_control: 1h] — pinned ≥1h
+  // system[2]: Context-bound LTM        [no cache_control]  — diff-pinned
+  //
+  // system[0]+[1] form a stable prefix cached at 1h TTL (written at 2×
+  // cost, read at 0.1×). system[2] rides the conversation cache (5m TTL,
+  // 1.25×). When context-bound LTM changes (turn 1→2, curation), only
+  // system[2] and messages are re-processed; system[0]+[1] are cache reads.
+  let stableLtmText: string | undefined; // block 2: preferences
+  let ltmText: string | undefined;       // block 3: context-bound entries
   if (cfg.knowledge.enabled) {
     // Track whether LTM state changed for batched DB persistence
     let ltmDirty = false;
     let pinDirty = false;
 
     try {
-      let cached = ltmSessionCache.get(sessionID);
+      const ltmFraction = cfg.budget.ltm;
+      const ltmBudget = getLtmBudget(ltmFraction);
+      const isFirstTurn = sessionID != null && !temporal.hasMessages(projectPath, sessionID);
+      const contextHint = lastUserTextTrimmed(req);
 
-      if (!cached) {
-        const ltmFraction = cfg.budget.ltm;
-        const ltmBudget = getLtmBudget(ltmFraction);
-        // Deferred LTM injection: on the first turn (no temporal messages yet),
-        // only inject preference-category entries (always-relevant coding style
-        // guidance). Context-dependent entries (gotchas, patterns, architecture)
-        // are deferred to turn 2+ when real session context exists for relevance
-        // scoring. This avoids polluting the agent's context with irrelevant
-        // entries selected by blind confidence fallback.
-        const isFirstTurn = sessionID != null && !temporal.hasMessages(projectPath, sessionID);
-        const contextHint = lastUserTextTrimmed(req);
-        const entries = await ltm.forSession(projectPath, sessionID, ltmBudget, {
-          ...(isFirstTurn ? { categories: ["preference"] } : {}),
+      // --- system[1]: Stable LTM (preferences) ---
+      // Computed once per session and pinned for ≥1h. NOT invalidated by
+      // curation — even if a preference changes, we keep the cached version
+      // so the Anthropic 1h prompt cache prefix stays warm.
+      let stable = stableLtmCache.get(sessionID);
+      if (!stable) {
+        const prefEntries = await ltm.forSession(projectPath, sessionID, ltmBudget, {
+          categories: ["preference"],
           ...(contextHint ? { contextHint } : {}),
         });
-        if (entries.length) {
+        if (prefEntries.length) {
           const formatted = formatKnowledge(
-            entries.map((e) => ({
+            prefEntries.map((e) => ({
               category: e.category,
               title: e.title,
               content: e.content,
             })),
             ltmBudget,
           );
-
           if (formatted) {
             const tokenCount = Math.ceil(formatted.length / 3);
-            cached = { formatted, tokenCount };
-            // Don't cache first-turn (preferences-only) LTM — on turn 2 the
-            // cache miss will re-trigger forSession() with full session context
-            // from temporal messages, producing a relevance-scored entry set.
-            if (!isFirstTurn) {
+            stable = { formatted, tokenCount };
+            stableLtmCache.set(sessionID, stable);
+          }
+        }
+      }
+      stableLtmText = stable?.formatted;
+
+      // --- system[2]: Context-bound LTM (non-preference entries) ---
+      // Deferred to turn 2+ when real session context exists for relevance
+      // scoring. On turn 1, only stable LTM (preferences) is injected.
+      if (!isFirstTurn) {
+        let cached = ltmSessionCache.get(sessionID);
+
+        if (!cached) {
+          // Reserve budget for stable LTM already injected in system[1]
+          const stableTokens = stable?.tokenCount ?? 0;
+          const contextBudget = Math.max(0, ltmBudget - stableTokens);
+          // Exclude preferences — they're already in system[1]
+          const contextEntries = await ltm.forSession(projectPath, sessionID, contextBudget, {
+            excludeCategories: ["preference"],
+            ...(contextHint ? { contextHint } : {}),
+          });
+          if (contextEntries.length) {
+            const formatted = formatKnowledge(
+              contextEntries.map((e) => ({
+                category: e.category,
+                title: e.title,
+                content: e.content,
+              })),
+              contextBudget,
+            );
+            if (formatted) {
+              const tokenCount = Math.ceil(formatted.length / 3);
+              cached = { formatted, tokenCount };
               ltmSessionCache.set(sessionID, cached);
               ltmDirty = true;
             }
           }
         }
-      }
 
-      if (cached) {
-        // Content-diff pinning: only update the injected LTM text if the
-        // new content differs by more than a threshold from what's currently
-        // pinned. This prevents cache busts from minor BM25 re-ranking after
-        // background curation/consolidation invalidates the LTM cache.
-        // Cost-aware threshold: on expensive models, tolerate larger diffs
-        // before busting the cache prefix (opus: 15%, sonnet: 10%, haiku: 5%).
-        const baseDiffThreshold = 0.05;
-        const effectiveDiffThreshold = (modelSpec.inputCostPerMillion ?? 3) >= 5
-          ? Math.min(baseDiffThreshold * 3, 0.20)  // opus: 15%
-          : (modelSpec.inputCostPerMillion ?? 3) >= 1
-            ? Math.min(baseDiffThreshold * 2, 0.15)  // sonnet: 10%
-            : baseDiffThreshold;                       // haiku: 5%
+        if (cached) {
+          // Content-diff pinning: only update the injected LTM text if the
+          // new content differs by more than a threshold from what's currently
+          // pinned. This prevents cache busts from minor re-ranking after
+          // background curation/consolidation invalidates the LTM cache.
+          // Cost-aware threshold: on expensive models, tolerate larger diffs
+          // before busting the cache prefix (opus: 15%, sonnet: 10%, haiku: 5%).
+          const baseDiffThreshold = 0.05;
+          const effectiveDiffThreshold = (modelSpec.inputCostPerMillion ?? 3) >= 5
+            ? Math.min(baseDiffThreshold * 3, 0.20)  // opus: 15%
+            : (modelSpec.inputCostPerMillion ?? 3) >= 1
+              ? Math.min(baseDiffThreshold * 2, 0.15)  // sonnet: 10%
+              : baseDiffThreshold;                       // haiku: 5%
 
-        const pinned = ltmPinnedText.get(sessionID);
-        if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < effectiveDiffThreshold) {
-          // Near-identical — keep the pinned text to preserve cache prefix
-          ltmText = pinned.formatted;
-          setLtmTokens(pinned.tokenCount, sessionID);
-        } else {
-          // Substantially different or first injection — pin the new text
-          ltmPinnedText.set(sessionID, cached);
-          pinDirty = true;
-          ltmText = cached.formatted;
-          setLtmTokens(cached.tokenCount, sessionID);
+          const pinned = ltmPinnedText.get(sessionID);
+          if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < effectiveDiffThreshold) {
+            // Near-identical — keep the pinned text to preserve cache prefix
+            ltmText = pinned.formatted;
+          } else {
+            // Substantially different or first injection — pin the new text
+            ltmPinnedText.set(sessionID, cached);
+            pinDirty = true;
+            ltmText = cached.formatted;
+          }
         }
-      } else {
-        setLtmTokens(0, sessionID);
       }
+
+      // Use stored tokenCount from cache/pin rather than re-estimating
+      // from string length — avoids inconsistent estimates.
+      const contextTokens = ltmText
+        ? (ltmPinnedText.get(sessionID)?.tokenCount
+          ?? ltmSessionCache.get(sessionID)?.tokenCount
+          ?? 0)
+        : 0;
+      setLtmTokens((stable?.tokenCount ?? 0) + contextTokens, sessionID);
     } catch (e) {
       log.error("LTM injection failed:", e);
       setLtmTokens(0, sessionID);
@@ -2633,40 +2692,45 @@ async function handleConversationTurn(
 
   // --- 7b. LTM refresh on emergency layer ---
   // Layer 4 (emergency/transient reset) signals that the context was fully
-  // reset. Re-run forSession() to re-rank knowledge entries by relevance to
-  // the current conversation state — entries that became relevant mid-session
-  // (e.g. a gotcha discovered during debugging) are surfaced on the reset
-  // turn rather than waiting for the next session. The full cache bust from
-  // Layer 4 means there's no additional cost from changing the LTM text.
+  // reset. Re-run forSession() to re-rank context-bound entries by relevance
+  // to the current conversation state — entries that became relevant mid-
+  // session (e.g. a gotcha discovered during debugging) are surfaced on the
+  // reset turn rather than waiting for the next session. Stable LTM
+  // (system[1]) is kept pinned — Layer 4 busts the prompt cache anyway, so
+  // system[1] will be re-written, but keeping the same content means the
+  // NEXT turn's prefix matches and gets a cache read.
   if (result.refreshLtm && cfg.knowledge.enabled) {
     try {
       const ltmFraction = cfg.budget.ltm;
       const ltmBudget = getLtmBudget(ltmFraction);
+      const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
+      const contextBudget = Math.max(0, ltmBudget - stableTokens);
       const contextHint = lastUserTextTrimmed(req);
-      const entries = await ltm.forSession(projectPath, sessionID, ltmBudget, {
+      const contextEntries = await ltm.forSession(projectPath, sessionID, contextBudget, {
+        excludeCategories: ["preference"],
         ...(contextHint ? { contextHint } : {}),
       });
       let refreshed = false;
 
-      if (entries.length) {
+      if (contextEntries.length) {
         const formatted = formatKnowledge(
-          entries.map((e) => ({
+          contextEntries.map((e) => ({
             category: e.category,
             title: e.title,
             content: e.content,
           })),
-          ltmBudget,
+          contextBudget,
         );
 
         if (formatted) {
           const tokenCount = Math.ceil(formatted.length / 3);
-          // Replace cache and pin — Layer 4 already busts the prompt cache,
-          // so there's no benefit to preserving the old pinned text.
+          // Replace context-bound cache and pin — Layer 4 already busts the
+          // prompt cache, so there's no benefit to preserving the old pin.
           ltmSessionCache.delete(sessionID);
           ltmSessionCache.set(sessionID, { formatted, tokenCount });
           ltmPinnedText.set(sessionID, { formatted, tokenCount });
           ltmText = formatted;
-          setLtmTokens(tokenCount, sessionID);
+          setLtmTokens(stableTokens + tokenCount, sessionID);
           saveSessionTracking(sessionID, {
             ltmCacheText: formatted,
             ltmCacheTokens: tokenCount,
@@ -2674,22 +2738,22 @@ async function handleConversationTurn(
             ltmPinTokens: tokenCount,
           });
           refreshed = true;
-          log.info("LTM refreshed on emergency layer (Layer 4) for session", sessionID);
+          log.info("Context-bound LTM refreshed on emergency layer (Layer 4) for session", sessionID);
         }
       }
 
       if (!refreshed) {
-        // forSession() returned no entries or formatKnowledge() returned empty —
-        // clear all LTM state so the turn doesn't carry stale knowledge.
+        // forSession() returned no context-bound entries — clear context LTM
+        // state. Stable LTM (system[1]) is preserved.
         ltmSessionCache.delete(sessionID);
         ltmPinnedText.delete(sessionID);
         ltmText = undefined;
-        setLtmTokens(0, sessionID);
+        setLtmTokens(stableTokens, sessionID);
         saveSessionTracking(sessionID, {
           ltmCacheText: null, ltmCacheTokens: null,
           ltmPinText: null, ltmPinTokens: null,
         });
-        log.info("LTM cleared on emergency layer (Layer 4) — no relevant entries for session", sessionID);
+        log.info("Context-bound LTM cleared on emergency layer (Layer 4) — stable LTM preserved for session", sessionID);
       }
     } catch (e) {
       // On error, leave the step-6 LTM state intact (cache, pin, text)
@@ -2795,6 +2859,7 @@ async function handleConversationTurn(
 
   const cacheOptions: AnthropicCacheOptions = {
     systemTTL: "1h",
+    stableLtmSystem: stableLtmText,
     ltmSystem: ltmText,
     cacheTools: true,
     cacheConversation: true,

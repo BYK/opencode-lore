@@ -683,6 +683,70 @@ describe("ltm.forSession", () => {
     }
   });
 
+  test("excludeCategories filters out specified categories", async () => {
+    ltm.create({
+      projectPath: PROJ,
+      category: "preference",
+      title: "Excluded preference entry",
+      content: "This preference should not appear",
+      scope: "project",
+      crossProject: false,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "Included gotcha entry",
+      content: "This gotcha should appear in results",
+      scope: "project",
+      crossProject: false,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "architecture",
+      title: "Included architecture entry",
+      content: "This architecture entry should appear",
+      scope: "project",
+      crossProject: false,
+    });
+
+    const result = await ltm.forSession(PROJ, SESSION, 10_000, {
+      excludeCategories: ["preference"],
+    });
+    expect(result.length).toBeGreaterThan(0);
+    for (const entry of result) {
+      expect(entry.category).not.toBe("preference");
+    }
+  });
+
+  test("excludeCategories and categories are mutually exclusive (categories wins)", async () => {
+    ltm.create({
+      projectPath: PROJ,
+      category: "preference",
+      title: "Pref entry for mutual exclusion test",
+      content: "Should appear because categories takes priority",
+      scope: "project",
+      crossProject: false,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "Gotcha for mutual exclusion test",
+      content: "Should NOT appear because categories restricts to preference",
+      scope: "project",
+      crossProject: false,
+    });
+
+    // When both are provided, categories wins (excludeCategories ignored)
+    const result = await ltm.forSession(PROJ, SESSION, 10_000, {
+      categories: ["preference"],
+      excludeCategories: ["gotcha"],
+    });
+    expect(result.length).toBeGreaterThan(0);
+    for (const entry of result) {
+      expect(entry.category).toBe("preference");
+    }
+  });
+
   test("contextHint provides relevance signal when no session context exists", async () => {
     // Create entries about different topics
     ltm.create({

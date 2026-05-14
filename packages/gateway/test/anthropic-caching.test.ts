@@ -397,6 +397,111 @@ describe("buildAnthropicRequest — LTM system block", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 3-block system prompt: host + stable LTM + context-bound LTM
+// ---------------------------------------------------------------------------
+
+describe("buildAnthropicRequest — 3-block system prompt", () => {
+  test("stable LTM creates block with 1h cache, host has no cache_control", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: "1h",
+      stableLtmSystem: "## Preferences\n* coding style",
+    });
+    const blocks = body.system as Array<Record<string, unknown>>;
+    expect(blocks).toHaveLength(2);
+
+    // Block 0: host prompt — no cache_control (covered by block 1's prefix)
+    expect(blocks[0].text).toBe("You are a helpful assistant.");
+    expect(blocks[0].cache_control).toBeUndefined();
+
+    // Block 1: stable LTM — 1h cache breakpoint
+    expect(blocks[1].text).toBe("## Preferences\n* coding style");
+    expect(blocks[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  test("all 3 blocks: host + stable LTM (1h) + context LTM (no cache)", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: "1h",
+      stableLtmSystem: "## Preferences\n* coding style",
+      ltmSystem: "## Gotcha\n* watch out for X",
+    });
+    const blocks = body.system as Array<Record<string, unknown>>;
+    expect(blocks).toHaveLength(3);
+
+    // Block 0: host prompt — no cache_control
+    expect(blocks[0].text).toBe("You are a helpful assistant.");
+    expect(blocks[0].cache_control).toBeUndefined();
+
+    // Block 1: stable LTM — 1h cache breakpoint
+    expect(blocks[1].text).toBe("## Preferences\n* coding style");
+    expect(blocks[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+
+    // Block 2: context-bound LTM — no cache_control (rides conversation cache)
+    expect(blocks[2].text).toBe("## Gotcha\n* watch out for X");
+    expect(blocks[2].cache_control).toBeUndefined();
+  });
+
+  test("stable LTM only (no context LTM) produces 2 blocks", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: "1h",
+      stableLtmSystem: "## Preferences\n* style",
+      ltmSystem: undefined,
+    });
+    const blocks = body.system as Array<Record<string, unknown>>;
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].cache_control).toBeUndefined();
+    expect(blocks[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  test("context LTM only (no stable LTM) falls back to host prompt breakpoint", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: "1h",
+      stableLtmSystem: undefined,
+      ltmSystem: "## Gotcha\n* watch out",
+    });
+    const blocks = body.system as Array<Record<string, unknown>>;
+    expect(blocks).toHaveLength(2);
+    // Host gets the cache breakpoint as fallback
+    expect(blocks[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    // Context LTM — no cache_control
+    expect(blocks[1].cache_control).toBeUndefined();
+  });
+
+  test("no caching concatenates both LTM texts into single string", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: false,
+      stableLtmSystem: "prefs",
+      ltmSystem: "gotchas",
+    });
+    expect(typeof body.system).toBe("string");
+    expect(body.system).toBe("You are a helpful assistant.\n\nprefs\n\ngotchas");
+  });
+
+  test("no caching with only stable LTM concatenates correctly", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: false,
+      stableLtmSystem: "prefs",
+    });
+    expect(body.system).toBe("You are a helpful assistant.\n\nprefs");
+  });
+
+  test("5m systemTTL with stable LTM still uses 1h on stable block", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: "5m",
+      stableLtmSystem: "## Preferences\n* style",
+      ltmSystem: "## Gotcha\n* issue",
+    });
+    const blocks = body.system as Array<Record<string, unknown>>;
+    expect(blocks).toHaveLength(3);
+    // Host — no cache_control
+    expect(blocks[0].cache_control).toBeUndefined();
+    // Stable LTM always gets 1h regardless of systemTTL
+    expect(blocks[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    // Context LTM — no cache_control
+    expect(blocks[2].cache_control).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Tool caching
 // ---------------------------------------------------------------------------
 
