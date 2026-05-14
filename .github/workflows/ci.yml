@@ -23,6 +23,8 @@ jobs:
       nightly-version: ${{ steps.nightly.outputs.version }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-tags: true  # fetch all tag refs for craft changelog
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -43,15 +45,75 @@ jobs:
 
       # Compute nightly version once, pass as job output to downstream jobs.
       # Only on main pushes — PRs and release branches don't get nightly versions.
+      #
+      # Uses craft to determine the next semver bump from conventional commits,
+      # so nightlies sort AHEAD of the current release (e.g. 0.19.0-dev.X > 0.18.0).
+      - name: Fetch history since last release tag
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          CURRENT=$(jq -r .version packages/gateway/package.json)
+          # Deepen shallow clone to include all commits since the release tag.
+          # --shallow-exclude sets the shallow boundary at the tag's commit,
+          # fetching only the TAG..HEAD range (~10-30 commits typically).
+          if git rev-parse "$CURRENT" >/dev/null 2>&1; then
+            git fetch --shallow-exclude="$CURRENT" origin main
+          else
+            # No matching tag (e.g. first release) — fetch full history
+            git fetch --unshallow
+          fi
+
+      - name: Install Craft CLI
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          CRAFT_URL=$(curl -fsSL https://api.github.com/repos/getsentry/craft/releases/latest \
+            | jq -r '.assets[] | select(.name == "craft") | .browser_download_url')
+          sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
+          sudo chmod +x /usr/local/bin/craft
+
       - name: Compute nightly version
         id: nightly
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TS=$(date -d "$COMMIT_TIMESTAMP" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$COMMIT_TIMESTAMP" +%s 2>/dev/null || date +%s)
+          # 1. Deterministic timestamp from commit
+          TS=$(date -d "$COMMIT_TIMESTAMP" +%s 2>/dev/null \
+            || date -j -f "%Y-%m-%dT%H:%M:%S" "$COMMIT_TIMESTAMP" +%s 2>/dev/null \
+            || date +%s)
+
+          # 2. Get bump type from craft (analyzes conventional commits since last tag)
+          BUMP_TYPE="patch"  # conservative fallback
+          if CRAFT_JSON=$(craft changelog --format json 2>/dev/null); then
+            DETECTED=$(echo "$CRAFT_JSON" | jq -r '.bumpType // empty')
+            if [ -n "$DETECTED" ]; then
+              BUMP_TYPE="$DETECTED"
+              echo "Craft detected bump type: ${BUMP_TYPE}"
+            else
+              echo "Craft returned null bumpType, falling back to: ${BUMP_TYPE}"
+            fi
+          else
+            echo "::warning::craft changelog failed, falling back to bump type: ${BUMP_TYPE}"
+          fi
+
+          # 3. Get current version from package.json
           CURRENT=$(jq -r .version packages/gateway/package.json)
-          VERSION="${CURRENT}-dev.${TS}"
+          echo "Current version: ${CURRENT}"
+
+          # 4. Compute next version by applying bump type
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "$BUMP_TYPE" in
+            major)
+              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor)
+              MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch)
+              PATCH=$((PATCH + 1)) ;;
+          esac
+          NEXT="${MAJOR}.${MINOR}.${PATCH}"
+
+          VERSION="${NEXT}-dev.${TS}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Nightly version: ${VERSION}"
+          echo "Nightly version: ${VERSION} (bump: ${BUMP_TYPE}, from: ${CURRENT})"
 
       # -----------------------------------------------------------------
       # CLI: npm bundle + smoke test (every run)
