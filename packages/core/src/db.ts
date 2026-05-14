@@ -1329,6 +1329,38 @@ export function loadSessionTracking(sessionID: string): LoadedSessionTracking | 
   };
 }
 
+/**
+ * Load all persisted header → session ID mappings from the session_state table.
+ *
+ * Used on gateway startup (in initIfNeeded) to pre-populate the in-memory
+ * headerSessionIndex so Tier 1 session identification works immediately
+ * after a process restart — without this, the first post-restart request
+ * with a known session header would generate a new session ID and orphan
+ * the old session's persisted state.
+ */
+export function loadHeaderSessionIndex(): Array<{
+  sessionId: string;
+  headerSessionId: string;
+  headerName: string;
+}> {
+  const rows = db()
+    .query(
+      `SELECT session_id, header_session_id, header_name
+       FROM session_state
+       WHERE header_session_id IS NOT NULL AND header_name IS NOT NULL`,
+    )
+    .all() as Array<{
+      session_id: string;
+      header_session_id: string;
+      header_name: string;
+    }>;
+  return rows.map((row) => ({
+    sessionId: row.session_id,
+    headerSessionId: row.header_session_id,
+    headerName: row.header_name,
+  }));
+}
+
 // ---------------------------------------------------------------------------
 // Key-value store (kv_meta table)
 // ---------------------------------------------------------------------------
