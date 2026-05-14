@@ -393,14 +393,22 @@ export function buildRecallFollowUp(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
 ): GatewayRequest {
-  // Build assistant message with ONLY the recall tool_use block.
-  // Exclude any pre-recall text/thinking blocks — those were already streamed
-  // to the client. By presenting only the tool_use, the model understands it
-  // called recall and hasn't yet produced a substantive response, so it will
-  // generate new content after receiving the tool_result.
+  // Build assistant message with thinking blocks (if any) + the recall tool_use.
+  // Text blocks are excluded — they carry no semantic state needed for the
+  // follow-up, and for the streaming path they were already sent to the client.
+  // Thinking blocks MUST be preserved: the Anthropic API requires thinking
+  // blocks (with their cryptographic signatures) to precede any tool_use
+  // blocks in assistant messages when extended thinking is enabled.
+  // Omitting them causes a 400 validation error from the API.
+  // Using a deny-list (exclude text/tool_use/tool_result) rather than an
+  // allow-list so future block types (e.g. redacted_thinking) are preserved
+  // by default.
+  const prefixBlocks = resp.content.filter(
+    (b) => b.type !== "text" && b.type !== "tool_use" && b.type !== "tool_result",
+  );
   const assistantMessage: GatewayMessage = {
     role: "assistant",
-    content: [recallToolUseBlock],
+    content: [...prefixBlocks, recallToolUseBlock],
   };
 
   // Build user message with tool_result

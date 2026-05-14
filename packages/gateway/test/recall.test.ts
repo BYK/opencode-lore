@@ -335,7 +335,7 @@ describe("buildRecallFollowUp", () => {
     expect(followUp.messages[1].role).toBe("assistant");
     expect(followUp.messages[2].role).toBe("user");
 
-    // Assistant message contains ONLY the recall tool_use (pre-recall text excluded)
+    // Assistant message contains ONLY the recall tool_use (text blocks excluded)
     expect(followUp.messages[1].content).toHaveLength(1);
     expect(followUp.messages[1].content[0]).toBe(recallBlock);
 
@@ -365,6 +365,113 @@ describe("buildRecallFollowUp", () => {
     expect(followUp.system).toBe("my system prompt");
     expect(followUp.model).toBe("claude-opus-4");
     expect(followUp.stream).toBe(false);
+  });
+
+  test("preserves thinking blocks in assistant message for extended thinking", () => {
+    const req = makeRequest(
+      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      [
+        { name: "Read", description: "Read", inputSchema: {} },
+        { name: "recall", description: "Recall", inputSchema: {} },
+      ],
+    );
+
+    const recallBlock = makeRecallToolUse("find config");
+    const resp = makeResponse(
+      [
+        { type: "thinking", thinking: "Let me search for config info...", signature: "sig_abc123" },
+        { type: "text", text: "Let me search." },
+        recallBlock,
+      ],
+      "tool_use",
+    );
+
+    const followUp = buildRecallFollowUp(
+      req,
+      resp,
+      "## Recall Results\n* config is in /root",
+      recallBlock,
+    );
+
+    // Assistant message should contain thinking block + recall tool_use
+    const assistant = followUp.messages[1];
+    expect(assistant.content).toHaveLength(2);
+    expect(assistant.content[0].type).toBe("thinking");
+    expect((assistant.content[0] as { thinking: string }).thinking).toBe(
+      "Let me search for config info...",
+    );
+    expect((assistant.content[0] as { signature: string }).signature).toBe(
+      "sig_abc123",
+    );
+    expect(assistant.content[1]).toBe(recallBlock);
+  });
+
+  test("excludes text blocks but keeps thinking blocks", () => {
+    const req = makeRequest(
+      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    );
+
+    const recallBlock = makeRecallToolUse();
+    const resp = makeResponse(
+      [
+        { type: "thinking", thinking: "reasoning...", signature: "sig_1" },
+        { type: "text", text: "Some pre-recall text" },
+        { type: "text", text: "More text" },
+        recallBlock,
+      ],
+      "tool_use",
+    );
+
+    const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
+
+    const assistant = followUp.messages[1];
+    // Only thinking + tool_use — text blocks excluded
+    expect(assistant.content).toHaveLength(2);
+    expect(assistant.content[0].type).toBe("thinking");
+    expect(assistant.content[1].type).toBe("tool_use");
+  });
+
+  test("handles multiple thinking blocks", () => {
+    const req = makeRequest(
+      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    );
+
+    const recallBlock = makeRecallToolUse();
+    const resp = makeResponse(
+      [
+        { type: "thinking", thinking: "first thought", signature: "sig_1" },
+        { type: "thinking", thinking: "second thought", signature: "sig_2" },
+        recallBlock,
+      ],
+      "tool_use",
+    );
+
+    const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
+
+    const assistant = followUp.messages[1];
+    expect(assistant.content).toHaveLength(3);
+    expect(assistant.content[0].type).toBe("thinking");
+    expect(assistant.content[1].type).toBe("thinking");
+    expect(assistant.content[2]).toBe(recallBlock);
+  });
+
+  test("works without thinking blocks (non-thinking model)", () => {
+    const req = makeRequest(
+      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    );
+
+    const recallBlock = makeRecallToolUse();
+    const resp = makeResponse(
+      [{ type: "text", text: "Let me search." }, recallBlock],
+      "tool_use",
+    );
+
+    const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
+
+    const assistant = followUp.messages[1];
+    // No thinking blocks — just the tool_use
+    expect(assistant.content).toHaveLength(1);
+    expect(assistant.content[0]).toBe(recallBlock);
   });
 });
 

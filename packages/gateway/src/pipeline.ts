@@ -1185,6 +1185,7 @@ function buildStreamingResponse(
               const errorBody = await followUpResponse.text();
               log.error(
                 `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
+                new Error(`recall follow-up upstream ${followUpResponse.status}`),
               );
               // Forward the held-back events to close the stream gracefully
               const heldBack = recallAccum.heldBackEvents();
@@ -3013,6 +3014,7 @@ async function handleConversationTurn(
       const errorBody = await followUpResponse.text();
       log.error(
         `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
+        new Error(`recall follow-up upstream ${followUpResponse.status}`),
       );
       // Fall back to response with marker (no continuation)
       postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
