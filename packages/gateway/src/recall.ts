@@ -111,6 +111,11 @@ const MARKER_REGEX = /📚 Searching (.+?) for "(.+?)"…/;
 /** Regex to parse an id-based recall marker. */
 const ID_MARKER_REGEX = /📚 Fetching detail for (.+?)…/;
 
+/** Check if a text string is a recall marker (search or detail). */
+export function isRecallMarker(text: string): boolean {
+  return MARKER_REGEX.test(text) || ID_MARKER_REGEX.test(text);
+}
+
 /**
  * Parse a recall marker text block, returning query and scope if valid.
  * Returns null if the text doesn't match the marker format.
