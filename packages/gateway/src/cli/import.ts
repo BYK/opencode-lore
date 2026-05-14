@@ -159,7 +159,7 @@ export async function commandImport(
     modelID: "claude-sonnet-4-6",
   };
   const llm = createGatewayLLMClient(
-    config.upstreamAnthropic,
+    { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
     resolveAuth,
     defaultModel,
   );

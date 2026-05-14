@@ -1,10 +1,17 @@
 /**
- * Batch queue for Anthropic Message Batches API.
+ * Batch queue for LLM Batch APIs (Anthropic + OpenAI).
  *
  * Wraps a synchronous LLMClient and intercepts non-urgent `prompt()` calls,
  * accumulating them in a queue. A flush timer periodically sends the queue
- * to Anthropic's `/v1/messages/batches` endpoint for 50% cost savings.
+ * to the appropriate batch API endpoint for 50% cost savings.
  * A poll timer checks for results and resolves the pending promises.
+ *
+ * Supports two batch providers:
+ *   - **Anthropic**: POST /v1/messages/batches with inline JSON
+ *   - **OpenAI**: Upload JSONL to /v1/files, then POST /v1/batches
+ *
+ * Items are grouped at flush time by `(authKey, providerID)` — each
+ * credential+provider combo gets its own batch submission.
  *
  * Urgent calls (compaction, overflow recovery, query expansion) bypass
  * the queue entirely and delegate to the inner synchronous client.
@@ -28,6 +35,48 @@ import {
   type AnthropicUsage,
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
+import { normalizeOpenAIUsage } from "./llm-adapter";
+
+// ---------------------------------------------------------------------------
+// BatchProvider strategy interface
+// ---------------------------------------------------------------------------
+
+/** A single result from a completed batch. */
+export interface BatchResult {
+  customId: string;
+  outcome: "succeeded" | "errored" | "canceled" | "expired";
+  text: string | null;
+  usage: AnthropicUsage | null;
+  model: string | null;
+  error?: string;
+}
+
+/** Result of polling a batch for status. */
+export type PollResult =
+  | { status: "pending" }
+  | { status: "done"; results: BatchResult[] }
+  | { status: "failed"; error: string };
+
+/**
+ * Provider-specific batch API operations.
+ *
+ * The batch queue delegates wire-format-specific work (submit, poll, retrieve)
+ * to a BatchProvider implementation. Queue management, flush timers, promise
+ * lifecycle, fallback, and shutdown are shared.
+ */
+export interface BatchProvider {
+  /** Provider name for logging and metrics. */
+  name: string;
+  /** Max age before falling back to synchronous (ms). */
+  maxBatchAgeMs: number;
+  /** Submit a batch. Returns a batch ID on success, or null on failure. */
+  submit(
+    auth: AuthCredential,
+    items: Array<{ customId: string; params: PendingRequest["params"] }>,
+  ): Promise<string | null>;
+  /** Poll a batch for completion. */
+  poll(auth: AuthCredential, batchId: string): Promise<PollResult>;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,7 +86,7 @@ import { recordWorkerCost } from "./cost-tracker";
 interface PendingRequest {
   /** Unique ID for correlating batch results (alphanumeric + hyphens). */
   customId: string;
-  /** Standard Messages API params. */
+  /** Standard Messages API params (Anthropic format — converted at submit time for OpenAI). */
   params: {
     model: string;
     max_tokens: number;
@@ -54,6 +103,8 @@ interface PendingRequest {
   enqueuedAt: number;
   /** Auth credential snapshotted at enqueue time for per-session isolation. */
   auth: AuthCredential;
+  /** Provider ID for routing to the correct batch provider at flush time. */
+  providerID: string;
   /** Session ID for billing header injection on fallback to individual requests. */
   sessionID?: string;
   /** Worker ID for cost attribution (e.g. "lore-distill", "lore-curator"). */
@@ -62,7 +113,7 @@ interface PendingRequest {
 
 /** A batch that has been submitted and is being polled for results. */
 interface InflightBatch {
-  /** Anthropic batch ID returned by the create endpoint. */
+  /** Batch ID returned by the provider's create endpoint. */
   batchId: string;
   /** Map from custom_id → pending request (for resolving on completion). */
   requests: Map<string, PendingRequest>;
@@ -72,6 +123,8 @@ interface InflightBatch {
   pollTimer: ReturnType<typeof setInterval>;
   /** Auth credential for this batch (used for poll/retrieve calls). */
   auth: AuthCredential;
+  /** The batch provider that submitted this batch (used for polling). */
+  provider: BatchProvider;
 }
 
 export interface BatchQueueConfig {
@@ -105,17 +158,380 @@ function generateCustomId(): string {
 }
 
 /**
- * Produce a grouping key for an auth credential.
+ * Produce a grouping key for an auth credential + provider combo.
  *
  * Uses the raw credential value so each distinct token/key gets its own
- * batch submission (required by the Anthropic API — different credentials
- * can't share a batch).
+ * batch submission (required by batch APIs — different credentials
+ * can't share a batch). Provider is included because Anthropic and OpenAI
+ * items must go to separate batch endpoints.
  */
-function authKey(cred: AuthCredential): string {
-  return `${cred.scheme}:${cred.value}`;
+function groupKey(cred: AuthCredential, providerID: string): string {
+  return `${cred.scheme}:${cred.value}|${providerID}`;
 }
 
 // authDisableKey removed — batch disable tracking is now per-session, not per-credential.
+
+// ---------------------------------------------------------------------------
+// Anthropic Batch Provider
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a BatchProvider for Anthropic's Messages Batches API.
+ *
+ * Submit: POST /v1/messages/batches with { requests: [{ custom_id, params }] }
+ * Poll:   GET /v1/messages/batches/{id} → check processing_status
+ * Results: GET results_url → JSONL with { custom_id, result: { type, message?, error? } }
+ */
+export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider {
+  const baseUrl = upstreamUrl.replace(/\/$/, "");
+
+  return {
+    name: "anthropic",
+    maxBatchAgeMs: DEFAULT_MAX_BATCH_AGE_MS, // 1 hour
+
+    async submit(auth, items) {
+      const requests = items.map((item) => ({
+        custom_id: item.customId,
+        params: item.params,
+      }));
+
+      const url = `${baseUrl}/v1/messages/batches`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "anthropic-version": "2023-06-01",
+          ...authHeaders(auth),
+        },
+        body: JSON.stringify({ requests }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "(no body)");
+        if (response.status === 401 || response.status === 403) {
+          log.warn(`anthropic batch auth error (${response.status}): ${text}`);
+        } else {
+          log.error(`anthropic batch create failed: ${response.status} ${response.statusText} — ${text}`);
+        }
+        return null;
+      }
+
+      const data = (await response.json()) as { id: string };
+      return data.id;
+    },
+
+    async poll(auth, batchId) {
+      const url = `${baseUrl}/v1/messages/batches/${batchId}`;
+      const response = await fetch(url, {
+        headers: {
+          "anthropic-version": "2023-06-01",
+          ...authHeaders(auth),
+        },
+      });
+
+      if (!response.ok) {
+        log.error(`anthropic batch poll failed for ${batchId}: ${response.status}`);
+        return { status: "pending" }; // Retry on next poll
+      }
+
+      const data = (await response.json()) as {
+        processing_status: string;
+        results_url: string | null;
+      };
+
+      if (data.processing_status !== "ended") return { status: "pending" };
+
+      // Batch is done — retrieve results
+      const resultsUrl = data.results_url ?? `${baseUrl}/v1/messages/batches/${batchId}/results`;
+      const resultsResponse = await fetch(resultsUrl, {
+        headers: {
+          "anthropic-version": "2023-06-01",
+          ...authHeaders(auth),
+        },
+      });
+
+      if (!resultsResponse.ok) {
+        log.error(`anthropic batch results fetch failed for ${batchId}: ${resultsResponse.status}`);
+        return { status: "pending" }; // Retry on next poll
+      }
+
+      const text = await resultsResponse.text();
+      const lines = text.split("\n").filter((l) => l.trim());
+      const results: BatchResult[] = [];
+
+      for (const line of lines) {
+        try {
+          const row = JSON.parse(line) as {
+            custom_id: string;
+            result: {
+              type: "succeeded" | "errored" | "canceled" | "expired";
+              message?: {
+                content?: Array<{ type: string; text?: string }>;
+                model?: string;
+                usage?: AnthropicUsage;
+              };
+              error?: { type: string; message: string };
+            };
+          };
+
+          if (row.result.type === "succeeded") {
+            const msg = row.result.message;
+            const textBlock = msg?.content?.find(
+              (b) => b.type === "text" && typeof b.text === "string",
+            );
+            results.push({
+              customId: row.custom_id,
+              outcome: "succeeded",
+              text: textBlock?.text ?? null,
+              usage: msg?.usage ?? null,
+              model: msg?.model ?? null,
+            });
+          } else {
+            results.push({
+              customId: row.custom_id,
+              outcome: row.result.type,
+              text: null,
+              usage: null,
+              model: null,
+              error: row.result.error
+                ? `${row.result.error.type}: ${row.result.error.message}`
+                : row.result.type,
+            });
+          }
+        } catch {
+          log.error(`failed to parse anthropic batch result line: ${line.slice(0, 200)}`);
+        }
+      }
+
+      return { status: "done", results };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI Batch Provider
+// ---------------------------------------------------------------------------
+
+/**
+ * Upload a JSONL file for OpenAI batch processing.
+ * POST /v1/files with purpose="batch" and multipart/form-data body.
+ */
+async function uploadOpenAIBatchFile(
+  baseUrl: string,
+  auth: AuthCredential,
+  jsonlContent: string,
+): Promise<string | null> {
+  const formData = new FormData();
+  formData.append("purpose", "batch");
+  formData.append(
+    "file",
+    new Blob([jsonlContent], { type: "application/jsonl" }),
+    "batch.jsonl",
+  );
+
+  const response = await fetch(`${baseUrl}/v1/files`, {
+    method: "POST",
+    headers: authHeaders(auth), // No Content-Type — FormData sets it with boundary
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "(no body)");
+    log.error(`openai file upload failed: ${response.status} — ${text}`);
+    return null;
+  }
+
+  const data = (await response.json()) as { id: string };
+  return data.id;
+}
+
+/**
+ * Download and parse OpenAI batch results from a file.
+ * GET /v1/files/{id}/content → JSONL lines
+ */
+async function downloadOpenAIResults(
+  baseUrl: string,
+  auth: AuthCredential,
+  fileId: string,
+): Promise<BatchResult[]> {
+  const response = await fetch(`${baseUrl}/v1/files/${fileId}/content`, {
+    headers: authHeaders(auth),
+  });
+  if (!response.ok) {
+    log.error(`openai results download failed: ${response.status}`);
+    return [];
+  }
+
+  const text = await response.text();
+  const results: BatchResult[] = [];
+
+  for (const line of text.split("\n").filter((l) => l.trim())) {
+    try {
+      const row = JSON.parse(line) as {
+        custom_id: string;
+        response: {
+          status_code: number;
+          body: {
+            choices?: Array<{ message?: { content?: string } }>;
+            model?: string;
+            usage?: {
+              prompt_tokens?: number;
+              completion_tokens?: number;
+              prompt_tokens_details?: { cached_tokens?: number };
+            };
+          };
+        };
+      };
+
+      if (row.response.status_code === 200) {
+        const body = row.response.body;
+        results.push({
+          customId: row.custom_id,
+          outcome: "succeeded",
+          text: body.choices?.[0]?.message?.content ?? null,
+          usage: body.usage ? normalizeOpenAIUsage(body.usage) : null,
+          model: body.model ?? null,
+        });
+      } else {
+        results.push({
+          customId: row.custom_id,
+          outcome: "errored",
+          text: null,
+          usage: null,
+          model: null,
+          error: `HTTP ${row.response.status_code}`,
+        });
+      }
+    } catch {
+      log.error(`failed to parse openai batch result line: ${line.slice(0, 200)}`);
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Convert system prompt from Anthropic block format to plain text for OpenAI.
+ * Anthropic stores system as `[{ type: "text", text: "..." }]` with cache hints;
+ * OpenAI expects a plain string in a `{ role: "system" }` message.
+ */
+function systemToText(
+  system: string | Array<{ type: string; text: string }>,
+): string {
+  if (typeof system === "string") return system;
+  return system.map((b) => b.text).join("\n");
+}
+
+/** Max batch age for OpenAI (4 hours). OpenAI allows up to 24h but we don't
+ *  want to wait that long for background work results. */
+const OPENAI_MAX_BATCH_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+/**
+ * Create a BatchProvider for OpenAI's Batch API.
+ *
+ * Submit: Build JSONL → upload to /v1/files → create batch via /v1/batches
+ * Poll:   GET /v1/batches/{id} → on completed, download results via /v1/files/{output_file_id}/content
+ * Only supports /v1/chat/completions endpoint.
+ */
+export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
+  const baseUrl = upstreamUrl.replace(/\/$/, "");
+
+  return {
+    name: "openai",
+    maxBatchAgeMs: OPENAI_MAX_BATCH_AGE_MS, // 4 hours
+
+    async submit(auth, items) {
+      // 1. Build JSONL content — one line per request
+      const lines = items.map((item) => {
+        const messages: Array<{ role: string; content: string }> = [];
+        if (item.params.system) {
+          messages.push({
+            role: "system",
+            content: systemToText(item.params.system),
+          });
+        }
+        messages.push(...item.params.messages);
+
+        return JSON.stringify({
+          custom_id: item.customId,
+          method: "POST",
+          url: "/v1/chat/completions",
+          body: {
+            model: item.params.model,
+            max_completion_tokens: item.params.max_tokens,
+            messages,
+          },
+        });
+      });
+      const jsonl = lines.join("\n");
+
+      // 2. Upload JSONL file
+      const fileId = await uploadOpenAIBatchFile(baseUrl, auth, jsonl);
+      if (!fileId) return null;
+
+      // 3. Create batch
+      const response = await fetch(`${baseUrl}/v1/batches`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(auth),
+        },
+        body: JSON.stringify({
+          input_file_id: fileId,
+          endpoint: "/v1/chat/completions",
+          completion_window: "24h",
+        }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "(no body)");
+        if (response.status === 401 || response.status === 403) {
+          log.warn(`openai batch auth error (${response.status}): ${text}`);
+        } else {
+          log.error(`openai batch create failed: ${response.status} ${response.statusText} — ${text}`);
+        }
+        return null;
+      }
+
+      const data = (await response.json()) as { id: string };
+      return data.id;
+    },
+
+    async poll(auth, batchId) {
+      const response = await fetch(`${baseUrl}/v1/batches/${batchId}`, {
+        headers: authHeaders(auth),
+      });
+
+      if (!response.ok) {
+        log.error(`openai batch poll failed for ${batchId}: ${response.status}`);
+        return { status: "pending" }; // Retry on next poll
+      }
+
+      const data = (await response.json()) as {
+        status: string;
+        output_file_id?: string;
+        error_file_id?: string;
+      };
+
+      if (data.status === "completed" && data.output_file_id) {
+        const results = await downloadOpenAIResults(baseUrl, auth, data.output_file_id);
+        return { status: "done", results };
+      }
+
+      if (
+        data.status === "failed" ||
+        data.status === "expired" ||
+        data.status === "cancelled" ||
+        data.status === "cancelling"
+      ) {
+        return { status: "failed", error: data.status };
+      }
+
+      // "validating", "in_progress", "finalizing" — still pending
+      return { status: "pending" };
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // BatchLLMClient
@@ -126,19 +542,22 @@ function authKey(cred: AuthCredential): string {
  *
  * - `urgent: true` calls → immediate delegation to `inner.prompt()`
  * - `urgent: false/undefined` calls → queued for batch processing
- * - On flush timer or queue full → POST /v1/messages/batches
- * - On poll timer → GET /v1/messages/batches/{id}, resolve promises
+ * - On flush timer or queue full → submit to provider-specific batch API
+ * - On poll timer → check status and resolve promises
  * - On error → fallback to synchronous calls for the failed batch
  *
+ * Items are grouped by `(authKey, providerID)` at flush time so each
+ * credential+provider combo gets its own batch submission.
+ *
  * @param inner       The synchronous LLMClient (gateway's direct adapter)
- * @param upstreamUrl Base Anthropic API URL (e.g. "https://api.anthropic.com")
+ * @param upstreams   Base URLs for each provider
  * @param getAuth     Callback to resolve auth credentials (per-session → global fallback)
  * @param defaultModel Default model for requests without explicit model
  * @param batchConfig Optional tuning parameters
  */
 export function createBatchLLMClient(
   inner: LLMClient,
-  upstreamUrl: string,
+  upstreams: { anthropic: string; openai: string },
   getAuth: (sessionID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
   batchConfig?: BatchQueueConfig,
@@ -146,7 +565,16 @@ export function createBatchLLMClient(
   const flushIntervalMs = batchConfig?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
   const maxQueueSize = batchConfig?.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
   const pollIntervalMs = batchConfig?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const maxBatchAgeMs = batchConfig?.maxBatchAgeMs ?? DEFAULT_MAX_BATCH_AGE_MS;
+
+  // Create both batch providers
+  const providers: Record<string, BatchProvider> = {
+    anthropic: createAnthropicBatchProvider(upstreams.anthropic),
+    openai: createOpenAIBatchProvider(upstreams.openai),
+  };
+
+  function resolveProvider(providerID: string): BatchProvider {
+    return providers[providerID] ?? providers.anthropic;
+  }
 
   // State
   const queue: PendingRequest[] = [];
@@ -186,59 +614,39 @@ export function createBatchLLMClient(
   let totalFailed = 0;
 
   // -------------------------------------------------------------------------
-  // Submit a single batch for one credential group
+  // Submit a single batch for one credential+provider group
   // -------------------------------------------------------------------------
 
-  async function submitBatch(auth: AuthCredential, items: PendingRequest[]): Promise<void> {
-    const requests = items.map((item) => ({
-      custom_id: item.customId,
-      params: item.params,
-    }));
-
-    log.info(`batch flush: submitting ${items.length} requests`);
+  async function submitBatch(
+    provider: BatchProvider,
+    auth: AuthCredential,
+    items: PendingRequest[],
+  ): Promise<void> {
+    log.info(`batch flush (${provider.name}): submitting ${items.length} requests`);
 
     try {
-      const url = `${upstreamUrl.replace(/\/$/, "")}/v1/messages/batches`;
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "anthropic-version": "2023-06-01",
-          ...authHeaders(auth),
-        },
-        body: JSON.stringify({ requests }),
-      });
+      const batchId = await provider.submit(
+        auth,
+        items.map((item) => ({ customId: item.customId, params: item.params })),
+      );
 
-      if (!response.ok) {
-        const text = await response.text().catch(() => "(no body)");
-        // Permanent auth errors — disable batch API for every session in this batch.
-        // Tracked per-session (not per-scheme) so future OAuth tokens with batch
-        // scope won't be blocked. Session IDs are stable across token refresh.
-        if (response.status === 401 || response.status === 403) {
-          const sessionIDs = new Set(items.map((i) => i.sessionID).filter(Boolean) as string[]);
-          for (const sid of sessionIDs) {
-            disabledBatchSessions.add(sid);
-          }
-          if (sessionIDs.size > 0) {
-            setKV(DISABLED_BATCH_KV_KEY, JSON.stringify([...disabledBatchSessions]));
-            log.warn(
-              `batch API disabled for sessions [${[...sessionIDs].join(", ")}] ` +
-                `(${response.status}): ${text}. ` +
-                `Future worker calls for these sessions will use individual requests.`,
-            );
-          }
-        } else {
-          log.error(`batch create failed: ${response.status} ${response.statusText} — ${text}`);
+      if (!batchId) {
+        // Provider returned null — submit failed (auth error, network, etc.)
+        // Disable batch for affected sessions on auth-like failures.
+        const sessionIDs = new Set(items.map((i) => i.sessionID).filter(Boolean) as string[]);
+        for (const sid of sessionIDs) {
+          disabledBatchSessions.add(sid);
         }
-        // Fall back to synchronous for all items
+        if (sessionIDs.size > 0) {
+          setKV(DISABLED_BATCH_KV_KEY, JSON.stringify([...disabledBatchSessions]));
+          log.warn(
+            `batch API (${provider.name}) disabled for sessions [${[...sessionIDs].join(", ")}]. ` +
+              `Future worker calls for these sessions will use individual requests.`,
+          );
+        }
         await fallbackAll(items);
         return;
       }
-
-      const data = (await response.json()) as {
-        id: string;
-        processing_status: string;
-      };
 
       totalBatched += items.length;
 
@@ -249,27 +657,28 @@ export function createBatchLLMClient(
       }
 
       const pollTimer = setInterval(
-        () => pollBatch(data.id).catch((e) => log.error("batch poll error:", e)),
+        () => pollBatch(batchId).catch((e) => log.error("batch poll error:", e)),
         pollIntervalMs,
       );
 
-      inflight.set(data.id, {
-        batchId: data.id,
+      inflight.set(batchId, {
+        batchId,
         requests: requestMap,
         submittedAt: Date.now(),
         pollTimer,
         auth,
+        provider,
       });
 
-      log.info(`batch created: ${data.id} with ${items.length} requests`);
+      log.info(`batch created (${provider.name}): ${batchId} with ${items.length} requests`);
     } catch (e) {
-      log.error("batch create error:", e);
+      log.error(`batch create error (${provider.name}):`, e);
       await fallbackAll(items);
     }
   }
 
   // -------------------------------------------------------------------------
-  // Flush: group queued items by credential, submit one batch per group
+  // Flush: group queued items by credential+provider, submit one batch per group
   // -------------------------------------------------------------------------
 
   async function flush(): Promise<void> {
@@ -278,19 +687,22 @@ export function createBatchLLMClient(
     // Take all items from the queue
     const batch = queue.splice(0);
 
-    // Group by auth credential — each credential gets its own batch
-    const byAuth = new Map<string, { auth: AuthCredential; items: PendingRequest[] }>();
+    // Group by (auth credential, provider) — each combo gets its own batch
+    const byGroup = new Map<
+      string,
+      { auth: AuthCredential; providerID: string; items: PendingRequest[] }
+    >();
     for (const item of batch) {
-      const key = authKey(item.auth);
-      let group = byAuth.get(key);
+      const key = groupKey(item.auth, item.providerID);
+      let group = byGroup.get(key);
       if (!group) {
-        group = { auth: item.auth, items: [] };
-        byAuth.set(key, group);
+        group = { auth: item.auth, providerID: item.providerID, items: [] };
+        byGroup.set(key, group);
       }
       group.items.push(item);
     }
 
-    for (const { auth, items } of byAuth.values()) {
+    for (const { auth, providerID, items } of byGroup.values()) {
       // Split items: disabled sessions fall back, others go to batch.
       // A session is disabled when a prior batch 403'd for that session's credential.
       const batchable: PendingRequest[] = [];
@@ -306,7 +718,8 @@ export function createBatchLLMClient(
         await fallbackAll(fallbacks);
       }
       if (batchable.length > 0) {
-        await submitBatch(auth, batchable);
+        const provider = resolveProvider(providerID);
+        await submitBatch(provider, auth, batchable);
       }
     }
   }
@@ -320,8 +733,9 @@ export function createBatchLLMClient(
     if (!batch) return;
 
     // Check max age — give up and fallback if too old
-    if (Date.now() - batch.submittedAt > maxBatchAgeMs) {
-      log.warn(`batch ${batchId} exceeded max age — falling back to synchronous`);
+    // Uses provider-specific max age (1h Anthropic, 4h OpenAI)
+    if (Date.now() - batch.submittedAt > batch.provider.maxBatchAgeMs) {
+      log.warn(`batch ${batchId} (${batch.provider.name}) exceeded max age — falling back to synchronous`);
       clearInterval(batch.pollTimer);
       inflight.delete(batchId);
       await fallbackAll([...batch.requests.values()]);
@@ -329,134 +743,67 @@ export function createBatchLLMClient(
     }
 
     try {
-      const url = `${upstreamUrl.replace(/\/$/, "")}/v1/messages/batches/${batchId}`;
-      const response = await fetch(url, {
-        headers: {
-          "anthropic-version": "2023-06-01",
-          ...authHeaders(batch.auth),
-        },
-      });
+      const pollResult = await batch.provider.poll(batch.auth, batchId);
 
-      if (!response.ok) {
-        log.error(`batch poll failed for ${batchId}: ${response.status}`);
-        return; // Retry on next poll
-      }
+      if (pollResult.status === "pending") return;
 
-      const data = (await response.json()) as {
-        processing_status: string;
-        results_url: string | null;
-      };
-
-      if (data.processing_status !== "ended") return;
-
-      // Batch is done — stream results
-      log.info(`batch ${batchId} ended — retrieving results`);
-
-      if (data.results_url) {
-        await retrieveResults(batchId, data.results_url);
-      } else {
-        // No results URL — try the standard endpoint
-        await retrieveResults(
-          batchId,
-          `${upstreamUrl.replace(/\/$/, "")}/v1/messages/batches/${batchId}/results`,
-        );
-      }
-    } catch (e) {
-      log.error(`batch poll error for ${batchId}:`, e);
-    }
-  }
-
-  async function retrieveResults(batchId: string, resultsUrl: string): Promise<void> {
-    const batch = inflight.get(batchId);
-    if (!batch) return;
-
-    try {
-      const response = await fetch(resultsUrl, {
-        headers: {
-          "anthropic-version": "2023-06-01",
-          ...authHeaders(batch.auth),
-        },
-      });
-
-      if (!response.ok) {
-        log.error(`batch results fetch failed for ${batchId}: ${response.status}`);
+      if (pollResult.status === "failed") {
+        log.error(`batch ${batchId} (${batch.provider.name}) failed: ${pollResult.error}`);
+        clearInterval(batch.pollTimer);
+        inflight.delete(batchId);
+        await fallbackAll([...batch.requests.values()]);
         return;
       }
 
-      const text = await response.text();
-      // Results are JSONL — one JSON object per line
-      const lines = text.split("\n").filter((l) => l.trim());
+      // status === "done" — resolve all results
+      log.info(`batch ${batchId} (${batch.provider.name}) completed — resolving ${pollResult.results.length} results`);
 
-      for (const line of lines) {
-        try {
-          const result = JSON.parse(line) as {
-            custom_id: string;
-            result: {
-              type: "succeeded" | "errored" | "canceled" | "expired";
-              message?: {
-                content?: Array<{ type: string; text?: string }>;
-                model?: string;
-                usage?: AnthropicUsage;
-              };
-              error?: { type: string; message: string };
-            };
-          };
+      for (const result of pollResult.results) {
+        const pending = batch.requests.get(result.customId);
+        if (!pending) continue;
 
-          const pending = batch.requests.get(result.custom_id);
-          if (!pending) continue;
-
-          switch (result.result.type) {
-            case "succeeded": {
-              const msg = result.result.message;
-              const textBlock = msg?.content?.find(
-                (b) => b.type === "text" && typeof b.text === "string",
+        switch (result.outcome) {
+          case "succeeded": {
+            // Emit gen_ai.chat span for batch result with usage + queue time
+            if (Sentry.isInitialized() && result.usage) {
+              Sentry.startSpan(
+                {
+                  op: "gen_ai.chat",
+                  name: `chat ${pending.params.model}`,
+                  attributes: {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.request.model": pending.params.model,
+                    "gen_ai.provider.name": batch.provider.name,
+                    "lore.call_type": "batch",
+                    "lore.batch_queue_ms": Date.now() - pending.enqueuedAt,
+                  },
+                },
+                (span) => {
+                  setGenAiUsageAttributes(span, result.usage!, result.model ?? undefined);
+                },
               );
-
-              // Emit gen_ai.chat span for batch result with usage + queue time
-              if (Sentry.isInitialized() && msg?.usage) {
-                Sentry.startSpan(
-                  {
-                    op: "gen_ai.chat",
-                    name: `chat ${pending.params.model}`,
-                    attributes: {
-                      "gen_ai.operation.name": "chat",
-                      "gen_ai.request.model": pending.params.model,
-                      "gen_ai.provider.name": "anthropic",
-                      "lore.call_type": "batch",
-                      "lore.batch_queue_ms": Date.now() - pending.enqueuedAt,
-                    },
-                  },
-                  (span) => {
-                    setGenAiUsageAttributes(span, msg.usage!, msg.model);
-                  },
-                );
-                emitCostMetric(pending.params.model, msg.usage, "batch");
-                recordWorkerCost(pending.sessionID, pending.params.model, msg.usage, "batch", pending.workerID);
-              }
-
-              pending.resolve(textBlock?.text ?? null);
-              totalResolved++;
-              break;
+              emitCostMetric(pending.params.model, result.usage, "batch");
+              recordWorkerCost(pending.sessionID, pending.params.model, result.usage, "batch", pending.workerID);
             }
-            case "errored":
-              pending.resolve(null); // Match inner client behavior (null on error)
-              totalFailed++;
-              log.error(
-                `batch item ${result.custom_id} errored: ${result.result.error?.type ?? "unknown"} — ${result.result.error?.message ?? JSON.stringify(result.result.error)}`,
-              );
-              break;
-            case "canceled":
-            case "expired":
-              pending.resolve(null);
-              totalFailed++;
-              log.warn(`batch item ${result.custom_id} ${result.result.type}`);
-              break;
-          }
 
-          batch.requests.delete(result.custom_id);
-        } catch {
-          log.error(`failed to parse batch result line: ${line.slice(0, 200)}`);
+            pending.resolve(result.text);
+            totalResolved++;
+            break;
+          }
+          case "errored":
+            pending.resolve(null); // Match inner client behavior (null on error)
+            totalFailed++;
+            log.error(`batch item ${result.customId} errored: ${result.error ?? "unknown"}`);
+            break;
+          case "canceled":
+          case "expired":
+            pending.resolve(null);
+            totalFailed++;
+            log.warn(`batch item ${result.customId} ${result.outcome}`);
+            break;
         }
+
+        batch.requests.delete(result.customId);
       }
 
       // Resolve any remaining items that weren't in the results (shouldn't happen)
@@ -472,7 +819,7 @@ export function createBatchLLMClient(
         `batch ${batchId} fully resolved (${totalResolved} ok, ${totalFailed} failed total)`,
       );
     } catch (e) {
-      log.error(`batch results retrieval error for ${batchId}:`, e);
+      log.error(`batch poll error for ${batchId} (${batch.provider.name}):`, e);
     }
   }
 
@@ -577,6 +924,7 @@ export function createBatchLLMClient(
           reject,
           enqueuedAt: Date.now(),
           auth: cred,
+          providerID: model.providerID,
           sessionID: opts?.sessionID,
           workerID: opts?.workerID,
         });
@@ -655,7 +1003,7 @@ export interface BatchStats {
   inflightRequests: number;
   /** Total requests that entered the queue. */
   totalQueued: number;
-  /** Total requests successfully submitted to the Batch API. */
+  /** Total requests successfully submitted to batch APIs (Anthropic + OpenAI). */
   totalBatched: number;
   /** Total requests that bypassed the queue (urgent). */
   totalUrgent: number;

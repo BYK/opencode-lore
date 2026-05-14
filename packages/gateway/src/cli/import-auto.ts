@@ -103,7 +103,7 @@ export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<voi
     modelID: "claude-sonnet-4-6",
   };
   const llm = createGatewayLLMClient(
-    gatewayConfig.upstreamAnthropic,
+    { anthropic: gatewayConfig.upstreamAnthropic, openai: gatewayConfig.upstreamOpenAI },
     resolveAuth,
     defaultModel,
   );

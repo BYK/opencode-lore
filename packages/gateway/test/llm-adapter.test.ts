@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { backoffMs, maxRetriesFor } from "../src/llm-adapter";
+import { backoffMs, maxRetriesFor, normalizeOpenAIUsage } from "../src/llm-adapter";
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — background (default)
@@ -152,5 +152,77 @@ describe("worst-case urgent budget", () => {
       total += backoffMs(attempt, 60_000, 429);
     }
     expect(total).toBe(300_000); // 5 retries × 60s
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeOpenAIUsage — maps OpenAI usage to AnthropicUsage shape
+// ---------------------------------------------------------------------------
+
+describe("normalizeOpenAIUsage", () => {
+  test("maps all OpenAI usage fields correctly", () => {
+    const result = normalizeOpenAIUsage({
+      prompt_tokens: 100,
+      completion_tokens: 50,
+      prompt_tokens_details: { cached_tokens: 30 },
+    });
+
+    expect(result).toEqual({
+      input_tokens: 100,
+      output_tokens: 50,
+      cache_read_input_tokens: 30,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  test("handles missing prompt_tokens_details", () => {
+    const result = normalizeOpenAIUsage({
+      prompt_tokens: 200,
+      completion_tokens: 75,
+    });
+
+    expect(result).toEqual({
+      input_tokens: 200,
+      output_tokens: 75,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  test("handles undefined usage gracefully", () => {
+    const result = normalizeOpenAIUsage(undefined);
+
+    expect(result).toEqual({
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  test("handles empty usage object", () => {
+    const result = normalizeOpenAIUsage({});
+
+    expect(result).toEqual({
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  test("handles zero cached_tokens", () => {
+    const result = normalizeOpenAIUsage({
+      prompt_tokens: 500,
+      completion_tokens: 200,
+      prompt_tokens_details: { cached_tokens: 0 },
+    });
+
+    expect(result).toEqual({
+      input_tokens: 500,
+      output_tokens: 200,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
   });
 });

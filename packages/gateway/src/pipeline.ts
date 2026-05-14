@@ -590,7 +590,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       modelID: "claude-sonnet-4-6",
     };
     const inner = createGatewayLLMClient(
-      config.upstreamAnthropic,
+      { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
       resolveAuth,
       defaultModel,
     );
@@ -607,7 +607,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     } else {
       llmClient = createBatchLLMClient(
         inner,
-        config.upstreamAnthropic,
+        { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
         resolveAuth,
         defaultModel,
       );

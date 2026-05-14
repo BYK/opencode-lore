@@ -1,7 +1,15 @@
 /**
- * Gateway LLM adapter: implements LLMClient via direct Anthropic API calls.
+ * Gateway LLM adapter: implements LLMClient via direct API calls.
  * Used by Lore's background workers (distillation, curation, query expansion)
  * running inside the gateway process.
+ *
+ * Supports both Anthropic Messages API and OpenAI Chat Completions API.
+ * The provider is selected at call time based on `model.providerID`:
+ *   - "anthropic" → POST /v1/messages (Anthropic wire format)
+ *   - "openai"    → POST /v1/chat/completions (OpenAI wire format)
+ *
+ * Retry logic, Sentry instrumentation, worker call tracking, and error
+ * handling are shared across both providers.
  */
 
 import type { LLMClient } from "@loreai/core";
@@ -105,18 +113,210 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI response types & usage normalization (exported for testing)
+// ---------------------------------------------------------------------------
+
+/** OpenAI Chat Completions response shape (subset we need). */
+type OpenAIChatResponse = {
+  choices?: Array<{ message?: { content?: string } }>;
+  model?: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
+};
+
+/**
+ * Normalize OpenAI usage to the AnthropicUsage shape for unified cost tracking.
+ *
+ * Maps:
+ *   prompt_tokens                          → input_tokens
+ *   completion_tokens                      → output_tokens
+ *   prompt_tokens_details.cached_tokens    → cache_read_input_tokens
+ *   (not reported by OpenAI)               → cache_creation_input_tokens = 0
+ */
+export function normalizeOpenAIUsage(
+  usage: OpenAIChatResponse["usage"],
+): AnthropicUsage {
+  return {
+    input_tokens: usage?.prompt_tokens ?? 0,
+    output_tokens: usage?.completion_tokens ?? 0,
+    cache_read_input_tokens: usage?.prompt_tokens_details?.cached_tokens ?? 0,
+    cache_creation_input_tokens: 0, // OpenAI doesn't report this separately
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Provider-specific request builders
+// ---------------------------------------------------------------------------
+
+/** Upstream URL + provider name for a resolved provider. */
+type ProviderTarget = {
+  url: string;
+  providerName: string;
+};
+
+/** Resolve upstream target based on model provider. */
+function resolveTarget(
+  upstreams: { anthropic: string; openai: string },
+  providerID: string,
+): ProviderTarget {
+  if (providerID === "openai") {
+    return {
+      url: upstreams.openai.replace(/\/$/, ""),
+      providerName: "openai",
+    };
+  }
+  return {
+    url: upstreams.anthropic.replace(/\/$/, ""),
+    providerName: "anthropic",
+  };
+}
+
+/**
+ * Build Anthropic Messages API request.
+ * Returns the full URL, headers, and serialized body.
+ */
+function buildAnthropicWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  sessionID?: string,
+): { url: string; headers: Record<string, string>; body: string } {
+  // For bearer tokens (Claude Code OAuth), inject the billing header
+  // as the first system block with a cch=00000 placeholder that gets
+  // signed after JSON serialization.
+  const billingBlock =
+    cred.scheme === "bearer"
+      ? buildBillingBlock(sessionID, user)
+      : null;
+
+  // System prompt caching for workers: send as block array with 1h TTL.
+  // Worker calls come in bursts (distillation, curation) separated by
+  // minutes of user thinking — 5m TTL expires between bursts, but 1h
+  // survives. The system prompt (DISTILLATION_SYSTEM, etc.) is static
+  // across all calls → near-100% cache hit rate after the first write.
+  const systemBlocks = system
+    ? [
+        {
+          type: "text" as const,
+          text: system,
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+      ]
+    : [];
+
+  const systemPayload =
+    billingBlock || systemBlocks.length > 0
+      ? [
+          ...(billingBlock ? [billingBlock] : []),
+          ...systemBlocks,
+        ]
+      : undefined;
+
+  let body = JSON.stringify({
+    model: model.modelID,
+    max_tokens: maxTokens,
+    system: systemPayload,
+    messages: [{ role: "user", content: user }],
+  });
+
+  // Sign the body: compute xxHash64 and replace cch=00000 with real hash
+  if (billingBlock) {
+    body = signBody(body);
+  }
+
+  return {
+    url: `${target.url}/v1/messages`,
+    headers: {
+      "Content-Type": "application/json",
+      "anthropic-version": "2023-06-01",
+      ...authHeaders(cred),
+    },
+    body,
+  };
+}
+
+/**
+ * Build OpenAI Chat Completions API request.
+ * Returns the full URL, headers, and serialized body.
+ */
+function buildOpenAIWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+): { url: string; headers: Record<string, string>; body: string } {
+  const messages: Array<{ role: string; content: string }> = [];
+  if (system) messages.push({ role: "system", content: system });
+  messages.push({ role: "user", content: user });
+
+  return {
+    url: `${target.url}/v1/chat/completions`,
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(cred),
+    },
+    body: JSON.stringify({
+      model: model.modelID,
+      max_completion_tokens: maxTokens,
+      messages,
+    }),
+  };
+}
+
+/** Extract text response from an Anthropic Messages API response. */
+function parseAnthropicResponse(data: {
+  content?: Array<{ type: string; text?: string }>;
+  model?: string;
+  usage?: AnthropicUsage;
+}): { text: string | null; usage: AnthropicUsage | null; model: string | null } {
+  const textBlock = data.content?.find(
+    (b) => b.type === "text" && typeof b.text === "string",
+  );
+  return {
+    text: textBlock?.text ?? null,
+    usage: data.usage ?? null,
+    model: data.model ?? null,
+  };
+}
+
+/** Extract text response from an OpenAI Chat Completions response. */
+function parseOpenAIResponse(data: OpenAIChatResponse): {
+  text: string | null;
+  usage: AnthropicUsage | null;
+  model: string | null;
+} {
+  return {
+    text: data.choices?.[0]?.message?.content ?? null,
+    usage: data.usage ? normalizeOpenAIUsage(data.usage) : null,
+    model: data.model ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // LLMClient factory
 // ---------------------------------------------------------------------------
 
 /**
- * Create an LLMClient that sends single-turn prompts directly to Anthropic.
+ * Create an LLMClient that sends single-turn prompts to the appropriate provider.
  *
- * @param upstreamUrl     Base URL of the upstream Anthropic endpoint
- * @param getAuth         Callback to resolve auth credentials (per-session → global fallback)
- * @param defaultModel    Default model to use when no override is specified
+ * Routes to Anthropic Messages API or OpenAI Chat Completions API based on
+ * `model.providerID`. Retry logic, Sentry instrumentation, and error handling
+ * are shared across both providers.
+ *
+ * @param upstreams     Base URLs for each provider
+ * @param getAuth       Callback to resolve auth credentials (per-session → global fallback)
+ * @param defaultModel  Default model to use when no override is specified
  */
 export function createGatewayLLMClient(
-  upstreamUrl: string,
+  upstreams: { anthropic: string; openai: string },
   getAuth: (sessionID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
 ): LLMClient {
@@ -129,7 +329,16 @@ export function createGatewayLLMClient(
       }
 
       const model = opts?.model ?? defaultModel;
-      const url = `${upstreamUrl.replace(/\/$/, "")}/v1/messages`;
+      const isOpenAI = model.providerID === "openai";
+      const target = resolveTarget(upstreams, model.providerID);
+      const maxTokens = opts?.maxTokens ?? 8192;
+
+      // Build provider-specific request
+      const req = isOpenAI
+        ? buildOpenAIWorkerRequest(target, cred, model, system, user, maxTokens)
+        : buildAnthropicWorkerRequest(
+            target, cred, model, system, user, maxTokens, opts?.sessionID,
+          );
 
       // Track this call so temporal capture can skip it
       const callID = `gw-worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -137,60 +346,7 @@ export function createGatewayLLMClient(
 
       const urgent = opts?.urgent === true;
 
-       try {
-        // --- Build system payload ---
-        // For bearer tokens (Claude Code OAuth), inject the billing header
-        // as the first system block with a cch=00000 placeholder that gets
-        // signed after JSON serialization. The billing header is pinned to
-        // a version with a known xxHash64 seed (see cch.ts VERSION_SEEDS).
-        const billingBlock =
-          cred.scheme === "bearer"
-            ? buildBillingBlock(opts?.sessionID, user)
-            : null;
-
-        // System prompt caching for workers: send as block array with 1h TTL.
-        // Worker calls come in bursts (distillation, curation) separated by
-        // minutes of user thinking — 5m TTL expires between bursts, but 1h
-        // survives. The system prompt (DISTILLATION_SYSTEM, etc.) is static
-        // across all calls → near-100% cache hit rate after the first write.
-        // Cost: 1.25× base for the initial write, 0.1× for subsequent reads.
-        const systemBlocks = system
-          ? [
-              {
-                type: "text" as const,
-                text: system,
-                cache_control: { type: "ephemeral", ttl: "1h" },
-              },
-            ]
-          : [];
-
-        const systemPayload =
-          billingBlock || systemBlocks.length > 0
-            ? [
-                ...(billingBlock ? [billingBlock] : []),
-                ...systemBlocks,
-              ]
-            : undefined;
-
-        // Build body with cch=00000 placeholder, then sign if needed
-        let body = JSON.stringify({
-          model: model.modelID,
-          max_tokens: opts?.maxTokens ?? 8192,
-          system: systemPayload,
-          messages: [{ role: "user", content: user }],
-        });
-
-        // Sign the body: compute xxHash64 and replace cch=00000 with real hash
-        if (billingBlock) {
-          body = signBody(body);
-        }
-
-        const reqHeaders = {
-          "Content-Type": "application/json",
-          "anthropic-version": "2023-06-01",
-          ...authHeaders(cred),
-        };
-
+      try {
         // Wrap the entire retry loop in a gen_ai.chat span so it captures
         // real wall-clock duration including retries and backoff delays.
         return await Sentry.startSpan(
@@ -200,7 +356,7 @@ export function createGatewayLLMClient(
             attributes: {
               "gen_ai.operation.name": "chat",
               "gen_ai.request.model": model.modelID,
-              "gen_ai.provider.name": "anthropic",
+              "gen_ai.provider.name": target.providerName,
               "lore.worker_id": opts?.workerID ?? "unknown",
               "lore.call_type": "direct",
               "lore.urgent": urgent,
@@ -217,13 +373,13 @@ export function createGatewayLLMClient(
             for (let attempt = 0; ; attempt++) {
               let response: Response;
               try {
-                response = await fetch(url, {
+                response = await fetch(req.url, {
                   method: "POST",
-                  headers: reqHeaders,
+                  headers: req.headers,
                   // opts.thinking is intentionally not forwarded — this bare API
-                  // call never includes the `thinking` parameter so Anthropic
-                  // models won't produce thinking tokens regardless.
-                  body,
+                  // call never includes the `thinking` parameter so models
+                  // won't produce thinking tokens regardless.
+                  body: req.body,
                 });
               } catch (e) {
                 // Network/fetch error — retry if attempts remain
@@ -249,17 +405,18 @@ export function createGatewayLLMClient(
               finalStatus = response.status;
 
               if (response.ok) {
-                const data = (await response.json()) as {
-                  content?: Array<{ type: string; text?: string }>;
-                  model?: string;
-                  usage?: AnthropicUsage;
-                };
+                const rawData = await response.json();
+
+                // Parse response based on provider
+                const parsed = isOpenAI
+                  ? parseOpenAIResponse(rawData as OpenAIChatResponse)
+                  : parseAnthropicResponse(rawData);
 
                 // Set usage attributes on the span
-                if (data.usage) {
-                  setGenAiUsageAttributes(span, data.usage, data.model);
-                  emitCostMetric(model.modelID, data.usage, "direct");
-                  recordWorkerCost(opts?.sessionID, model.modelID, data.usage, "direct", opts?.workerID);
+                if (parsed.usage) {
+                  setGenAiUsageAttributes(span, parsed.usage, parsed.model ?? undefined);
+                  emitCostMetric(model.modelID, parsed.usage, "direct");
+                  recordWorkerCost(opts?.sessionID, model.modelID, parsed.usage, "direct", opts?.workerID);
                 }
 
                 // Enrich span with retry metadata on eventual success
@@ -275,11 +432,7 @@ export function createGatewayLLMClient(
                   span.setAttribute("lore.retry.final_status", finalStatus);
                 }
 
-                const textBlock = data.content?.find(
-                  (b) => b.type === "text" && typeof b.text === "string",
-                );
-
-                return textBlock?.text ?? null;
+                return parsed.text;
               }
 
               // Non-transient error — fail immediately, no retry
