@@ -660,7 +660,7 @@ function getOrCreateSession(
     state = {
       sessionID,
       projectPath,
-      fingerprint: "",
+      fingerprint: persisted?.fingerprint || "",
       lastRequestTime: Date.now(),
       lastUserTurnTime: 0,
       messageCount: persisted?.messageCount ?? 0,
@@ -676,6 +676,29 @@ function getOrCreateSession(
         bustCount: 0,
       },
     };
+
+    // Restore session identity (v24) — prevents Tier 3 fallback on restart
+    if (persisted?.headerSessionId && persisted.headerName) {
+      state.headerSessionId = persisted.headerSessionId;
+      state.headerName = persisted.headerName;
+      // Rebuild headerSessionIndex for this session
+      const indexKey = `${persisted.headerName}:${persisted.headerSessionId}`;
+      headerSessionIndex.set(indexKey, sessionID);
+    }
+
+    // Restore cache warming state (v24) — preserves earned TTL tier
+    if (persisted?.resolvedConversationTTL) {
+      const ttl = persisted.resolvedConversationTTL;
+      state.resolvedConversationTTL = (ttl === "5m" || ttl === "1h") ? ttl : "5m";
+    }
+    if (persisted?.warmupState) {
+      try {
+        state.warmup = JSON.parse(persisted.warmupState);
+      } catch {
+        log.warn(`corrupt warmup state for session ${sessionID.slice(0, 16)}, starting fresh`);
+      }
+    }
+
     // Restore LTM cache/pin from DB
     if (persisted?.ltmCacheText != null && persisted.ltmCacheTokens != null) {
       ltmSessionCache.set(sessionID, {
@@ -802,6 +825,11 @@ async function identifySession(
         // Index the promoted header for future Tier 2 lookups.
         const indexKey = `${result.promoted.name}:${result.promoted.value}`;
         headerSessionIndex.set(indexKey, bestMatch.sid);
+        // Persist immediately — rare event, critical for post-restart correlation
+        saveSessionTracking(bestMatch.sid, {
+          headerSessionId: result.promoted.value,
+          headerName: result.promoted.name,
+        });
         log.info(
           `session ${bestMatch.sid.slice(0, 16)}: promoted header ${result.promoted.name} for Tier 2 identification`,
         );
@@ -1848,6 +1876,12 @@ function postResponse(
       updateShadowContext(sessionID, actualInput, resp.usage.outputTokens ?? 0, getWorkerModel()?.modelID ?? "unknown", req.model);
     }
 
+    // Mark session dirty for periodic flush (gradient + warming + costs).
+    // The 30s idle tick will persist state only for dirty sessions.
+    if (!isSubagentTurn) {
+      sessionState._dirty = true;
+    }
+
     // --- Schedule background work (fire-and-forget) ---
     // Skip for sub-agent turns: no temporal messages were stored above,
     // so there's nothing new to distill or curate.
@@ -2288,6 +2322,8 @@ async function handleConversationTurn(
       },
     );
     sessionState.fingerprint = fingerprint;
+    // Persist fingerprint immediately — rare event (new session only)
+    saveSessionTracking(sessionID, { fingerprint });
 
     // Seed header learning for new sessions (Tier 2 bootstrap).
     // Even Tier 1 sessions don't need this, but it's harmless and

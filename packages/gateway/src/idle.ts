@@ -25,6 +25,7 @@ import {
   exportLoreFile,
   saveSessionCosts,
   saveSessionTracking,
+  saveGradientState,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
@@ -115,6 +116,44 @@ export function startIdleScheduler(
       flushGlobalHistograms();
     } catch (e) {
       log.warn("cache-warmer: histogram flush error:", e);
+    }
+
+    // --- Periodic state persistence (30s tick) ---
+    // Flush gradient calibration + cache warming + cost state for dirty sessions.
+    // Max data loss on crash is one tick interval (~30s) — acceptable tradeoff
+    // vs per-mutation writes on the hot path.
+    for (const [sessionID, state] of sessions) {
+      if (!state._dirty) continue;
+      try {
+        saveGradientState(sessionID);
+        // Persist cache warming state (resolvedConversationTTL + warmup blob)
+        // in a single DB write alongside gradient state.
+        saveSessionTracking(sessionID, {
+          resolvedConversationTTL: state.resolvedConversationTTL ?? "5m",
+          warmupState: state.warmup ? JSON.stringify(state.warmup) : null,
+        });
+        // Persist cost snapshot
+        const costs = getSessionCosts(sessionID);
+        if (costs && costs.conversation.turns > 0) {
+          saveSessionCosts(sessionID, {
+            conversationCost: costs.conversation.cost,
+            workerCost: totalWorkerCost(costs),
+            conversationTurns: costs.conversation.turns,
+            cacheReadTokens: costs.conversation.cacheReadTokens,
+            cacheWriteTokens: costs.conversation.cacheWriteTokens,
+            warmupSavings: costs.counterfactual.warmupSavings,
+            warmupHits: costs.counterfactual.warmupHits,
+            ttlSavings: costs.counterfactual.ttlSavings,
+            ttlHits: costs.counterfactual.ttlHits,
+            batchSavings: costs.batchSavings,
+            avoidedCompactions: costs.counterfactual.avoidedCompactions,
+            avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
+          });
+        }
+        state._dirty = false;
+      } catch (e) {
+        log.error(`periodic state flush error for session ${sessionID.slice(0, 16)}:`, e);
+      }
     }
   }, POLL_INTERVAL_MS);
 

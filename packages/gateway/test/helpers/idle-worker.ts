@@ -66,6 +66,7 @@ mock.module("@loreai/core", () => ({
   exportLoreFile: () => {},
   saveSessionCosts: () => {},
   saveSessionTracking: () => {},
+  saveGradientState: () => {},
   loadSessionTracking: () => null,
   getKV: () => null,
   setKV: () => {},

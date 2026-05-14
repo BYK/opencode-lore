@@ -528,6 +528,24 @@ const MIGRATIONS: string[] = [
   ALTER TABLE session_state ADD COLUMN ltm_pin_tokens INTEGER;
   ALTER TABLE session_state ADD COLUMN consecutive_text_only_turns INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 24: Persist remaining volatile session state across restarts.
+  -- Session identity (Tier 1/2/3 session correlation)
+  ALTER TABLE session_state ADD COLUMN fingerprint TEXT NOT NULL DEFAULT '';
+  ALTER TABLE session_state ADD COLUMN header_session_id TEXT;
+  ALTER TABLE session_state ADD COLUMN header_name TEXT;
+  -- Cache warming state
+  ALTER TABLE session_state ADD COLUMN resolved_conversation_ttl TEXT NOT NULL DEFAULT '5m';
+  ALTER TABLE session_state ADD COLUMN warmup_state TEXT;
+  -- Gradient calibration state (survives restarts to avoid uncalibrated busts)
+  ALTER TABLE session_state ADD COLUMN dynamic_context_cap REAL NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN bust_rate_ema REAL NOT NULL DEFAULT -1;
+  ALTER TABLE session_state ADD COLUMN inter_bust_interval_ema REAL NOT NULL DEFAULT -1;
+  ALTER TABLE session_state ADD COLUMN last_layer INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN last_known_input INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN last_turn_at INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN last_bust_at INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -1095,6 +1113,21 @@ export type SessionTrackingState = {
   ltmCacheTokens?: number | null;
   ltmPinText?: string | null;
   ltmPinTokens?: number | null;
+  // v24: session identity
+  fingerprint?: string;
+  headerSessionId?: string | null;
+  headerName?: string | null;
+  // v24: cache warming
+  resolvedConversationTTL?: string;
+  warmupState?: string | null; // JSON blob
+  // v24: gradient calibration
+  dynamicContextCap?: number;
+  bustRateEMA?: number;
+  interBustIntervalEMA?: number;
+  lastLayer?: number;
+  lastKnownInput?: number;
+  lastTurnAt?: number;
+  lastBustAt?: number;
 };
 
 /**
@@ -1147,6 +1180,57 @@ export function saveSessionTracking(sessionID: string, state: SessionTrackingSta
     sets.push("ltm_pin_tokens = ?");
     vals.push(state.ltmPinTokens);
   }
+  // v24: session identity
+  if (state.fingerprint !== undefined) {
+    sets.push("fingerprint = ?");
+    vals.push(state.fingerprint);
+  }
+  if (state.headerSessionId !== undefined) {
+    sets.push("header_session_id = ?");
+    vals.push(state.headerSessionId);
+  }
+  if (state.headerName !== undefined) {
+    sets.push("header_name = ?");
+    vals.push(state.headerName);
+  }
+  // v24: cache warming
+  if (state.resolvedConversationTTL !== undefined) {
+    sets.push("resolved_conversation_ttl = ?");
+    vals.push(state.resolvedConversationTTL);
+  }
+  if (state.warmupState !== undefined) {
+    sets.push("warmup_state = ?");
+    vals.push(state.warmupState);
+  }
+  // v24: gradient calibration
+  if (state.dynamicContextCap !== undefined) {
+    sets.push("dynamic_context_cap = ?");
+    vals.push(state.dynamicContextCap);
+  }
+  if (state.bustRateEMA !== undefined) {
+    sets.push("bust_rate_ema = ?");
+    vals.push(state.bustRateEMA);
+  }
+  if (state.interBustIntervalEMA !== undefined) {
+    sets.push("inter_bust_interval_ema = ?");
+    vals.push(state.interBustIntervalEMA);
+  }
+  if (state.lastLayer !== undefined) {
+    sets.push("last_layer = ?");
+    vals.push(state.lastLayer);
+  }
+  if (state.lastKnownInput !== undefined) {
+    sets.push("last_known_input = ?");
+    vals.push(state.lastKnownInput);
+  }
+  if (state.lastTurnAt !== undefined) {
+    sets.push("last_turn_at = ?");
+    vals.push(state.lastTurnAt);
+  }
+  if (state.lastBustAt !== undefined) {
+    sets.push("last_bust_at = ?");
+    vals.push(state.lastBustAt);
+  }
 
   // Update only the specified columns
   db()
@@ -1166,6 +1250,21 @@ export type LoadedSessionTracking = {
   ltmCacheTokens: number | null;
   ltmPinText: string | null;
   ltmPinTokens: number | null;
+  // v24: session identity
+  fingerprint: string;
+  headerSessionId: string | null;
+  headerName: string | null;
+  // v24: cache warming
+  resolvedConversationTTL: string;
+  warmupState: string | null;
+  // v24: gradient calibration
+  dynamicContextCap: number;
+  bustRateEMA: number;
+  interBustIntervalEMA: number;
+  lastLayer: number;
+  lastKnownInput: number;
+  lastTurnAt: number;
+  lastBustAt: number;
 };
 
 /**
@@ -1176,7 +1275,11 @@ export function loadSessionTracking(sessionID: string): LoadedSessionTracking | 
     .query(
       `SELECT last_curated_at, message_count, turns_since_curation,
               consecutive_text_only_turns,
-              ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens
+              ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens,
+              fingerprint, header_session_id, header_name,
+              resolved_conversation_ttl, warmup_state,
+              dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
+              last_layer, last_known_input, last_turn_at, last_bust_at
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
@@ -1188,6 +1291,18 @@ export function loadSessionTracking(sessionID: string): LoadedSessionTracking | 
       ltm_cache_tokens: number | null;
       ltm_pin_text: string | null;
       ltm_pin_tokens: number | null;
+      fingerprint: string;
+      header_session_id: string | null;
+      header_name: string | null;
+      resolved_conversation_ttl: string;
+      warmup_state: string | null;
+      dynamic_context_cap: number;
+      bust_rate_ema: number;
+      inter_bust_interval_ema: number;
+      last_layer: number;
+      last_known_input: number;
+      last_turn_at: number;
+      last_bust_at: number;
     } | null;
   if (!row) return null;
   return {
@@ -1199,6 +1314,18 @@ export function loadSessionTracking(sessionID: string): LoadedSessionTracking | 
     ltmCacheTokens: row.ltm_cache_tokens,
     ltmPinText: row.ltm_pin_text,
     ltmPinTokens: row.ltm_pin_tokens,
+    fingerprint: row.fingerprint,
+    headerSessionId: row.header_session_id,
+    headerName: row.header_name,
+    resolvedConversationTTL: row.resolved_conversation_ttl,
+    warmupState: row.warmup_state,
+    dynamicContextCap: row.dynamic_context_cap,
+    bustRateEMA: row.bust_rate_ema,
+    interBustIntervalEMA: row.inter_bust_interval_ema,
+    lastLayer: row.last_layer,
+    lastKnownInput: row.last_known_input,
+    lastTurnAt: row.last_turn_at,
+    lastBustAt: row.last_bust_at,
   };
 }
 

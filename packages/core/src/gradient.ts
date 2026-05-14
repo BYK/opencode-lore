@@ -1,6 +1,6 @@
 import type { LoreMessage, LorePart, LoreMessageWithParts, LoreToolPart, LoreTextPart, LoreToolState, LoreToolStateCompleted } from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
-import { db, ensureProject, loadForceMinLayer, saveForceMinLayer } from "./db";
+import { db, ensureProject, loadForceMinLayer, saveForceMinLayer, saveSessionTracking, loadSessionTracking } from "./db";
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
 import { normalize } from "./markdown";
@@ -319,6 +319,27 @@ function getSessionState(sessionID: string): SessionState {
     // forceMinLayer=2, but if OpenCode restarts before the next turn,
     // the in-memory escalation would be lost without this.
     state.forceMinLayer = loadForceMinLayer(sessionID) as SafetyLayer;
+
+    // Restore gradient calibration state from DB (v24) — avoids uncalibrated
+    // first turns after restart. Without this, dynamicContextCap reverts to
+    // the static ceiling, bustRateEMA is uninitialized, and lastTurnAt=0
+    // prevents onIdleResume() from detecting idle gaps.
+    //
+    // Atomic restore: lastTurnAt > 0 is the proxy for "gradient state was
+    // ever flushed to DB". Restore all fields together or none — avoids
+    // per-field sentinel fragility where a valid value (e.g. lastLayer=0)
+    // could be mistaken for "never persisted".
+    const persisted = loadSessionTracking(sessionID);
+    if (persisted && persisted.lastTurnAt > 0) {
+      state.dynamicContextCap = persisted.dynamicContextCap;
+      state.bustRateEMA = persisted.bustRateEMA;
+      state.interBustIntervalEMA = persisted.interBustIntervalEMA;
+      state.lastLayer = persisted.lastLayer as SafetyLayer;
+      state.lastKnownInput = persisted.lastKnownInput;
+      state.lastTurnAt = persisted.lastTurnAt;
+      state.lastBustAt = persisted.lastBustAt;
+    }
+
     sessionStates.set(sessionID, state);
   }
   return state;
@@ -604,6 +625,28 @@ export function inspectSessionState(sessionID: string): {
  */
 export function setLastTurnAtForTest(sessionID: string, ms: number): void {
   getSessionState(sessionID).lastTurnAt = ms;
+}
+
+/**
+ * Persist gradient calibration state to the session_state table.
+ *
+ * Designed to be called periodically (e.g. every 30s from the idle scheduler
+ * tick) rather than on every mutation, to avoid write amplification on the
+ * hot path. Max data loss on crash is one tick interval (~30s).
+ */
+export function saveGradientState(sessionID: string): void {
+  const state = sessionStates.get(sessionID);
+  if (!state) return;
+
+  saveSessionTracking(sessionID, {
+    dynamicContextCap: state.dynamicContextCap,
+    bustRateEMA: state.bustRateEMA,
+    interBustIntervalEMA: state.interBustIntervalEMA,
+    lastLayer: state.lastLayer,
+    lastKnownInput: state.lastKnownInput,
+    lastTurnAt: state.lastTurnAt,
+    lastBustAt: state.lastBustAt,
+  });
 }
 
 type Distillation = {

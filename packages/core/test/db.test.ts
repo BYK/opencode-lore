@@ -23,7 +23,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(23);
+    expect(row.version).toBe(24);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -541,6 +541,97 @@ describe("db", () => {
     const loaded = loadSessionTracking(sid);
     expect(loaded!.ltmCacheText).toBeNull();
     expect(loaded!.ltmCacheTokens).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // v24: session identity, cache warming, gradient state
+  // -------------------------------------------------------------------------
+
+  test("saveSessionTracking v24 session identity round-trip", () => {
+    const sid = `test-v24-identity-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      fingerprint: "abc123hash",
+      headerSessionId: "uuid-4567",
+      headerName: "x-claude-code-session-id",
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.fingerprint).toBe("abc123hash");
+    expect(loaded!.headerSessionId).toBe("uuid-4567");
+    expect(loaded!.headerName).toBe("x-claude-code-session-id");
+  });
+
+  test("saveSessionTracking v24 cache warming round-trip", () => {
+    const sid = `test-v24-warming-${crypto.randomUUID()}`;
+    const warmup = { lastWarmupAt: 1000, warmupCount: 3, warmupHits: 1, disabled: false, forceKeepWarm: true };
+    saveSessionTracking(sid, {
+      resolvedConversationTTL: "1h",
+      warmupState: JSON.stringify(warmup),
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.resolvedConversationTTL).toBe("1h");
+    const parsed = JSON.parse(loaded!.warmupState!);
+    expect(parsed.warmupCount).toBe(3);
+    expect(parsed.forceKeepWarm).toBe(true);
+  });
+
+  test("saveSessionTracking v24 gradient state round-trip", () => {
+    const sid = `test-v24-gradient-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      dynamicContextCap: 150000,
+      bustRateEMA: 0.35,
+      interBustIntervalEMA: 120000,
+      lastLayer: 1,
+      lastKnownInput: 80000,
+      lastTurnAt: Date.now() - 5000,
+      lastBustAt: Date.now() - 60000,
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.dynamicContextCap).toBe(150000);
+    expect(loaded!.bustRateEMA).toBeCloseTo(0.35);
+    expect(loaded!.interBustIntervalEMA).toBe(120000);
+    expect(loaded!.lastLayer).toBe(1);
+    expect(loaded!.lastKnownInput).toBe(80000);
+    expect(loaded!.lastTurnAt).toBeGreaterThan(0);
+    expect(loaded!.lastBustAt).toBeGreaterThan(0);
+  });
+
+  test("saveSessionTracking v24 partial update preserves v23 + v24 fields", () => {
+    const sid = `test-v24-partial-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      messageCount: 10,
+      fingerprint: "hash1",
+      dynamicContextCap: 100000,
+    });
+    // Update only gradient field
+    saveSessionTracking(sid, { bustRateEMA: 0.5 });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded!.messageCount).toBe(10);
+    expect(loaded!.fingerprint).toBe("hash1");
+    expect(loaded!.dynamicContextCap).toBe(100000);
+    expect(loaded!.bustRateEMA).toBeCloseTo(0.5);
+  });
+
+  test("saveSessionTracking v24 defaults are correct for new rows", () => {
+    const sid = `test-v24-defaults-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, { messageCount: 1 });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    // v24 defaults
+    expect(loaded!.fingerprint).toBe("");
+    expect(loaded!.headerSessionId).toBeNull();
+    expect(loaded!.headerName).toBeNull();
+    expect(loaded!.resolvedConversationTTL).toBe("5m");
+    expect(loaded!.warmupState).toBeNull();
+    expect(loaded!.dynamicContextCap).toBe(0);
+    expect(loaded!.bustRateEMA).toBe(-1);
+    expect(loaded!.interBustIntervalEMA).toBe(-1);
+    expect(loaded!.lastLayer).toBe(0);
+    expect(loaded!.lastKnownInput).toBe(0);
+    expect(loaded!.lastTurnAt).toBe(0);
+    expect(loaded!.lastBustAt).toBe(0);
   });
 
   // -------------------------------------------------------------------------
