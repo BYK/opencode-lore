@@ -160,6 +160,7 @@ import {
   expandRecallMarkers,
   cleanupRecallStore,
   replaceRecallWithMarker,
+  isRecallMarker,
 } from "./recall";
 
 // ---------------------------------------------------------------------------
@@ -1748,17 +1749,24 @@ function postResponse(
         }
       }
 
-      // Build and store the assistant response message
-      const assistantMsg = gatewayMessagesToLore(
-        [{ role: "assistant", content: resp.content }],
-        sessionID,
-      )[0];
-      updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
-      temporal.store({
-        projectPath,
-        info: assistantMsg.info,
-        parts: assistantMsg.parts,
-      });
+      // Build and store the assistant response message.
+      // Strip recall marker text blocks — they contain the raw query string
+      // and pollute FTS results with self-referential noise.
+      const assistantContent = resp.content.filter(
+        (b) => !(b.type === "text" && isRecallMarker(b.text)),
+      );
+      if (assistantContent.length > 0) {
+        const assistantMsg = gatewayMessagesToLore(
+          [{ role: "assistant", content: assistantContent }],
+          sessionID,
+        )[0];
+        updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
+        temporal.store({
+          projectPath,
+          info: assistantMsg.info,
+          parts: assistantMsg.parts,
+        });
+      }
 
       // Update session state (persisted in the batched save after messageCount update)
       sessionState.turnsSinceCuration =

@@ -19,6 +19,7 @@ import {
   buildRecallFollowUp,
   buildRecallMarker,
   parseRecallMarker,
+  isRecallMarker,
   scopeToLabel,
   labelToScope,
   recallStoreKey,
@@ -266,6 +267,27 @@ describe("parseRecallMarker", () => {
     expect(parseRecallMarker("hello world")).toBeNull();
     expect(parseRecallMarker("[Searching memory...]")).toBeNull();
     expect(parseRecallMarker("")).toBeNull();
+  });
+});
+
+describe("isRecallMarker", () => {
+  test("detects search markers", () => {
+    expect(isRecallMarker('📚 Searching all archives for "test query"…')).toBe(true);
+    expect(isRecallMarker('📚 Searching session history for "auth"…')).toBe(true);
+    expect(isRecallMarker('📚 Searching project archives for "config"…')).toBe(true);
+    expect(isRecallMarker('📚 Searching knowledge base for "patterns"…')).toBe(true);
+  });
+
+  test("detects id-based detail markers", () => {
+    expect(isRecallMarker("📚 Fetching detail for k:abc123…")).toBe(true);
+    expect(isRecallMarker("📚 Fetching detail for d:019abc…")).toBe(true);
+  });
+
+  test("rejects non-marker text", () => {
+    expect(isRecallMarker("hello world")).toBe(false);
+    expect(isRecallMarker("[Searching memory...]")).toBe(false);
+    expect(isRecallMarker("")).toBe(false);
+    expect(isRecallMarker("📚 Some other text")).toBe(false);
   });
 });
 
