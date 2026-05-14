@@ -1250,8 +1250,8 @@ function pageWarming(): string {
       Used as Bayesian prior for sessions with few observations.
     </p>`;
 
-    for (const [projectPath, hist] of globalHists) {
-      const name = projectPath.split("/").pop() ?? projectPath;
+    for (const [pid, hist] of globalHists) {
+      const name = projectName(pid) ?? pid;
       body += `<details class="warming">
         <summary>${esc(name)} &mdash; ${hist.total} observations</summary>`;
       if (hist.total > 0) {
