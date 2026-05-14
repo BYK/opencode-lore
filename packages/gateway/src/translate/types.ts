@@ -284,6 +284,12 @@ export type SessionState = {
   lastModel?: string;
   /** Protocol from the last real request (for warming profile resolution). */
   lastProtocol?: "anthropic" | "openai" | "openai-responses";
+
+  // --- Periodic persistence ---
+
+  /** Set true when session state changes that need periodic flush to DB.
+   *  Consumed by the 30s idle tick — only dirty sessions are flushed. */
+  _dirty?: boolean;
 };
 
 // ---------------------------------------------------------------------------
