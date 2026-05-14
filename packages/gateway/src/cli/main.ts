@@ -93,6 +93,7 @@ const OPTIONS = {
   version: { type: "boolean" as const, short: "v" },
   help: { type: "boolean" as const, short: "h" },
   yes: { type: "boolean" as const, short: "y" },
+  interactive: { type: "boolean" as const, short: "i" },
   // `lore logs` flags
   follow: { type: "boolean" as const, short: "f" },
   n: { type: "string" as const },

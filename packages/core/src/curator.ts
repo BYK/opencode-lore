@@ -1,5 +1,5 @@
 import { config } from "./config";
-import { saveSessionTracking, loadSessionTracking } from "./db";
+import { saveSessionTracking, loadSessionTracking, ensureProject } from "./db";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
@@ -227,6 +227,18 @@ async function runInner(input: {
       if (dupes.totalRemoved > 0) {
         log.info(`post-curation dedup: merged ${dupes.totalRemoved} duplicate entries`);
         result.deleted += dupes.totalRemoved;
+      }
+      // Record auto-signals for adaptive threshold calibration.
+      // Merged pairs → accept; non-merged high-similarity pairs → reject.
+      if (dupes.pairSimilarities.size > 0) {
+        const pid = ensureProject(input.projectPath);
+        ltm.recordAutoSignals(pid, dupes);
+        // Recalibrate if enough data has accumulated
+        const newThreshold = ltm.calibrateDedupThreshold(pid);
+        if (newThreshold !== null) {
+          const count = ltm.getDedupFeedbackCount(pid);
+          ltm.saveCalibratedThreshold(pid, newThreshold, count);
+        }
       }
     } catch (err) {
       log.warn("post-curation dedup failed (non-fatal):", err);

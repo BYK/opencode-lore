@@ -546,6 +546,24 @@ const MIGRATIONS: string[] = [
   ALTER TABLE session_state ADD COLUMN last_turn_at INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE session_state ADD COLUMN last_bust_at INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 25: Adaptive dedup threshold — store accept/reject feedback
+  -- on embedding-based duplicate pairs for per-project threshold calibration.
+  -- Titles stored instead of FK IDs because entries are deleted during dedup;
+  -- the similarity float is the actual calibration input.
+  CREATE TABLE IF NOT EXISTS dedup_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT,
+    entry_a_title TEXT NOT NULL,
+    entry_b_title TEXT NOT NULL,
+    similarity REAL NOT NULL,
+    accepted INTEGER NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_dedup_feedback_project
+    ON dedup_feedback(project_id);
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */

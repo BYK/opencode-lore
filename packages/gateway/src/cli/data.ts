@@ -713,20 +713,53 @@ function printDedupResult(
     console.log(`Cluster ${i + 1} (${total} entries → 1):`);
     console.log(`  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`);
     for (const m of cluster.merged) {
-      console.log(`  ${apply ? "Remove" : "Would remove"}: "${truncate(m.title, 60)}" (${m.id.slice(0, 8)}…)`);
+      const pairKey = [cluster.surviving.id, m.id].sort().join(":");
+      const sim = result.pairSimilarities.get(pairKey);
+      const simStr = sim != null ? ` [sim: ${sim.toFixed(3)}]` : "";
+      console.log(`  ${apply ? "Remove" : "Would remove"}: "${truncate(m.title, 55)}" (${m.id.slice(0, 8)}…)${simStr}`);
     }
     console.log();
   }
+}
+
+/** Prompt the user for a single-key choice. Returns the chosen key. */
+function promptChoice(message: string, choices: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const ask = () => {
+      rl.question(message, (answer) => {
+        const trimmed = answer.trim().toLowerCase();
+        if (choices.includes(trimmed)) {
+          rl.close();
+          resolve(trimmed);
+        } else {
+          ask(); // re-prompt on invalid input
+        }
+      });
+    };
+    ask();
+  });
 }
 
 async function cmdDedup(
   _args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
-  const { ltm, data, embedding: emb } = await import("@loreai/core");
+  const { ltm, data, projectId: getProjectId, embedding: emb } = await import("@loreai/core");
   const apply = !!flags.yes;
+  const interactive = !!flags.interactive;
   const asJson = !!flags.json;
   const explicitProject = typeof flags.project === "string" ? resolve(flags.project) : null;
+
+  if (interactive && apply) {
+    console.error("Error: --interactive and --yes are mutually exclusive.");
+    process.exit(1);
+  }
+
+  if (interactive && !process.stdin.isTTY) {
+    console.error("Error: --interactive requires a TTY. Use --yes for non-interactive.");
+    process.exit(1);
+  }
 
   // Determine which projects to process
   const projects = explicitProject
@@ -756,6 +789,25 @@ async function cmdDedup(
     }
   }
 
+  // Display calibration status for each project
+  for (const project of projects) {
+    const pid = getProjectId(project.path);
+    if (!pid) continue;
+    const count = ltm.getDedupFeedbackCount(pid);
+    const threshold = ltm.loadCalibratedThreshold(pid);
+    if (threshold !== null) {
+      console.log(`[${project.name}] Using calibrated threshold ${threshold.toFixed(3)} (from ${count} feedback pairs, default: 0.935).`);
+    } else if (count > 0) {
+      console.log(`[${project.name}] ${count}/20 feedback samples collected. Threshold calibration activates after 20 samples.`);
+    }
+  }
+
+  // Interactive mode: dry-run first, then prompt per cluster
+  if (interactive) {
+    await cmdDedupInteractive(projects, explicitProject, ltm, getProjectId);
+    return;
+  }
+
   if (!apply) {
     console.log("Scanning for duplicate knowledge entries (dry run)...\n");
   } else {
@@ -764,12 +816,12 @@ async function cmdDedup(
 
   let grandTotalRemoved = 0;
   let grandTotalClusters = 0;
-  const allResults: Array<{ name: string; result: Awaited<ReturnType<typeof ltm.deduplicate>> }> = [];
+  const allResults: Array<{ name: string; path: string; result: Awaited<ReturnType<typeof ltm.deduplicate>> }> = [];
 
   for (const project of projects) {
     const result = await ltm.deduplicate(project.path, { dryRun: !apply });
     if (result.clusters.length > 0) {
-      allResults.push({ name: project.name, result });
+      allResults.push({ name: project.name, path: project.path, result });
       grandTotalRemoved += result.totalRemoved;
       grandTotalClusters += result.clusters.length;
     }
@@ -778,7 +830,7 @@ async function cmdDedup(
   // Also dedup global (cross-project) entries
   const globalResult = await ltm.deduplicateGlobal({ dryRun: !apply });
   if (globalResult.clusters.length > 0) {
-    allResults.push({ name: "Global", result: globalResult });
+    allResults.push({ name: "Global", path: "", result: globalResult });
     grandTotalRemoved += globalResult.totalRemoved;
     grandTotalClusters += globalResult.clusters.length;
   }
@@ -804,8 +856,168 @@ async function cmdDedup(
       (multiProject ? ` in ${allResults.length} projects.` : "."),
   );
 
+  // Record feedback and recalibrate when --yes is used
+  if (apply) {
+    for (const { name, path, result } of allResults) {
+      const pid = name === "Global" ? null : getProjectId(path) ?? null;
+      ltm.recordDedupResultFeedback(pid, result, true, "cli_yes");
+    }
+    // Recalibrate per project
+    const calibratedProjects = new Set<string | null>();
+    for (const { name, path } of allResults) {
+      const pid = name === "Global" ? null : getProjectId(path) ?? null;
+      if (calibratedProjects.has(pid)) continue;
+      calibratedProjects.add(pid);
+      const newThreshold = ltm.calibrateDedupThreshold(pid);
+      if (newThreshold !== null) {
+        const count = ltm.getDedupFeedbackCount(pid);
+        ltm.saveCalibratedThreshold(pid, newThreshold, count);
+        console.log(`Threshold calibrated to ${newThreshold.toFixed(3)} (from ${count} feedback pairs).`);
+      }
+    }
+  }
+
   if (!apply) {
-    console.log("\nRun with --yes to apply.");
+    console.log("\nRun with --yes to apply, or --interactive for per-cluster review.");
+  }
+}
+
+/**
+ * Interactive dedup: dry-run first, then prompt the user per cluster
+ * for accept/reject/skip decisions. Records feedback for calibration.
+ */
+async function cmdDedupInteractive(
+  projects: Array<{ path: string; name: string }>,
+  explicitProject: string | null,
+  ltm: typeof import("@loreai/core").ltm,
+  getProjectId: typeof import("@loreai/core").projectId,
+): Promise<void> {
+  console.log("Scanning for duplicate knowledge entries (interactive mode)...\n");
+
+  // Collect all clusters across projects (dry run)
+  type ProjectCluster = {
+    projectName: string;
+    projectPath: string;
+    cluster: Awaited<ReturnType<typeof ltm.deduplicate>>["clusters"][number];
+    pairSimilarities: Map<string, number>;
+  };
+  const allClusters: ProjectCluster[] = [];
+
+  for (const project of projects) {
+    const result = await ltm.deduplicate(project.path, { dryRun: true });
+    for (const cluster of result.clusters) {
+      allClusters.push({
+        projectName: project.name,
+        projectPath: project.path,
+        cluster,
+        pairSimilarities: result.pairSimilarities,
+      });
+    }
+  }
+
+  // Global entries
+  const globalResult = await ltm.deduplicateGlobal({ dryRun: true });
+  for (const cluster of globalResult.clusters) {
+    allClusters.push({
+      projectName: "Global",
+      projectPath: "",
+      cluster,
+      pairSimilarities: globalResult.pairSimilarities,
+    });
+  }
+
+  if (allClusters.length === 0) {
+    console.log("No duplicates found.");
+    return;
+  }
+
+  let acceptedCount = 0;
+  let rejectedCount = 0;
+  let skippedCount = 0;
+  let removedCount = 0;
+  const multiProject = allClusters.length > 1 || (!explicitProject && projects.length > 1);
+
+  for (let i = 0; i < allClusters.length; i++) {
+    const { projectName, projectPath, cluster, pairSimilarities } = allClusters[i];
+    const total = 1 + cluster.merged.length;
+
+    if (multiProject) console.log(`--- ${projectName} ---`);
+    console.log(`\nCluster ${i + 1} of ${allClusters.length} (${total} entries → 1):`);
+    console.log(`  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`);
+    for (const m of cluster.merged) {
+      const pairKey = [cluster.surviving.id, m.id].sort().join(":");
+      const sim = pairSimilarities.get(pairKey);
+      const simStr = sim != null ? ` [sim: ${sim.toFixed(3)}]` : "";
+      console.log(`  Merge:  "${truncate(m.title, 55)}" (${m.id.slice(0, 8)}…)${simStr}`);
+    }
+
+    const answer = await promptChoice("\n  [a]ccept merge / [r]eject (keep all) / [s]kip? ", ["a", "r", "s"]);
+    const pid = projectName === "Global" ? null : getProjectId(projectPath) ?? null;
+
+    if (answer === "a") {
+      // Apply merge: remove merged entries
+      for (const m of cluster.merged) {
+        ltm.remove(m.id);
+      }
+      // Record accept feedback
+      for (const m of cluster.merged) {
+        const pairKey = [cluster.surviving.id, m.id].sort().join(":");
+        const sim = pairSimilarities.get(pairKey);
+        if (sim != null && sim > 0) {
+          ltm.recordDedupFeedback({
+            projectId: pid,
+            entryATitle: cluster.surviving.title,
+            entryBTitle: m.title,
+            similarity: sim,
+            accepted: true,
+            source: "cli_interactive",
+          });
+        }
+      }
+      acceptedCount++;
+      removedCount += cluster.merged.length;
+      console.log(`  → Merged (${cluster.merged.length} entries removed).`);
+    } else if (answer === "r") {
+      // Record reject feedback (don't delete anything)
+      for (const m of cluster.merged) {
+        const pairKey = [cluster.surviving.id, m.id].sort().join(":");
+        const sim = pairSimilarities.get(pairKey);
+        if (sim != null && sim > 0) {
+          ltm.recordDedupFeedback({
+            projectId: pid,
+            entryATitle: cluster.surviving.title,
+            entryBTitle: m.title,
+            similarity: sim,
+            accepted: false,
+            source: "cli_interactive",
+          });
+        }
+      }
+      rejectedCount++;
+      console.log("  → Kept separate.");
+    } else {
+      skippedCount++;
+      console.log("  → Skipped.");
+    }
+  }
+
+  console.log(
+    `\nDone: ${acceptedCount} accepted (${removedCount} entries removed), ` +
+      `${rejectedCount} rejected, ${skippedCount} skipped.`,
+  );
+
+  // Recalibrate per project after interactive session
+  const calibratedProjects = new Set<string | null>();
+  for (const { projectName, projectPath } of allClusters) {
+    const pid = projectName === "Global" ? null : getProjectId(projectPath) ?? null;
+    if (calibratedProjects.has(pid)) continue;
+    calibratedProjects.add(pid);
+    const newThreshold = ltm.calibrateDedupThreshold(pid);
+    if (newThreshold !== null) {
+      const count = ltm.getDedupFeedbackCount(pid);
+      ltm.saveCalibratedThreshold(pid, newThreshold, count);
+      console.log(`Threshold calibrated to ${newThreshold.toFixed(3)} (from ${count} feedback pairs).`);
+    }
   }
 }
 
@@ -868,6 +1080,7 @@ Options:
   --limit <n>           Max rows for list commands (default: 50)
   --json                Output JSON instead of table
   --yes, -y             Skip confirmation for destructive operations
+  --interactive, -i     Interactive mode for dedup (accept/reject per cluster)
 
 Clear options:
   --knowledge           Clear only knowledge entries
@@ -891,6 +1104,7 @@ Examples:
   lore data recover --yes                  # skip confirmation
   lore data dedup                          # dry-run: show duplicate clusters
   lore data dedup --yes                    # apply: remove duplicates
+  lore data dedup --interactive            # accept/reject each cluster interactively
   lore data dedup --project /path/to/project
   lore data reindex                        # rebuild all embedding vectors
 `.trimStart();

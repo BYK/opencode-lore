@@ -1,5 +1,5 @@
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject } from "./db";
+import { db, ensureProject, getKV, setKV } from "./db";
 import { config } from "./config";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, extractTopTerms, filterTerms, runRelaxedSearch } from "./search";
 import * as embedding from "./embedding";
@@ -1078,6 +1078,8 @@ export type DedupCluster = {
 export type DedupResult = {
   clusters: DedupCluster[];
   totalRemoved: number;
+  /** Pairwise embedding cosine similarities. Key: sorted "idA:idB". */
+  pairSimilarities: Map<string, number>;
 };
 
 /**
@@ -1104,13 +1106,17 @@ export type DedupResult = {
  * @returns             Cluster report and count of removed entries
  */
 /** Core dedup logic — operates on an arbitrary list of entries. */
-function _dedup(entries: KnowledgeEntry[], dryRun: boolean): DedupResult {
-  if (entries.length < 2) return { clusters: [], totalRemoved: 0 };
+function _dedup(
+  entries: KnowledgeEntry[],
+  dryRun: boolean,
+  embeddingThreshold: number = EMBEDDING_DEDUP_THRESHOLD,
+): DedupResult {
+  if (entries.length < 2) return { clusters: [], totalRemoved: 0, pairSimilarities: new Map() };
 
   // --- Build neighbor map using title overlap + embedding similarity ---
   // Two entries are considered neighbors (potential duplicates) if EITHER:
   //   (a) title word-overlap ≥ 0.7 with ≥ 4 shared words, OR
-  //   (b) embedding cosine similarity ≥ 0.935
+  //   (b) embedding cosine similarity ≥ embeddingThreshold (default 0.935)
   // Star clustering (no transitivity) prevents snowball merging.
   // O(n²) pairwise comparison — acceptable for n ≤ 25 (maxEntries cap).
 
@@ -1138,6 +1144,8 @@ function _dedup(entries: KnowledgeEntry[], dryRun: boolean): DedupResult {
   // Pre-compute neighbors for all pairs
   type DedupHit = { id: string; score: number };
   const neighborMap = new Map<string, DedupHit[]>();
+  // Collect all pairwise embedding similarities (for feedback/calibration).
+  const pairSimilarities = new Map<string, number>();
 
   for (const entry of entries) {
     const neighbors: DedupHit[] = [];
@@ -1157,7 +1165,15 @@ function _dedup(entries: KnowledgeEntry[], dryRun: boolean): DedupResult {
         const otherVec = embeddingMap.get(other.id);
         if (otherVec && entryVec.length === otherVec.length) {
           similarity = embedding.cosineSimilarity(entryVec, otherVec);
-          embeddingMatch = similarity >= EMBEDDING_DEDUP_THRESHOLD;
+          embeddingMatch = similarity >= embeddingThreshold;
+        }
+      }
+
+      // Track all pairwise embedding similarities for calibration signals
+      if (similarity > 0) {
+        const pairKey = [entry.id, other.id].sort().join(":");
+        if (!pairSimilarities.has(pairKey)) {
+          pairSimilarities.set(pairKey, similarity);
         }
       }
 
@@ -1232,21 +1248,24 @@ function _dedup(entries: KnowledgeEntry[], dryRun: boolean): DedupResult {
   // Sort clusters by size descending for readability
   result.sort((a, b) => b.merged.length - a.merged.length);
 
-  return { clusters: result, totalRemoved };
+  return { clusters: result, totalRemoved, pairSimilarities };
 }
 
 export async function deduplicate(
   projectPath: string,
   opts?: { dryRun?: boolean },
 ): Promise<DedupResult> {
+  const pid = ensureProject(projectPath);
+  const threshold = loadCalibratedThreshold(pid) ?? EMBEDDING_DEDUP_THRESHOLD;
   const entries = forProject(projectPath, false);
-  return _dedup(entries, opts?.dryRun ?? true);
+  return _dedup(entries, opts?.dryRun ?? true, threshold);
 }
 
 /** Deduplicate global (cross-project) entries that have no project_id. */
 export async function deduplicateGlobal(
   opts?: { dryRun?: boolean },
 ): Promise<DedupResult> {
+  const threshold = loadCalibratedThreshold(null) ?? EMBEDDING_DEDUP_THRESHOLD;
   const entries = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge
@@ -1255,5 +1274,296 @@ export async function deduplicateGlobal(
        ORDER BY confidence DESC, updated_at DESC`,
     )
     .all() as KnowledgeEntry[];
-  return _dedup(entries, opts?.dryRun ?? true);
+  return _dedup(entries, opts?.dryRun ?? true, threshold);
+}
+
+// ---------------------------------------------------------------------------
+// Dedup feedback & adaptive threshold calibration
+// ---------------------------------------------------------------------------
+
+export type DedupFeedbackSource = "auto_dedup" | "cli_yes" | "cli_interactive";
+
+const MIN_CALIBRATION_SAMPLES = 20;
+const DEFAULT_EMBEDDING_DEDUP_THRESHOLD = EMBEDDING_DEDUP_THRESHOLD;
+/** Only record auto-signals for pairs with similarity >= this floor. */
+const AUTO_SIGNAL_MIN_SIMILARITY = 0.80;
+/** Max auto-signal pairs to record per dedup run (closest to threshold). */
+const AUTO_SIGNAL_MAX_PAIRS = 50;
+
+/** Record a single dedup feedback row. */
+export function recordDedupFeedback(input: {
+  projectId: string | null;
+  entryATitle: string;
+  entryBTitle: string;
+  similarity: number;
+  accepted: boolean;
+  source: DedupFeedbackSource;
+}): void {
+  db()
+    .query(
+      `INSERT INTO dedup_feedback
+         (project_id, entry_a_title, entry_b_title, similarity, accepted, source, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.projectId,
+      input.entryATitle,
+      input.entryBTitle,
+      input.similarity,
+      input.accepted ? 1 : 0,
+      input.source,
+      Date.now(),
+    );
+}
+
+/**
+ * Bulk-record feedback for all merged pairs in a DedupResult.
+ * Only records pairs with embedding similarity > 0 (title-overlap-only
+ * matches are excluded from calibration).
+ */
+export function recordDedupResultFeedback(
+  projectId: string | null,
+  result: DedupResult,
+  accepted: boolean,
+  source: DedupFeedbackSource,
+): void {
+  for (const cluster of result.clusters) {
+    for (const merged of cluster.merged) {
+      const pairKey = [cluster.surviving.id, merged.id].sort().join(":");
+      const similarity = result.pairSimilarities.get(pairKey);
+      if (similarity != null && similarity > 0) {
+        recordDedupFeedback({
+          projectId,
+          entryATitle: cluster.surviving.title,
+          entryBTitle: merged.title,
+          similarity,
+          accepted,
+          source,
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Record automatic calibration signals from a post-curation dedup sweep.
+ *
+ * - Merged pairs → accept signals
+ * - Non-merged pairs with similarity in [0.80, threshold) → reject signals
+ *   (the system decided they were distinct at this similarity level)
+ *
+ * Caps at AUTO_SIGNAL_MAX_PAIRS most interesting pairs per run (closest
+ * to the threshold boundary) to avoid table bloat.
+ */
+export function recordAutoSignals(
+  projectId: string | null,
+  result: DedupResult,
+): void {
+  // Collect merged pair IDs for quick lookup
+  const mergedPairs = new Set<string>();
+  for (const cluster of result.clusters) {
+    for (const merged of cluster.merged) {
+      const pairKey = [cluster.surviving.id, merged.id].sort().join(":");
+      mergedPairs.add(pairKey);
+    }
+  }
+
+  // Build a title map from the pairSimilarities keys — we need titles for
+  // reject signals too (non-merged pairs). For entries that appear in clusters
+  // we have titles directly; for others we need to look them up.
+  const titleMap = new Map<string, string>();
+  for (const cluster of result.clusters) {
+    titleMap.set(cluster.surviving.id, cluster.surviving.title);
+    for (const m of cluster.merged) {
+      titleMap.set(m.id, m.title);
+    }
+  }
+
+  // For reject signals, we need titles for entries not in any cluster.
+  // Look them up from the DB if missing.
+  for (const pairKey of result.pairSimilarities.keys()) {
+    const [idA, idB] = pairKey.split(":");
+    for (const id of [idA, idB]) {
+      if (!titleMap.has(id)) {
+        const row = db()
+          .query("SELECT title FROM knowledge WHERE id = ?")
+          .get(id) as { title: string } | null;
+        if (row) titleMap.set(id, row.title);
+      }
+    }
+  }
+
+  // Collect all candidate signals
+  type Signal = { entryATitle: string; entryBTitle: string; similarity: number; accepted: boolean };
+  const signals: Signal[] = [];
+
+  // Accept signals: merged pairs with embedding similarity
+  for (const cluster of result.clusters) {
+    for (const merged of cluster.merged) {
+      const pairKey = [cluster.surviving.id, merged.id].sort().join(":");
+      const sim = result.pairSimilarities.get(pairKey);
+      if (sim != null && sim >= AUTO_SIGNAL_MIN_SIMILARITY) {
+        signals.push({
+          entryATitle: cluster.surviving.title,
+          entryBTitle: merged.title,
+          similarity: sim,
+          accepted: true,
+        });
+      }
+    }
+  }
+
+  // Reject signals: non-merged pairs with high similarity
+  for (const [pairKey, sim] of result.pairSimilarities) {
+    if (sim < AUTO_SIGNAL_MIN_SIMILARITY) continue;
+    if (mergedPairs.has(pairKey)) continue; // already recorded as accept
+
+    const [idA, idB] = pairKey.split(":");
+    const titleA = titleMap.get(idA);
+    const titleB = titleMap.get(idB);
+    if (!titleA || !titleB) continue;
+
+    signals.push({
+      entryATitle: titleA,
+      entryBTitle: titleB,
+      similarity: sim,
+      accepted: false,
+    });
+  }
+
+  // Sort by distance to threshold boundary (most informative first), cap
+  const currentThreshold = loadCalibratedThreshold(projectId) ?? DEFAULT_EMBEDDING_DEDUP_THRESHOLD;
+  signals.sort((a, b) => Math.abs(a.similarity - currentThreshold) - Math.abs(b.similarity - currentThreshold));
+  const capped = signals.slice(0, AUTO_SIGNAL_MAX_PAIRS);
+
+  for (const s of capped) {
+    recordDedupFeedback({
+      projectId,
+      entryATitle: s.entryATitle,
+      entryBTitle: s.entryBTitle,
+      similarity: s.similarity,
+      accepted: s.accepted,
+      source: "auto_dedup",
+    });
+  }
+}
+
+/** Get all feedback for a project (for calibration). */
+export function getDedupFeedback(
+  projectId: string | null,
+): Array<{ similarity: number; accepted: boolean; source: string }> {
+  const rows = (
+    projectId !== null
+      ? db()
+          .query(
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE project_id = ? ORDER BY similarity",
+          )
+          .all(projectId)
+      : db()
+          .query(
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE project_id IS NULL ORDER BY similarity",
+          )
+          .all()
+  ) as Array<{ similarity: number; accepted: number; source: string }>;
+  return rows.map((r) => ({ similarity: r.similarity, accepted: r.accepted === 1, source: r.source }));
+}
+
+/** Quick count of feedback rows for a project. */
+export function getDedupFeedbackCount(projectId: string | null): number {
+  const row = (
+    projectId !== null
+      ? db()
+          .query("SELECT COUNT(*) as cnt FROM dedup_feedback WHERE project_id = ?")
+          .get(projectId)
+      : db()
+          .query("SELECT COUNT(*) as cnt FROM dedup_feedback WHERE project_id IS NULL")
+          .get()
+  ) as { cnt: number } | null;
+  return row?.cnt ?? 0;
+}
+
+/**
+ * Compute an optimal embedding dedup threshold from user feedback.
+ *
+ * Algorithm:
+ * 1. Load all (similarity, accepted) pairs for the project.
+ * 2. If fewer than MIN_CALIBRATION_SAMPLES, return null (use default).
+ * 3. If all feedback is "accept" (no rejects), return the minimum
+ *    accepted similarity minus a small margin (0.005).
+ * 4. If all feedback is "reject" (no accepts), return null.
+ * 5. Otherwise, find the threshold that maximizes separation:
+ *    - For each candidate threshold (midpoint between consecutive
+ *      distinct similarity values), compute accuracy:
+ *        correct = accepted_pairs_above + rejected_pairs_below
+ *        accuracy = correct / total
+ *    - Pick the threshold with highest accuracy.
+ *    - Tie-break: prefer higher threshold (conservative).
+ *    - Clamp to [0.85, 0.98].
+ */
+export function calibrateDedupThreshold(projectId: string | null): number | null {
+  const feedback = getDedupFeedback(projectId);
+  if (feedback.length < MIN_CALIBRATION_SAMPLES) return null;
+
+  const accepted = feedback.filter((f) => f.accepted);
+  const rejected = feedback.filter((f) => !f.accepted);
+
+  // Edge case: all accept, no rejects
+  if (rejected.length === 0) {
+    const minAccepted = Math.min(...accepted.map((f) => f.similarity));
+    return Math.max(0.85, minAccepted - 0.005);
+  }
+
+  // Edge case: all reject, no accepts
+  if (accepted.length === 0) {
+    log.warn("dedup calibration: all feedback is reject — keeping default threshold");
+    return null;
+  }
+
+  // Find optimal threshold via accuracy maximization
+  const allSims = [...new Set(feedback.map((f) => f.similarity))].sort((a, b) => a - b);
+
+  let bestThreshold = DEFAULT_EMBEDDING_DEDUP_THRESHOLD;
+  let bestAccuracy = -1;
+
+  for (let i = 0; i < allSims.length - 1; i++) {
+    const candidate = (allSims[i] + allSims[i + 1]) / 2;
+
+    // Pairs above threshold are predicted "merge" — should be accepted
+    // Pairs below threshold are predicted "keep separate" — should be rejected
+    const correctAccepted = accepted.filter((f) => f.similarity >= candidate).length;
+    const correctRejected = rejected.filter((f) => f.similarity < candidate).length;
+    const accuracy = (correctAccepted + correctRejected) / feedback.length;
+
+    // Tie-break: prefer higher threshold (conservative — fewer false merges)
+    if (accuracy > bestAccuracy || (accuracy === bestAccuracy && candidate > bestThreshold)) {
+      bestAccuracy = accuracy;
+      bestThreshold = candidate;
+    }
+  }
+
+  // Clamp to sane range
+  return Math.max(0.85, Math.min(0.98, bestThreshold));
+}
+
+/** Persist the calibrated threshold for a project. */
+export function saveCalibratedThreshold(
+  projectId: string | null,
+  threshold: number,
+  sampleSize: number,
+): void {
+  const key = `dedup_threshold:${projectId ?? "global"}`;
+  setKV(key, JSON.stringify({ threshold, sampleSize, calibratedAt: Date.now() }));
+}
+
+/** Load the calibrated threshold for a project, or null if not calibrated. */
+export function loadCalibratedThreshold(projectId: string | null): number | null {
+  const key = `dedup_threshold:${projectId ?? "global"}`;
+  const raw = getKV(key);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed.threshold === "number" ? parsed.threshold : null;
+  } catch {
+    return null;
+  }
 }
