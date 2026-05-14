@@ -2616,10 +2616,11 @@ async function handleConversationTurn(
   // Layer 4 means there's no additional cost from changing the LTM text.
   if (result.refreshLtm && cfg.knowledge.enabled) {
     try {
-      ltmSessionCache.delete(sessionID);
       const ltmFraction = cfg.budget.ltm;
       const ltmBudget = getLtmBudget(ltmFraction);
       const entries = ltm.forSession(projectPath, sessionID, ltmBudget);
+      let refreshed = false;
+
       if (entries.length) {
         const formatted = formatKnowledge(
           entries.map((e) => ({
@@ -2632,9 +2633,10 @@ async function handleConversationTurn(
 
         if (formatted) {
           const tokenCount = Math.ceil(formatted.length / 3);
-          ltmSessionCache.set(sessionID, { formatted, tokenCount });
-          // Bypass content-diff pinning — Layer 4 already busts the cache,
+          // Replace cache and pin — Layer 4 already busts the prompt cache,
           // so there's no benefit to preserving the old pinned text.
+          ltmSessionCache.delete(sessionID);
+          ltmSessionCache.set(sessionID, { formatted, tokenCount });
           ltmPinnedText.set(sessionID, { formatted, tokenCount });
           ltmText = formatted;
           setLtmTokens(tokenCount, sessionID);
@@ -2644,10 +2646,28 @@ async function handleConversationTurn(
             ltmPinText: formatted,
             ltmPinTokens: tokenCount,
           });
+          refreshed = true;
           log.info("LTM refreshed on emergency layer (Layer 4) for session", sessionID);
         }
       }
+
+      if (!refreshed) {
+        // forSession() returned no entries or formatKnowledge() returned empty —
+        // clear all LTM state so the turn doesn't carry stale knowledge.
+        ltmSessionCache.delete(sessionID);
+        ltmPinnedText.delete(sessionID);
+        ltmText = undefined;
+        setLtmTokens(0, sessionID);
+        saveSessionTracking(sessionID, {
+          ltmCacheText: null, ltmCacheTokens: null,
+          ltmPinText: null, ltmPinTokens: null,
+        });
+        log.info("LTM cleared on emergency layer (Layer 4) — no relevant entries for session", sessionID);
+      }
     } catch (e) {
+      // On error, leave the step-6 LTM state intact (cache, pin, text)
+      // so the turn proceeds with the pre-refresh knowledge rather than
+      // an inconsistent state. The next turn will retry via step 6.
       log.error("LTM refresh on emergency layer failed:", e);
     }
   }
