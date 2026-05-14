@@ -32,8 +32,8 @@ Environment Variables:
 Examples:
     curl -fsSL https://withlore.ai/install | bash
     curl -fsSL https://withlore.ai/install | bash -s -- --version 0.14.0
-    LORE_VERSION=nightly curl -fsSL https://withlore.ai/install | bash
-    LORE_INSTALL_DIR=~/.local/bin curl -fsSL https://withlore.ai/install | bash
+    export LORE_VERSION=nightly && curl -fsSL https://withlore.ai/install | bash
+    export LORE_INSTALL_DIR=~/.local/bin && curl -fsSL https://withlore.ai/install | bash
 EOF
 }
 
