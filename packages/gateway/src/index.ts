@@ -22,7 +22,7 @@ export { startServer } from "./server";
 export { handleRequest, resetPipelineState } from "./pipeline";
 export { readPortFile } from "./portfile";
 export { startGateway, probeGateway } from "./cli/start";
-export type { GatewayHandle } from "./cli/start";
+export type { GatewayHandle, StartOptions } from "./cli/start";
 
 // ---------------------------------------------------------------------------
 // CLI entry — called by dist/bin.cjs or `bun run src/index.ts`

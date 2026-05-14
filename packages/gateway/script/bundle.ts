@@ -278,11 +278,8 @@ export declare function probeGateway(baseURL: string, timeoutMs?: number): Promi
 /** Read the port file. Returns the port number or null if not found/invalid. */
 export declare function readPortFile(): number | null;
 
-/** Handle an incoming request through the Lore pipeline. */
-export declare function handleRequest(req: Request): Promise<Response>;
-
 /** Reset internal pipeline state (for testing). */
-export declare function resetPipelineState(): void;
+export declare function resetPipelineState(): Promise<void>;
 
 /** CLI entry point — called by dist/bin.cjs. */
 export declare function _cli(): Promise<void>;

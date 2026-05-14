@@ -263,6 +263,7 @@ export function startServer(config: GatewayConfig): {
 } {
   // Defensive defaults for public API consumers who may pass incomplete config.
   // loadConfig() always provides these, but startServer is a public export.
+  config = config ?? ({} as GatewayConfig);
   if (!config.hosts?.length) {
     console.error(
       `[lore] warning: config.hosts is empty or missing, defaulting to ["127.0.0.1"]. ` +
@@ -270,7 +271,7 @@ export function startServer(config: GatewayConfig): {
     );
     config = { ...config, hosts: ["127.0.0.1"] };
   }
-  if (config.port == null || config.port < 0) {
+  if (!Number.isFinite(config.port) || config.port < 0) {
     config = { ...config, port: DEFAULT_PORT };
   }
 
