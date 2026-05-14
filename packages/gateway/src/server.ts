@@ -327,6 +327,11 @@ export function startServer(config: GatewayConfig): {
         return withCors(await handleUIRequest(req, url));
       }
 
+      // GET / — redirect to dashboard
+      if (method === "GET" && pathname === "/") {
+        return withCors(Response.redirect(new URL("/ui", url), 302));
+      }
+
       // 404 for everything else
       return errorResponse(404, "not_found", `No route for ${method} ${pathname}`);
     } catch (e) {
