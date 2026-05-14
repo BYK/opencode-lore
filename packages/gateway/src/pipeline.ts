@@ -279,31 +279,35 @@ const stableLtmCache = new Map<
 
 /**
  * Measure character-level difference between two strings as a ratio (0..1).
- * Uses a simple length + common-prefix heuristic — not a full diff, but
- * sufficient to detect "substantially the same" vs "meaningfully different".
+ * Samples characters at regular intervals across the full string length to
+ * detect interior changes, not just prefix/suffix differences.
+ *
+ * For short strings (≤1000 chars) compares every character. For longer
+ * strings samples up to 1000 evenly-spaced positions for O(1) cost.
  */
 function textDiffRatio(a: string, b: string): number {
   if (a === b) return 0;
   if (!a || !b) return 1;
 
-  // Common prefix length
-  const minLen = Math.min(a.length, b.length);
   const maxLen = Math.max(a.length, b.length);
-  let common = 0;
-  for (let i = 0; i < minLen; i++) {
-    if (a[i] === b[i]) common++;
-    else break;
+  const minLen = Math.min(a.length, b.length);
+
+  // Length difference accounts for part of the diff
+  const lengthDiff = maxLen - minLen;
+
+  // Sample up to 1000 positions across the overlapping region
+  const sampleCount = Math.min(minLen, 1000);
+  const step = sampleCount < minLen ? minLen / sampleCount : 1;
+  let mismatches = 0;
+  for (let i = 0; i < sampleCount; i++) {
+    const idx = Math.floor(i * step);
+    if (a[idx] !== b[idx]) mismatches++;
   }
 
-  // Common suffix length (non-overlapping with prefix)
-  let suffix = 0;
-  for (let i = 0; i < minLen - common; i++) {
-    if (a[a.length - 1 - i] === b[b.length - 1 - i]) suffix++;
-    else break;
-  }
-
-  const matched = common + suffix;
-  return 1 - matched / maxLen;
+  // Extrapolate mismatch rate to the full overlapping region + length diff
+  const mismatchRate = sampleCount > 0 ? mismatches / sampleCount : 0;
+  const estimatedMismatches = mismatchRate * minLen + lengthDiff;
+  return Math.min(1, estimatedMismatches / maxLen);
 }
 
 /** Cached LLM client for background workers. */
@@ -930,12 +934,24 @@ async function forwardToUpstream(
       : config.upstreamOpenAI);
 
   if (effectiveProtocol === "openai-responses") {
-    const result = buildOpenAIResponsesUpstreamRequest(req, effectiveUpstreamBase);
+    // Inject LTM into system prompt for non-Anthropic paths.
+    // Anthropic handles LTM via separate system blocks in buildAnthropicRequest;
+    // OpenAI paths receive a single system string, so we concatenate here.
+    const ltmParts = [cache?.stableLtmSystem, cache?.ltmSystem].filter(Boolean);
+    const reqWithLtm = ltmParts.length
+      ? { ...req, system: [req.system, ...ltmParts].filter(Boolean).join("\n\n") }
+      : req;
+    const result = buildOpenAIResponsesUpstreamRequest(reqWithLtm, effectiveUpstreamBase);
     url = result.url;
     headers = result.headers;
     body = result.body;
   } else if (effectiveProtocol === "openai") {
-    const result = buildOpenAIUpstreamRequest(req, effectiveUpstreamBase);
+    // Inject LTM into system prompt (see comment above for openai-responses).
+    const ltmParts = [cache?.stableLtmSystem, cache?.ltmSystem].filter(Boolean);
+    const reqWithLtm = ltmParts.length
+      ? { ...req, system: [req.system, ...ltmParts].filter(Boolean).join("\n\n") }
+      : req;
+    const result = buildOpenAIUpstreamRequest(reqWithLtm, effectiveUpstreamBase);
     url = result.url;
     headers = result.headers;
     body = result.body;
@@ -2587,9 +2603,13 @@ async function handleConversationTurn(
         let cached = ltmSessionCache.get(sessionID);
 
         if (!cached) {
-          // Reserve budget for stable LTM already injected in system[1]
+          // Reserve budget for stable LTM already injected in system[1].
+          // Guarantee at least 50% of the total budget for context-bound
+          // entries — preferences are useful but gotchas/patterns are more
+          // critical for correctness during active work.
           const stableTokens = stable?.tokenCount ?? 0;
-          const contextBudget = Math.max(0, ltmBudget - stableTokens);
+          const minContextBudget = Math.floor(ltmBudget * 0.5);
+          const contextBudget = Math.max(minContextBudget, ltmBudget - stableTokens);
           // Exclude preferences — they're already in system[1]
           const contextEntries = await ltm.forSession(projectPath, sessionID, contextBudget, {
             excludeCategories: ["preference"],
@@ -2704,7 +2724,8 @@ async function handleConversationTurn(
       const ltmFraction = cfg.budget.ltm;
       const ltmBudget = getLtmBudget(ltmFraction);
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
-      const contextBudget = Math.max(0, ltmBudget - stableTokens);
+      const minContextBudget = Math.floor(ltmBudget * 0.5);
+      const contextBudget = Math.max(minContextBudget, ltmBudget - stableTokens);
       const contextHint = lastUserTextTrimmed(req);
       const contextEntries = await ltm.forSession(projectPath, sessionID, contextBudget, {
         excludeCategories: ["preference"],

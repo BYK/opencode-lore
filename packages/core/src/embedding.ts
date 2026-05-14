@@ -706,14 +706,25 @@ type VectorHit = { id: string; similarity: number };
  * Search all knowledge entries with embeddings by cosine similarity.
  * Returns top-k entries sorted by similarity descending.
  * Pure brute-force — fine for <100 entries (microseconds).
+ *
+ * @param excludeCategories  Optional category names to exclude from results.
+ *   Useful when preferences are injected in a separate system block and
+ *   shouldn't compete for vector search slots with context-bound entries.
  */
 export function vectorSearch(
   queryEmbedding: Float32Array,
   limit = 10,
+  excludeCategories?: string[],
 ): VectorHit[] {
+  let sql = "SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND confidence > 0.2";
+  const params: string[] = [];
+  if (excludeCategories?.length) {
+    sql += ` AND category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
+    params.push(...excludeCategories);
+  }
   const rows = db()
-    .query("SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND confidence > 0.2")
-    .all() as Array<{ id: string; embedding: Buffer }>;
+    .query(sql)
+    .all(...params) as Array<{ id: string; embedding: Buffer }>;
 
   const scored: VectorHit[] = [];
   for (const row of rows) {
