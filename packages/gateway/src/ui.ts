@@ -227,6 +227,7 @@ nav a { font-size: 0.9em; }
 .stat { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; min-width: 120px; }
 .stat .label { font-size: 0.8em; color: var(--fg3); text-transform: uppercase; }
 .stat .value { font-size: 1.4em; font-weight: 600; }
+.stat .value .total { font-size: 0.7em; font-weight: 400; color: var(--fg3); }
 table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.9em; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 th { background: var(--bg2); font-weight: 600; font-size: 0.85em; color: var(--fg2); text-transform: uppercase; }
@@ -632,8 +633,8 @@ function pageDashboard(): string {
   body += `<div class="stats">
     <div class="stat"><div class="label">Projects</div><div class="value">${stats.project_count}</div></div>
     <div class="stat"><div class="label">Knowledge</div><div class="value">${stats.knowledge_count}</div></div>
-    <div class="stat"><div class="label">Sessions</div><div class="value">${stats.session_count}</div></div>
-    ${netSavings > 0 ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(netSavings)}</div></div>` : ""}
+    <div class="stat"><div class="label">Sessions</div><div class="value">${allCosts.size}<span class="total">/${stats.session_count}</span></div></div>
+    ${netSavings > 0 ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(liveSavings)}<span class="total">/${formatUSD(netSavings)}</span></div></div>` : ""}
   </div>`;
 
   if (!projects.length) {
@@ -1334,13 +1335,13 @@ function pageCosts(): string {
   const combinedSessionCount = allCosts.size + hist.sessionCount;
   const combinedTotalSpend = liveTotalSpend + hist.persistedConversationCost + hist.totalWorkerCost;
 
-  // Summary stats (all lifetime-scoped)
+  // Summary stats (live/total format)
   body += `<div class="stats">
-    <div class="stat"><div class="label">Sessions</div><div class="value">${combinedSessionCount}</div></div>
-    <div class="stat"><div class="label">Total Spend</div><div class="value">${formatUSD(combinedTotalSpend)}</div></div>
-    <div class="stat"><div class="label">Avoided Compactions</div><div class="value">${combinedAvoidedCompactions}</div></div>
-    ${combinedNetSavings > 0 ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(combinedNetSavings)}</div></div>` : ""}
-    ${combinedNetSavings < 0 ? `<div class="stat"><div class="label">Net Overhead</div><div class="value" style="color:#e06c75">${formatUSD(-combinedNetSavings)}</div></div>` : ""}
+    <div class="stat"><div class="label">Sessions</div><div class="value">${allCosts.size}<span class="total">/${combinedSessionCount}</span></div></div>
+    <div class="stat"><div class="label">Spend</div><div class="value">${formatUSD(liveTotalSpend)}<span class="total">/${formatUSD(combinedTotalSpend)}</span></div></div>
+    <div class="stat"><div class="label">Avoided Compactions</div><div class="value">${liveAvoidedCompactions}<span class="total">/${combinedAvoidedCompactions}</span></div></div>
+    ${combinedNetSavings > 0 ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(liveTotalSavings)}<span class="total">/${formatUSD(combinedNetSavings)}</span></div></div>` : ""}
+    ${combinedNetSavings < 0 ? `<div class="stat"><div class="label">Net Overhead</div><div class="value" style="color:#e06c75">${formatUSD(-liveTotalSavings)}<span class="total">/${formatUSD(-combinedNetSavings)}</span></div></div>` : ""}
   </div>`;
 
   // =====================================================
@@ -1377,13 +1378,19 @@ function pageCosts(): string {
     body += `</table></div>`;
 
     // Per-session table
+    const activeSessions = getActiveSessions();
     body += `<h3>Per Session</h3><table>
-      <tr><th>Session</th><th data-sort="num">Turns</th><th data-sort="num">Conversation</th><th data-sort="num">Worker</th><th data-sort="num">Total</th><th data-sort="num">Savings</th></tr>`;
+      <tr><th data-sort="text">Project</th><th>Session</th><th data-sort="num">Turns</th><th data-sort="num">Conversation</th><th data-sort="num">Worker</th><th data-sort="num">Total</th><th data-sort="num">Savings</th></tr>`;
     for (const [sid, c] of allCosts) {
       const actual = totalActualCost(c);
       const saved = totalSavings(c);
+      const sess = activeSessions.get(sid);
+      const projPath = sess?.projectPath ?? "";
+      const projId = projPath ? ensureProject(projPath) : "";
+      const projLabel = projPath ? (projectName(projPath) ?? "(unnamed)") : "-";
       body += `<tr>
-        <td><code>${esc(sid.slice(0, 16))}</code></td>
+        <td>${projId ? `<a href="/ui/projects/${esc(projId)}">${esc(projLabel)}</a>` : esc(projLabel)}</td>
+        <td>${projId ? `<a href="/ui/sessions/${esc(projId)}/${esc(sid)}"><code>${esc(sid.slice(0, 16))}</code></a>` : `<code>${esc(sid.slice(0, 16))}</code>`}</td>
         <td>${c.conversation.turns}</td>
         <td>${formatUSD(c.conversation.cost)}</td>
         <td>${formatUSD(totalWorkerCost(c))}</td>
