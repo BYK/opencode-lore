@@ -318,16 +318,21 @@ export function blendHistograms(
 // Global histograms (per-project, in-memory)
 // ---------------------------------------------------------------------------
 
-/** Global histograms keyed by projectPath. */
+/** Global histograms keyed by project_id (UUID). */
 const globalHistograms = new Map<string, InterTurnHistogram>();
 
+/**
+ * Get the global histogram for a project by its ID.
+ *
+ * Creates an empty histogram if none exists for the given pid.
+ */
 export function getGlobalHistogram(
-  projectPath: string,
+  pid: string,
 ): InterTurnHistogram {
-  let hist = globalHistograms.get(projectPath);
+  let hist = globalHistograms.get(pid);
   if (!hist) {
     hist = createHistogram();
-    globalHistograms.set(projectPath, hist);
+    globalHistograms.set(pid, hist);
   }
   return hist;
 }
@@ -337,7 +342,9 @@ export function blendedHistogramForSession(
   state: SessionState,
 ): InterTurnHistogram {
   const sessionHist = getSessionHistogram(state);
-  const globalHist = getGlobalHistogram(state.projectPath);
+  const pid = projectId(state.projectPath);
+  if (!pid) return sessionHist; // no project in DB yet — session-only
+  const globalHist = getGlobalHistogram(pid);
   return blendHistograms(sessionHist, globalHist);
 }
 
@@ -826,8 +833,8 @@ export function computeWarmingSnapshot(
 
   // Histograms
   const sessionHist = state.survivalModel ?? createHistogram();
-  loadGlobalHistograms(state.projectPath);
-  const globalHist = getGlobalHistogram(state.projectPath);
+  const pid = loadGlobalHistograms(state.projectPath);
+  const globalHist = pid ? getGlobalHistogram(pid) : createHistogram();
   const blendedHist = blendHistograms(sessionHist, globalHist);
   const sessionWeight = Math.min(sessionHist.total / BLEND_PSEUDOCOUNT, 1.0);
 
@@ -1147,7 +1154,7 @@ export async function executeWarmup(
 // Global histogram persistence (SQLite)
 // ---------------------------------------------------------------------------
 
-/** Tracks which projects have been modified since last flush. */
+/** Tracks which project IDs have been modified since last flush. */
 const dirtyProjects = new Set<string>();
 
 /**
@@ -1157,19 +1164,21 @@ const dirtyProjects = new Set<string>();
  * globalHistograms map so survival analysis has data immediately after
  * a gateway restart.
  *
+ * Returns the resolved project_id (UUID) so callers can reuse it
+ * without a redundant `projectId()` query, or `undefined` if the
+ * project is not yet in the DB.
+ *
  * Backward compatibility: if the DB contains old time-slot-segmented rows
  * (work/evening/night), they are merged by summing bin counts into a single
  * histogram. New data is written under the "all" time_slot key.
  */
-export function loadGlobalHistograms(projectPath: string): void {
-  if (globalHistograms.has(projectPath)) return; // already loaded
+export function loadGlobalHistograms(projectPath: string): string | undefined {
+  const pid = projectId(projectPath);
+  if (!pid) return undefined; // project not yet in DB — nothing to load
+
+  if (globalHistograms.has(pid)) return pid; // already loaded
 
   const merged = createHistogram();
-  const pid = projectId(projectPath);
-  if (!pid) {
-    globalHistograms.set(projectPath, merged);
-    return;
-  }
 
   try {
     const rows = db()
@@ -1200,7 +1209,8 @@ export function loadGlobalHistograms(projectPath: string): void {
     log.warn("cache-warmer: failed to load global histograms:", e);
   }
 
-  globalHistograms.set(projectPath, merged);
+  globalHistograms.set(pid, merged);
+  return pid;
 }
 
 /**
@@ -1220,11 +1230,8 @@ export function flushGlobalHistograms(): void {
   const d = db();
   const now = Date.now();
 
-  for (const projectPath of dirtyProjects) {
-    const pid = projectId(projectPath);
-    if (!pid) continue;
-
-    const hist = globalHistograms.get(projectPath);
+  for (const pid of dirtyProjects) {
+    const hist = globalHistograms.get(pid);
     if (!hist) continue;
 
     try {
@@ -1269,17 +1276,18 @@ export function recordGlobalGap(
   projectPath: string,
   gapMs: number,
 ): void {
-  loadGlobalHistograms(projectPath); // ensure loaded
-  const hist = getGlobalHistogram(projectPath);
+  const pid = loadGlobalHistograms(projectPath); // ensure loaded; resolves pid
+  if (!pid) return; // project not yet in DB — skip
+  const hist = getGlobalHistogram(pid);
   recordGap(hist, gapMs);
-  dirtyProjects.add(projectPath);
+  dirtyProjects.add(pid);
 }
 
 // ---------------------------------------------------------------------------
 // Dashboard helpers
 // ---------------------------------------------------------------------------
 
-/** Read-only snapshot of all loaded global histograms (for dashboard). */
+/** Read-only snapshot of all loaded global histograms, keyed by project_id (for dashboard). */
 export function getGlobalHistogramsSnapshot(): ReadonlyMap<string, InterTurnHistogram> {
   return globalHistograms;
 }

@@ -1172,11 +1172,20 @@ import {
   getGlobalHistogram,
   loadGlobalHistograms,
   flushGlobalHistograms,
+  blendedHistogramForSession,
 } from "../src/cache-warmer";
 
 describe("gap recording filtering", () => {
+  const GAP_TEST_PROJECT_PATH = "/tmp/test-gap-project";
+  const GAP_TEST_PID = "test-gap-pid";
+
   beforeEach(() => {
     _resetForTest();
+    // Ensure the project exists in the DB so recordGlobalGap can resolve pid.
+    const d = db();
+    d.query(
+      "INSERT OR IGNORE INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(GAP_TEST_PID, GAP_TEST_PROJECT_PATH, "test-gap", null, Date.now());
   });
 
   /**
@@ -1311,7 +1320,7 @@ describe("gap recording filtering", () => {
 
   test("global histogram also records gap for user turns", () => {
     const now = Date.now();
-    const state = makeSessionState({ lastUserTurnTime: now - 120_000 }); // 2 min ago
+    const state = makeSessionState({ projectPath: GAP_TEST_PROJECT_PATH, lastUserTurnTime: now - 120_000 }); // 2 min ago
 
     simulateGapRecording(state, {
       isSubagentTurn: false,
@@ -1319,13 +1328,13 @@ describe("gap recording filtering", () => {
       now,
     });
 
-    const globalHist = getGlobalHistogram(state.projectPath);
+    const globalHist = getGlobalHistogram(GAP_TEST_PID);
     expect(globalHist.total).toBe(1);
   });
 
   test("global histogram is not polluted by subagent turns", () => {
     const now = Date.now();
-    const state = makeSessionState({ lastUserTurnTime: now - 120_000 });
+    const state = makeSessionState({ projectPath: GAP_TEST_PROJECT_PATH, lastUserTurnTime: now - 120_000 });
 
     simulateGapRecording(state, {
       isSubagentTurn: true,
@@ -1333,7 +1342,7 @@ describe("gap recording filtering", () => {
       now,
     });
 
-    const globalHist = getGlobalHistogram(state.projectPath);
+    const globalHist = getGlobalHistogram(GAP_TEST_PID);
     expect(globalHist.total).toBe(0);
   });
 
@@ -1349,6 +1358,38 @@ describe("gap recording filtering", () => {
 
     // survivalModel is the histogram itself, not a { slots: ... } wrapper
     expect(state.survivalModel).toBe(hist);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Undefined pid fallback (project not yet in DB)
+// ---------------------------------------------------------------------------
+
+describe("undefined pid fallback", () => {
+  beforeEach(() => {
+    _resetForTest();
+  });
+
+  test("blendedHistogramForSession returns session-only histogram when project is not in DB", () => {
+    // Use a path that has NO corresponding project in the DB.
+    const state = makeSessionState({ projectPath: "/tmp/nonexistent-project" });
+    const sessionHist = getSessionHistogram(state);
+    recordGap(sessionHist, 60_000); // add an observation to the session histogram
+
+    const blended = blendedHistogramForSession(state);
+    // With no project in DB, blended should be the session histogram itself
+    expect(blended).toBe(sessionHist);
+    expect(blended.total).toBe(1);
+  });
+
+  test("recordGlobalGap is a no-op when project is not in DB", () => {
+    const unknownPath = "/tmp/nonexistent-project";
+    // Should not throw — silently skips
+    recordGlobalGap(unknownPath, 60_000);
+
+    // loadGlobalHistograms also returns undefined for unknown projects
+    const pid = loadGlobalHistograms(unknownPath);
+    expect(pid).toBeUndefined();
   });
 });
 
@@ -1398,7 +1439,7 @@ describe("global histogram persistence", () => {
 
     loadGlobalHistograms(TEST_PROJECT_PATH);
 
-    const hist = getGlobalHistogram(TEST_PROJECT_PATH);
+    const hist = getGlobalHistogram(pid);
     expect(hist.total).toBe(15); // 10 + 5
     expect(hist.counts[0]).toBe(10);
     expect(hist.counts[3]).toBe(5);
@@ -1454,7 +1495,7 @@ describe("global histogram persistence", () => {
     _resetForTest(); // clears in-memory state
     loadGlobalHistograms(TEST_PROJECT_PATH);
 
-    const hist = getGlobalHistogram(TEST_PROJECT_PATH);
+    const hist = getGlobalHistogram(pid);
     expect(hist.total).toBe(10); // 7 + 3, no double-count
     expect(hist.counts[0]).toBe(7);
     expect(hist.counts[5]).toBe(3);
