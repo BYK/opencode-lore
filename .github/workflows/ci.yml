@@ -48,13 +48,13 @@ jobs:
       #
       # Uses craft to determine the next semver bump from conventional commits,
       # so nightlies sort AHEAD of the current release (e.g. 0.19.0-dev.X > 0.18.0).
-      - name: Fetch history since last release tag
+      - name: Fetch commits since last release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           CURRENT=$(jq -r .version packages/gateway/package.json)
-          # Deepen shallow clone to include all commits since the release tag.
-          # --shallow-exclude sets the shallow boundary at the tag's commit,
-          # fetching only the TAG..HEAD range (~10-30 commits typically).
+          # Deepen the shallow clone to include commits since the release tag.
+          # --shallow-exclude sets the boundary at the tag commit (exclusive),
+          # giving us all commits in the TAG..HEAD range.
           if git rev-parse "$CURRENT" >/dev/null 2>&1; then
             git fetch --shallow-exclude="$CURRENT" origin main
           else
@@ -83,8 +83,9 @@ jobs:
 
           # 2. Get bump type from craft (analyzes conventional commits since last tag)
           BUMP_TYPE="patch"  # conservative fallback
+          CURRENT=$(jq -r .version packages/gateway/package.json)
           CRAFT_ERR=$(mktemp)
-          if CRAFT_JSON=$(craft changelog --format json 2>"$CRAFT_ERR"); then
+          if CRAFT_JSON=$(craft changelog --since "$CURRENT" --format json 2>"$CRAFT_ERR"); then
             DETECTED=$(echo "$CRAFT_JSON" | jq -r '.bumpType // empty')
             if [ -n "$DETECTED" ]; then
               BUMP_TYPE="$DETECTED"
@@ -98,11 +99,9 @@ jobs:
           fi
           rm -f "$CRAFT_ERR"
 
-          # 3. Get current version from package.json
-          CURRENT=$(jq -r .version packages/gateway/package.json)
           echo "Current version: ${CURRENT}"
 
-          # 4. Compute next version by applying bump type
+          # 3. Compute next version by applying bump type
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
           case "$BUMP_TYPE" in
             major)
