@@ -1388,7 +1388,7 @@ function pageCosts(): string {
       const sess = activeSessions.get(sid);
       const projPath = sess?.projectPath ?? "";
       const projId = projPath ? ensureProject(projPath) : "";
-      const projLabel = projPath ? (projectName(projPath) ?? "(unnamed)") : "-";
+      const projLabel = projId ? (projectName(projId) ?? "(unnamed)") : "-";
       body += `<tr>
         <td>${projId ? `<a href="/ui/projects/${esc(projId)}">${esc(projLabel)}</a>` : esc(projLabel)}</td>
         <td>${projId ? `<a href="/ui/sessions/${esc(projId)}/${esc(sid)}"><code>${esc(sid.slice(0, 16))}</code></a>` : `<code>${esc(sid.slice(0, 16))}</code>`}</td>
