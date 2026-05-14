@@ -11,7 +11,7 @@
  *
  * Uses `Bun.serve()` — this package targets Bun exclusively.
  */
-import type { GatewayConfig } from "./config";
+import { DEFAULT_PORT, type GatewayConfig } from "./config";
 import type { GatewayRequest } from "./translate/types";
 import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest, buildOpenAIResponse } from "./translate/openai";
@@ -261,6 +261,19 @@ export function startServer(config: GatewayConfig): {
   port: number;
   hosts: string[];
 } {
+  // Defensive defaults for public API consumers who may pass incomplete config.
+  // loadConfig() always provides these, but startServer is a public export.
+  if (!config.hosts?.length) {
+    console.error(
+      `[lore] warning: config.hosts is empty or missing, defaulting to ["127.0.0.1"]. ` +
+        `Use loadConfig() or startGateway() for a fully-populated config.`,
+    );
+    config = { ...config, hosts: ["127.0.0.1"] };
+  }
+  if (config.port == null || config.port < 0) {
+    config = { ...config, port: DEFAULT_PORT };
+  }
+
   // Shared fetch handler for all server instances.
   const fetch = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
