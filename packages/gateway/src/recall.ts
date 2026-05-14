@@ -113,7 +113,7 @@ const ID_MARKER_REGEX = /📚 Fetching detail for (.+?)…/;
 
 /** Check if a text string is a recall marker (search or detail). */
 export function isRecallMarker(text: string): boolean {
-  return MARKER_REGEX.test(text) || ID_MARKER_REGEX.test(text);
+  return parseRecallMarker(text) !== null;
 }
 
 /**
