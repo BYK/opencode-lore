@@ -747,6 +747,67 @@ describe("ltm.forSession", () => {
     }
   });
 
+  test("excludeCategories filters cross-project entries too", async () => {
+    ltm.create({
+      projectPath: PROJ,
+      category: "preference",
+      title: "Cross-project pref to exclude",
+      content: "This cross-project preference should not appear",
+      scope: "project",
+      crossProject: true,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "Cross-project gotcha to include",
+      content: "This cross-project gotcha should appear",
+      scope: "project",
+      crossProject: true,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "architecture",
+      title: "Local arch entry to include",
+      content: "This local architecture entry should appear",
+      scope: "project",
+      crossProject: false,
+    });
+
+    const result = await ltm.forSession(PROJ, SESSION, 10_000, {
+      excludeCategories: ["preference"],
+    });
+    expect(result.length).toBeGreaterThan(0);
+    for (const entry of result) {
+      expect(entry.category).not.toBe("preference");
+    }
+  });
+
+  test("empty excludeCategories array has no effect", async () => {
+    ltm.create({
+      projectPath: PROJ,
+      category: "preference",
+      title: "Pref for empty-exclude test",
+      content: "Should appear when excludeCategories is empty array",
+      scope: "project",
+      crossProject: false,
+    });
+    ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "Gotcha for empty-exclude test",
+      content: "Should also appear when excludeCategories is empty",
+      scope: "project",
+      crossProject: false,
+    });
+
+    const result = await ltm.forSession(PROJ, SESSION, 10_000, {
+      excludeCategories: [],
+    });
+    const categories = new Set(result.map((e) => e.category));
+    // Both categories should be present — empty exclude means no filtering
+    expect(categories.size).toBeGreaterThanOrEqual(2);
+  });
+
   test("contextHint provides relevance signal when no session context exists", async () => {
     // Create entries about different topics
     ltm.create({

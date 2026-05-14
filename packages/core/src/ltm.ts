@@ -355,16 +355,24 @@ function scoreEntriesFTS(sessionContext: string): Map<string, number> {
   }
 }
 
+/**
+ * Well-known knowledge entry categories managed by the curator.
+ * The DB column is a free-form string, but these are the standard values.
+ */
+export type KnowledgeCategory = "decision" | "pattern" | "preference" | "architecture" | "gotcha";
+
 /** Options for `forSession()` to control entry selection. */
 export type ForSessionOptions = {
   /** Caller-provided context (e.g., user's current message) for relevance
    *  scoring when no session context exists in the DB yet. */
   contextHint?: string;
   /** Restrict to these categories (e.g., `['preference']` for turn 1). */
-  categories?: string[];
+  categories?: (KnowledgeCategory | (string & {}))[];
   /** Exclude these categories (e.g., `['preference']` for context-bound
-   *  entries when preferences are already injected in a separate block). */
-  excludeCategories?: string[];
+   *  entries when preferences are already injected in a separate block).
+   *  Mutually exclusive with `categories` — if both are provided,
+   *  `categories` (include) wins. */
+  excludeCategories?: (KnowledgeCategory | (string & {}))[];
 };
 
 /**
@@ -473,7 +481,7 @@ export async function forSession(
     let vectorScores: Map<string, number>;
     try {
       const [contextVec] = await embedding.embed([sessionContext], "query");
-      const hits = embedding.vectorSearch(contextVec, 50);
+      const hits = embedding.vectorSearch(contextVec, 50, excludeFilter);
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
     } catch (err) {
       log.warn("Vector scoring failed, falling back to FTS5:", err);
