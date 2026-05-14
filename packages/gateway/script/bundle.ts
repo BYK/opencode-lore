@@ -96,6 +96,28 @@ await esbuild.build({
 });
 
 // ---------------------------------------------------------------------------
+// Embedding worker — separate CJS file next to index.cjs
+// ---------------------------------------------------------------------------
+// LocalProvider in core/embedding.ts spawns this via node:worker_threads.
+// The binary build has its own vendored path (__LORE_VENDOR_WORKER_URL__),
+// but the npm CJS bundle needs an actual file alongside index.cjs.
+
+await esbuild.build({
+  entryPoints: [join(packageDir, "..", "core", "src", "embedding-worker.ts")],
+  bundle: true,
+  format: "cjs",
+  target: "node22",
+  platform: "node",
+  conditions: ["node"],
+  external: ["onnxruntime-node", "sharp"],
+  outfile: join(distDir, "embedding-worker.cjs"),
+  sourcemap: false,
+  minify: true,
+  logLevel: "info",
+  legalComments: "none",
+});
+
+// ---------------------------------------------------------------------------
 // Debug ID injection + sourcemap upload
 // ---------------------------------------------------------------------------
 
@@ -288,6 +310,7 @@ export declare function _cli(): Promise<void>;
 writeFileSync(join(distDir, "index.d.cts"), typeDeclarations);
 
 console.log(`\n✓ @loreai/gateway npm bundle complete (v${pkg.version})`);
-console.log(`  dist/index.cjs  — CJS bundle`);
-console.log(`  dist/bin.cjs    — CLI wrapper`);
-console.log(`  dist/index.d.cts — type declarations`);
+console.log(`  dist/index.cjs            — CJS bundle`);
+console.log(`  dist/embedding-worker.cjs — embedding worker (spawned via worker_threads)`);
+console.log(`  dist/bin.cjs              — CLI wrapper`);
+console.log(`  dist/index.d.cts          — type declarations`);

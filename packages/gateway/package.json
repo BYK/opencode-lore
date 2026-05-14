@@ -28,6 +28,7 @@
   "dependencies": {},
   "files": [
     "dist/bin.cjs",
+    "dist/embedding-worker.cjs",
     "dist/index.cjs",
     "dist/index.d.cts"
   ],

@@ -272,7 +272,21 @@ class LocalProvider implements EmbeddingProvider {
           workerUrl = vendorWorkerUrl;
         }
       } else {
-        workerUrl = new URL(`./embedding-worker${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url);
+        // In CJS bundles (gateway npm package), esbuild shims import.meta as
+        // an empty object {}, so import.meta.url is undefined. Fall back to
+        // __filename which esbuild defines in CJS output.
+        const selfUrl = typeof import.meta.url === "string" ? import.meta.url : undefined;
+        if (selfUrl) {
+          workerUrl = new URL(
+            `./embedding-worker${selfUrl.endsWith(".ts") ? ".ts" : ".js"}`,
+            selfUrl,
+          );
+        } else {
+          // CJS fallback: __filename is defined by esbuild's CJS output.
+          // The embedding-worker.cjs is built alongside the main bundle.
+          const { pathToFileURL } = await import("node:url");
+          workerUrl = new URL("./embedding-worker.cjs", pathToFileURL(__filename));
+        }
       }
 
       const vendor = vendorModelInfo();
