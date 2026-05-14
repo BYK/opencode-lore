@@ -27,7 +27,7 @@
 import type { LLMClient } from "@loreai/core";
 import { log, getKV, setKV } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
-import type { AuthCredential } from "./auth";
+import { authFingerprint, type AuthCredential } from "./auth";
 import { authHeaders } from "./auth";
 import {
   setGenAiUsageAttributes,
@@ -69,11 +69,15 @@ export interface BatchProvider {
   name: string;
   /** Max age before falling back to synchronous (ms). */
   maxBatchAgeMs: number;
-  /** Submit a batch. Returns a batch ID on success, or null on failure. */
+  /**
+   * Submit a batch. Returns a batch ID on success.
+   * Returns `"auth-error"` for 401/403 (permanent — session should be disabled).
+   * Returns `null` for transient failures (network, 5xx — retry via fallback).
+   */
   submit(
     auth: AuthCredential,
     items: Array<{ customId: string; params: PendingRequest["params"] }>,
-  ): Promise<string | null>;
+  ): Promise<string | "auth-error" | null>;
   /** Poll a batch for completion. */
   poll(auth: AuthCredential, batchId: string): Promise<PollResult>;
 }
@@ -95,10 +99,8 @@ interface PendingRequest {
       | Array<{ type: string; text: string; cache_control?: { type: string; ttl?: string } }>;
     messages: Array<{ role: string; content: string }>;
   };
-  /** Resolve the caller's promise with the text response. */
+  /** Resolve the caller's promise with the text response (null on error). */
   resolve: (value: string | null) => void;
-  /** Reject the caller's promise on error. */
-  reject: (error: Error) => void;
   /** Timestamp when the request was enqueued. */
   enqueuedAt: number;
   /** Auth credential snapshotted at enqueue time for per-session isolation. */
@@ -160,13 +162,14 @@ function generateCustomId(): string {
 /**
  * Produce a grouping key for an auth credential + provider combo.
  *
- * Uses the raw credential value so each distinct token/key gets its own
- * batch submission (required by batch APIs — different credentials
- * can't share a batch). Provider is included because Anthropic and OpenAI
- * items must go to separate batch endpoints.
+ * Uses `authFingerprint()` (SHA-256 truncated) so the raw credential
+ * never appears as a Map key — avoids accidental exposure via logs,
+ * Sentry breadcrumbs, or error serialization. Each distinct token/key
+ * still gets its own batch submission. Provider is included because
+ * Anthropic and OpenAI items must go to separate batch endpoints.
  */
 function groupKey(cred: AuthCredential, providerID: string): string {
-  return `${cred.scheme}:${cred.value}|${providerID}`;
+  return `${authFingerprint(cred)}|${providerID}`;
 }
 
 // authDisableKey removed — batch disable tracking is now per-session, not per-credential.
@@ -210,9 +213,9 @@ export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider
         const text = await response.text().catch(() => "(no body)");
         if (response.status === 401 || response.status === 403) {
           log.warn(`anthropic batch auth error (${response.status}): ${text}`);
-        } else {
-          log.error(`anthropic batch create failed: ${response.status} ${response.statusText} — ${text}`);
+          return "auth-error";
         }
+        log.error(`anthropic batch create failed: ${response.status} ${response.statusText} — ${text}`);
         return null;
       }
 
@@ -337,6 +340,10 @@ async function uploadOpenAIBatchFile(
 
   if (!response.ok) {
     const text = await response.text().catch(() => "(no body)");
+    if (response.status === 401 || response.status === 403) {
+      log.warn(`openai file upload auth error (${response.status}): ${text}`);
+      return "auth-error";
+    }
     log.error(`openai file upload failed: ${response.status} — ${text}`);
     return null;
   }
@@ -467,7 +474,7 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
 
       // 2. Upload JSONL file
       const fileId = await uploadOpenAIBatchFile(baseUrl, auth, jsonl);
-      if (!fileId) return null;
+      if (!fileId || fileId === "auth-error") return fileId;
 
       // 3. Create batch
       const response = await fetch(`${baseUrl}/v1/batches`, {
@@ -487,9 +494,9 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
         const text = await response.text().catch(() => "(no body)");
         if (response.status === 401 || response.status === 403) {
           log.warn(`openai batch auth error (${response.status}): ${text}`);
-        } else {
-          log.error(`openai batch create failed: ${response.status} ${response.statusText} — ${text}`);
+          return "auth-error";
         }
+        log.error(`openai batch create failed: ${response.status} ${response.statusText} — ${text}`);
         return null;
       }
 
@@ -521,13 +528,12 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
       if (
         data.status === "failed" ||
         data.status === "expired" ||
-        data.status === "cancelled" ||
-        data.status === "cancelling"
+        data.status === "cancelled"
       ) {
         return { status: "failed", error: data.status };
       }
 
-      // "validating", "in_progress", "finalizing" — still pending
+      // "validating", "in_progress", "finalizing", "cancelling" — still pending
       return { status: "pending" };
     },
   };
@@ -630,20 +636,22 @@ export function createBatchLLMClient(
         items.map((item) => ({ customId: item.customId, params: item.params })),
       );
 
-      if (!batchId) {
-        // Provider returned null — submit failed (auth error, network, etc.)
-        // Disable batch for affected sessions on auth-like failures.
-        const sessionIDs = new Set(items.map((i) => i.sessionID).filter(Boolean) as string[]);
-        for (const sid of sessionIDs) {
-          disabledBatchSessions.add(sid);
+      if (!batchId || batchId === "auth-error") {
+        if (batchId === "auth-error") {
+          // Permanent auth failure — disable batch for affected sessions
+          const sessionIDs = new Set(items.map((i) => i.sessionID).filter(Boolean) as string[]);
+          for (const sid of sessionIDs) {
+            disabledBatchSessions.add(sid);
+          }
+          if (sessionIDs.size > 0) {
+            setKV(DISABLED_BATCH_KV_KEY, JSON.stringify([...disabledBatchSessions]));
+            log.warn(
+              `batch API (${provider.name}) disabled for sessions [${[...sessionIDs].join(", ")}]. ` +
+                `Future worker calls for these sessions will use individual requests.`,
+            );
+          }
         }
-        if (sessionIDs.size > 0) {
-          setKV(DISABLED_BATCH_KV_KEY, JSON.stringify([...disabledBatchSessions]));
-          log.warn(
-            `batch API (${provider.name}) disabled for sessions [${[...sessionIDs].join(", ")}]. ` +
-              `Future worker calls for these sessions will use individual requests.`,
-          );
-        }
+        // Transient (null) or auth error — fall back to synchronous
         await fallbackAll(items);
         return;
       }
@@ -907,21 +915,20 @@ export function createBatchLLMClient(
               cache_control: { type: "ephemeral" as const, ttl: "1h" },
             },
           ]
-        : system;
+        : undefined;
 
       const customId = generateCustomId();
 
-      const promise = new Promise<string | null>((resolve, reject) => {
+      const promise = new Promise<string | null>((resolve) => {
         queue.push({
           customId,
           params: {
             model: model.modelID,
             max_tokens: opts?.maxTokens ?? 8192,
-            system: systemPayload ?? system,
+            system: systemPayload ?? [],
             messages: [{ role: "user", content: user }],
           },
           resolve,
-          reject,
           enqueuedAt: Date.now(),
           auth: cred,
           providerID: model.providerID,
