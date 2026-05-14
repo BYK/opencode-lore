@@ -2549,8 +2549,13 @@ async function handleConversationTurn(
           if (formatted) {
             const tokenCount = Math.ceil(formatted.length / 3);
             cached = { formatted, tokenCount };
-            ltmSessionCache.set(sessionID, cached);
-            ltmDirty = true;
+            // Don't cache first-turn (preferences-only) LTM — on turn 2 the
+            // cache miss will re-trigger forSession() with full session context
+            // from temporal messages, producing a relevance-scored entry set.
+            if (!isFirstTurn) {
+              ltmSessionCache.set(sessionID, cached);
+              ltmDirty = true;
+            }
           }
         }
       }
@@ -3144,7 +3149,7 @@ export function removeOrphanedToolResults(
 // ---------------------------------------------------------------------------
 
 /**
- * Extract the text of the last user message, trimmed and lowercased.
+ * Extract the text of the last user message, trimmed.
  * Returns empty string if no user message found.
  */
 function lastUserTextTrimmed(req: GatewayRequest): string {
