@@ -515,6 +515,19 @@ const MIGRATIONS: string[] = [
       AND ih.source_id = '__declined__'
   );
   `,
+  `
+  -- Version 23: Persist volatile session tracking state across restarts.
+  -- Previously these were in-memory only, causing duplicate processing,
+  -- false compaction detection, and expensive prompt cache busts on restart.
+  ALTER TABLE session_state ADD COLUMN last_curated_at INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN turns_since_curation INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN ltm_cache_text TEXT;
+  ALTER TABLE session_state ADD COLUMN ltm_cache_tokens INTEGER;
+  ALTER TABLE session_state ADD COLUMN ltm_pin_text TEXT;
+  ALTER TABLE session_state ADD COLUMN ltm_pin_tokens INTEGER;
+  ALTER TABLE session_state ADD COLUMN consecutive_text_only_turns INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -1066,6 +1079,148 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
     });
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Session tracking state (session_state table, v23 columns)
+// ---------------------------------------------------------------------------
+
+/** Fields that can be persisted for session tracking state. */
+export type SessionTrackingState = {
+  lastCuratedAt?: number;
+  messageCount?: number;
+  turnsSinceCuration?: number;
+  consecutiveTextOnlyTurns?: number;
+  ltmCacheText?: string | null;
+  ltmCacheTokens?: number | null;
+  ltmPinText?: string | null;
+  ltmPinTokens?: number | null;
+};
+
+/**
+ * Persist session tracking state. Ensures the row exists, then updates
+ * only the fields that are explicitly provided (not undefined).
+ */
+export function saveSessionTracking(sessionID: string, state: SessionTrackingState): void {
+  const now = Date.now();
+
+  // Ensure row exists (no-op if it already does)
+  db()
+    .query(
+      "INSERT OR IGNORE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, 0, ?)",
+    )
+    .run(sessionID, now);
+
+  // Build SET clauses for only the provided fields
+  const sets: string[] = ["updated_at = ?"];
+  const vals: (string | number | null)[] = [now];
+
+  if (state.lastCuratedAt !== undefined) {
+    sets.push("last_curated_at = ?");
+    vals.push(state.lastCuratedAt);
+  }
+  if (state.messageCount !== undefined) {
+    sets.push("message_count = ?");
+    vals.push(state.messageCount);
+  }
+  if (state.turnsSinceCuration !== undefined) {
+    sets.push("turns_since_curation = ?");
+    vals.push(state.turnsSinceCuration);
+  }
+  if (state.consecutiveTextOnlyTurns !== undefined) {
+    sets.push("consecutive_text_only_turns = ?");
+    vals.push(state.consecutiveTextOnlyTurns);
+  }
+  if (state.ltmCacheText !== undefined) {
+    sets.push("ltm_cache_text = ?");
+    vals.push(state.ltmCacheText);
+  }
+  if (state.ltmCacheTokens !== undefined) {
+    sets.push("ltm_cache_tokens = ?");
+    vals.push(state.ltmCacheTokens);
+  }
+  if (state.ltmPinText !== undefined) {
+    sets.push("ltm_pin_text = ?");
+    vals.push(state.ltmPinText);
+  }
+  if (state.ltmPinTokens !== undefined) {
+    sets.push("ltm_pin_tokens = ?");
+    vals.push(state.ltmPinTokens);
+  }
+
+  // Update only the specified columns
+  db()
+    .query(
+      "UPDATE session_state SET " + sets.join(", ") + " WHERE session_id = ?",
+    )
+    .run(...vals, sessionID);
+}
+
+/** Loaded session tracking state. */
+export type LoadedSessionTracking = {
+  lastCuratedAt: number;
+  messageCount: number;
+  turnsSinceCuration: number;
+  consecutiveTextOnlyTurns: number;
+  ltmCacheText: string | null;
+  ltmCacheTokens: number | null;
+  ltmPinText: string | null;
+  ltmPinTokens: number | null;
+};
+
+/**
+ * Load persisted session tracking state. Returns null if no row exists.
+ */
+export function loadSessionTracking(sessionID: string): LoadedSessionTracking | null {
+  const row = db()
+    .query(
+      `SELECT last_curated_at, message_count, turns_since_curation,
+              consecutive_text_only_turns,
+              ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens
+       FROM session_state WHERE session_id = ?`,
+    )
+    .get(sessionID) as {
+      last_curated_at: number;
+      message_count: number;
+      turns_since_curation: number;
+      consecutive_text_only_turns: number;
+      ltm_cache_text: string | null;
+      ltm_cache_tokens: number | null;
+      ltm_pin_text: string | null;
+      ltm_pin_tokens: number | null;
+    } | null;
+  if (!row) return null;
+  return {
+    lastCuratedAt: row.last_curated_at,
+    messageCount: row.message_count,
+    turnsSinceCuration: row.turns_since_curation,
+    consecutiveTextOnlyTurns: row.consecutive_text_only_turns,
+    ltmCacheText: row.ltm_cache_text,
+    ltmCacheTokens: row.ltm_cache_tokens,
+    ltmPinText: row.ltm_pin_text,
+    ltmPinTokens: row.ltm_pin_tokens,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Key-value store (kv_meta table)
+// ---------------------------------------------------------------------------
+
+/** Get a kv_meta value by key. Returns null if not found. */
+export function getKV(key: string): string | null {
+  const row = db()
+    .query("SELECT value FROM kv_meta WHERE key = ?")
+    .get(key) as { value: string } | null;
+  return row?.value ?? null;
+}
+
+/** Set a kv_meta value (upsert). */
+export function setKV(key: string, value: string): void {
+  db()
+    .query(
+      "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+    )
+    .run(key, value, value);
 }
 
 // ---------------------------------------------------------------------------

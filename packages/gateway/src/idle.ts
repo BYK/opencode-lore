@@ -24,6 +24,7 @@ import {
   exportToFile,
   exportLoreFile,
   saveSessionCosts,
+  saveSessionTracking,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
@@ -196,6 +197,7 @@ export function buildIdleWorkHandler(
             () => curator.run({ llm, projectPath, sessionID, model }),
           );
           state.turnsSinceCuration = 0;
+          saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
           if (result.created > 0 || result.updated > 0 || result.deleted > 0) {
             log.info(
               `idle curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,

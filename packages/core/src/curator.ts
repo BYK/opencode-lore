@@ -1,9 +1,11 @@
 import { config } from "./config";
+import { saveSessionTracking, loadSessionTracking } from "./db";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
 import { detectAndFormat } from "./instruction-detect";
+import { curatorLimiter } from "./session-limiter";
 import type { LLMClient } from "./types";
 
 /**
@@ -121,7 +123,19 @@ export function applyOps(
 // Track which messages we've already curated — per session to prevent
 // cross-session leaking (curation on session A advancing the timestamp
 // past session B's messages, causing B's curation to find < 3 recent).
+// In-memory cache backed by session_state DB table so it survives restarts.
 const lastCuratedAt = new Map<string, number>();
+
+/** Get the last-curated timestamp for a session, loading from DB if needed. */
+function getLastCuratedAt(sessionID: string): number {
+  const cached = lastCuratedAt.get(sessionID);
+  if (cached !== undefined) return cached;
+  // Load from DB on first access
+  const persisted = loadSessionTracking(sessionID);
+  const ts = persisted?.lastCuratedAt ?? 0;
+  lastCuratedAt.set(sessionID, ts);
+  return ts;
+}
 
 export async function run(input: {
   llm: LLMClient;
@@ -132,9 +146,33 @@ export async function run(input: {
   const cfg = config();
   if (!cfg.curator.enabled) return { created: 0, updated: 0, deleted: 0 };
 
+  // Skip-if-busy: curation is periodic, not accumulative. If a curation is
+  // already running for this session, skip — the next trigger will pick up
+  // any new messages. Serializing would waste an LLM call.
+  //
+  // The isBusy() check and get()() enqueue are both synchronous — in Node's
+  // single-threaded event loop no microtask can interleave between them, so
+  // there is no TOCTOU race. The p-limit(1) serialization is a safety net
+  // if this invariant is ever violated.
+  if (curatorLimiter.isBusy(input.sessionID)) {
+    log.info(`curation skipped: already running for session ${input.sessionID.slice(0, 16)}`);
+    return { created: 0, updated: 0, deleted: 0 };
+  }
+
+  return curatorLimiter.get(input.sessionID)(() => runInner(input));
+}
+
+async function runInner(input: {
+  llm: LLMClient;
+  projectPath: string;
+  sessionID: string;
+  model?: { providerID: string; modelID: string };
+}): Promise<{ created: number; updated: number; deleted: number }> {
+  const cfg = config();
+
   // Get recent messages since last curation
   const all = temporal.bySession(input.projectPath, input.sessionID);
-  const sessionCuratedAt = lastCuratedAt.get(input.sessionID) ?? 0;
+  const sessionCuratedAt = getLastCuratedAt(input.sessionID);
   const recent = all.filter((m) => m.created_at > sessionCuratedAt);
   if (recent.length < 3) return { created: 0, updated: 0, deleted: 0 };
 
@@ -195,7 +233,9 @@ export async function run(input: {
     }
   }
 
-  lastCuratedAt.set(input.sessionID, Date.now());
+  const now = Date.now();
+  lastCuratedAt.set(input.sessionID, now);
+  saveSessionTracking(input.sessionID, { lastCuratedAt: now });
   return result;
 }
 

@@ -45,6 +45,8 @@ import {
   LORE_FILE,
   latReader,
   embedding,
+  saveSessionTracking,
+  loadSessionTracking,
 } from "@loreai/core";
 
 import type {
@@ -653,15 +655,17 @@ function getOrCreateSession(
 ): SessionState {
   let state = sessions.get(sessionID);
   if (!state) {
+    // Restore persisted tracking state from DB (survives process restarts)
+    const persisted = loadSessionTracking(sessionID);
     state = {
       sessionID,
       projectPath,
       fingerprint: "",
       lastRequestTime: Date.now(),
       lastUserTurnTime: 0,
-      messageCount: 0,
-      turnsSinceCuration: 0,
-      consecutiveTextOnlyTurns: 0,
+      messageCount: persisted?.messageCount ?? 0,
+      turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
+      consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
       recallStore: new Map(),
       cacheAnalytics: {
         lastRequestBody: null,
@@ -672,6 +676,19 @@ function getOrCreateSession(
         bustCount: 0,
       },
     };
+    // Restore LTM cache/pin from DB
+    if (persisted?.ltmCacheText != null && persisted.ltmCacheTokens != null) {
+      ltmSessionCache.set(sessionID, {
+        formatted: persisted.ltmCacheText,
+        tokenCount: persisted.ltmCacheTokens,
+      });
+    }
+    if (persisted?.ltmPinText != null && persisted.ltmPinTokens != null) {
+      ltmPinnedText.set(sessionID, {
+        formatted: persisted.ltmPinText,
+        tokenCount: persisted.ltmPinTokens,
+      });
+    }
     sessions.set(sessionID, state);
   }
   state.lastRequestTime = Date.now();
@@ -1696,7 +1713,7 @@ function postResponse(
         parts: assistantMsg.parts,
       });
 
-      // Update session state
+      // Update session state (persisted in the batched save after messageCount update)
       sessionState.turnsSinceCuration =
         (sessionState.turnsSinceCuration ?? 0) + 1;
 
@@ -1869,17 +1886,20 @@ function scheduleBackgroundWork(
         callType: "direct",
       })
       .catch((e) => log.error("background distillation failed:", e));
-  }
-
-  // Check if pending tokens exceed maxSegmentTokens threshold
-  const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
-  if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
-    log.info(
-      `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
-    );
-    distillation
-      .run({ llm, projectPath, sessionID, model, skipMeta: true, callType: batchQueueEnabled ? "batch" : "direct" })
-      .catch((e) => log.error("background distillation failed:", e));
+  } else {
+    // Incremental distillation: only when urgent didn't fire (urgent with
+    // force:true already processes everything, making incremental redundant).
+    // With the core p-limit(1) guard they'd serialize anyway, but this avoids
+    // a wasted run() call.
+    const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
+    if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
+      log.info(
+        `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
+      );
+      distillation
+        .run({ llm, projectPath, sessionID, model, skipMeta: true, callType: batchQueueEnabled ? "batch" : "direct" })
+        .catch((e) => log.error("background distillation failed:", e));
+    }
   }
 
   // Curation: run periodically when the knowledge system is enabled.
@@ -1903,9 +1923,11 @@ function scheduleBackgroundWork(
     )
       .then((result) => {
         sessionState.turnsSinceCuration = 0;
+        saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
         if (result.created > 0 || result.updated > 0 || result.deleted > 0) {
           // Invalidate LTM cache only when curation actually changed entries
           ltmSessionCache.delete(sessionID);
+          saveSessionTracking(sessionID, { ltmCacheText: null, ltmCacheTokens: null });
           log.info(
             `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
           );
@@ -2303,6 +2325,13 @@ async function handleConversationTurn(
   // resumes, triggering false structural compaction detection.
   if (!isSubagentTurn) {
     sessionState.messageCount = currMsgCount;
+    // Batched save: messageCount + turnsSinceCuration + consecutiveTextOnlyTurns
+    // together to avoid multiple DB writes per turn.
+    saveSessionTracking(sessionID, {
+      messageCount: currMsgCount,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
+    });
   }
 
   // Track session model for worker model discovery
@@ -2412,6 +2441,7 @@ async function handleConversationTurn(
   sessionState.lastTurnWasIdle = idleResult.triggered;
   if (idleResult.triggered) {
     ltmSessionCache.delete(sessionID);
+    saveSessionTracking(sessionID, { ltmCacheText: null, ltmCacheTokens: null });
     log.info(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
         (cacheWarm ? " (cache warm — skipping compact)" : ""),
@@ -2421,6 +2451,10 @@ async function handleConversationTurn(
   // --- 6. LTM injection (kept separate from host system prompt for caching) ---
   let ltmText: string | undefined;
   if (cfg.knowledge.enabled) {
+    // Track whether LTM state changed for batched DB persistence
+    let ltmDirty = false;
+    let pinDirty = false;
+
     try {
       let cached = ltmSessionCache.get(sessionID);
 
@@ -2442,6 +2476,7 @@ async function handleConversationTurn(
             const tokenCount = Math.ceil(formatted.length / 3);
             cached = { formatted, tokenCount };
             ltmSessionCache.set(sessionID, cached);
+            ltmDirty = true;
           }
         }
       }
@@ -2468,6 +2503,7 @@ async function handleConversationTurn(
         } else {
           // Substantially different or first injection — pin the new text
           ltmPinnedText.set(sessionID, cached);
+          pinDirty = true;
           ltmText = cached.formatted;
           setLtmTokens(cached.tokenCount, sessionID);
         }
@@ -2479,6 +2515,16 @@ async function handleConversationTurn(
       setLtmTokens(0, sessionID);
     } finally {
       consumeCameOutOfIdle(sessionID);
+    }
+
+    // Batched LTM state persistence — single DB write for cache + pin changes
+    if (ltmDirty || pinDirty) {
+      const cached = ltmSessionCache.get(sessionID);
+      const pinned = ltmPinnedText.get(sessionID);
+      saveSessionTracking(sessionID, {
+        ...(ltmDirty && cached ? { ltmCacheText: cached.formatted, ltmCacheTokens: cached.tokenCount } : {}),
+        ...(pinDirty && pinned ? { ltmPinText: pinned.formatted, ltmPinTokens: pinned.tokenCount } : {}),
+      });
     }
   } else {
     setLtmTokens(0, sessionID);

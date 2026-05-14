@@ -18,7 +18,7 @@
  */
 
 import type { LLMClient } from "@loreai/core";
-import { log } from "@loreai/core";
+import { log, getKV, setKV } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
 import { authHeaders } from "./auth";
@@ -161,8 +161,21 @@ export function createBatchLLMClient(
    * tokens may gain batch scope. A 403 from one session's token should only
    * block that session, not all bearer-token sessions. Session IDs are stable
    * for the lifetime of a connection, so token refresh doesn't bypass this.
+   *
+   * Persisted to kv_meta so disabled sessions survive process restarts.
    */
+  const DISABLED_BATCH_KV_KEY = "disabled_batch_sessions";
   const disabledBatchSessions = new Set<string>();
+  // Restore from DB
+  try {
+    const raw = getKV(DISABLED_BATCH_KV_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as string[];
+      for (const sid of parsed) disabledBatchSessions.add(sid);
+    }
+  } catch {
+    // Corrupted value — start fresh
+  }
 
   // Stats
   let totalQueued = 0;
@@ -207,6 +220,7 @@ export function createBatchLLMClient(
             disabledBatchSessions.add(sid);
           }
           if (sessionIDs.size > 0) {
+            setKV(DISABLED_BATCH_KV_KEY, JSON.stringify([...disabledBatchSessions]));
             log.warn(
               `batch API disabled for sessions [${[...sessionIDs].join(", ")}] ` +
                 `(${response.status}): ${text}. ` +

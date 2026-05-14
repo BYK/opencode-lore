@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt } from "../src/db";
+import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, getKV, setKV } from "../src/db";
 
 
 describe("db", () => {
@@ -23,7 +23,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(22);
+    expect(row.version).toBe(23);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -456,5 +456,110 @@ describe("db", () => {
     expect(all.has(sid1)).toBe(true);
     expect(all.has(sid2)).toBe(false);
     expect(all.get(sid1)!.warmupSavings).toBe(0.1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Migration v23: Session tracking state persistence
+  // -------------------------------------------------------------------------
+
+  test("session_state has v23 tracking columns", () => {
+    const cols = db()
+      .query("PRAGMA table_info(session_state)")
+      .all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toContain("last_curated_at");
+    expect(names).toContain("message_count");
+    expect(names).toContain("turns_since_curation");
+    expect(names).toContain("ltm_cache_text");
+    expect(names).toContain("ltm_cache_tokens");
+    expect(names).toContain("ltm_pin_text");
+    expect(names).toContain("ltm_pin_tokens");
+    expect(names).toContain("consecutive_text_only_turns");
+  });
+
+  test("saveSessionTracking and loadSessionTracking round-trip", () => {
+    const sid = `test-tracking-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      lastCuratedAt: 1000,
+      messageCount: 42,
+      turnsSinceCuration: 5,
+      ltmCacheText: "cached LTM text",
+      ltmCacheTokens: 100,
+      ltmPinText: "pinned LTM text",
+      ltmPinTokens: 90,
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.lastCuratedAt).toBe(1000);
+    expect(loaded!.messageCount).toBe(42);
+    expect(loaded!.turnsSinceCuration).toBe(5);
+    expect(loaded!.ltmCacheText).toBe("cached LTM text");
+    expect(loaded!.ltmCacheTokens).toBe(100);
+    expect(loaded!.ltmPinText).toBe("pinned LTM text");
+    expect(loaded!.ltmPinTokens).toBe(90);
+  });
+
+  test("saveSessionTracking partial update preserves other fields", () => {
+    const sid = `test-tracking-partial-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      lastCuratedAt: 1000,
+      messageCount: 10,
+      turnsSinceCuration: 3,
+    });
+    // Update only messageCount
+    saveSessionTracking(sid, { messageCount: 20 });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded!.lastCuratedAt).toBe(1000);
+    expect(loaded!.messageCount).toBe(20);
+    expect(loaded!.turnsSinceCuration).toBe(3);
+  });
+
+  test("saveSessionTracking preserves existing forceMinLayer", () => {
+    const sid = `test-tracking-layer-${crypto.randomUUID()}`;
+    saveForceMinLayer(sid, 2);
+    saveSessionTracking(sid, { messageCount: 15 });
+    expect(loadForceMinLayer(sid)).toBe(2);
+    expect(loadSessionTracking(sid)!.messageCount).toBe(15);
+  });
+
+  test("loadSessionTracking returns null for unknown session", () => {
+    expect(loadSessionTracking("nonexistent-tracking")).toBeNull();
+  });
+
+  test("saveSessionTracking can set ltm fields to null", () => {
+    const sid = `test-tracking-null-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      ltmCacheText: "some text",
+      ltmCacheTokens: 50,
+    });
+    expect(loadSessionTracking(sid)!.ltmCacheText).toBe("some text");
+    // Clear the cache
+    saveSessionTracking(sid, {
+      ltmCacheText: null,
+      ltmCacheTokens: null,
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded!.ltmCacheText).toBeNull();
+    expect(loaded!.ltmCacheTokens).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // KV helpers (kv_meta table)
+  // -------------------------------------------------------------------------
+
+  test("getKV returns null for unknown key", () => {
+    expect(getKV("nonexistent_kv_key")).toBeNull();
+  });
+
+  test("setKV and getKV round-trip", () => {
+    setKV("test_kv_key", "test_kv_value");
+    expect(getKV("test_kv_key")).toBe("test_kv_value");
+  });
+
+  test("setKV upserts on conflict", () => {
+    setKV("kv_upsert", "first");
+    expect(getKV("kv_upsert")).toBe("first");
+    setKV("kv_upsert", "second");
+    expect(getKV("kv_upsert")).toBe("second");
   });
 });

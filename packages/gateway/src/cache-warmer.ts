@@ -23,7 +23,7 @@
  *    are wrong.
  */
 
-import { log, config as loreConfig, db, projectId } from "@loreai/core";
+import { log, config as loreConfig, db, projectId, getKV, setKV } from "@loreai/core";
 import type {
   InterTurnHistogram,
   WarmupResult,
@@ -95,6 +95,30 @@ export const BREAK_FLOOR_MS = 180_000;
 
 let circuitBreakerFailures = 0;
 let circuitBreakerTripped = false;
+let circuitBreakerLoaded = false;
+
+const CB_KV_KEY = "warmup_circuit_breaker";
+
+/** Load circuit breaker state from DB on first access. */
+function ensureCircuitBreakerLoaded(): void {
+  if (circuitBreakerLoaded) return;
+  circuitBreakerLoaded = true;
+  try {
+    const raw = getKV(CB_KV_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { tripped?: boolean; failures?: number };
+      circuitBreakerTripped = parsed.tripped ?? false;
+      circuitBreakerFailures = parsed.failures ?? 0;
+    }
+  } catch {
+    // Corrupted value — start fresh
+  }
+}
+
+/** Persist circuit breaker state to DB. */
+function saveCircuitBreaker(): void {
+  setKV(CB_KV_KEY, JSON.stringify({ tripped: circuitBreakerTripped, failures: circuitBreakerFailures }));
+}
 
 /**
  * Check if the global circuit breaker has tripped.
@@ -106,6 +130,7 @@ let circuitBreakerTripped = false;
  * afford to keep trying.
  */
 export function isCircuitBreakerTripped(): boolean {
+  ensureCircuitBreakerLoaded();
   return circuitBreakerTripped;
 }
 
@@ -115,6 +140,7 @@ export function getCircuitBreakerStatus(): {
   failures: number;
   maxFailures: number;
 } {
+  ensureCircuitBreakerLoaded();
   return {
     tripped: circuitBreakerTripped,
     failures: circuitBreakerFailures,
@@ -133,6 +159,7 @@ export function getCircuitBreakerStatus(): {
  * Returns true if the circuit breaker has tripped (warming should stop).
  */
 export function checkCircuitBreaker(result: WarmupResult): boolean {
+  ensureCircuitBreakerLoaded();
   if (circuitBreakerTripped) return true;
 
   if (result.ok && result.cacheCreationTokens > 0 && result.cacheReadTokens === 0) {
@@ -142,8 +169,10 @@ export function checkCircuitBreaker(result: WarmupResult): boolean {
         `(${circuitBreakerFailures}/${CIRCUIT_BREAKER_MAX_FAILURES}). ` +
         `cacheCreation=${result.cacheCreationTokens} cacheRead=${result.cacheReadTokens}`,
     );
+    saveCircuitBreaker();
     if (circuitBreakerFailures >= CIRCUIT_BREAKER_MAX_FAILURES) {
       circuitBreakerTripped = true;
+      saveCircuitBreaker();
       log.error(
         `cache-warmer CIRCUIT BREAKER TRIPPED: ${CIRCUIT_BREAKER_MAX_FAILURES} consecutive ` +
           `uncached warmups detected. ALL cache warming disabled for this process. ` +
@@ -155,6 +184,7 @@ export function checkCircuitBreaker(result: WarmupResult): boolean {
   } else if (result.ok && result.cacheReadTokens > 0) {
     // Successful cache read — reset the failure counter
     circuitBreakerFailures = 0;
+    saveCircuitBreaker();
   }
 
   return circuitBreakerTripped;
@@ -1262,6 +1292,8 @@ export function getGlobalHistogramsSnapshot(): ReadonlyMap<string, InterTurnHist
 export function _resetForTest(): void {
   circuitBreakerFailures = 0;
   circuitBreakerTripped = false;
+  circuitBreakerLoaded = true; // Mark as loaded so it doesn't re-read stale DB state
+  try { setKV(CB_KV_KEY, JSON.stringify({ tripped: false, failures: 0 })); } catch { /* DB may not be available in all test contexts */ }
   globalHistograms.clear();
   dirtyProjects.clear();
 }

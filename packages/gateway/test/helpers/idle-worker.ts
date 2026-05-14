@@ -65,6 +65,10 @@ mock.module("@loreai/core", () => ({
   exportToFile: () => {},
   exportLoreFile: () => {},
   saveSessionCosts: () => {},
+  saveSessionTracking: () => {},
+  loadSessionTracking: () => null,
+  getKV: () => null,
+  setKV: () => {},
   // Needed by transitive imports (cache-warmer.ts, cost-tracker.ts)
   db: () => ({}),
   projectId: () => undefined,

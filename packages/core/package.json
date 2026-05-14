@@ -26,6 +26,7 @@
     "@huggingface/hub": "2.11.0",
     "@huggingface/transformers": "^3.7.1",
     "micromark": "^4.0.0",
+    "p-limit": "7",
     "remark": "^15.0.1",
     "uuidv7": "^1.1.0",
     "zod": "^4.3.6"

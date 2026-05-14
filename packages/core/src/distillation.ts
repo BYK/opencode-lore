@@ -14,6 +14,7 @@ import {
 } from "./prompt";
 import { toolStripAnnotation } from "./gradient";
 import { workerSessionIDs } from "./worker";
+import { distillLimiter } from "./session-limiter";
 import type { LLMClient } from "./types";
 
 // Re-export for backwards compat — index.ts and others may still import from here.
@@ -610,8 +611,23 @@ function resetOrphans(projectPath: string, sessionID: string): number {
   return orphans.length;
 }
 
-// Main distillation entry point — called on session.idle or when urgent
+// Main distillation entry point — called on session.idle or when urgent.
+// Serialized per session via p-limit(1) to prevent concurrent runs from
+// reading the same undistilled messages and producing duplicate rows.
 export async function run(input: {
+  llm: LLMClient;
+  projectPath: string;
+  sessionID: string;
+  model?: { providerID: string; modelID: string };
+  force?: boolean;
+  skipMeta?: boolean;
+  urgent?: boolean;
+  callType?: "batch" | "direct";
+}): Promise<{ rounds: number; distilled: number }> {
+  return distillLimiter.get(input.sessionID)(() => runInner(input));
+}
+
+async function runInner(input: {
   llm: LLMClient;
   projectPath: string;
   sessionID: string;
@@ -697,7 +713,8 @@ export async function run(input: {
       gen0Count(input.projectPath, input.sessionID) >=
       cfg.distillation.metaThreshold
     ) {
-      await metaDistill({
+      // Call inner directly — we're already under the per-session limiter.
+      await metaDistillInner({
         llm: input.llm,
         projectPath: input.projectPath,
         sessionID: input.sessionID,
@@ -776,17 +793,29 @@ async function distillSegment(input: {
     return null;
   }
 
-  const distillId = storeDistillation({
-    projectPath: input.projectPath,
-    sessionID: input.sessionID,
-    observations: result.observations,
-    sourceIDs: input.messages.map((m) => m.id),
-    generation: 0,
-    rCompression: rComp,
-    cNorm,
-    callType: input.callType,
-  });
-  temporal.markDistilled(input.messages.map((m) => m.id));
+  // Atomic: store distillation + mark source messages as distilled in one
+  // transaction. Without this, a crash between the two statements would leave
+  // messages undistilled but with an existing distillation row, causing
+  // re-processing on restart and duplicate distillation content.
+  let distillId: string;
+  db().exec("BEGIN IMMEDIATE");
+  try {
+    distillId = storeDistillation({
+      projectPath: input.projectPath,
+      sessionID: input.sessionID,
+      observations: result.observations,
+      sourceIDs: input.messages.map((m) => m.id),
+      generation: 0,
+      rCompression: rComp,
+      cNorm,
+      callType: input.callType,
+    });
+    temporal.markDistilled(input.messages.map((m) => m.id));
+    db().exec("COMMIT");
+  } catch (e) {
+    db().exec("ROLLBACK");
+    throw e;
+  }
 
   log.info(
     `distill segment: ${input.messages.length} msgs, ` +
@@ -840,9 +869,21 @@ async function distillSegment(input: {
  * via `<previous-meta-summary>` so the LLM updates in place rather than
  * re-deriving from scratch.
  *
- * Exported for tests; `run()` is the production entry point.
+ * Serialized per session via the same p-limit(1) as `run()`. Exported for
+ * the idle handler which calls metaDistill() independently of run().
  */
 export async function metaDistill(input: {
+  llm: LLMClient;
+  projectPath: string;
+  sessionID: string;
+  model?: { providerID: string; modelID: string };
+  urgent?: boolean;
+  callType?: "batch" | "direct";
+}): Promise<DistillationResult | null> {
+  return distillLimiter.get(input.sessionID)(() => metaDistillInner(input));
+}
+
+async function metaDistillInner(input: {
   llm: LLMClient;
   projectPath: string;
   sessionID: string;
