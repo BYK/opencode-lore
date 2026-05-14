@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, loadHeaderSessionIndex, getKV, setKV } from "../src/db";
 
 
@@ -685,5 +685,44 @@ describe("db", () => {
     expect(getKV("kv_upsert")).toBe("first");
     setKV("kv_upsert", "second");
     expect(getKV("kv_upsert")).toBe("second");
+  });
+
+  describe("ensureProject test-path guard", () => {
+    let savedLoreDbPath: string | undefined;
+
+    beforeEach(() => {
+      savedLoreDbPath = process.env.LORE_DB_PATH;
+    });
+
+    afterEach(() => {
+      // Restore — tests run under setup.ts preload so LORE_DB_PATH is set
+      if (savedLoreDbPath !== undefined) {
+        process.env.LORE_DB_PATH = savedLoreDbPath;
+      } else {
+        delete process.env.LORE_DB_PATH;
+      }
+    });
+
+    test("throws for /test/ paths when LORE_DB_PATH is unset", () => {
+      delete process.env.LORE_DB_PATH;
+      expect(() => ensureProject("/test/ltm/something")).toThrow(
+        /Refusing to create project with test path/,
+      );
+    });
+
+    test("allows /test/ paths when LORE_DB_PATH is set (temp DB)", () => {
+      // LORE_DB_PATH is already set by test preload — just verify it works
+      expect(() => ensureProject("/test/guard-check")).not.toThrow();
+    });
+
+    test("allows non-test paths when LORE_DB_PATH is unset", () => {
+      delete process.env.LORE_DB_PATH;
+      // Real-looking paths should not be blocked (guard only rejects /test/ prefix)
+      // Note: we don't actually call ensureProject here because the DB singleton
+      // is already initialized — this verifies the guard logic doesn't throw
+      // for normal paths. The DB call itself would succeed since the singleton
+      // is already open.
+      expect(() => ensureProject("/home/user/my-project")).not.toThrow();
+    });
   });
 });

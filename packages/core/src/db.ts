@@ -796,6 +796,18 @@ export function close() {
  * git_remote was not yet populated (pre-v14 rows), it is backfilled lazily.
  */
 export function ensureProject(path: string, name?: string): string {
+  // Guard: reject synthetic test paths when targeting the production DB.
+  // Test paths like "/test/ltm/project" are absolute paths that don't exist
+  // on any real filesystem — they're only valid in test suites running against
+  // a temp DB (LORE_DB_PATH set by test preload). If we see such a path
+  // without LORE_DB_PATH being set, a test is hitting the production DB.
+  if (!process.env.LORE_DB_PATH && /^\/test\//.test(path)) {
+    throw new Error(
+      `Refusing to create project with test path "${path}" in the production DB. ` +
+        `Set LORE_DB_PATH to a temp path, or run tests via \`bun test\` from the repo root.`,
+    );
+  }
+
   // 1. Exact path match (fast path)
   const existing = db()
     .query("SELECT id, git_remote FROM projects WHERE path = ?")
