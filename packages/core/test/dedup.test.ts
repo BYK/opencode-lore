@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject, getKV } from "../src/db";
 import * as ltm from "../src/ltm";
+import { dedupPairKey } from "../src/ltm";
 import * as embedding from "../src/embedding";
 
 const PROJECT = "/test/dedup/project";
@@ -177,8 +178,8 @@ describe("dedup — core _dedup()", () => {
     const result = await ltm.deduplicate(PROJECT, { dryRun: true });
     expect(result.pairSimilarities.size).toBeGreaterThan(0);
 
-    const pairKey = [id1, id2].sort().join(":");
-    const sim = result.pairSimilarities.get(pairKey);
+    const pk = dedupPairKey(id1, id2);
+    const sim = result.pairSimilarities.get(pk);
     expect(sim).toBeDefined();
     // Identical vectors should have similarity ~1.0
     expect(sim!).toBeCloseTo(1.0, 2);
@@ -354,7 +355,7 @@ describe("dedup — feedback recording", () => {
     expect(feedback[0].similarity).toBeCloseTo(0.94, 2);
   });
 
-  test("recordAutoSignals records accepts for merged pairs", async () => {
+  test("recordAutoSignals does NOT record accepts for merged pairs (avoids tautological loop)", async () => {
     const id1 = createEntry({ title: "Unique entry for auto signal alpha" });
     const id2 = createEntry({ title: "Unique entry for auto signal beta" });
     // Same embedding → merged
@@ -367,34 +368,49 @@ describe("dedup — feedback recording", () => {
     const pid = ensureProject(PROJECT);
     ltm.recordAutoSignals(pid, result);
 
+    // Auto-signals should only record rejects, never accepts
     const feedback = ltm.getDedupFeedback(pid);
     const accepts = feedback.filter((f) => f.accepted);
-    expect(accepts.length).toBeGreaterThanOrEqual(1);
-    expect(accepts[0].source).toBe("auto_dedup");
+    expect(accepts).toHaveLength(0);
   });
 
   test("recordAutoSignals records rejects for high-similarity non-merged pairs", async () => {
+    // Create 3 entries: two with identical embeddings (will merge),
+    // plus a third with a high-but-below-threshold similarity to the first.
+    // The third entry's pair with the first is a non-merged pair with
+    // similarity >= 0.80, which should produce a reject signal.
     const id1 = createEntry({ title: "Unique entry for reject signal alpha" });
     const id2 = createEntry({ title: "Unique entry for reject signal beta" });
-    // Similar but not identical embeddings — perturbation creates
-    // a similarity that should be above 0.80 but below 0.935
-    injectSimilarEmbedding(id1, 42, 0);
-    injectSimilarEmbedding(id2, 42, 0.5);
+    const id3 = createEntry({ title: "Unique entry for reject signal gamma" });
+
+    // id1 and id2: identical → will merge (similarity = 1.0)
+    injectEmbedding(id1, 42);
+    injectEmbedding(id2, 42);
+    // id3: perturbation of seed 42 — high similarity but below threshold
+    injectSimilarEmbedding(id3, 42, 0.5);
 
     const result = await ltm.deduplicate(PROJECT, { dryRun: true });
 
-    const pid = ensureProject(PROJECT);
-    const pairKey = [id1, id2].sort().join(":");
-    const sim = result.pairSimilarities.get(pairKey);
+    // Verify id3 has a high-similarity pair recorded
+    const pk13 = dedupPairKey(id1, id3);
+    const pk23 = dedupPairKey(id2, id3);
+    const sim13 = result.pairSimilarities.get(pk13);
+    const sim23 = result.pairSimilarities.get(pk23);
 
-    // Only expect reject signals if similarity is in the [0.80, threshold) range
-    if (sim != null && sim >= 0.80 && result.clusters.length === 0) {
-      ltm.recordAutoSignals(pid, result);
-      const feedback = ltm.getDedupFeedback(pid);
-      const rejects = feedback.filter((f) => !f.accepted);
-      expect(rejects.length).toBeGreaterThanOrEqual(1);
-      expect(rejects[0].source).toBe("auto_dedup");
+    // At least one of the non-merged pairs should have sim >= 0.80
+    const hasHighSimPair = (sim13 != null && sim13 >= 0.80) || (sim23 != null && sim23 >= 0.80);
+    expect(hasHighSimPair).toBe(true);
+
+    const pid = ensureProject(PROJECT);
+    ltm.recordAutoSignals(pid, result);
+
+    const feedback = ltm.getDedupFeedback(pid);
+    // All auto signals should be rejects (never accepts)
+    for (const f of feedback) {
+      expect(f.accepted).toBe(false);
     }
+    expect(feedback.length).toBeGreaterThanOrEqual(1);
+    expect(feedback[0].source).toBe("auto_dedup");
   });
 
   test("recordAutoSignals filters out pairs below 0.80 similarity", async () => {
@@ -414,6 +430,19 @@ describe("dedup — feedback recording", () => {
     for (const f of feedback) {
       expect(f.similarity).toBeGreaterThanOrEqual(0.80);
     }
+  });
+
+  test("entryTitles map is populated for all entries (survives deletion)", async () => {
+    const id1 = createEntry({ title: "Entry title alpha for titles test" });
+    const id2 = createEntry({ title: "Entry title beta for titles test" });
+    injectEmbedding(id1, 42);
+    injectEmbedding(id2, 42);
+
+    const result = await ltm.deduplicate(PROJECT, { dryRun: false });
+    // One entry was deleted, but entryTitles should still have both
+    expect(result.entryTitles.size).toBe(2);
+    expect(result.entryTitles.get(id1)).toBe("Entry title alpha for titles test");
+    expect(result.entryTitles.get(id2)).toBe("Entry title beta for titles test");
   });
 });
 
@@ -527,6 +556,33 @@ describe("dedup — threshold calibration", () => {
     expect(threshold!).toBeGreaterThanOrEqual(0.85);
   });
 
+  test("overlapping accept/reject ranges: handles noisy feedback gracefully", () => {
+    const pid = ensureProject(PROJECT);
+    // Real-world scenario: some pairs at 0.92 were accepted, others at 0.92 rejected.
+    // The algorithm should still find a reasonable threshold.
+    const rows: Array<{ similarity: number; accepted: boolean }> = [];
+    // Mostly rejects below 0.92
+    for (let i = 0; i < 8; i++) {
+      rows.push({ similarity: 0.87 + i * 0.005, accepted: false });
+    }
+    // Overlap zone: mix of accept/reject around 0.92
+    rows.push({ similarity: 0.920, accepted: false });
+    rows.push({ similarity: 0.920, accepted: true });
+    rows.push({ similarity: 0.925, accepted: false });
+    rows.push({ similarity: 0.925, accepted: true });
+    // Mostly accepts above 0.93
+    for (let i = 0; i < 10; i++) {
+      rows.push({ similarity: 0.93 + i * 0.005, accepted: true });
+    }
+    seedFeedback(pid, rows);
+
+    const threshold = ltm.calibrateDedupThreshold(pid);
+    expect(threshold).not.toBeNull();
+    // Should still find something in the 0.90-0.93 range despite noise
+    expect(threshold!).toBeGreaterThanOrEqual(0.90);
+    expect(threshold!).toBeLessThanOrEqual(0.95);
+  });
+
   test("tie-break: prefers higher threshold (conservative)", () => {
     const pid = ensureProject(PROJECT);
     // Perfect symmetry: equal number of accepts and rejects around multiple
@@ -624,6 +680,78 @@ describe("dedup — threshold persistence", () => {
 
     const result = await ltm.deduplicate(PROJECT, { dryRun: true });
     expect(result.clusters).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feedback pruning
+// ---------------------------------------------------------------------------
+
+describe("dedup — feedback pruning", () => {
+  beforeEach(cleanup);
+
+  test("pruneDedupFeedback keeps most recent rows up to cap", () => {
+    const pid = ensureProject(PROJECT);
+    // Insert 510 rows (above the 500 cap)
+    for (let i = 0; i < 510; i++) {
+      ltm.recordDedupFeedback({
+        projectId: pid,
+        entryATitle: `A-${i}`,
+        entryBTitle: `B-${i}`,
+        similarity: 0.90 + (i % 10) * 0.005,
+        accepted: i % 2 === 0,
+        source: "auto_dedup",
+      });
+    }
+    expect(ltm.getDedupFeedbackCount(pid)).toBe(510);
+
+    ltm.pruneDedupFeedback(pid);
+
+    expect(ltm.getDedupFeedbackCount(pid)).toBe(500);
+  });
+
+  test("pruneDedupFeedback is a no-op when under cap", () => {
+    const pid = ensureProject(PROJECT);
+    for (let i = 0; i < 10; i++) {
+      ltm.recordDedupFeedback({
+        projectId: pid,
+        entryATitle: `A-${i}`,
+        entryBTitle: `B-${i}`,
+        similarity: 0.93,
+        accepted: true,
+        source: "cli_yes",
+      });
+    }
+
+    ltm.pruneDedupFeedback(pid);
+    expect(ltm.getDedupFeedbackCount(pid)).toBe(10);
+  });
+
+  test("pruneDedupFeedback scopes to project — doesn't prune other projects", () => {
+    const pidA = ensureProject(PROJECT);
+    const pidB = ensureProject(PROJECT_B);
+
+    // Project A: 510 rows
+    for (let i = 0; i < 510; i++) {
+      ltm.recordDedupFeedback({
+        projectId: pidA,
+        entryATitle: `A-${i}`, entryBTitle: `B-${i}`,
+        similarity: 0.93, accepted: true, source: "auto_dedup",
+      });
+    }
+    // Project B: 5 rows
+    for (let i = 0; i < 5; i++) {
+      ltm.recordDedupFeedback({
+        projectId: pidB,
+        entryATitle: `A-${i}`, entryBTitle: `B-${i}`,
+        similarity: 0.94, accepted: false, source: "cli_interactive",
+      });
+    }
+
+    ltm.pruneDedupFeedback(pidA);
+
+    expect(ltm.getDedupFeedbackCount(pidA)).toBe(500);
+    expect(ltm.getDedupFeedbackCount(pidB)).toBe(5); // untouched
   });
 });
 

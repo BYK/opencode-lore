@@ -1075,11 +1075,18 @@ export type DedupCluster = {
   merged: Array<{ id: string; title: string }>;
 };
 
+/** Stable pair key for two entry IDs — sorted to ensure order-independence. */
+export function dedupPairKey(idA: string, idB: string): string {
+  return idA < idB ? `${idA}:${idB}` : `${idB}:${idA}`;
+}
+
 export type DedupResult = {
   clusters: DedupCluster[];
   totalRemoved: number;
-  /** Pairwise embedding cosine similarities. Key: sorted "idA:idB". */
+  /** Pairwise embedding cosine similarities. Key: dedupPairKey(idA, idB). */
   pairSimilarities: Map<string, number>;
+  /** All entry titles by ID — for feedback recording after entries are deleted. */
+  entryTitles: Map<string, string>;
 };
 
 /**
@@ -1111,7 +1118,7 @@ function _dedup(
   dryRun: boolean,
   embeddingThreshold: number = EMBEDDING_DEDUP_THRESHOLD,
 ): DedupResult {
-  if (entries.length < 2) return { clusters: [], totalRemoved: 0, pairSimilarities: new Map() };
+  if (entries.length < 2) return { clusters: [], totalRemoved: 0, pairSimilarities: new Map(), entryTitles: new Map() };
 
   // --- Build neighbor map using title overlap + embedding similarity ---
   // Two entries are considered neighbors (potential duplicates) if EITHER:
@@ -1171,9 +1178,9 @@ function _dedup(
 
       // Track all pairwise embedding similarities for calibration signals
       if (similarity > 0) {
-        const pairKey = [entry.id, other.id].sort().join(":");
-        if (!pairSimilarities.has(pairKey)) {
-          pairSimilarities.set(pairKey, similarity);
+        const pk = dedupPairKey(entry.id, other.id);
+        if (!pairSimilarities.has(pk)) {
+          pairSimilarities.set(pk, similarity);
         }
       }
 
@@ -1248,7 +1255,10 @@ function _dedup(
   // Sort clusters by size descending for readability
   result.sort((a, b) => b.merged.length - a.merged.length);
 
-  return { clusters: result, totalRemoved, pairSimilarities };
+  // Build title map from all input entries — survives entry deletion.
+  const entryTitles = new Map(entries.map((e) => [e.id, e.title]));
+
+  return { clusters: result, totalRemoved, pairSimilarities, entryTitles };
 }
 
 export async function deduplicate(
@@ -1329,8 +1339,8 @@ export function recordDedupResultFeedback(
 ): void {
   for (const cluster of result.clusters) {
     for (const merged of cluster.merged) {
-      const pairKey = [cluster.surviving.id, merged.id].sort().join(":");
-      const similarity = result.pairSimilarities.get(pairKey);
+      const pk = dedupPairKey(cluster.surviving.id, merged.id);
+      const similarity = result.pairSimilarities.get(pk);
       if (similarity != null && similarity > 0) {
         recordDedupFeedback({
           projectId,
@@ -1348,9 +1358,11 @@ export function recordDedupResultFeedback(
 /**
  * Record automatic calibration signals from a post-curation dedup sweep.
  *
- * - Merged pairs → accept signals
- * - Non-merged pairs with similarity in [0.80, threshold) → reject signals
- *   (the system decided they were distinct at this similarity level)
+ * Only records **reject** signals — non-merged pairs with similarity in
+ * [0.80, threshold). Accept signals from auto-dedup are tautological (the
+ * pair was merged *because* its similarity exceeded the threshold), so they
+ * provide no new information and would create a self-reinforcing feedback
+ * loop. Manual signals (cli_yes, cli_interactive) provide the accept side.
  *
  * Caps at AUTO_SIGNAL_MAX_PAIRS most interesting pairs per run (closest
  * to the threshold boundary) to avoid table bloat.
@@ -1359,76 +1371,40 @@ export function recordAutoSignals(
   projectId: string | null,
   result: DedupResult,
 ): void {
-  // Collect merged pair IDs for quick lookup
+  // Collect merged pair IDs for quick lookup (to exclude from reject signals)
   const mergedPairs = new Set<string>();
   for (const cluster of result.clusters) {
     for (const merged of cluster.merged) {
-      const pairKey = [cluster.surviving.id, merged.id].sort().join(":");
-      mergedPairs.add(pairKey);
+      mergedPairs.add(dedupPairKey(cluster.surviving.id, merged.id));
     }
   }
 
-  // Build a title map from the pairSimilarities keys — we need titles for
-  // reject signals too (non-merged pairs). For entries that appear in clusters
-  // we have titles directly; for others we need to look them up.
-  const titleMap = new Map<string, string>();
+  // Build a title map — we need titles for reject signals (non-merged pairs).
+  // Use entryTitles from result first, then fall back to cluster data.
+  const titleMap = new Map<string, string>(result.entryTitles);
   for (const cluster of result.clusters) {
-    titleMap.set(cluster.surviving.id, cluster.surviving.title);
+    if (!titleMap.has(cluster.surviving.id)) {
+      titleMap.set(cluster.surviving.id, cluster.surviving.title);
+    }
     for (const m of cluster.merged) {
-      titleMap.set(m.id, m.title);
+      if (!titleMap.has(m.id)) titleMap.set(m.id, m.title);
     }
   }
 
-  // For reject signals, we need titles for entries not in any cluster.
-  // Look them up from the DB if missing.
-  for (const pairKey of result.pairSimilarities.keys()) {
-    const [idA, idB] = pairKey.split(":");
-    for (const id of [idA, idB]) {
-      if (!titleMap.has(id)) {
-        const row = db()
-          .query("SELECT title FROM knowledge WHERE id = ?")
-          .get(id) as { title: string } | null;
-        if (row) titleMap.set(id, row.title);
-      }
-    }
-  }
-
-  // Collect all candidate signals
-  type Signal = { entryATitle: string; entryBTitle: string; similarity: number; accepted: boolean };
+  // Collect reject signals: non-merged pairs with high similarity
+  type Signal = { entryATitle: string; entryBTitle: string; similarity: number };
   const signals: Signal[] = [];
 
-  // Accept signals: merged pairs with embedding similarity
-  for (const cluster of result.clusters) {
-    for (const merged of cluster.merged) {
-      const pairKey = [cluster.surviving.id, merged.id].sort().join(":");
-      const sim = result.pairSimilarities.get(pairKey);
-      if (sim != null && sim >= AUTO_SIGNAL_MIN_SIMILARITY) {
-        signals.push({
-          entryATitle: cluster.surviving.title,
-          entryBTitle: merged.title,
-          similarity: sim,
-          accepted: true,
-        });
-      }
-    }
-  }
-
-  // Reject signals: non-merged pairs with high similarity
-  for (const [pairKey, sim] of result.pairSimilarities) {
+  for (const [pk, sim] of result.pairSimilarities) {
     if (sim < AUTO_SIGNAL_MIN_SIMILARITY) continue;
-    if (mergedPairs.has(pairKey)) continue; // already recorded as accept
+    if (mergedPairs.has(pk)) continue; // merged pair — skip (tautological accept)
 
-    const [idA, idB] = pairKey.split(":");
+    const [idA, idB] = pk.split(":");
     const titleA = titleMap.get(idA);
     const titleB = titleMap.get(idB);
     if (!titleA || !titleB) continue;
 
-    signals.push({
-      entryATitle: titleA,
-      entryBTitle: titleB,
-      similarity: sim,
-      accepted: false,
-    });
+    signals.push({ entryATitle: titleA, entryBTitle: titleB, similarity: sim });
   }
 
   // Sort by distance to threshold boundary (most informative first), cap
@@ -1436,13 +1412,16 @@ export function recordAutoSignals(
   signals.sort((a, b) => Math.abs(a.similarity - currentThreshold) - Math.abs(b.similarity - currentThreshold));
   const capped = signals.slice(0, AUTO_SIGNAL_MAX_PAIRS);
 
+  // Prune old feedback to prevent unbounded table growth
+  pruneDedupFeedback(projectId);
+
   for (const s of capped) {
     recordDedupFeedback({
       projectId,
       entryATitle: s.entryATitle,
       entryBTitle: s.entryBTitle,
       similarity: s.similarity,
-      accepted: s.accepted,
+      accepted: false,
       source: "auto_dedup",
     });
   }
@@ -1480,6 +1459,40 @@ export function getDedupFeedbackCount(projectId: string | null): number {
           .get()
   ) as { cnt: number } | null;
   return row?.cnt ?? 0;
+}
+
+/** Max feedback rows to keep per project (prevents unbounded growth). */
+const MAX_FEEDBACK_ROWS_PER_PROJECT = 500;
+
+/**
+ * Prune old feedback rows for a project, keeping the most recent
+ * MAX_FEEDBACK_ROWS_PER_PROJECT rows. Called from recordAutoSignals
+ * to prevent unbounded table growth.
+ */
+export function pruneDedupFeedback(projectId: string | null): void {
+  const count = getDedupFeedbackCount(projectId);
+  if (count <= MAX_FEEDBACK_ROWS_PER_PROJECT) return;
+
+  const excess = count - MAX_FEEDBACK_ROWS_PER_PROJECT;
+  if (projectId !== null) {
+    db()
+      .query(
+        `DELETE FROM dedup_feedback WHERE id IN (
+           SELECT id FROM dedup_feedback WHERE project_id = ?
+           ORDER BY created_at ASC LIMIT ?
+         )`,
+      )
+      .run(projectId, excess);
+  } else {
+    db()
+      .query(
+        `DELETE FROM dedup_feedback WHERE id IN (
+           SELECT id FROM dedup_feedback WHERE project_id IS NULL
+           ORDER BY created_at ASC LIMIT ?
+         )`,
+      )
+      .run(excess);
+  }
 }
 
 /**

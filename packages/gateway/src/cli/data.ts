@@ -700,6 +700,11 @@ async function cmdMerge(
 // dedup — Deduplicate knowledge entries across all projects (or one)
 // ---------------------------------------------------------------------------
 
+/** Stable pair key for two entry IDs — mirrors ltm.dedupPairKey(). */
+function pairKey(idA: string, idB: string): string {
+  return idA < idB ? `${idA}:${idB}` : `${idB}:${idA}`;
+}
+
 function printDedupResult(
   result: Awaited<ReturnType<typeof import("@loreai/core").ltm.deduplicate>>,
   apply: boolean,
@@ -713,8 +718,8 @@ function printDedupResult(
     console.log(`Cluster ${i + 1} (${total} entries → 1):`);
     console.log(`  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`);
     for (const m of cluster.merged) {
-      const pairKey = [cluster.surviving.id, m.id].sort().join(":");
-      const sim = result.pairSimilarities.get(pairKey);
+      const pk = pairKey(cluster.surviving.id, m.id);
+      const sim = result.pairSimilarities.get(pk);
       const simStr = sim != null ? ` [sim: ${sim.toFixed(3)}]` : "";
       console.log(`  ${apply ? "Remove" : "Would remove"}: "${truncate(m.title, 55)}" (${m.id.slice(0, 8)}…)${simStr}`);
     }
@@ -722,14 +727,23 @@ function printDedupResult(
   }
 }
 
-/** Prompt the user for a single-key choice. Returns the chosen key. */
-function promptChoice(message: string, choices: string[]): Promise<string> {
+/** Prompt the user for a single-key choice. Returns the chosen key, or "s" on EOF/close. */
+function promptChoice(message: string, choices: string[], fallback = "s"): Promise<string> {
   return new Promise((resolve) => {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let resolved = false;
+    rl.on("close", () => {
+      if (!resolved) {
+        resolved = true;
+        resolve(fallback);
+      }
+    });
     const ask = () => {
       rl.question(message, (answer) => {
+        if (resolved) return;
         const trimmed = answer.trim().toLowerCase();
         if (choices.includes(trimmed)) {
+          resolved = true;
           rl.close();
           resolve(trimmed);
         } else {
@@ -841,7 +855,16 @@ async function cmdDedup(
   }
 
   if (asJson) {
-    console.log(JSON.stringify(allResults, null, 2));
+    // Map is not JSON-serializable — convert to plain objects.
+    const serializable = allResults.map((r) => ({
+      ...r,
+      result: {
+        ...r.result,
+        pairSimilarities: Object.fromEntries(r.result.pairSimilarities),
+        entryTitles: Object.fromEntries(r.result.entryTitles),
+      },
+    }));
+    console.log(JSON.stringify(serializable, null, 2));
     return;
   }
 
@@ -945,8 +968,8 @@ async function cmdDedupInteractive(
     console.log(`\nCluster ${i + 1} of ${allClusters.length} (${total} entries → 1):`);
     console.log(`  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`);
     for (const m of cluster.merged) {
-      const pairKey = [cluster.surviving.id, m.id].sort().join(":");
-      const sim = pairSimilarities.get(pairKey);
+      const pk = pairKey(cluster.surviving.id, m.id);
+      const sim = pairSimilarities.get(pk);
       const simStr = sim != null ? ` [sim: ${sim.toFixed(3)}]` : "";
       console.log(`  Merge:  "${truncate(m.title, 55)}" (${m.id.slice(0, 8)}…)${simStr}`);
     }
@@ -961,8 +984,8 @@ async function cmdDedupInteractive(
       }
       // Record accept feedback
       for (const m of cluster.merged) {
-        const pairKey = [cluster.surviving.id, m.id].sort().join(":");
-        const sim = pairSimilarities.get(pairKey);
+        const pk = pairKey(cluster.surviving.id, m.id);
+        const sim = pairSimilarities.get(pk);
         if (sim != null && sim > 0) {
           ltm.recordDedupFeedback({
             projectId: pid,
@@ -980,8 +1003,8 @@ async function cmdDedupInteractive(
     } else if (answer === "r") {
       // Record reject feedback (don't delete anything)
       for (const m of cluster.merged) {
-        const pairKey = [cluster.surviving.id, m.id].sort().join(":");
-        const sim = pairSimilarities.get(pairKey);
+        const pk = pairKey(cluster.surviving.id, m.id);
+        const sim = pairSimilarities.get(pk);
         if (sim != null && sim > 0) {
           ltm.recordDedupFeedback({
             projectId: pid,
