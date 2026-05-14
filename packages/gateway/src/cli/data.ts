@@ -5,7 +5,7 @@
  *   list <type>           List entries (projects, knowledge, sessions, distillations)
  *   show <type> <id>      Show full detail for an entry
  *   clear [options]       Clear data for a project or wipe the database
- *   delete <type> <id>    Delete a single entry
+ *   delete <type> <id>    Delete a single entry (type: knowledge, session, distillation, project)
  */
 import { createInterface } from "node:readline";
 import { resolve } from "path";
@@ -480,9 +480,48 @@ async function cmdDelete(
       break;
     }
 
+    case "project": {
+      const { projectId: resolveProjectId } = await import("@loreai/core");
+      // rawId can be a project UUID or a filesystem path
+      let id = rawId;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId)) {
+        const resolved = resolveProjectId(resolve(rawId));
+        if (!resolved) {
+          console.error(`No project found for path: ${rawId}`);
+          process.exit(1);
+        }
+        id = resolved;
+      }
+      // Validate existence before prompting for confirmation
+      const project = data.listProjects().find((p) => p.id === id);
+      if (!project) {
+        console.error(`Project not found: ${rawId}`);
+        process.exit(1);
+      }
+      if (!skipConfirm) {
+        const confirmed = await confirm(
+          `\nDelete project ${project.name ?? id.slice(0, 12)}... and ALL its data ` +
+            `(${project.knowledge_count} knowledge, ${project.session_count} sessions, ` +
+            `${project.distillation_count} distillations)?`,
+        );
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
+      }
+      const result = data.deleteProject(id)!;
+      console.log(
+        `Deleted project: ${result.knowledge_deleted} knowledge, ` +
+          `${result.temporal_deleted} messages, ` +
+          `${result.distillations_deleted} distillations, ` +
+          `${result.sessions_cleared} sessions.`,
+      );
+      break;
+    }
+
     default:
       console.error(
-        `Unknown type "${type ?? "(none)"}". Use: knowledge, session, distillation`,
+        `Unknown type "${type ?? "(none)"}". Use: knowledge, session, distillation, project`,
       );
       process.exit(1);
   }
@@ -818,7 +857,7 @@ Subcommands:
   list <type>           List entries (projects, knowledge, sessions, distillations)
   show <type> <id>      Show full detail for an entry
   clear [options]       Clear data for a project or wipe the database
-  delete <type> <id>    Delete a single entry
+  delete <type> <id>    Delete a single entry (type: knowledge, session, distillation, project)
   merge                 Scan git remotes and merge duplicate projects
   recover               Re-import knowledge from .lore.md / AGENTS.md files
   dedup                 Find and remove duplicate knowledge entries (all projects)
@@ -845,6 +884,7 @@ Examples:
   lore data clear --all
   lore data delete knowledge abc12345
   lore data delete session abc12345-6789
+  lore data delete project /path/to/project  # delete project and ALL its data
   lore data merge                          # scan & merge git duplicates
   lore data merge --yes                    # skip confirmation
   lore data recover                        # re-import from .lore.md / AGENTS.md

@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, loadHeaderSessionIndex, getKV, setKV } from "../src/db";
 
 
@@ -685,5 +685,49 @@ describe("db", () => {
     expect(getKV("kv_upsert")).toBe("first");
     setKV("kv_upsert", "second");
     expect(getKV("kv_upsert")).toBe("second");
+  });
+
+  describe("ensureProject test-path guard", () => {
+    let savedLoreDbPath: string | undefined;
+
+    beforeEach(() => {
+      savedLoreDbPath = process.env.LORE_DB_PATH;
+    });
+
+    afterEach(() => {
+      // Restore — tests run under setup.ts preload so LORE_DB_PATH is set
+      if (savedLoreDbPath !== undefined) {
+        process.env.LORE_DB_PATH = savedLoreDbPath;
+      } else {
+        delete process.env.LORE_DB_PATH;
+      }
+    });
+
+    test("throws for /test/ paths when LORE_DB_PATH is unset", () => {
+      delete process.env.LORE_DB_PATH;
+      expect(() => ensureProject("/test/ltm/something")).toThrow(
+        /Refusing to create project with test path/,
+      );
+    });
+
+    test("allows /test/ paths when LORE_DB_PATH is set (temp DB)", () => {
+      // LORE_DB_PATH is already set by test preload — just verify it works
+      expect(() => ensureProject("/test/guard-check")).not.toThrow();
+    });
+
+    test("allows non-test paths when LORE_DB_PATH is unset", () => {
+      delete process.env.LORE_DB_PATH;
+      // The guard only rejects /test/ prefix — real-looking paths pass through.
+      // The DB singleton is already initialized (pointing at the temp test DB),
+      // so this call writes to the temp DB, not the production one.
+      expect(() => ensureProject("/home/user/my-project")).not.toThrow();
+    });
+
+    test("does not match similar-but-different path prefixes", () => {
+      delete process.env.LORE_DB_PATH;
+      // /testing/... and /test (no trailing slash) should NOT be rejected
+      expect(() => ensureProject("/testing/something")).not.toThrow();
+      expect(() => ensureProject("/test")).not.toThrow();
+    });
   });
 });
