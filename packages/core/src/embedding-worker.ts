@@ -1,14 +1,21 @@
 /**
- * Embedding worker thread — runs fastembed/ONNX inference off the main thread.
+ * Embedding worker thread — runs ONNX inference via @huggingface/transformers
+ * off the main thread.
  *
  * This file is the entry point for a `node:worker_threads` Worker spawned by
- * `LocalProvider` in `embedding.ts`. It owns the `FlagEmbedding` ONNX model
+ * `LocalProvider` in `embedding.ts`. It owns the transformers.js pipeline
  * and processes embed requests sequentially from a priority queue. Moving
  * inference here keeps the main thread's event loop free — HTTP requests,
  * SSE streams, and session APIs are no longer blocked during embedding.
  *
  * Communication uses `parentPort` message passing with structured clone.
  * Float32Array vectors are sent back directly (Bun preserves identity).
+ *
+ * The worker applies Nomic's recommended post-processing:
+ *   1. Mean pooling (via pipeline option)
+ *   2. Layer normalization
+ *   3. Matryoshka dimension truncation (if dimensions < full 768)
+ *   4. L2 normalization
  *
  * @see embedding-worker-types.ts for the message protocol.
  */
@@ -25,53 +32,72 @@ import type {
 // workerData
 // ---------------------------------------------------------------------------
 
-const { modelName, vendorModel } = workerData as WorkerInitData;
+const { modelId, dimensions, vendorModel } = workerData as WorkerInitData;
 
 // ---------------------------------------------------------------------------
 // Model lifecycle — lazy init on first embed request
 // ---------------------------------------------------------------------------
 
-/** The fastembed model, typed to the subset of methods we use. */
-type FastembedModel = {
-  queryEmbed(text: string): Promise<number[]>;
-  passageEmbed(texts: string[], batchSize?: number): AsyncGenerator<number[][]>;
+/** The transformers.js pipeline instance, typed loosely since the exact
+ *  return type depends on the pipeline task. */
+type FeatureExtractionPipeline = {
+  (texts: string[], options?: Record<string, unknown>): Promise<{
+    dims: number[];
+    data: Float32Array;
+    tolist(): number[][];
+  }>;
+  dispose?(): Promise<void>;
 };
 
-let model: FastembedModel | null = null;
+let pipe: FeatureExtractionPipeline | null = null;
+let layerNormFn: ((input: unknown, normalized_shape: number[]) => {
+  dims: number[];
+  data: Float32Array;
+  normalize(p: number, dim: number): { tolist(): number[][]; data: Float32Array; dims: number[] };
+  slice(...args: unknown[]): { normalize(p: number, dim: number): { tolist(): number[][]; data: Float32Array; dims: number[] } };
+}) | null = null;
 let initPromise: Promise<void> | null = null;
 let initFailed = false;
 let initError: string | null = null;
 
 /**
- * Ensure the fastembed model is loaded. Lazy — first call triggers the
- * dynamic import + FlagEmbedding.init(), subsequent calls return immediately.
+ * Ensure the transformers.js pipeline is loaded. Lazy — first call triggers
+ * the dynamic import + pipeline creation, subsequent calls return immediately.
  * On failure, marks the worker as permanently broken and posts `init-error`.
  */
-async function ensureModel(): Promise<FastembedModel> {
-  if (model) return model;
-  if (initFailed) throw new Error(initError ?? "fastembed init previously failed");
+async function ensurePipeline(): Promise<void> {
+  if (pipe) return;
+  if (initFailed) throw new Error(initError ?? "pipeline init previously failed");
 
   if (!initPromise) {
     initPromise = (async () => {
-      const fastembed = await import("fastembed");
-      const { EmbeddingModel, FlagEmbedding } = fastembed;
+      const transformers = await import("@huggingface/transformers");
+      const { pipeline, env, layer_norm } = transformers;
 
-      let m: unknown;
+      // Configure transformers.js environment
+      env.allowRemoteModels = !vendorModel;
+      env.allowLocalModels = true;
+
       if (vendorModel) {
-        // Binary mode: use pre-extracted model files.
-        m = await FlagEmbedding.init({
-          model: EmbeddingModel.CUSTOM,
-          modelAbsoluteDirPath: vendorModel.modelAbsoluteDirPath,
-          modelName: vendorModel.modelName,
-        });
-      } else {
-        // npm mode: resolve model name against fastembed's enum.
-        const enumValue = (EmbeddingModel as Record<string, string>)[modelName];
-        m = await FlagEmbedding.init({
-          model: enumValue ?? modelName,
-        } as { model: typeof EmbeddingModel.BGESmallENV15 });
+        // Binary mode: point at pre-extracted model files on disk.
+        env.localModelPath = vendorModel.localModelPath;
+        env.allowRemoteModels = false;
       }
-      model = m as FastembedModel;
+
+      // Create feature-extraction pipeline with ONNX quantized model.
+      // dtype: 'q8' selects the INT8 quantized ONNX variant (model_quantized.onnx)
+      // which is ~137MB for Nomic v1.5 vs ~547MB for the full FP32 model.
+      //
+      // device: "cpu" — in npm mode, transformers.js uses onnxruntime-node
+      // (native CPU). In the compiled binary, onnxruntime-node is redirected
+      // to onnxruntime-web by the build plugin, which handles "cpu" via its
+      // WASM+SIMD backend (API-compatible, ~2x faster on batch workloads).
+      pipe = (await pipeline("feature-extraction", modelId, {
+        dtype: "q8",
+        device: "cpu",
+      })) as unknown as FeatureExtractionPipeline;
+
+      layerNormFn = layer_norm as typeof layerNormFn;
     })().catch((err) => {
       initFailed = true;
       initError = err instanceof Error ? err.message : String(err);
@@ -83,8 +109,7 @@ async function ensureModel(): Promise<FastembedModel> {
   }
 
   await initPromise;
-  if (!model) throw new Error("model init completed but model is null");
-  return model;
+  if (!pipe) throw new Error("pipeline init completed but pipe is null");
 }
 
 // ---------------------------------------------------------------------------
@@ -135,31 +160,70 @@ async function drain(): Promise<void> {
 // Embed processing
 // ---------------------------------------------------------------------------
 
+/**
+ * Detect ONNX runtime out-of-memory errors. The runtime throws opaque
+ * numeric error codes (e.g. "287180544") for allocation failures rather
+ * than a readable message. We match on large numeric-only strings and
+ * known OOM patterns.
+ */
+function isOomError(msg: string): boolean {
+  // Pure numeric error codes ≥ 6 digits are ORT allocation failures
+  if (/^\d{6,}$/.test(msg)) return true;
+  // Explicit OOM messages from various ONNX backends
+  if (/out.of.memory|alloc.*fail|oom/i.test(msg)) return true;
+  return false;
+}
+
 async function processEmbed(req: EmbedRequest): Promise<void> {
   try {
-    const m = await ensureModel();
+    await ensurePipeline();
 
-    let vectors: Float32Array[];
+    // Run feature extraction with mean pooling.
+    // truncation: true caps each text at the model's max length (8192 tokens
+    // for Nomic v1.5), preventing oversized inputs from causing OOM.
+    const output = await pipe!(req.texts, { pooling: "mean", truncation: true });
 
-    if (req.inputType === "query" && req.texts.length === 1) {
-      // Single query — use queryEmbed for better quality.
-      const vec = await m.queryEmbed(req.texts[0]);
-      vectors = [new Float32Array(vec)];
+    // Post-process following Nomic's recipe:
+    //   1. Layer normalization over the full hidden dimension
+    //   2. Matryoshka truncation to target dimensions
+    //   3. L2 normalization
+    const fullDim = output.dims[output.dims.length - 1]; // 768 for Nomic v1.5
+    const truncate = dimensions < fullDim;
+
+    let normalized: { tolist(): number[][]; data: Float32Array; dims: number[] };
+    if (truncate) {
+      // layer_norm → slice → L2 normalize
+      normalized = layerNormFn!(output, [fullDim])
+        .slice(null, [0, dimensions])
+        .normalize(2, -1);
     } else {
-      // Batch document embedding via async generator.
-      vectors = [];
-      for await (const batch of m.passageEmbed(req.texts)) {
-        for (const vec of batch) {
-          vectors.push(new Float32Array(vec));
-        }
-      }
+      // layer_norm → L2 normalize (no truncation)
+      normalized = layerNormFn!(output, [fullDim])
+        .normalize(2, -1);
+    }
+
+    // Extract per-text vectors from the batched tensor.
+    const numTexts = req.texts.length;
+    const vectors: Float32Array[] = [];
+    const dim = truncate ? dimensions : fullDim;
+
+    for (let i = 0; i < numTexts; i++) {
+      const start = i * dim;
+      const vec = new Float32Array(dim);
+      vec.set(normalized.data.subarray(start, start + dim));
+      vectors.push(vec);
     }
 
     post({ type: "result", id: req.id, vectors });
   } catch (err) {
-    // Don't re-post init-error — it was already sent in ensureModel().
+    // Don't re-post init-error — it was already sent in ensurePipeline().
     if (!initFailed) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = isOomError(raw)
+        ? `ONNX runtime out of memory (batch=${req.texts.length}, ` +
+          `longest≈${Math.max(...req.texts.map((t) => t.length))} chars). ` +
+          `Try reducing batch size. Raw: ${raw}`
+        : raw;
       post({ type: "error", id: req.id, error: msg });
     }
   }

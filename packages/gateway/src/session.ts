@@ -267,6 +267,7 @@ export function detectClientType(
 export const KNOWN_SESSION_HEADERS = [
   "x-claude-code-session-id", // Claude Code (UUID, persists for CLI session)
   "x-session-affinity",       // OpenCode  (nanoid, persists for session)
+  "x-lore-session-id",        // Lore plugins (Pi, etc.) — injected via registerProvider
 ] as const;
 
 /**

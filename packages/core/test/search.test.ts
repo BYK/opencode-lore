@@ -259,6 +259,87 @@ describe("search", () => {
       // With k=10, rank 0 → 1/(10+0) = 0.1
       expect(fused[0].score).toBeCloseTo(0.1, 4);
     });
+
+    test("weight defaults to 1 — identical to unweighted", () => {
+      const lists = [
+        {
+          items: [{ id: "a" }, { id: "b" }],
+          key: (x: { id: string }) => x.id,
+        },
+      ];
+      const withoutWeight = reciprocalRankFusion(lists);
+      const withWeight = reciprocalRankFusion(
+        lists.map((l) => ({ ...l, weight: 1 })),
+      );
+
+      expect(withWeight.map((r) => r.score)).toEqual(
+        withoutWeight.map((r) => r.score),
+      );
+    });
+
+    test("weight multiplies RRF score contribution", () => {
+      const fused = reciprocalRankFusion([
+        {
+          items: [{ id: "a" }],
+          key: (x) => x.id,
+          weight: 2,
+        },
+      ]);
+
+      // rank 0, weight 2: 2 / (60 + 0) = 1/30
+      expect(fused[0].score).toBeCloseTo(2 / 60, 6);
+    });
+
+    test("weight can change ranking order", () => {
+      // Without weight: "shared" (in both lists) beats "boosted" (in one list)
+      const unweighted = reciprocalRankFusion([
+        {
+          items: [{ id: "shared" }, { id: "only-1" }],
+          key: (x) => x.id,
+        },
+        {
+          items: [{ id: "shared" }, { id: "boosted" }],
+          key: (x) => x.id,
+        },
+      ]);
+      expect(unweighted[0].item.id).toBe("shared");
+
+      // With high weight on second list: "boosted" at rank 1 with weight 5
+      // scores 5/(60+1) = 0.0820; "shared" at rank 0 in both = 1/60 + 5/60
+      // = 0.1 — shared still wins at rank 0, but "boosted" beats "only-1"
+      const weighted = reciprocalRankFusion([
+        {
+          items: [{ id: "shared" }, { id: "only-1" }],
+          key: (x) => x.id,
+        },
+        {
+          items: [{ id: "shared" }, { id: "boosted" }],
+          key: (x) => x.id,
+          weight: 5,
+        },
+      ]);
+      const ids = weighted.map((r) => r.item.id);
+      // "boosted" should rank above "only-1" due to higher weighted score
+      expect(ids.indexOf("boosted")).toBeLessThan(ids.indexOf("only-1"));
+    });
+
+    test("mixed weighted and unweighted lists accumulate correctly", () => {
+      const fused = reciprocalRankFusion([
+        {
+          items: [{ id: "a" }],
+          key: (x) => x.id,
+          // no weight → defaults to 1
+        },
+        {
+          items: [{ id: "a" }],
+          key: (x) => x.id,
+          weight: 1.5,
+        },
+      ]);
+
+      // "a" at rank 0 in both: 1/60 + 1.5/60 = 2.5/60
+      expect(fused[0].score).toBeCloseTo(2.5 / 60, 6);
+    });
   });
 
   describe("exactTermMatchRank", () => {

@@ -1,17 +1,17 @@
 /**
  * @loreai/pi — Lore memory engine as a Pi coding-agent extension.
  *
- * On startup, the extension probes for an existing Lore gateway and, if
- * none is found, starts one in-process by importing @loreai/gateway.
- * It then redirects compatible provider URLs through the gateway and
- * registers a single Pi-specific hook (session_before_compact) that the
- * gateway cannot handle via HTTP interception. All other memory features
- * (LTM injection, gradient transforms, temporal capture, recall, idle
- * work) are handled exclusively by the gateway pipeline.
+ * On startup, the extension probes for an existing Lore gateway server
+ * and, if none is found, starts one in-process by importing
+ * @loreai/gateway. It then redirects compatible provider URLs through
+ * the gateway and registers a Pi-specific compaction hook
+ * (session_before_compact) that requires Pi's extension API. All other
+ * memory features (LTM injection, gradient transforms, temporal capture,
+ * recall, idle work) are handled by the gateway pipeline.
  *
- * If the gateway cannot be started, the extension logs an error and
- * becomes inert — no hooks are registered and Pi runs without memory
- * features.
+ * If the gateway server cannot be reached, the extension logs an error
+ * and becomes inert — no hooks are registered and Pi runs without
+ * memory features.
  *
  * Installation (in user's `~/.pi/agent/extensions/`):
  *   import lore from "@loreai/pi";
@@ -26,7 +26,6 @@ import type {
   SessionBeforeCompactEvent,
   SessionStartEvent,
 } from "@mariozechner/pi-coding-agent";
-import { distillation, log } from "@loreai/core";
 
 // Pi doesn't re-export these event result types at the top level — inline their
 // minimal shape here to avoid depending on an internal package path.
@@ -45,9 +44,10 @@ type SessionBeforeCompactResult = {
  *
  * - anthropic-messages API → gateway POST /v1/messages
  * - openai-completions API → gateway POST /v1/chat/completions
+ * - openai-responses API   → gateway POST /v1/responses
  *
- * Providers using other protocols (Google SDK, AWS Bedrock SDK, OpenAI
- * responses API, Mistral conversations) are not redirected.
+ * Providers using other protocols (Google SDK, AWS Bedrock SDK,
+ * Mistral conversations) are not redirected.
  */
 const GATEWAY_PROVIDERS = [
   // anthropic-messages API
@@ -61,7 +61,17 @@ const GATEWAY_PROVIDERS = [
   "cerebras",
   "openrouter",
   "huggingface",
+  "zai",
+  "minimax",
+  "minimax-cn",
+  "kimi-coding",
+  "vercel-ai-gateway",
+  // openai-responses API
+  "openai",
 ];
+
+/** Default ports to probe when looking for a running gateway (must match gateway defaults). */
+const KNOWN_GATEWAY_PORTS = [3207, 5673];
 
 /**
  * Check if the Lore gateway is reachable at the given base URL.
@@ -80,37 +90,68 @@ async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean>
 }
 
 /**
+ * Resolve the gateway URL by probing known ports and reading the port file.
+ *
+ * Order: LORE_GATEWAY_URL env var → port file → known default ports (3207, 5673).
+ * Returns the URL of a running gateway, or null if none found.
+ */
+async function resolveGatewayUrl(): Promise<string | null> {
+  // 1. Explicit env var — probe it to verify it's actually reachable.
+  if (process.env.LORE_GATEWAY_URL) {
+    const url = process.env.LORE_GATEWAY_URL.replace(/\/$/, "");
+    if (await probeGateway(url)) return url;
+    // env var set but gateway unreachable — fall through to discovery
+  }
+
+  // 2. Build probe list: port file first (handles random port), then known defaults.
+  const probePorts = new Set<number>();
+  try {
+    const gw = "@loreai/gateway";
+    const { readPortFile } = await import(/* webpackIgnore: true */ gw);
+    const portfilePort = readPortFile();
+    if (portfilePort) probePorts.add(portfilePort);
+  } catch {
+    /* gateway package not available — skip port file */
+  }
+  for (const p of KNOWN_GATEWAY_PORTS) probePorts.add(p);
+
+  // 3. Probe each port.
+  for (const port of probePorts) {
+    const url = `http://127.0.0.1:${port}`;
+    if (await probeGateway(url)) return url;
+  }
+
+  return null;
+}
+
+/**
  * Start the gateway server in-process by importing @loreai/gateway as a library.
  * The published CJS bundle includes Node.js polyfills that shim Bun.serve()
  * to node:http.createServer(), so this works under both Bun and Node.js.
+ *
+ * Uses startGateway() which handles the full port fallback chain
+ * (3207 → 5673 → random) and port file management automatically.
+ * Returns the URL of the started gateway, or null on failure.
  */
-async function startInProcess(gatewayBase: string): Promise<boolean> {
+async function startInProcess(): Promise<string | null> {
   try {
     // Dynamic import — the gateway may be resolved from src (workspace) or
     // dist/index.cjs (npm). Use a variable to prevent tsc from resolving the
     // module at compile time (the .d.cts only exists after building).
     const gw = "@loreai/gateway";
-    const { loadConfig, startServer } = await import(/* webpackIgnore: true */ gw);
-    const config = loadConfig();
+    const { startGateway } = await import(/* webpackIgnore: true */ gw);
+    const handle = await startGateway({ quiet: true });
+    const url = `http://127.0.0.1:${handle.port}`;
 
-    // Parse the expected port from gatewayBase so the server binds there.
-    const url = new URL(gatewayBase);
-    if (url.port) config.port = Number(url.port);
+    if (!handle.owned) {
+      console.info(`pi: reusing existing gateway at ${url}`);
+    }
 
-    startServer(config);
-    // startServer is synchronous — if it didn't throw, the server is
-    // listening. Verify with a quick health check.
-    return await probeGateway(gatewayBase, 1000);
+    return url;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // Port-in-use means something is already on that port but our probe
-    // didn't detect it (race). Treat as success — the proxy is available.
-    // Match both Node's EADDRINUSE and Bun's "Is port N in use?" format.
-    if (/EADDRINUSE/i.test(msg) || /port\b.*\bin use/i.test(msg)) {
-      return await probeGateway(gatewayBase, 1000);
-    }
-    log.info("pi: failed to start gateway in-process:", msg);
-    return false;
+    console.info("pi: failed to start gateway in-process:", msg);
+    return null;
   }
 }
 
@@ -130,54 +171,76 @@ function sessionIDFor(sessionFile: string | undefined): string {
  * redirects provider URLs and registers compaction override.
  */
 export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
-  const gatewayBase =
-    (process.env.LORE_GATEWAY_URL ?? "http://127.0.0.1:6969").replace(/\/$/, "");
+  let gatewayBase = "";
+  let loreActive = false;
+  const loreDisabled =
+    process.env.LORE_DISABLED === "1" || process.env.LORE_DISABLED === "true";
+  const inTestEnv = process.env.NODE_ENV === "test";
 
-  let gatewayActive = false;
-  const inTestEnv =
-    process.env.NODE_ENV === "test" ||
-    process.env.LORE_GATEWAY_MODE === "test";
-
-  if (process.env.LORE_GATEWAY_MODE !== "0" && !inTestEnv) {
-    if (await probeGateway(gatewayBase)) {
-      log.info(`pi: gateway detected at ${gatewayBase}`);
-      gatewayActive = true;
+  if (!loreDisabled && !inTestEnv) {
+    // Try to find a running gateway first (probes port file + known ports).
+    const existingUrl = await resolveGatewayUrl();
+    if (existingUrl) {
+      console.info(`pi: gateway detected at ${existingUrl}`);
+      gatewayBase = existingUrl;
+      loreActive = true;
     } else {
-      log.info(`pi: starting gateway in-process at ${gatewayBase}…`);
-      if (await startInProcess(gatewayBase)) {
-        log.info(`pi: gateway started in-process at ${gatewayBase}`);
-        gatewayActive = true;
+      // No running gateway — start one in-process (handles fallback chain).
+      console.info("pi: starting gateway in-process…");
+      const startedUrl = await startInProcess();
+      if (startedUrl) {
+        console.info(`pi: gateway started in-process at ${startedUrl}`);
+        gatewayBase = startedUrl;
+        loreActive = true;
       }
     }
   }
 
-  if (!gatewayActive && !inTestEnv && process.env.LORE_GATEWAY_MODE !== "0") {
+  if (!loreActive && !inTestEnv && !loreDisabled) {
     const msg =
-      "Lore gateway failed to start — memory features are unavailable. " +
-      "Ensure @loreai/gateway is installed or start the gateway manually.";
-    log.error("pi:", msg);
+      "Lore failed to start — memory features are unavailable. " +
+      "Ensure @loreai/gateway is installed.";
+    console.error("pi:", msg);
     return;
   }
 
-  if (!gatewayActive) return;
+  if (!loreActive) return;
 
-  log.info(`pi: gateway active — routing providers through ${gatewayBase}`);
-
-  // Redirect all gateway-compatible providers through the proxy.
-  for (const provider of GATEWAY_PROVIDERS) {
-    pi.registerProvider(provider, { baseUrl: gatewayBase });
-  }
+  console.info(`pi: routing providers through ${gatewayBase}`);
 
   // ---------------------------------------------------------------------------
-  // Minimal session tracking — only needed by session_before_compact below.
+  // Session tracking — used for provider header injection and compaction.
   // ---------------------------------------------------------------------------
 
   let projectPath = process.cwd();
   let currentSessionID = sessionIDFor(undefined);
 
+  /**
+   * Register (or re-register) all gateway-compatible providers with the
+   * current session header. Called on startup and again on session_start
+   * once the real session ID is known.
+   */
+  function registerProviders(): void {
+    for (const provider of GATEWAY_PROVIDERS) {
+      pi.registerProvider(provider, {
+        baseUrl: gatewayBase,
+        headers: { "x-lore-session-id": currentSessionID },
+      });
+    }
+  }
+
+  // Initial registration with ephemeral session ID.
+  registerProviders();
+
   pi.on("session_start", async (_event: SessionStartEvent, ctx) => {
     projectPath = ctx.cwd;
-    currentSessionID = sessionIDFor(ctx.sessionManager.getSessionFile());
+    const newID = sessionIDFor(ctx.sessionManager.getSessionFile());
+    if (newID !== currentSessionID) {
+      currentSessionID = newID;
+      // Re-register with the real session ID so all subsequent provider
+      // requests carry the correct x-lore-session-id header.
+      registerProviders();
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -185,8 +248,9 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   //
   // Pi's compaction goes through its extension API, not HTTP. The gateway
   // intercepts compaction via HTTP request patterns (Claude Code-specific),
-  // which don't match Pi's internal compaction flow. The extension provides
-  // Lore's distillation-aware summaries directly.
+  // which don't match Pi's internal compaction flow. This hook calls the
+  // gateway's POST /v1/compact endpoint to get a full LLM-synthesized
+  // compaction summary (force-distill + knowledge + compact prompt).
   // ---------------------------------------------------------------------------
 
   pi.on(
@@ -196,25 +260,39 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       _ctx,
     ): Promise<SessionBeforeCompactResult | undefined> => {
       try {
-        const summaries = distillation.loadForSession(
-          projectPath,
-          currentSessionID,
-        );
-        if (summaries.length === 0) return undefined;
+        const res = await fetch(`${gatewayBase}/v1/compact`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-lore-session-id": currentSessionID,
+          },
+          body: JSON.stringify({
+            project_path: projectPath,
+            previous_summary: event.preparation.previousSummary,
+          }),
+        });
 
-        const summaryText = summaries
-          .map((s) => s.observations)
-          .join("\n\n---\n\n");
+        if (!res.ok) {
+          // Gateway returned an error — fall back to Pi's default compaction.
+          const errBody = await res.text().catch(() => "");
+          console.error(
+            `pi: compaction endpoint returned ${res.status}: ${errBody}`,
+          );
+          return undefined;
+        }
+
+        const { summary } = (await res.json()) as { summary: string };
+        if (!summary) return undefined;
 
         return {
           compaction: {
-            summary: summaryText,
+            summary,
             firstKeptEntryId: event.preparation.firstKeptEntryId,
             tokensBefore: event.preparation.tokensBefore,
           },
         };
       } catch (err) {
-        log.error("pi: custom compaction failed, falling back to default:", err);
+        console.error("pi: custom compaction failed, falling back to default:", err);
         return undefined;
       }
     },

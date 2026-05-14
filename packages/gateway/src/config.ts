@@ -4,12 +4,29 @@
  */
 
 // ---------------------------------------------------------------------------
+// Port defaults
+// ---------------------------------------------------------------------------
+
+/**
+ * Default port preference order when LORE_LISTEN_PORT is not set.
+ *
+ * - 3207: flip upside-down → 7=L, 0=O, 2=R, 3=E → LORE (calculator-word)
+ * - 5673: T9 phone keypad → 5=L, 6=O, 7=R, 3=E → LORE
+ */
+export const DEFAULT_PORTS = [3207, 5673] as const;
+
+/** The primary default port (first in the fallback chain). */
+export const DEFAULT_PORT = DEFAULT_PORTS[0];
+
+// ---------------------------------------------------------------------------
 // Config shape
 // ---------------------------------------------------------------------------
 
 export interface GatewayConfig {
-  /** Port to listen on. Default: 6969. Env: LORE_LISTEN_PORT */
+  /** Port to listen on. Default: 3207. Env: LORE_LISTEN_PORT */
   port: number;
+  /** True when the port was explicitly set via LORE_LISTEN_PORT or --port. */
+  portExplicit: boolean;
   /**
    * Hosts to bind to. Default: ["127.0.0.1"].
    * Env: LORE_LISTEN_HOST (comma-separated for multiple addresses).
@@ -34,7 +51,8 @@ export interface GatewayConfig {
 export function loadConfig(): GatewayConfig {
   const env = process.env;
   return {
-    port: parsePort(env.LORE_LISTEN_PORT, 6969),
+    port: parsePort(env.LORE_LISTEN_PORT, DEFAULT_PORT),
+    portExplicit: !!env.LORE_LISTEN_PORT,
     hosts: parseHosts(env.LORE_LISTEN_HOST),
     upstreamAnthropic: trimTrailingSlash(
       env.LORE_UPSTREAM_ANTHROPIC || "https://api.anthropic.com",
@@ -53,7 +71,7 @@ export function loadConfig(): GatewayConfig {
 
 export type UpstreamRoute = {
   url: string;
-  protocol: "anthropic" | "openai";
+  protocol: "anthropic" | "openai" | "openai-responses";
 };
 
 /**
@@ -63,7 +81,7 @@ export type UpstreamRoute = {
  * matches `claude-` before any catch-all. Unknown models fall back to the
  * env-var-configured defaults.
  */
-const UPSTREAM_ROUTES: Array<{ prefix: string; url: string; protocol: "anthropic" | "openai" }> = [
+const UPSTREAM_ROUTES: Array<{ prefix: string; url: string; protocol: "anthropic" | "openai" | "openai-responses" }> = [
   // Anthropic
   { prefix: "claude-",        url: "https://api.anthropic.com",          protocol: "anthropic" },
   // Nvidia NIM
@@ -151,26 +169,41 @@ export function inferProjectPath(systemPrompt: string): string | null {
 // getProjectPath
 // ---------------------------------------------------------------------------
 
+export type ProjectPathSource = "header" | "inferred" | "cwd";
+
+export type ProjectPathResult = {
+  path: string;
+  source: ProjectPathSource;
+};
+
 /**
  * Resolve the project path for a request. Checks in order:
  *  1. `X-Lore-Project` header (explicit override)
  *  2. `inferProjectPath(systemPrompt)` (zero-config extraction)
  *  3. `process.cwd()` (last resort fallback)
+ *
+ * Returns a `{ path, source }` tuple so callers can distinguish a
+ * successful resolution from a cwd fallback and take corrective action
+ * (e.g. upgrading from session-cached state).
+ *
+ * NOTE: The cwd fallback does NOT log a warning — callers are responsible
+ * for logging after any post-hoc upgrades (e.g. from session state) so
+ * the warning only fires when the fallback truly sticks.
  */
 export function getProjectPath(
   systemPrompt: string,
   headers: Record<string, string>,
-): string {
+): ProjectPathResult {
   // 1. Explicit header override
   const headerPath = headers["x-lore-project"];
-  if (headerPath) return headerPath;
+  if (headerPath) return { path: headerPath, source: "header" };
 
   // 2. Infer from system prompt content
   const inferred = inferProjectPath(systemPrompt);
-  if (inferred) return inferred;
+  if (inferred) return { path: inferred, source: "inferred" };
 
   // 3. Fall back to gateway's own cwd
-  return process.cwd();
+  return { path: process.cwd(), source: "cwd" };
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +213,12 @@ export function getProjectPath(
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const n = Number.parseInt(value, 10);
-  if (Number.isNaN(n) || n < 0 || n > 65535) return fallback;
+  if (Number.isNaN(n) || n < 0 || n > 65535) {
+    console.error(
+      `[lore] warning: invalid port "${value}", using default ${fallback}`,
+    );
+    return fallback;
+  }
   return n;
 }
 
@@ -190,7 +228,12 @@ function parsePositiveInt(
 ): number {
   if (!value) return fallback;
   const n = Number.parseInt(value, 10);
-  if (Number.isNaN(n) || n <= 0) return fallback;
+  if (Number.isNaN(n) || n <= 0) {
+    console.error(
+      `[lore] warning: invalid value "${value}", using default ${fallback}`,
+    );
+    return fallback;
+  }
   return n;
 }
 

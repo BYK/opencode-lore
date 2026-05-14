@@ -6,8 +6,8 @@
  *
  * External — all of these are resolved at consumer install time, NOT bundled:
  *
- * - `@loreai/core` — published separately; users picking up a new core
- *   version (security/bug fix) automatically benefit without a pi republish.
+ * - `@loreai/gateway` — started in-process via dynamic import; published
+ *   separately so users benefit from gateway updates without a pi republish.
  * - `@mariozechner/*` — Pi bundles these internally and injects them via
  *   jiti's virtualModules when loading extensions. Bundling our own copies
  *   would break: jiti resolves imports to the virtual modules, but if we
@@ -30,7 +30,6 @@ mkdirSync(distDir, { recursive: true });
 
 const external = [
   "node:*",
-  "@loreai/core",
   "@loreai/gateway",
   "@mariozechner/pi-coding-agent",
   "@mariozechner/pi-tui",

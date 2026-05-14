@@ -435,6 +435,9 @@ export async function downloadBinaryToTemp(
     let patchBytes: number | undefined;
     if (deltaResult) {
       patchBytes = deltaResult.patchBytes;
+      console.error(
+        `[lore] Applied delta patch (${formatBytes(patchBytes)} downloaded)`,
+      );
     } else if (offline) {
       throw new UpgradeError(
         "offline_cache_miss",

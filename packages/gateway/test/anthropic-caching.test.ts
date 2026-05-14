@@ -5,7 +5,7 @@
  *  1. System prompt caching with 5m TTL (conversation turns)
  *  2. System prompt caching with 1h TTL (worker calls)
  *  3. Conversation message caching (breakpoint on last block)
- *  4. No caching for passthrough (title/summary requests)
+ *  4. No caching for passthrough (meta requests: title gen, summaries, etc.)
  */
 import { describe, test, expect } from "bun:test";
 import {

@@ -1,8 +1,8 @@
 import { Database } from "#db/driver";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
-import { homedir } from "os";
 import { getGitRemote } from "./git";
+import { dataDir } from "./data-dir";
 
 /**
  * Extract the repository name from a normalized git remote URL.
@@ -453,13 +453,100 @@ const MIGRATIONS: string[] = [
   ALTER TABLE session_state ADD COLUMN ttl_hits INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE session_state ADD COLUMN batch_savings REAL NOT NULL DEFAULT 0;
   `,
-];
+  `
+  -- Version 19: Import history for conversation import idempotency.
+  -- Tracks which external agent sessions have been imported to prevent
+  -- re-importing unchanged sources and to record user-declined imports.
+  CREATE TABLE IF NOT EXISTS import_history (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    agent_name TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    entries_created INTEGER NOT NULL DEFAULT 0,
+    entries_updated INTEGER NOT NULL DEFAULT 0,
+    imported_at INTEGER NOT NULL,
+    UNIQUE(project_id, agent_name, source_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_import_history_project ON import_history(project_id);
+  `,
+  `
+  -- Version 20: Purge worker boilerplate from temporal messages.
+  -- Legacy gateway/plugin worker calls (distillation observer, curator,
+  -- consolidation, reflector, eval) stored their full system prompts
+  -- (containing entire conversation transcripts, up to 1.6MB each) as
+  -- temporal messages. These pollute FTS search results by matching
+  -- virtually any domain keyword. Safe to delete: their actual output
+  -- (distillations, knowledge entries) is stored in dedicated tables.
+  DELETE FROM temporal_messages WHERE content LIKE '%You are a memory observer.%'
+    OR content LIKE '%You are a long-term memory curator.%'
+    OR content LIKE '%You are a long-term memory curator performing a consolidation pass.%'
+    OR content LIKE '%You are a memory reflector.%'
+    OR content LIKE '%You are evaluating distillation quality.%';
+  `,
+  `
+  -- Version 21: Persist avoided compaction data from live sessions.
+  -- Historical estimates previously re-simulated avoided compactions from
+  -- temporal message token estimates (chars/3), missing system prompt and
+  -- tool definition overhead. Persisting the live session's real shadow
+  -- context tracking (from actual API-reported total input tokens) gives
+  -- accurate post-restart historical estimates.
+  ALTER TABLE session_state ADD COLUMN avoided_compactions INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN avoided_compaction_cost REAL NOT NULL DEFAULT 0;
+  `,
+  `
+  -- Version 22: Track when conversation import was last offered/run.
+  -- NULL means import has never been offered for this project.
+  -- Used by auto-import to avoid re-prompting, and by explicit
+  -- \`lore import\` for incremental imports (only newer conversations).
+  ALTER TABLE projects ADD COLUMN last_import_at INTEGER;
 
-function dataDir() {
-  const xdg = process.env.XDG_DATA_HOME;
-  const base = xdg || join(homedir(), ".local", "share");
-  return join(base, "opencode-lore");
-}
+  -- Backfill: migrate legacy __declined__ sentinel rows so existing
+  -- users who previously declined are not re-prompted after upgrading.
+  UPDATE projects SET last_import_at = (
+    SELECT ih.imported_at FROM import_history ih
+    WHERE ih.project_id = projects.id
+      AND ih.source_id = '__declined__'
+    LIMIT 1
+  )
+  WHERE EXISTS (
+    SELECT 1 FROM import_history ih
+    WHERE ih.project_id = projects.id
+      AND ih.source_id = '__declined__'
+  );
+  `,
+  `
+  -- Version 23: Persist volatile session tracking state across restarts.
+  -- Previously these were in-memory only, causing duplicate processing,
+  -- false compaction detection, and expensive prompt cache busts on restart.
+  ALTER TABLE session_state ADD COLUMN last_curated_at INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN turns_since_curation INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN ltm_cache_text TEXT;
+  ALTER TABLE session_state ADD COLUMN ltm_cache_tokens INTEGER;
+  ALTER TABLE session_state ADD COLUMN ltm_pin_text TEXT;
+  ALTER TABLE session_state ADD COLUMN ltm_pin_tokens INTEGER;
+  ALTER TABLE session_state ADD COLUMN consecutive_text_only_turns INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  -- Version 24: Persist remaining volatile session state across restarts.
+  -- Session identity (Tier 1/2/3 session correlation)
+  ALTER TABLE session_state ADD COLUMN fingerprint TEXT NOT NULL DEFAULT '';
+  ALTER TABLE session_state ADD COLUMN header_session_id TEXT;
+  ALTER TABLE session_state ADD COLUMN header_name TEXT;
+  -- Cache warming state
+  ALTER TABLE session_state ADD COLUMN resolved_conversation_ttl TEXT NOT NULL DEFAULT '5m';
+  ALTER TABLE session_state ADD COLUMN warmup_state TEXT;
+  -- Gradient calibration state (survives restarts to avoid uncalibrated busts)
+  ALTER TABLE session_state ADD COLUMN dynamic_context_cap REAL NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN bust_rate_ema REAL NOT NULL DEFAULT -1;
+  ALTER TABLE session_state ADD COLUMN inter_bust_interval_ema REAL NOT NULL DEFAULT -1;
+  ALTER TABLE session_state ADD COLUMN last_layer INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN last_known_input INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN last_turn_at INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE session_state ADD COLUMN last_bust_at INTEGER NOT NULL DEFAULT 0;
+  `,
+];
 
 /** Return the resolved path of the SQLite database file. */
 export function dbPath(): string {
@@ -808,6 +895,33 @@ export function isFirstRun(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Conversation import tracking
+// ---------------------------------------------------------------------------
+
+/**
+ * Get the timestamp of the last conversation import offer/run for a project.
+ * Returns null if import has never been offered for this project.
+ */
+export function getLastImportAt(projectPath: string): number | null {
+  const id = ensureProject(projectPath);
+  const row = db()
+    .query("SELECT last_import_at FROM projects WHERE id = ?")
+    .get(id) as { last_import_at: number | null } | null;
+  return row?.last_import_at ?? null;
+}
+
+/**
+ * Record that conversation import was offered/run for a project.
+ * Prevents auto-import from re-prompting, and enables incremental imports.
+ */
+export function setLastImportAt(projectPath: string, timestamp: number): void {
+  const id = ensureProject(projectPath);
+  db()
+    .query("UPDATE projects SET last_import_at = ? WHERE id = ?")
+    .run(timestamp, id);
+}
+
+// ---------------------------------------------------------------------------
 // Persistent session state (error recovery)
 // ---------------------------------------------------------------------------
 
@@ -851,6 +965,8 @@ export type SessionCostSnapshot = {
   ttlSavings: number;
   ttlHits: number;
   batchSavings: number;
+  avoidedCompactions: number;
+  avoidedCompactionCost: number;
 };
 
 /**
@@ -863,8 +979,9 @@ export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot):
       `INSERT INTO session_state (session_id, force_min_layer, updated_at,
          conversation_cost, worker_cost, conversation_turns,
          cache_read_tokens, cache_write_tokens,
-         warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings)
-       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings,
+         avoided_compactions, avoided_compaction_cost)
+       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          conversation_cost = excluded.conversation_cost,
          worker_cost = excluded.worker_cost,
@@ -876,6 +993,8 @@ export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot):
          ttl_savings = excluded.ttl_savings,
          ttl_hits = excluded.ttl_hits,
          batch_savings = excluded.batch_savings,
+         avoided_compactions = excluded.avoided_compactions,
+         avoided_compaction_cost = excluded.avoided_compaction_cost,
          updated_at = excluded.updated_at`,
     )
     .run(
@@ -883,6 +1002,7 @@ export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot):
       costs.conversationCost, costs.workerCost, costs.conversationTurns,
       costs.cacheReadTokens, costs.cacheWriteTokens,
       costs.warmupSavings, costs.warmupHits, costs.ttlSavings, costs.ttlHits, costs.batchSavings,
+      costs.avoidedCompactions, costs.avoidedCompactionCost,
     );
 }
 
@@ -895,7 +1015,8 @@ export function loadSessionCosts(sessionID: string): SessionCostSnapshot | null 
     .query(
       `SELECT conversation_cost, worker_cost, conversation_turns,
               cache_read_tokens, cache_write_tokens,
-              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings
+              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings,
+              avoided_compactions, avoided_compaction_cost
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
@@ -909,6 +1030,8 @@ export function loadSessionCosts(sessionID: string): SessionCostSnapshot | null 
       ttl_savings: number;
       ttl_hits: number;
       batch_savings: number;
+      avoided_compactions: number;
+      avoided_compaction_cost: number;
     } | null;
   if (!row) return null;
   return {
@@ -922,6 +1045,8 @@ export function loadSessionCosts(sessionID: string): SessionCostSnapshot | null 
     ttlSavings: row.ttl_savings,
     ttlHits: row.ttl_hits,
     batchSavings: row.batch_savings,
+    avoidedCompactions: row.avoided_compactions,
+    avoidedCompactionCost: row.avoided_compaction_cost,
   };
 }
 
@@ -934,7 +1059,8 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
     .query(
       `SELECT session_id, conversation_cost, worker_cost, conversation_turns,
               cache_read_tokens, cache_write_tokens,
-              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings
+              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings,
+              avoided_compactions, avoided_compaction_cost
        FROM session_state
        WHERE conversation_turns > 0 OR warmup_savings > 0 OR ttl_savings > 0 OR batch_savings > 0`,
     )
@@ -950,6 +1076,8 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
       ttl_savings: number;
       ttl_hits: number;
       batch_savings: number;
+      avoided_compactions: number;
+      avoided_compaction_cost: number;
     }>;
   const result = new Map<string, SessionCostSnapshot>();
   for (const row of rows) {
@@ -964,9 +1092,294 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
       ttlSavings: row.ttl_savings,
       ttlHits: row.ttl_hits,
       batchSavings: row.batch_savings,
+      avoidedCompactions: row.avoided_compactions,
+      avoidedCompactionCost: row.avoided_compaction_cost,
     });
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Session tracking state (session_state table, v23 columns)
+// ---------------------------------------------------------------------------
+
+/** Fields that can be persisted for session tracking state. */
+export type SessionTrackingState = {
+  lastCuratedAt?: number;
+  messageCount?: number;
+  turnsSinceCuration?: number;
+  consecutiveTextOnlyTurns?: number;
+  ltmCacheText?: string | null;
+  ltmCacheTokens?: number | null;
+  ltmPinText?: string | null;
+  ltmPinTokens?: number | null;
+  // v24: session identity
+  fingerprint?: string;
+  headerSessionId?: string | null;
+  headerName?: string | null;
+  // v24: cache warming
+  resolvedConversationTTL?: string;
+  warmupState?: string | null; // JSON blob
+  // v24: gradient calibration
+  dynamicContextCap?: number;
+  bustRateEMA?: number;
+  interBustIntervalEMA?: number;
+  lastLayer?: number;
+  lastKnownInput?: number;
+  lastTurnAt?: number;
+  lastBustAt?: number;
+};
+
+/**
+ * Persist session tracking state. Ensures the row exists, then updates
+ * only the fields that are explicitly provided (not undefined).
+ */
+export function saveSessionTracking(sessionID: string, state: SessionTrackingState): void {
+  const now = Date.now();
+
+  // Ensure row exists (no-op if it already does)
+  db()
+    .query(
+      "INSERT OR IGNORE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, 0, ?)",
+    )
+    .run(sessionID, now);
+
+  // Build SET clauses for only the provided fields
+  const sets: string[] = ["updated_at = ?"];
+  const vals: (string | number | null)[] = [now];
+
+  if (state.lastCuratedAt !== undefined) {
+    sets.push("last_curated_at = ?");
+    vals.push(state.lastCuratedAt);
+  }
+  if (state.messageCount !== undefined) {
+    sets.push("message_count = ?");
+    vals.push(state.messageCount);
+  }
+  if (state.turnsSinceCuration !== undefined) {
+    sets.push("turns_since_curation = ?");
+    vals.push(state.turnsSinceCuration);
+  }
+  if (state.consecutiveTextOnlyTurns !== undefined) {
+    sets.push("consecutive_text_only_turns = ?");
+    vals.push(state.consecutiveTextOnlyTurns);
+  }
+  if (state.ltmCacheText !== undefined) {
+    sets.push("ltm_cache_text = ?");
+    vals.push(state.ltmCacheText);
+  }
+  if (state.ltmCacheTokens !== undefined) {
+    sets.push("ltm_cache_tokens = ?");
+    vals.push(state.ltmCacheTokens);
+  }
+  if (state.ltmPinText !== undefined) {
+    sets.push("ltm_pin_text = ?");
+    vals.push(state.ltmPinText);
+  }
+  if (state.ltmPinTokens !== undefined) {
+    sets.push("ltm_pin_tokens = ?");
+    vals.push(state.ltmPinTokens);
+  }
+  // v24: session identity
+  if (state.fingerprint !== undefined) {
+    sets.push("fingerprint = ?");
+    vals.push(state.fingerprint);
+  }
+  if (state.headerSessionId !== undefined) {
+    sets.push("header_session_id = ?");
+    vals.push(state.headerSessionId);
+  }
+  if (state.headerName !== undefined) {
+    sets.push("header_name = ?");
+    vals.push(state.headerName);
+  }
+  // v24: cache warming
+  if (state.resolvedConversationTTL !== undefined) {
+    sets.push("resolved_conversation_ttl = ?");
+    vals.push(state.resolvedConversationTTL);
+  }
+  if (state.warmupState !== undefined) {
+    sets.push("warmup_state = ?");
+    vals.push(state.warmupState);
+  }
+  // v24: gradient calibration
+  if (state.dynamicContextCap !== undefined) {
+    sets.push("dynamic_context_cap = ?");
+    vals.push(state.dynamicContextCap);
+  }
+  if (state.bustRateEMA !== undefined) {
+    sets.push("bust_rate_ema = ?");
+    vals.push(state.bustRateEMA);
+  }
+  if (state.interBustIntervalEMA !== undefined) {
+    sets.push("inter_bust_interval_ema = ?");
+    vals.push(state.interBustIntervalEMA);
+  }
+  if (state.lastLayer !== undefined) {
+    sets.push("last_layer = ?");
+    vals.push(state.lastLayer);
+  }
+  if (state.lastKnownInput !== undefined) {
+    sets.push("last_known_input = ?");
+    vals.push(state.lastKnownInput);
+  }
+  if (state.lastTurnAt !== undefined) {
+    sets.push("last_turn_at = ?");
+    vals.push(state.lastTurnAt);
+  }
+  if (state.lastBustAt !== undefined) {
+    sets.push("last_bust_at = ?");
+    vals.push(state.lastBustAt);
+  }
+
+  // Update only the specified columns
+  db()
+    .query(
+      "UPDATE session_state SET " + sets.join(", ") + " WHERE session_id = ?",
+    )
+    .run(...vals, sessionID);
+}
+
+/** Loaded session tracking state. */
+export type LoadedSessionTracking = {
+  lastCuratedAt: number;
+  messageCount: number;
+  turnsSinceCuration: number;
+  consecutiveTextOnlyTurns: number;
+  ltmCacheText: string | null;
+  ltmCacheTokens: number | null;
+  ltmPinText: string | null;
+  ltmPinTokens: number | null;
+  // v24: session identity
+  fingerprint: string;
+  headerSessionId: string | null;
+  headerName: string | null;
+  // v24: cache warming
+  resolvedConversationTTL: string;
+  warmupState: string | null;
+  // v24: gradient calibration
+  dynamicContextCap: number;
+  bustRateEMA: number;
+  interBustIntervalEMA: number;
+  lastLayer: number;
+  lastKnownInput: number;
+  lastTurnAt: number;
+  lastBustAt: number;
+};
+
+/**
+ * Load persisted session tracking state. Returns null if no row exists.
+ */
+export function loadSessionTracking(sessionID: string): LoadedSessionTracking | null {
+  const row = db()
+    .query(
+      `SELECT last_curated_at, message_count, turns_since_curation,
+              consecutive_text_only_turns,
+              ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens,
+              fingerprint, header_session_id, header_name,
+              resolved_conversation_ttl, warmup_state,
+              dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
+              last_layer, last_known_input, last_turn_at, last_bust_at
+       FROM session_state WHERE session_id = ?`,
+    )
+    .get(sessionID) as {
+      last_curated_at: number;
+      message_count: number;
+      turns_since_curation: number;
+      consecutive_text_only_turns: number;
+      ltm_cache_text: string | null;
+      ltm_cache_tokens: number | null;
+      ltm_pin_text: string | null;
+      ltm_pin_tokens: number | null;
+      fingerprint: string;
+      header_session_id: string | null;
+      header_name: string | null;
+      resolved_conversation_ttl: string;
+      warmup_state: string | null;
+      dynamic_context_cap: number;
+      bust_rate_ema: number;
+      inter_bust_interval_ema: number;
+      last_layer: number;
+      last_known_input: number;
+      last_turn_at: number;
+      last_bust_at: number;
+    } | null;
+  if (!row) return null;
+  return {
+    lastCuratedAt: row.last_curated_at,
+    messageCount: row.message_count,
+    turnsSinceCuration: row.turns_since_curation,
+    consecutiveTextOnlyTurns: row.consecutive_text_only_turns,
+    ltmCacheText: row.ltm_cache_text,
+    ltmCacheTokens: row.ltm_cache_tokens,
+    ltmPinText: row.ltm_pin_text,
+    ltmPinTokens: row.ltm_pin_tokens,
+    fingerprint: row.fingerprint,
+    headerSessionId: row.header_session_id,
+    headerName: row.header_name,
+    resolvedConversationTTL: row.resolved_conversation_ttl,
+    warmupState: row.warmup_state,
+    dynamicContextCap: row.dynamic_context_cap,
+    bustRateEMA: row.bust_rate_ema,
+    interBustIntervalEMA: row.inter_bust_interval_ema,
+    lastLayer: row.last_layer,
+    lastKnownInput: row.last_known_input,
+    lastTurnAt: row.last_turn_at,
+    lastBustAt: row.last_bust_at,
+  };
+}
+
+/**
+ * Load all persisted header → session ID mappings from the session_state table.
+ *
+ * Used on gateway startup (in initIfNeeded) to pre-populate the in-memory
+ * headerSessionIndex so Tier 1 session identification works immediately
+ * after a process restart — without this, the first post-restart request
+ * with a known session header would generate a new session ID and orphan
+ * the old session's persisted state.
+ */
+export function loadHeaderSessionIndex(): Array<{
+  sessionId: string;
+  headerSessionId: string;
+  headerName: string;
+}> {
+  const rows = db()
+    .query(
+      `SELECT session_id, header_session_id, header_name
+       FROM session_state
+       WHERE header_session_id IS NOT NULL AND header_name IS NOT NULL`,
+    )
+    .all() as Array<{
+      session_id: string;
+      header_session_id: string;
+      header_name: string;
+    }>;
+  return rows.map((row) => ({
+    sessionId: row.session_id,
+    headerSessionId: row.header_session_id,
+    headerName: row.header_name,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Key-value store (kv_meta table)
+// ---------------------------------------------------------------------------
+
+/** Get a kv_meta value by key. Returns null if not found. */
+export function getKV(key: string): string | null {
+  const row = db()
+    .query("SELECT value FROM kv_meta WHERE key = ?")
+    .get(key) as { value: string } | null;
+  return row?.value ?? null;
+}
+
+/** Set a kv_meta value (upsert). */
+export function setKV(key: string, value: string): void {
+  db()
+    .query(
+      "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+    )
+    .run(key, value, value);
 }
 
 // ---------------------------------------------------------------------------

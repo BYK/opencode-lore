@@ -121,7 +121,7 @@ export function makeConversationFixtures(
 }
 
 // ---------------------------------------------------------------------------
-// Standard 3-tool set (matches smoke-test pattern — passes isTitleOrSummaryRequest)
+// Standard 3-tool set (matches smoke-test pattern — passes isMetaRequest)
 // ---------------------------------------------------------------------------
 
 /** Three tools that ensure a request is classified as a normal conversation turn. */

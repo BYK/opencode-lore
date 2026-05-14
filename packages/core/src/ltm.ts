@@ -1,7 +1,7 @@
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "./db";
 import { config } from "./config";
-import { ftsQuery, EMPTY_QUERY, extractTopTerms, runRelaxedSearch } from "./search";
+import { ftsQuery, ftsQueryOr, EMPTY_QUERY, extractTopTerms, filterTerms, runRelaxedSearch } from "./search";
 import * as embedding from "./embedding";
 import * as latReader from "./lat-reader";
 import * as log from "./log";
@@ -50,6 +50,10 @@ export function create(input: {
       ? ensureProject(input.projectPath)
       : null;
 
+  // IF-2: Global entries (pid=null) must be cross-project to avoid a data hole
+  // where forSession() can't find them in either the project or cross-project pool.
+  const crossProject = pid === null ? true : (input.crossProject ?? false);
+
   // Dedup guard: if an entry with the same project_id + title already exists,
   // update its content instead of inserting a duplicate. This prevents the
   // curator from creating multiple entries for the same concept across sessions.
@@ -90,6 +94,16 @@ export function create(input: {
       update(crossExisting.id, { content: input.content });
       return crossExisting.id;
     }
+
+    // Fuzzy dedup: check for title-similar entries via FTS5 + word-overlap.
+    // This catches near-duplicates the curator creates with slightly different
+    // titles for the same concept (e.g. "Upgrade lock bug" vs "Upgrade binary
+    // lock re-entry bug"). Placed after exact checks (cheaper checks first).
+    const fuzzyMatch = findFuzzyDuplicate({ title: input.title, projectId: pid });
+    if (fuzzyMatch) {
+      update(fuzzyMatch.id, { content: input.content });
+      return fuzzyMatch.id;
+    }
   }
 
   const id = input.id ?? uuidv7();
@@ -106,7 +120,7 @@ export function create(input: {
       input.title,
       input.content,
       input.session ?? null,
-      (input.crossProject ?? false) ? 1 : 0,
+      crossProject ? 1 : 0,
       now,
       now,
     );
@@ -130,8 +144,10 @@ export function update(
     params.push(input.content);
   }
   if (input.confidence !== undefined) {
+    // Clamp to [0.0, 1.0] — an LLM-provided value outside this range would
+    // give disproportionate scoring weight (>1) or silently soft-delete (<0.2).
     sets.push("confidence = ?");
-    params.push(input.confidence);
+    params.push(Math.max(0, Math.min(1, input.confidence)));
   }
   sets.push("updated_at = ?");
   params.push(Date.now());
@@ -151,6 +167,100 @@ export function update(
 
 export function remove(id: string) {
   db().query("DELETE FROM knowledge WHERE id = ?").run(id);
+}
+
+// ---------------------------------------------------------------------------
+// Fuzzy title dedup — word-overlap similarity
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute title word-overlap between two titles.
+ * Returns { coefficient, intersectionSize } where:
+ * - coefficient = |A ∩ B| / min(|A|, |B|) (0–1)
+ * - intersectionSize = number of shared meaningful words
+ * Filters stopwords and single-char tokens for meaningful comparison.
+ */
+function titleOverlap(a: string, b: string): { coefficient: number; intersectionSize: number } {
+  const wordsA = new Set(filterTerms(a).map((w) => w.toLowerCase()));
+  const wordsB = new Set(filterTerms(b).map((w) => w.toLowerCase()));
+  if (wordsA.size === 0 || wordsB.size === 0) return { coefficient: 0, intersectionSize: 0 };
+  const intersection = [...wordsA].filter((w) => wordsB.has(w));
+  return {
+    coefficient: intersection.length / Math.min(wordsA.size, wordsB.size),
+    intersectionSize: intersection.length,
+  };
+}
+
+/** Minimum word-overlap coefficient to consider two titles as duplicates. */
+const FUZZY_DEDUP_THRESHOLD = 0.7;
+/** Minimum number of overlapping meaningful words required for a fuzzy match.
+ *  Prevents false positives on short titles where 2-3 common words produce
+ *  a high overlap coefficient despite being genuinely different entries. */
+const FUZZY_DEDUP_MIN_OVERLAP = 4;
+/** Minimum cosine similarity for embedding-based dedup. Empirically tuned
+ *  against 312 Nomic v1.5 entries:
+ *  - 0.935+: all genuine duplicates (same topic, different wording)
+ *  - 0.92–0.935: contains false positives from same-subsystem entries
+ *    (e.g. "BGE Small unusable" ↔ "Nomic OOM" scored 0.9326 — related
+ *    but distinct bugs). Star clustering amplifies this by bridging.
+ *  - <0.92: mixed or unrelated entries */
+const EMBEDDING_DEDUP_THRESHOLD = 0.935;
+
+/**
+ * Find an existing knowledge entry whose title is fuzzy-similar to the given title.
+ *
+ * Uses FTS5 to find up to 5 candidates, then applies word-overlap filtering.
+ * This is the same algorithm used by `check()` but returns a single match
+ * for use in the `create()` dedup guard.
+ *
+ * @returns The first matching entry (id + title), or null if no fuzzy match.
+ */
+export function findFuzzyDuplicate(input: {
+  title: string;
+  projectId: string | null;
+  excludeId?: string;
+}): { id: string; title: string } | null {
+  const q = ftsQueryOr(input.title);
+  if (q === EMPTY_QUERY) return null;
+
+  const { title: tw, content: cw, category: catw } = config().search.ftsWeights;
+
+  try {
+    // Build query scoped to the same project + cross-project entries
+    const excludeClause = input.excludeId ? "AND k.id != ?" : "";
+    const sql = input.projectId !== null
+      ? `SELECT k.id, k.title FROM knowledge_fts f
+         CROSS JOIN knowledge k ON k.rowid = f.rowid
+         WHERE knowledge_fts MATCH ?
+         AND (k.project_id = ? OR k.cross_project = 1)
+         AND k.confidence > 0.2
+         ${excludeClause}
+         ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT 5`
+      : `SELECT k.id, k.title FROM knowledge_fts f
+         CROSS JOIN knowledge k ON k.rowid = f.rowid
+         WHERE knowledge_fts MATCH ?
+         AND (k.project_id IS NULL OR k.cross_project = 1)
+         AND k.confidence > 0.2
+         ${excludeClause}
+         ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT 5`;
+
+    const params: (string | number)[] = input.projectId !== null
+      ? [q, input.projectId, ...(input.excludeId ? [input.excludeId] : []), tw, cw, catw]
+      : [q, ...(input.excludeId ? [input.excludeId] : []), tw, cw, catw];
+
+    const candidates = db().query(sql).all(...params) as Array<{ id: string; title: string }>;
+
+    for (const candidate of candidates) {
+      const { coefficient, intersectionSize } = titleOverlap(input.title, candidate.title);
+      if (coefficient >= FUZZY_DEDUP_THRESHOLD && intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP) {
+        return candidate;
+      }
+    }
+  } catch {
+    // FTS5 error — fall through to no match
+  }
+
+  return null;
 }
 
 export function forProject(
@@ -842,4 +952,196 @@ export function check(projectPath: string): IntegrityIssue[] {
   }
 
   return issues;
+}
+
+// ---------------------------------------------------------------------------
+// Deduplication — embedding-based semantic clustering with word-overlap fallback
+// ---------------------------------------------------------------------------
+
+export type DedupCluster = {
+  surviving: { id: string; title: string };
+  merged: Array<{ id: string; title: string }>;
+};
+
+export type DedupResult = {
+  clusters: DedupCluster[];
+  totalRemoved: number;
+};
+
+/**
+ * Deduplicate knowledge entries for a project.
+ *
+ * Uses two complementary signals with "star" clustering (no transitive
+ * chains) to prevent snowball merging:
+ *
+ * 1. **Title word-overlap** (Jaccard on meaningful words) — catches entries
+ *    with similar titles regardless of content wording.
+ * 2. **Embedding cosine similarity** (when embeddings are available) — catches
+ *    entries with different titles but semantically identical content. Nomic
+ *    v1.5 produces a same-domain spread of 0.46–0.70 for distinct entries,
+ *    making threshold-based dedup viable at 0.935+ (lower thresholds catch
+ *    related-but-distinct entries as false positives, especially via star
+ *    clustering where a hub entry bridges two distinct topics).
+ *
+ * Pairs matching either signal are clustered together. For each cluster,
+ * picks a survivor (highest confidence, then most recently updated, then
+ * shortest title) and removes the rest.
+ *
+ * @param projectPath   Project root path
+ * @param opts.dryRun   If true (default), report clusters without deleting
+ * @returns             Cluster report and count of removed entries
+ */
+/** Core dedup logic — operates on an arbitrary list of entries. */
+function _dedup(entries: KnowledgeEntry[], dryRun: boolean): DedupResult {
+  if (entries.length < 2) return { clusters: [], totalRemoved: 0 };
+
+  // --- Build neighbor map using title overlap + embedding similarity ---
+  // Two entries are considered neighbors (potential duplicates) if EITHER:
+  //   (a) title word-overlap ≥ 0.7 with ≥ 4 shared words, OR
+  //   (b) embedding cosine similarity ≥ 0.935
+  // Star clustering (no transitivity) prevents snowball merging.
+  // O(n²) pairwise comparison — acceptable for n ≤ 25 (maxEntries cap).
+
+  // Load embeddings for the given entries (if available).
+  // We query directly rather than using vectorSearch() because we need
+  // pairwise comparison among entries, not a query-vs-all search.
+  const embeddingMap = new Map<string, Float32Array>();
+  {
+    const entryIds = entries.map((e) => e.id);
+    // Build parameterized IN clause for the entry IDs
+    const placeholders = entryIds.map(() => "?").join(",");
+    const rows = db()
+      .query(`SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`)
+      .all(...entryIds) as Array<{ id: string; embedding: Buffer }>;
+    for (const row of rows) {
+      try {
+        embeddingMap.set(row.id, embedding.fromBlob(row.embedding));
+      } catch {
+        // Skip corrupted embeddings — entry falls back to title-overlap only.
+        log.info(`skipping corrupted embedding for entry ${row.id}`);
+      }
+    }
+  }
+
+  // Pre-compute neighbors for all pairs
+  type DedupHit = { id: string; score: number };
+  const neighborMap = new Map<string, DedupHit[]>();
+
+  for (const entry of entries) {
+    const neighbors: DedupHit[] = [];
+    const entryVec = embeddingMap.get(entry.id);
+
+    for (const other of entries) {
+      if (other.id === entry.id) continue;
+
+      // Signal 1: title word-overlap
+      const { coefficient, intersectionSize } = titleOverlap(entry.title, other.title);
+      const titleMatch = coefficient >= FUZZY_DEDUP_THRESHOLD && intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP;
+
+      // Signal 2: embedding cosine similarity
+      let embeddingMatch = false;
+      let similarity = 0;
+      if (entryVec) {
+        const otherVec = embeddingMap.get(other.id);
+        if (otherVec && entryVec.length === otherVec.length) {
+          similarity = embedding.cosineSimilarity(entryVec, otherVec);
+          embeddingMatch = similarity >= EMBEDDING_DEDUP_THRESHOLD;
+        }
+      }
+
+      if (titleMatch || embeddingMatch) {
+        // Use the stronger signal as the match score for cluster priority
+        neighbors.push({ id: other.id, score: Math.max(coefficient, similarity) });
+      }
+    }
+    neighbors.sort((a, b) => b.score - a.score);
+    neighborMap.set(entry.id, neighbors);
+  }
+
+  // Greedy star clustering — process entries with most neighbors first
+  const claimed = new Set<string>();
+  const rawClusters = new Map<string, string[]>();
+
+  const sortedIds = [...neighborMap.keys()].sort(
+    (a, b) => neighborMap.get(b)!.length - neighborMap.get(a)!.length,
+  );
+
+  for (const centerId of sortedIds) {
+    if (claimed.has(centerId)) continue;
+    claimed.add(centerId);
+    const members = [centerId];
+
+    for (const { id: neighborId } of neighborMap.get(centerId)!) {
+      if (claimed.has(neighborId)) continue;
+      claimed.add(neighborId);
+      members.push(neighborId);
+    }
+
+    if (members.length > 1) {
+      rawClusters.set(centerId, members);
+    }
+  }
+
+  // Build clusters and pick survivors
+  const entryById = new Map(entries.map((e) => [e.id, e]));
+  const result: DedupCluster[] = [];
+  let totalRemoved = 0;
+
+  for (const members of rawClusters.values()) {
+    if (members.length < 2) continue;
+
+    // Pick survivor: highest confidence → most recent → shortest title
+    const sorted = members
+      .map((id) => entryById.get(id)!)
+      .filter(Boolean)
+      .sort((a, b) => {
+        if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+        if (b.updated_at !== a.updated_at) return b.updated_at - a.updated_at;
+        return a.title.length - b.title.length;
+      });
+
+    const survivor = sorted[0];
+    const merged = sorted.slice(1);
+
+    result.push({
+      surviving: { id: survivor.id, title: survivor.title },
+      merged: merged.map((e) => ({ id: e.id, title: e.title })),
+    });
+
+    if (!dryRun) {
+      for (const entry of merged) {
+        remove(entry.id);
+      }
+    }
+
+    totalRemoved += merged.length;
+  }
+
+  // Sort clusters by size descending for readability
+  result.sort((a, b) => b.merged.length - a.merged.length);
+
+  return { clusters: result, totalRemoved };
+}
+
+export async function deduplicate(
+  projectPath: string,
+  opts?: { dryRun?: boolean },
+): Promise<DedupResult> {
+  const entries = forProject(projectPath, false);
+  return _dedup(entries, opts?.dryRun ?? true);
+}
+
+/** Deduplicate global (cross-project) entries that have no project_id. */
+export async function deduplicateGlobal(
+  opts?: { dryRun?: boolean },
+): Promise<DedupResult> {
+  const entries = db()
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+       WHERE project_id IS NULL
+       AND confidence > 0.2
+       ORDER BY confidence DESC, updated_at DESC`,
+    )
+    .all() as KnowledgeEntry[];
+  return _dedup(entries, opts?.dryRun ?? true);
 }

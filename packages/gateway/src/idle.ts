@@ -24,6 +24,8 @@ import {
   exportToFile,
   exportLoreFile,
   saveSessionCosts,
+  saveSessionTracking,
+  saveGradientState,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
@@ -32,14 +34,14 @@ import { getWorkerModel } from "./worker-model";
 import {
   isCircuitBreakerTripped,
   resolveProfile,
-  resolveTimeSlot,
   blendedHistogramForSession,
   shouldWarm,
   executeWarmup,
   loadGlobalHistograms,
   flushGlobalHistograms,
 } from "./cache-warmer";
-import { emitWarmupMetric, emitSessionCostMetrics } from "./sentry";
+import * as Sentry from "@sentry/bun";
+import { emitWarmupMetric, emitSessionCostMetrics, emitCurationMetrics } from "./sentry";
 import { getSessionCosts, totalWorkerCost } from "./cost-tracker";
 
 const POLL_INTERVAL_MS = 30_000;
@@ -96,8 +98,7 @@ export function startIdleScheduler(
       );
       if (!profile) continue;
 
-      const slot = resolveTimeSlot(new Date(now));
-      const blendedHist = blendedHistogramForSession(state, slot);
+      const blendedHist = blendedHistogramForSession(state);
       if (!shouldWarm(state, profile, blendedHist, now)) continue;
 
       warmupInProgress.add(sessionID);
@@ -115,6 +116,44 @@ export function startIdleScheduler(
       flushGlobalHistograms();
     } catch (e) {
       log.warn("cache-warmer: histogram flush error:", e);
+    }
+
+    // --- Periodic state persistence (30s tick) ---
+    // Flush gradient calibration + cache warming + cost state for dirty sessions.
+    // Max data loss on crash is one tick interval (~30s) — acceptable tradeoff
+    // vs per-mutation writes on the hot path.
+    for (const [sessionID, state] of sessions) {
+      if (!state._dirty) continue;
+      try {
+        saveGradientState(sessionID);
+        // Persist cache warming state (resolvedConversationTTL + warmup blob)
+        // in a single DB write alongside gradient state.
+        saveSessionTracking(sessionID, {
+          resolvedConversationTTL: state.resolvedConversationTTL ?? "5m",
+          warmupState: state.warmup ? JSON.stringify(state.warmup) : null,
+        });
+        // Persist cost snapshot
+        const costs = getSessionCosts(sessionID);
+        if (costs && costs.conversation.turns > 0) {
+          saveSessionCosts(sessionID, {
+            conversationCost: costs.conversation.cost,
+            workerCost: totalWorkerCost(costs),
+            conversationTurns: costs.conversation.turns,
+            cacheReadTokens: costs.conversation.cacheReadTokens,
+            cacheWriteTokens: costs.conversation.cacheWriteTokens,
+            warmupSavings: costs.counterfactual.warmupSavings,
+            warmupHits: costs.counterfactual.warmupHits,
+            ttlSavings: costs.counterfactual.ttlSavings,
+            ttlHits: costs.counterfactual.ttlHits,
+            batchSavings: costs.batchSavings,
+            avoidedCompactions: costs.counterfactual.avoidedCompactions,
+            avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
+          });
+        }
+        state._dirty = false;
+      } catch (e) {
+        log.error(`periodic state flush error for session ${sessionID.slice(0, 16)}:`, e);
+      }
     }
   }, POLL_INTERVAL_MS);
 
@@ -156,14 +195,13 @@ export function touchSession(
  *
  * Each step is independently try/catch'd — one failure won't block the rest.
  *
- * @param projectPath - Resolved project directory path
  * @param llm - LLM client for worker calls (distillation, curation)
  */
 export function buildIdleWorkHandler(
-  projectPath: string,
   llm: LLMClient,
 ): (sessionID: string, state: SessionState) => Promise<void> {
   return async (sessionID: string, state: SessionState) => {
+    const projectPath = state.projectPath;
     const cfg = loreConfig();
     const model = getWorkerModel();
 
@@ -193,8 +231,18 @@ export function buildIdleWorkHandler(
     if (cfg.knowledge.enabled && cfg.curator.onIdle) {
       try {
         if (state.turnsSinceCuration >= cfg.curator.afterTurns) {
-          await curator.run({ llm, projectPath, sessionID, model });
+          const result = await Sentry.startSpan(
+            { name: "lore.curator", op: "lore.curation", attributes: { trigger: "idle" } },
+            () => curator.run({ llm, projectPath, sessionID, model }),
+          );
           state.turnsSinceCuration = 0;
+          saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
+          if (result.created > 0 || result.updated > 0 || result.deleted > 0) {
+            log.info(
+              `idle curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
+            );
+            emitCurationMetrics({ ...result, trigger: "idle" });
+          }
         }
       } catch (e) {
         log.error("idle curation error:", e);
@@ -209,14 +257,13 @@ export function buildIdleWorkHandler(
           log.info(
             `entry count ${entries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
           );
-          const { updated, deleted } = await curator.consolidate({
-            llm,
-            projectPath,
-            sessionID,
-            model,
-          });
-          if (updated > 0 || deleted > 0) {
-            log.info(`consolidation: ${updated} updated, ${deleted} deleted`);
+          const result = await Sentry.startSpan(
+            { name: "lore.consolidation", op: "lore.curation", attributes: { trigger: "consolidation" } },
+            () => curator.consolidate({ llm, projectPath, sessionID, model }),
+          );
+          if (result.updated > 0 || result.deleted > 0) {
+            log.info(`consolidation: ${result.updated} updated, ${result.deleted} deleted`);
+            emitCurationMetrics({ created: 0, ...result, trigger: "consolidation" });
           }
         }
       } catch (e) {
@@ -280,7 +327,8 @@ export function buildIdleWorkHandler(
     emitSessionCostMetrics(sessionID);
 
     // 9. Persist live session cost snapshot to DB so historical estimates
-    //    include cache warming, 1h TTL, and batch API savings after restart.
+    //    include all worker costs, avoided compactions, cache warming,
+    //    1h TTL, and batch API savings after restart.
     try {
       const costs = getSessionCosts(sessionID);
       if (costs && costs.conversation.turns > 0) {
@@ -295,6 +343,8 @@ export function buildIdleWorkHandler(
           ttlSavings: costs.counterfactual.ttlSavings,
           ttlHits: costs.counterfactual.ttlHits,
           batchSavings: costs.batchSavings,
+          avoidedCompactions: costs.counterfactual.avoidedCompactions,
+          avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
         });
       }
     } catch (e) {

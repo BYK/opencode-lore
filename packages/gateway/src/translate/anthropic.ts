@@ -251,7 +251,7 @@ export function parseAnthropicRequest(
  *     layer, no distillation arrival, no window eviction), the prefix is
  *     byte-identical → cache reads at 0.1× base cost vs 1× uncached.
  *
- * Title/summary passthrough requests should NEVER enable caching — their
+ * Meta request passthrough (title gen, summaries, etc.) should NEVER enable caching — their
  * content varies every call, producing 1.25× write cost with zero reads.
  */
 export type AnthropicCacheOptions = {

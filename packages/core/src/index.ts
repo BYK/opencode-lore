@@ -18,7 +18,9 @@ export * as embedding from "./embedding";
 export * as embeddingVendor from "./embedding-vendor";
 export * as latReader from "./lat-reader";
 export * as patternExtract from "./pattern-extract";
+export * as instructionDetect from "./instruction-detect";
 export * as log from "./log";
+export * as conversationImport from "./import";
 
 export {
   runRecall,
@@ -53,11 +55,14 @@ export type {
 } from "./types";
 export { isTextPart, isReasoningPart, isToolPart } from "./types";
 
+export { dataDir } from "./data-dir";
 export { load, config, type LoreConfig } from "./config";
 export {
   db,
   dbPath,
   ensureProject,
+  getLastImportAt,
+  setLastImportAt,
   isFirstRun,
   projectId,
   projectName,
@@ -68,6 +73,13 @@ export {
   loadSessionCosts,
   loadAllSessionCosts,
   type SessionCostSnapshot,
+  saveSessionTracking,
+  loadSessionTracking,
+  loadHeaderSessionIndex,
+  type SessionTrackingState,
+  type LoadedSessionTracking,
+  getKV,
+  setKV,
   getMeta,
   setMeta,
   getInstanceId,
@@ -95,6 +107,7 @@ export {
   onIdleResume,
   getLastTurnAt,
   consumeCameOutOfIdle,
+  saveGradientState,
   // Test-only — exposed at the barrel so host-package tests can simulate idle
   // gaps without sleeping. Not part of the public API.
   setLastTurnAtForTest,

@@ -5,7 +5,7 @@
  *
  * Commands:
  *   (none) / run   → start gateway + launch agent
- *   start          → start gateway server only
+ *   start          → start gateway server (no agent auto-launch)
  *   data           → inspect and manage stored data
  *   recall         → search project memory from the terminal
  *   upgrade        → self-update
@@ -25,6 +25,66 @@ import {
 // Argument parsing
 // ---------------------------------------------------------------------------
 
+/** Token from `parseArgs` with `tokens: true`. */
+interface ParseToken {
+  kind: "option" | "positional" | "option-terminator";
+  index: number;
+  name?: string;
+  rawName?: string;
+  value?: string;
+  inlineValue?: boolean;
+}
+
+/** Set of option names defined in OPTIONS — used to detect unknown flags. */
+const KNOWN_OPTIONS = new Set<string>();
+
+/**
+ * Extract arguments that should be forwarded to the launched agent.
+ *
+ * Strategy:
+ * 1. If `--` is present, everything after it is the agent's.
+ * 2. If an agent/command positional is found, slice raw `argv` from one past
+ *    it — everything after the agent name is the agent's. This avoids
+ *    parseArgs's inability to handle unknown value-bearing flags
+ *    (e.g. `--model gpt-4`).
+ * 3. In auto-detect mode (no agent name, no `--`), reconstruct unknown option
+ *    tokens (flags not in OPTIONS) and forward them. This handles cases like
+ *    `lore --dangerously-skip-permissions` where the flag should reach the
+ *    auto-detected agent.
+ *
+ * Caveat: lore's own known options (--port, --debug, etc.) are consumed by
+ * parseArgs regardless of position. Place them before the agent name, or use
+ * `--` to prevent lore from consuming them.
+ */
+function extractAgentArgs(argv: string[], tokens: ParseToken[]): string[] {
+  // 1. If there is a `--` (option-terminator), everything after it is for the agent.
+  const terminator = tokens.find((t) => t.kind === "option-terminator");
+  if (terminator) {
+    return argv.slice(terminator.index + 1);
+  }
+
+  // 2. Find the agent/command positional — the first positional that is NOT "run".
+  const positionalTokens = tokens.filter((t) => t.kind === "positional");
+  for (const pt of positionalTokens) {
+    if (pt.value === "run") continue;
+    // This is the agent/command name. Everything after it in raw argv is the agent's.
+    return argv.slice(pt.index + 1);
+  }
+
+  // 3. Auto-detect with no agent name — collect unknown option tokens.
+  //    Unknown flags (not in OPTIONS) are reconstructed from their rawName
+  //    and forwarded to the agent. parseArgs treats all unknown flags as
+  //    booleans, so value-bearing flags like `--model gpt-4` cannot be
+  //    reconstructed here — use `--` for those cases.
+  const unknownArgs: string[] = [];
+  for (const t of tokens) {
+    if (t.kind === "option" && t.name && !KNOWN_OPTIONS.has(t.name)) {
+      unknownArgs.push(t.rawName ?? `--${t.name}`);
+    }
+  }
+  return unknownArgs;
+}
+
 /** Options shared by all commands. */
 const OPTIONS = {
   port: { type: "string" as const, short: "p" },
@@ -32,16 +92,29 @@ const OPTIONS = {
   debug: { type: "boolean" as const, short: "d" },
   version: { type: "boolean" as const, short: "v" },
   help: { type: "boolean" as const, short: "h" },
-  // Hidden diagnostic: prints the vendored-fastembed registration set by
+  yes: { type: "boolean" as const, short: "y" },
+  // `lore logs` flags
+  follow: { type: "boolean" as const, short: "f" },
+  n: { type: "string" as const },
+  lines: { type: "string" as const },
+  path: { type: "boolean" as const },
+  // Hidden diagnostic: prints the vendored-model registration set by
   // the binary build wrapper (or "none" in npm mode). Used by CI to verify
   // the embed-asset pipeline actually wired up. Not in help text.
   "print-vendor-info": { type: "boolean" as const },
   // Hidden diagnostic: actually exercises the local embedding provider
-  // (extracts vendor → loads fastembed → embeds a sample string) and
-  // prints success or the failure reason. Used by CI to catch model-load
-  // regressions that --print-vendor-info alone wouldn't surface.
+  // (loads transformers.js → embeds a sample string) and prints success
+  // or the failure reason. Used by CI to catch model-load regressions
+  // that --print-vendor-info alone wouldn't surface.
   "check-embeddings": { type: "boolean" as const },
 } as const;
+
+// Populate the set used by extractAgentArgs to distinguish lore's own flags
+// from unknown flags that should be forwarded to the agent.
+for (const [name, def] of Object.entries(OPTIONS)) {
+  KNOWN_OPTIONS.add(name);
+  if ("short" in def && def.short) KNOWN_OPTIONS.add(def.short);
+}
 
 function parsePort(value: string): number {
   const n = Number.parseInt(value, 10);
@@ -72,27 +145,32 @@ function buildStartOptions(values: {
 // ---------------------------------------------------------------------------
 
 export async function _cli(): Promise<void> {
-  // Parse known options, allow positional args for command + pass-through
+  // Parse known options, allow positional args for command + pass-through.
+  // `tokens: true` gives us index information needed to extract agent args.
   let values: ReturnType<typeof parseArgs>["values"];
   let positionals: string[];
+  let tokens: ParseToken[];
+  const argv = process.argv.slice(2);
 
   try {
     const parsed = parseArgs({
-      args: process.argv.slice(2),
+      args: argv,
       options: OPTIONS,
       allowPositionals: true,
       strict: false,
+      tokens: true,
     });
     values = parsed.values;
     positionals = parsed.positionals;
+    tokens = parsed.tokens as ParseToken[];
   } catch (e) {
     console.error(`Error: ${e instanceof Error ? e.message : e}`);
     printHelp();
     process.exit(1);
   }
 
-  // --version / -v
-  if (values.version) {
+  // --version / -v (only when no subcommand is given)
+  if (values.version && positionals.length === 0) {
     printVersion();
     return;
   }
@@ -109,12 +187,10 @@ export async function _cli(): Promise<void> {
   }
 
   // --check-embeddings (hidden). End-to-end smoke for the embedding
-  // pipeline: materialises the bundled side-load lib + model files,
-  // loads fastembed, runs one embedding through the local provider,
-  // prints `ok dim=N` or a clear failure message. Used by CI to catch
-  // regressions in the model load path that --print-vendor-info
-  // wouldn't surface (e.g. ONNX file mismatches, tokenizer file naming
-  // issues, dlopen install_name drift on macOS/Windows).
+  // pipeline: loads transformers.js + the model, runs one embedding
+  // through the local provider, prints `ok dim=N` or a clear failure
+  // message. Used by CI to catch regressions in the model load path
+  // that --print-vendor-info wouldn't surface.
    if (values["check-embeddings"]) {
     const { embedding } = await import("@loreai/core");
     try {
@@ -124,8 +200,7 @@ export async function _cli(): Promise<void> {
         process.exit(1);
       }
       console.log(`ok dim=${vec.length}`);
-      // Force-exit to avoid Bun NAPI teardown crash — fastembed is loaded
-      // on the main thread in this diagnostic path.
+      // Force-exit to avoid potential ONNX Runtime teardown issues.
       const { safeExit } = await import("./exit");
       safeExit(0);
     } catch (err: unknown) {
@@ -170,7 +245,10 @@ export async function _cli(): Promise<void> {
         // Lazy-import to avoid pulling in child_process + agent detection
         // when only `lore start` or `lore help` is needed.
         const { commandRun } = await import("./run");
-        await commandRun(startOpts, rest);
+        const agentArgs = extractAgentArgs(argv, tokens);
+        // Pass only the agent name (if any) as cmdArgs; extra flags go via agentArgs.
+        const agentName = rest.length > 0 ? [rest[0]] : [];
+        await commandRun(startOpts, agentName, agentArgs);
         break;
       }
 
@@ -186,9 +264,26 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "logs": {
+        const { commandLogs } = await import("./logs");
+        await commandLogs(rest, values as Record<string, unknown>);
+        break;
+      }
+
+      case "import": {
+        const { commandImport } = await import("./import");
+        await commandImport(rest, values as Record<string, unknown>);
+        break;
+      }
+
       case "upgrade": {
         const { commandUpgrade } = await import("./upgrade");
-        await commandUpgrade(rest);
+        // Pass raw args so upgrade's own parseArgs handles --version, --channel etc.
+        // Start search at index 2 to skip the binary/script path entries.
+        const rawUpgradeArgs = process.argv.slice(
+          process.argv.indexOf("upgrade", 2) + 1,
+        );
+        await commandUpgrade(rawUpgradeArgs);
         break;
       }
 
@@ -197,11 +292,47 @@ export async function _cli(): Promise<void> {
         break;
 
       default:
-        // Unknown first arg — treat it as `lore run <unknown> ...`
+        // Check if the unknown command matches a known agent binary.
         // This allows `lore claude` as shorthand for `lore run claude`.
         {
+          const { AGENTS } = await import("./agents");
+          const knownBinaries = AGENTS.map((a) => a.binary);
+          if (!knownBinaries.includes(command)) {
+            // Not a known agent — likely a typo. Show a helpful error.
+            const knownCommands = [
+              "start", "run", "data", "recall", "logs", "import", "upgrade", "help",
+              ...knownBinaries,
+            ];
+            // "Did you mean?" — use Levenshtein distance for robust matching
+            function levenshtein(a: string, b: string): number {
+              const m = a.length, n = b.length;
+              const dp: number[][] = Array.from({ length: m + 1 }, (_, i) =>
+                Array.from({ length: n + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+              );
+              for (let i = 1; i <= m; i++)
+                for (let j = 1; j <= n; j++)
+                  dp[i][j] = a[i - 1] === b[j - 1]
+                    ? dp[i - 1][j - 1]
+                    : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+              return dp[m][n];
+            }
+            let suggestion: string | undefined;
+            let bestDist = Infinity;
+            for (const c of knownCommands) {
+              const dist = levenshtein(command, c);
+              if (dist < bestDist && dist <= Math.max(2, Math.floor(command.length / 2))) {
+                bestDist = dist;
+                suggestion = c;
+              }
+            }
+            const hint = suggestion ? ` Did you mean "lore ${suggestion}"?` : "";
+            console.error(`Unknown command "${command}".${hint}\nRun "lore help" for available commands.`);
+            process.exitCode = 1;
+            break;
+          }
           const { commandRun } = await import("./run");
-          await commandRun(startOpts, [command, ...rest]);
+          const agentArgs = extractAgentArgs(argv, tokens);
+          await commandRun(startOpts, [command], agentArgs);
         }
         break;
     }

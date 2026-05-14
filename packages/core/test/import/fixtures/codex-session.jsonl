@@ -1,0 +1,9 @@
+{"type":"session_meta","payload":{"meta":{"id":"sess-codex-1","timestamp":"2025-05-10T14:00:00Z","cwd":"/test/codex-project","source":"Cli","model_provider":"openai","cli_version":"0.1.0"}}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":"How do I set up TypeScript in this project?"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll help you set up TypeScript. Let me check your project structure first."}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"ls -la\"}"}}
+{"type":"response_item","payload":{"type":"function_call_output","output":"total 16\ndrwxr-xr-x  4 user user 4096 May 10 14:00 .\n-rw-r--r--  1 user user  220 May 10 14:00 package.json\n-rw-r--r--  1 user user   45 May 10 14:00 index.js"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":"I see you have a basic project. Let me install TypeScript and create a tsconfig.json."}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"npm install --save-dev typescript @types/node\"}"}}
+{"type":"event_msg","payload":{"type":"exec","output":"added 2 packages in 1.5s"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":"TypeScript is now installed. Remember to add a `tsconfig.json` with `strict: true` for the best experience."}}

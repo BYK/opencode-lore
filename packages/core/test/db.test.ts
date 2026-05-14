@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts } from "../src/db";
+import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, loadHeaderSessionIndex, getKV, setKV } from "../src/db";
 
 
 describe("db", () => {
@@ -16,13 +16,14 @@ describe("db", () => {
     expect(names).toContain("schema_version");
     expect(names).toContain("session_state");
     expect(names).toContain("metadata");
+    expect(names).toContain("import_history");
   });
 
   test("schema version is set", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(18);
+    expect(row.version).toBe(24);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -361,6 +362,8 @@ describe("db", () => {
       ttlSavings: 0.34,
       ttlHits: 7,
       batchSavings: 0.56,
+      avoidedCompactions: 2,
+      avoidedCompactionCost: 0.78,
     };
     saveSessionCosts(sid, snapshot);
     const loaded = loadSessionCosts(sid);
@@ -373,16 +376,20 @@ describe("db", () => {
       conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
       cacheReadTokens: 0, cacheWriteTokens: 0,
       warmupSavings: 0, warmupHits: 0, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
+      avoidedCompactions: 0, avoidedCompactionCost: 0,
     });
     saveSessionCosts(sid, {
       conversationCost: 2.0, workerCost: 0.5, conversationTurns: 15,
       cacheReadTokens: 100000, cacheWriteTokens: 10000,
       warmupSavings: 0.5, warmupHits: 5, ttlSavings: 0.8, ttlHits: 10, batchSavings: 1.2,
+      avoidedCompactions: 3, avoidedCompactionCost: 1.5,
     });
     const loaded = loadSessionCosts(sid);
     expect(loaded!.conversationCost).toBe(2.0);
     expect(loaded!.conversationTurns).toBe(15);
     expect(loaded!.warmupSavings).toBe(0.5);
+    expect(loaded!.avoidedCompactions).toBe(3);
+    expect(loaded!.avoidedCompactionCost).toBe(1.5);
   });
 
   test("saveSessionCosts preserves existing forceMinLayer", () => {
@@ -392,6 +399,7 @@ describe("db", () => {
       conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
       cacheReadTokens: 0, cacheWriteTokens: 0,
       warmupSavings: 0, warmupHits: 0, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
+      avoidedCompactions: 0, avoidedCompactionCost: 0,
     });
     expect(loadForceMinLayer(sid)).toBe(2);
     expect(loadSessionCosts(sid)!.conversationTurns).toBe(5);
@@ -401,6 +409,37 @@ describe("db", () => {
     expect(loadSessionCosts("nonexistent-session")).toBeNull();
   });
 
+  // -------------------------------------------------------------------------
+  // Migration v22: last_import_at on projects
+  // -------------------------------------------------------------------------
+
+  test("projects table has last_import_at column (migration v22)", () => {
+    const cols = db()
+      .query("PRAGMA table_info(projects)")
+      .all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toContain("last_import_at");
+  });
+
+  test("getLastImportAt returns null for new project", () => {
+    const result = getLastImportAt("/test/import-tracking/new");
+    expect(result).toBeNull();
+  });
+
+  test("setLastImportAt and getLastImportAt round-trip", () => {
+    const path = "/test/import-tracking/roundtrip";
+    const ts = Date.now();
+    setLastImportAt(path, ts);
+    expect(getLastImportAt(path)).toBe(ts);
+  });
+
+  test("setLastImportAt updates existing value", () => {
+    const path = "/test/import-tracking/update";
+    setLastImportAt(path, 1000);
+    expect(getLastImportAt(path)).toBe(1000);
+    setLastImportAt(path, 2000);
+    expect(getLastImportAt(path)).toBe(2000);
+  });
+
   test("loadAllSessionCosts returns only sessions with cost data", () => {
     const sid1 = `test-costs-all-1-${crypto.randomUUID()}`;
     const sid2 = `test-costs-all-2-${crypto.randomUUID()}`;
@@ -408,6 +447,7 @@ describe("db", () => {
       conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
       cacheReadTokens: 0, cacheWriteTokens: 0,
       warmupSavings: 0.1, warmupHits: 1, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
+      avoidedCompactions: 1, avoidedCompactionCost: 0.3,
     });
     // sid2: all zeros — should not appear (only forceMinLayer row)
     saveForceMinLayer(sid2, 1);
@@ -416,5 +456,234 @@ describe("db", () => {
     expect(all.has(sid1)).toBe(true);
     expect(all.has(sid2)).toBe(false);
     expect(all.get(sid1)!.warmupSavings).toBe(0.1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Migration v23: Session tracking state persistence
+  // -------------------------------------------------------------------------
+
+  test("session_state has v23 tracking columns", () => {
+    const cols = db()
+      .query("PRAGMA table_info(session_state)")
+      .all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toContain("last_curated_at");
+    expect(names).toContain("message_count");
+    expect(names).toContain("turns_since_curation");
+    expect(names).toContain("ltm_cache_text");
+    expect(names).toContain("ltm_cache_tokens");
+    expect(names).toContain("ltm_pin_text");
+    expect(names).toContain("ltm_pin_tokens");
+    expect(names).toContain("consecutive_text_only_turns");
+  });
+
+  test("saveSessionTracking and loadSessionTracking round-trip", () => {
+    const sid = `test-tracking-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      lastCuratedAt: 1000,
+      messageCount: 42,
+      turnsSinceCuration: 5,
+      ltmCacheText: "cached LTM text",
+      ltmCacheTokens: 100,
+      ltmPinText: "pinned LTM text",
+      ltmPinTokens: 90,
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.lastCuratedAt).toBe(1000);
+    expect(loaded!.messageCount).toBe(42);
+    expect(loaded!.turnsSinceCuration).toBe(5);
+    expect(loaded!.ltmCacheText).toBe("cached LTM text");
+    expect(loaded!.ltmCacheTokens).toBe(100);
+    expect(loaded!.ltmPinText).toBe("pinned LTM text");
+    expect(loaded!.ltmPinTokens).toBe(90);
+  });
+
+  test("saveSessionTracking partial update preserves other fields", () => {
+    const sid = `test-tracking-partial-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      lastCuratedAt: 1000,
+      messageCount: 10,
+      turnsSinceCuration: 3,
+    });
+    // Update only messageCount
+    saveSessionTracking(sid, { messageCount: 20 });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded!.lastCuratedAt).toBe(1000);
+    expect(loaded!.messageCount).toBe(20);
+    expect(loaded!.turnsSinceCuration).toBe(3);
+  });
+
+  test("saveSessionTracking preserves existing forceMinLayer", () => {
+    const sid = `test-tracking-layer-${crypto.randomUUID()}`;
+    saveForceMinLayer(sid, 2);
+    saveSessionTracking(sid, { messageCount: 15 });
+    expect(loadForceMinLayer(sid)).toBe(2);
+    expect(loadSessionTracking(sid)!.messageCount).toBe(15);
+  });
+
+  test("loadSessionTracking returns null for unknown session", () => {
+    expect(loadSessionTracking("nonexistent-tracking")).toBeNull();
+  });
+
+  test("saveSessionTracking can set ltm fields to null", () => {
+    const sid = `test-tracking-null-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      ltmCacheText: "some text",
+      ltmCacheTokens: 50,
+    });
+    expect(loadSessionTracking(sid)!.ltmCacheText).toBe("some text");
+    // Clear the cache
+    saveSessionTracking(sid, {
+      ltmCacheText: null,
+      ltmCacheTokens: null,
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded!.ltmCacheText).toBeNull();
+    expect(loaded!.ltmCacheTokens).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // v24: session identity, cache warming, gradient state
+  // -------------------------------------------------------------------------
+
+  test("saveSessionTracking v24 session identity round-trip", () => {
+    const sid = `test-v24-identity-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      fingerprint: "abc123hash",
+      headerSessionId: "uuid-4567",
+      headerName: "x-claude-code-session-id",
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.fingerprint).toBe("abc123hash");
+    expect(loaded!.headerSessionId).toBe("uuid-4567");
+    expect(loaded!.headerName).toBe("x-claude-code-session-id");
+  });
+
+  test("saveSessionTracking v24 cache warming round-trip", () => {
+    const sid = `test-v24-warming-${crypto.randomUUID()}`;
+    const warmup = { lastWarmupAt: 1000, warmupCount: 3, warmupHits: 1, disabled: false, forceKeepWarm: true };
+    saveSessionTracking(sid, {
+      resolvedConversationTTL: "1h",
+      warmupState: JSON.stringify(warmup),
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.resolvedConversationTTL).toBe("1h");
+    const parsed = JSON.parse(loaded!.warmupState!);
+    expect(parsed.warmupCount).toBe(3);
+    expect(parsed.forceKeepWarm).toBe(true);
+  });
+
+  test("saveSessionTracking v24 gradient state round-trip", () => {
+    const sid = `test-v24-gradient-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      dynamicContextCap: 150000,
+      bustRateEMA: 0.35,
+      interBustIntervalEMA: 120000,
+      lastLayer: 1,
+      lastKnownInput: 80000,
+      lastTurnAt: Date.now() - 5000,
+      lastBustAt: Date.now() - 60000,
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.dynamicContextCap).toBe(150000);
+    expect(loaded!.bustRateEMA).toBeCloseTo(0.35);
+    expect(loaded!.interBustIntervalEMA).toBe(120000);
+    expect(loaded!.lastLayer).toBe(1);
+    expect(loaded!.lastKnownInput).toBe(80000);
+    expect(loaded!.lastTurnAt).toBeGreaterThan(0);
+    expect(loaded!.lastBustAt).toBeGreaterThan(0);
+  });
+
+  test("saveSessionTracking v24 partial update preserves v23 + v24 fields", () => {
+    const sid = `test-v24-partial-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      messageCount: 10,
+      fingerprint: "hash1",
+      dynamicContextCap: 100000,
+    });
+    // Update only gradient field
+    saveSessionTracking(sid, { bustRateEMA: 0.5 });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded!.messageCount).toBe(10);
+    expect(loaded!.fingerprint).toBe("hash1");
+    expect(loaded!.dynamicContextCap).toBe(100000);
+    expect(loaded!.bustRateEMA).toBeCloseTo(0.5);
+  });
+
+  test("saveSessionTracking v24 defaults are correct for new rows", () => {
+    const sid = `test-v24-defaults-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, { messageCount: 1 });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded).not.toBeNull();
+    // v24 defaults
+    expect(loaded!.fingerprint).toBe("");
+    expect(loaded!.headerSessionId).toBeNull();
+    expect(loaded!.headerName).toBeNull();
+    expect(loaded!.resolvedConversationTTL).toBe("5m");
+    expect(loaded!.warmupState).toBeNull();
+    expect(loaded!.dynamicContextCap).toBe(0);
+    expect(loaded!.bustRateEMA).toBe(-1);
+    expect(loaded!.interBustIntervalEMA).toBe(-1);
+    expect(loaded!.lastLayer).toBe(0);
+    expect(loaded!.lastKnownInput).toBe(0);
+    expect(loaded!.lastTurnAt).toBe(0);
+    expect(loaded!.lastBustAt).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // loadHeaderSessionIndex
+  // -------------------------------------------------------------------------
+
+  test("loadHeaderSessionIndex only returns sessions with non-null headers", () => {
+    const sid1 = `test-hsi-1-${crypto.randomUUID()}`;
+    const sid2 = `test-hsi-2-${crypto.randomUUID()}`;
+    saveSessionTracking(sid1, {
+      headerSessionId: "uuid-aaa",
+      headerName: "x-claude-code-session-id",
+    });
+    saveSessionTracking(sid2, {
+      headerSessionId: "uuid-bbb",
+      headerName: "x-session-affinity",
+    });
+    // Session without headers should NOT appear
+    const sid3 = `test-hsi-3-${crypto.randomUUID()}`;
+    saveSessionTracking(sid3, { messageCount: 5 });
+
+    const entries = loadHeaderSessionIndex();
+    const found1 = entries.find((e) => e.sessionId === sid1);
+    const found2 = entries.find((e) => e.sessionId === sid2);
+    const found3 = entries.find((e) => e.sessionId === sid3);
+
+    expect(found1).toBeDefined();
+    expect(found1!.headerSessionId).toBe("uuid-aaa");
+    expect(found1!.headerName).toBe("x-claude-code-session-id");
+    expect(found2).toBeDefined();
+    expect(found2!.headerSessionId).toBe("uuid-bbb");
+    expect(found2!.headerName).toBe("x-session-affinity");
+    expect(found3).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // KV helpers (kv_meta table)
+  // -------------------------------------------------------------------------
+
+  test("getKV returns null for unknown key", () => {
+    expect(getKV("nonexistent_kv_key")).toBeNull();
+  });
+
+  test("setKV and getKV round-trip", () => {
+    setKV("test_kv_key", "test_kv_value");
+    expect(getKV("test_kv_key")).toBe("test_kv_value");
+  });
+
+  test("setKV upserts on conflict", () => {
+    setKV("kv_upsert", "first");
+    expect(getKV("kv_upsert")).toBe("first");
+    setKV("kv_upsert", "second");
+    expect(getKV("kv_upsert")).toBe("second");
   });
 });

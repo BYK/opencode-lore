@@ -12,10 +12,12 @@
  * as the version argument. The choice is persisted in ~/.lore/channel.
  *
  * Flags:
- *   --check    Check for updates without installing
- *   --force    Force re-download even if up to date
- *   --offline  Upgrade from cached patches (no network)
- *   --channel  Set release channel (stable or nightly)
+ *   -v, --version <ver>  Target version (alternative to positional argument)
+ *       --channel <ch>   Set release channel (stable or nightly)
+ *       --check          Check for updates without installing
+ *       --force          Force re-download even if up to date
+ *       --offline        Upgrade from cached patches (no network)
+ *   -h, --help           Show subcommand help text
  *
  * Adapted from Sentry CLI's upgrade command — stripped of brew/npm
  * detection, setup spawning, release notes, and Sentry SDK telemetry.
@@ -55,6 +57,7 @@ interface UpgradeFlags {
   check: boolean;
   force: boolean;
   offline: boolean;
+  help: boolean;
   channel?: string;
 }
 
@@ -68,7 +71,9 @@ function parseUpgradeFlags(args: string[]): {
       check: { type: "boolean", default: false },
       force: { type: "boolean", default: false },
       offline: { type: "boolean", default: false },
+      help: { type: "boolean", default: false, short: "h" },
       channel: { type: "string" },
+      version: { type: "string", short: "v" },
     },
     allowPositionals: true,
     strict: false,
@@ -79,9 +84,13 @@ function parseUpgradeFlags(args: string[]): {
       check: !!values.check,
       force: !!values.force,
       offline: !!values.offline,
+      help: !!values.help,
       channel: values.channel as string | undefined,
     },
-    versionArg: positionals[0],
+    // --version / -v flag takes precedence over positional arg.
+    // With strict:false, --version without a value may coerce to boolean true.
+    versionArg:
+      typeof values.version === "string" ? values.version : positionals[0],
   };
 }
 
@@ -165,6 +174,31 @@ function resolveOfflineTarget(versionArg: string | undefined): string {
 
 export async function commandUpgrade(args: string[]): Promise<void> {
   const { flags, versionArg: rawVersionArg } = parseUpgradeFlags(args);
+
+  if (flags.help) {
+    console.error(`Usage: lore upgrade [version] [options]
+
+Upgrade lore to the latest or a specific version.
+
+Arguments:
+  version               Target version, or "nightly"/"stable" to switch channel
+
+Options:
+  -v, --version <ver>   Target version (alternative to positional argument)
+      --channel <ch>    Set release channel (stable or nightly)
+      --check           Check for updates without installing
+      --force           Force re-download even if up to date
+      --offline         Upgrade from cached patches (no network)
+  -h, --help            Show this help text
+
+Examples:
+  lore upgrade                    # Upgrade to latest on current channel
+  lore upgrade nightly            # Switch to nightly channel and update
+  lore upgrade stable             # Switch back to stable channel
+  lore upgrade --version 0.17.0   # Upgrade to a specific version
+  lore upgrade --check            # Check for updates without installing`);
+    return;
+  }
 
   const { channel, cleanVersionArg } = resolveChannelAndVersion(
     rawVersionArg,
@@ -265,12 +299,6 @@ export async function commandUpgrade(args: string[]): Promise<void> {
   // Download the new binary
   const downloadResult = await executeUpgrade(target, downloadTag, offline);
 
-  if (downloadResult.patchBytes) {
-    console.error(
-      `[lore] Applied delta patch (${formatBytes(downloadResult.patchBytes)} downloaded)`,
-    );
-  }
-
   // Install: replace the current binary atomically
   try {
     const currentInstallDir = dirname(getCurlInstallPaths().installPath);
@@ -300,12 +328,3 @@ export async function commandUpgrade(args: string[]): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}

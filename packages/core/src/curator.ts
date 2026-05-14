@@ -1,8 +1,11 @@
 import { config } from "./config";
+import { saveSessionTracking, loadSessionTracking } from "./db";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
+import { detectAndFormat } from "./instruction-detect";
+import { curatorLimiter } from "./session-limiter";
 import type { LLMClient } from "./types";
 
 /**
@@ -11,9 +14,9 @@ import type { LLMClient } from "./types";
  * The curator prompt also instructs the model to stay within this limit,
  * so truncation is a last-resort safety net.
  */
-const MAX_ENTRY_CONTENT_LENGTH = 1200;
+export const MAX_ENTRY_CONTENT_LENGTH = 1200;
 
-type CuratorOp =
+export type CuratorOp =
   | {
       op: "create";
       category: string;
@@ -25,7 +28,11 @@ type CuratorOp =
   | { op: "update"; id: string; content?: string; confidence?: number }
   | { op: "delete"; id: string; reason: string };
 
-function parseOps(text: string): CuratorOp[] {
+/**
+ * Parse the LLM's JSON response into typed curator ops.
+ * Handles markdown fences and filters invalid entries.
+ */
+export function parseOps(text: string): CuratorOp[] {
   const cleaned = text
     .trim()
     .replace(/^```json?\s*/i, "")
@@ -45,58 +52,29 @@ function parseOps(text: string): CuratorOp[] {
   }
 }
 
-// Track which messages we've already curated — per session to prevent
-// cross-session leaking (curation on session A advancing the timestamp
-// past session B's messages, causing B's curation to find < 3 recent).
-const lastCuratedAt = new Map<string, number>();
-
-export async function run(input: {
-  llm: LLMClient;
-  projectPath: string;
-  sessionID: string;
-  model?: { providerID: string; modelID: string };
-}): Promise<{ created: number; updated: number; deleted: number }> {
-  const cfg = config();
-  if (!cfg.curator.enabled) return { created: 0, updated: 0, deleted: 0 };
-
-  // Get recent messages since last curation
-  const all = temporal.bySession(input.projectPath, input.sessionID);
-  const sessionCuratedAt = lastCuratedAt.get(input.sessionID) ?? 0;
-  const recent = all.filter((m) => m.created_at > sessionCuratedAt);
-  if (recent.length < 3) return { created: 0, updated: 0, deleted: 0 };
-
-  const text = recent.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
-  const existing = ltm.forProject(input.projectPath, false);
-  const existingForPrompt = existing.map((e) => ({
-    id: e.id,
-    category: e.category,
-    title: e.title,
-    content: e.content,
-  }));
-
-  const userContent = curatorUser({
-    messages: text,
-    existing: existingForPrompt,
-  });
-  const model = input.model ?? cfg.model;
-  const responseText = await input.llm.prompt(
-    CURATOR_SYSTEM,
-    userContent,
-    { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 2048 },
-  );
-  if (!responseText) return { created: 0, updated: 0, deleted: 0 };
-
-  const ops = parseOps(responseText);
+/**
+ * Apply a list of curator ops (create/update/delete) to the knowledge DB.
+ * Shared by both the live curator and the conversation import system.
+ *
+ * @returns Counts of applied operations.
+ */
+export function applyOps(
+  ops: CuratorOp[],
+  input: {
+    projectPath?: string;
+    sessionID?: string;
+    /** If true, skip "create" ops (used by consolidation). */
+    skipCreate?: boolean;
+  },
+): { created: number; updated: number; deleted: number } {
   let created = 0;
   let updated = 0;
   let deleted = 0;
-
   const idsToSync: string[] = [];
 
   for (const op of ops) {
     if (op.op === "create") {
-      // Truncate oversized content — the model should stay within the prompt's
-      // 500-word limit, but enforce it here as a hard safety net.
+      if (input.skipCreate) continue;
       const content =
         op.content.length > MAX_ENTRY_CONTENT_LENGTH
           ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
@@ -139,8 +117,126 @@ export async function run(input: {
     ltm.syncRefs(id);
   }
 
-  lastCuratedAt.set(input.sessionID, Date.now());
   return { created, updated, deleted };
+}
+
+// Track which messages we've already curated — per session to prevent
+// cross-session leaking (curation on session A advancing the timestamp
+// past session B's messages, causing B's curation to find < 3 recent).
+// In-memory cache backed by session_state DB table so it survives restarts.
+const lastCuratedAt = new Map<string, number>();
+
+/** Get the last-curated timestamp for a session, loading from DB if needed. */
+function getLastCuratedAt(sessionID: string): number {
+  const cached = lastCuratedAt.get(sessionID);
+  if (cached !== undefined) return cached;
+  // Load from DB on first access
+  const persisted = loadSessionTracking(sessionID);
+  const ts = persisted?.lastCuratedAt ?? 0;
+  lastCuratedAt.set(sessionID, ts);
+  return ts;
+}
+
+export async function run(input: {
+  llm: LLMClient;
+  projectPath: string;
+  sessionID: string;
+  model?: { providerID: string; modelID: string };
+}): Promise<{ created: number; updated: number; deleted: number }> {
+  const cfg = config();
+  if (!cfg.curator.enabled) return { created: 0, updated: 0, deleted: 0 };
+
+  // Skip-if-busy: curation is periodic, not accumulative. If a curation is
+  // already running for this session, skip — the next trigger will pick up
+  // any new messages. Serializing would waste an LLM call.
+  //
+  // The isBusy() check and get()() enqueue are both synchronous — in Node's
+  // single-threaded event loop no microtask can interleave between them, so
+  // there is no TOCTOU race. The p-limit(1) serialization is a safety net
+  // if this invariant is ever violated.
+  if (curatorLimiter.isBusy(input.sessionID)) {
+    log.info(`curation skipped: already running for session ${input.sessionID.slice(0, 16)}`);
+    return { created: 0, updated: 0, deleted: 0 };
+  }
+
+  return curatorLimiter.get(input.sessionID)(() => runInner(input));
+}
+
+async function runInner(input: {
+  llm: LLMClient;
+  projectPath: string;
+  sessionID: string;
+  model?: { providerID: string; modelID: string };
+}): Promise<{ created: number; updated: number; deleted: number }> {
+  const cfg = config();
+
+  // Get recent messages since last curation
+  const all = temporal.bySession(input.projectPath, input.sessionID);
+  const sessionCuratedAt = getLastCuratedAt(input.sessionID);
+  const recent = all.filter((m) => m.created_at > sessionCuratedAt);
+  if (recent.length < 3) return { created: 0, updated: 0, deleted: 0 };
+
+  const text = recent.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
+  const existing = ltm.forProject(input.projectPath, false);
+  const existingForPrompt = existing.map((e) => ({
+    id: e.id,
+    category: e.category,
+    title: e.title,
+    content: e.content,
+  }));
+
+  const baseUserContent = curatorUser({
+    messages: text,
+    existing: existingForPrompt,
+  });
+
+  // Detect repeated instructions across prior sessions and append as
+  // additional context for the curator. This is async (may embed candidates)
+  // but fast — typically <250ms for 5 candidates with local embeddings.
+  let crossSessionContext = "";
+  try {
+    crossSessionContext = await detectAndFormat({
+      projectPath: input.projectPath,
+      sessionID: input.sessionID,
+    });
+  } catch (err) {
+    log.warn("instruction-detect failed (non-fatal):", err);
+  }
+
+  const userContent = baseUserContent + crossSessionContext;
+  const model = input.model ?? cfg.model;
+  const responseText = await input.llm.prompt(
+    CURATOR_SYSTEM,
+    userContent,
+    { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 2048 },
+  );
+  if (!responseText) return { created: 0, updated: 0, deleted: 0 };
+
+  const ops = parseOps(responseText);
+  const result = applyOps(ops, {
+    projectPath: input.projectPath,
+    sessionID: input.sessionID,
+  });
+
+  // Post-curation dedup sweep: if the curator created new entries, check for
+  // and auto-merge any semantic duplicates it introduced. Uses embedding-based
+  // similarity when available, falls back to word-overlap.
+  if (result.created > 0) {
+    try {
+      const dupes = await ltm.deduplicate(input.projectPath, { dryRun: false });
+      if (dupes.totalRemoved > 0) {
+        log.info(`post-curation dedup: merged ${dupes.totalRemoved} duplicate entries`);
+        result.deleted += dupes.totalRemoved;
+      }
+    } catch (err) {
+      log.warn("post-curation dedup failed (non-fatal):", err);
+    }
+  }
+
+  const now = Date.now();
+  lastCuratedAt.set(input.sessionID, now);
+  saveSessionTracking(input.sessionID, { lastCuratedAt: now });
+  return result;
 }
 
 export function resetCurationTracker(sessionID?: string) {
@@ -190,31 +286,11 @@ export async function consolidate(input: {
   if (!responseText) return { updated: 0, deleted: 0 };
 
   const ops = parseOps(responseText);
-  let updated = 0;
-  let deleted = 0;
+  const result = applyOps(ops, {
+    projectPath: input.projectPath,
+    sessionID: input.sessionID,
+    skipCreate: true, // Consolidation must not add entries.
+  });
 
-  for (const op of ops) {
-    // Consolidation only applies update and delete — never create.
-    if (op.op === "update") {
-      const entry = ltm.get(op.id);
-      if (entry) {
-        const content =
-          op.content !== undefined && op.content.length > MAX_ENTRY_CONTENT_LENGTH
-            ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
-              " [truncated — entry too long]"
-            : op.content;
-        ltm.update(op.id, { content, confidence: op.confidence });
-        updated++;
-      }
-    } else if (op.op === "delete") {
-      const entry = ltm.get(op.id);
-      if (entry) {
-        ltm.remove(op.id);
-        deleted++;
-      }
-    }
-    // "create" ops are silently ignored — consolidation must not add entries.
-  }
-
-  return { updated, deleted };
+  return { updated: result.updated, deleted: result.deleted };
 }

@@ -349,48 +349,35 @@ async function cmdClear(
   const specific = onlyKnowledge || onlyTemporal || onlyDistillations;
 
   if (specific) {
-    // Clear specific data types
-    if (onlyKnowledge) {
-      const counts = data.countForProject(projectPath);
-      if (!skipConfirm) {
-        const confirmed = await confirm(
-          `\nThis will delete ${counts.knowledge} knowledge entries for project at:\n  ${projectPath}\n` +
-            `The .lore.md file will be regenerated.`,
-        );
-        if (!confirmed) {
-          console.log("Cancelled.");
-          return;
-        }
+    // Collect counts once and build a single confirmation prompt
+    const counts = data.countForProject(projectPath);
+    const targets: string[] = [];
+    if (onlyKnowledge) targets.push(`${counts.knowledge} knowledge entries`);
+    if (onlyTemporal) targets.push(`${counts.messages} temporal messages`);
+    if (onlyDistillations) targets.push(`${counts.distillations} distillations`);
+
+    if (!skipConfirm) {
+      const confirmed = await confirm(
+        `\nThis will delete the following for project at:\n  ${projectPath}\n` +
+          targets.map((t) => `  - ${t}`).join("\n") +
+          (onlyKnowledge ? "\n  The .lore.md file will be regenerated." : ""),
+      );
+      if (!confirmed) {
+        console.log("Cancelled.");
+        return;
       }
+    }
+
+    if (onlyKnowledge) {
       const deleted = data.clearKnowledge(projectPath);
       console.log(`Deleted ${deleted} knowledge entries.`);
       console.log("Regenerated .lore.md \u2014 commit the change to prevent re-import from git.");
     }
     if (onlyTemporal) {
-      const counts = data.countForProject(projectPath);
-      if (!skipConfirm) {
-        const confirmed = await confirm(
-          `\nThis will delete ${counts.messages} temporal messages for project at:\n  ${projectPath}`,
-        );
-        if (!confirmed) {
-          console.log("Cancelled.");
-          return;
-        }
-      }
       const deleted = data.clearTemporal(projectPath);
       console.log(`Deleted ${deleted} temporal messages.`);
     }
     if (onlyDistillations) {
-      const counts = data.countForProject(projectPath);
-      if (!skipConfirm) {
-        const confirmed = await confirm(
-          `\nThis will delete ${counts.distillations} distillations for project at:\n  ${projectPath}`,
-        );
-        if (!confirmed) {
-          console.log("Cancelled.");
-          return;
-        }
-      }
       const deleted = data.clearDistillations(projectPath);
       console.log(`Deleted ${deleted} distillations.`);
     }
@@ -670,6 +657,154 @@ async function cmdMerge(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// dedup — Deduplicate knowledge entries across all projects (or one)
+// ---------------------------------------------------------------------------
+
+function printDedupResult(
+  result: Awaited<ReturnType<typeof import("@loreai/core").ltm.deduplicate>>,
+  apply: boolean,
+  label?: string,
+): void {
+  if (label) console.log(`\n--- ${label} ---\n`);
+
+  for (let i = 0; i < result.clusters.length; i++) {
+    const cluster = result.clusters[i];
+    const total = 1 + cluster.merged.length;
+    console.log(`Cluster ${i + 1} (${total} entries → 1):`);
+    console.log(`  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`);
+    for (const m of cluster.merged) {
+      console.log(`  ${apply ? "Remove" : "Would remove"}: "${truncate(m.title, 60)}" (${m.id.slice(0, 8)}…)`);
+    }
+    console.log();
+  }
+}
+
+async function cmdDedup(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const { ltm, data, embedding: emb } = await import("@loreai/core");
+  const apply = !!flags.yes;
+  const asJson = !!flags.json;
+  const explicitProject = typeof flags.project === "string" ? resolve(flags.project) : null;
+
+  // Determine which projects to process
+  const projects = explicitProject
+    ? [{ path: explicitProject, name: explicitProject }]
+    : data.listProjects().map((p) => ({ path: p.path, name: p.name ?? p.path }));
+
+  if (projects.length === 0) {
+    console.log("No projects found.");
+    return;
+  }
+
+  // Auto-reindex if embedding config changed (e.g. model migration)
+  // or if there are entries missing embeddings. backfillEmbeddings()
+  // calls checkConfigChange() internally — no need to call it separately.
+  if (emb.isAvailable()) {
+    try {
+      const knowledgeCount = await emb.backfillEmbeddings();
+      // Also backfill distillations — checkConfigChange() inside
+      // backfillEmbeddings() may have NULLed their embeddings too.
+      const distillCount = await emb.backfillDistillationEmbeddings();
+      const total = knowledgeCount + distillCount;
+      if (total > 0) {
+        console.log(`Re-indexed ${total} entries (${knowledgeCount} knowledge, ${distillCount} distillations).\n`);
+      }
+    } catch (err) {
+      console.error("Warning: embedding reindex failed, dedup will use title-overlap only:", err);
+    }
+  }
+
+  if (!apply) {
+    console.log("Scanning for duplicate knowledge entries (dry run)...\n");
+  } else {
+    console.log("Deduplicating knowledge entries...\n");
+  }
+
+  let grandTotalRemoved = 0;
+  let grandTotalClusters = 0;
+  const allResults: Array<{ name: string; result: Awaited<ReturnType<typeof ltm.deduplicate>> }> = [];
+
+  for (const project of projects) {
+    const result = await ltm.deduplicate(project.path, { dryRun: !apply });
+    if (result.clusters.length > 0) {
+      allResults.push({ name: project.name, result });
+      grandTotalRemoved += result.totalRemoved;
+      grandTotalClusters += result.clusters.length;
+    }
+  }
+
+  // Also dedup global (cross-project) entries
+  const globalResult = await ltm.deduplicateGlobal({ dryRun: !apply });
+  if (globalResult.clusters.length > 0) {
+    allResults.push({ name: "Global", result: globalResult });
+    grandTotalRemoved += globalResult.totalRemoved;
+    grandTotalClusters += globalResult.clusters.length;
+  }
+
+  if (grandTotalClusters === 0) {
+    console.log("No duplicates found.");
+    return;
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify(allResults, null, 2));
+    return;
+  }
+
+  const multiProject = allResults.length > 1 || (!explicitProject && projects.length > 1);
+  for (const { name, result } of allResults) {
+    printDedupResult(result, apply, multiProject ? name : undefined);
+  }
+
+  console.log(
+    `${apply ? "Removed" : "Would remove"} ${grandTotalRemoved} duplicate entries ` +
+      `across ${grandTotalClusters} clusters` +
+      (multiProject ? ` in ${allResults.length} projects.` : "."),
+  );
+
+  if (!apply) {
+    console.log("\nRun with --yes to apply.");
+  }
+}
+
+async function cmdReindex(): Promise<void> {
+  const { embedding } = await import("@loreai/core");
+
+  if (!embedding.isAvailable()) {
+    console.error("No embedding provider available.");
+    console.error(
+      "Set VOYAGE_API_KEY/OPENAI_API_KEY for remote embeddings, or ensure " +
+        "@huggingface/transformers is installed for local embeddings.",
+    );
+    process.exit(1);
+  }
+
+  try {
+    // backfillEmbeddings() calls checkConfigChange() internally —
+    // it detects config changes, clears stale embeddings, then re-embeds.
+    console.log("Re-indexing knowledge entries...");
+    const knowledgeCount = await embedding.backfillEmbeddings();
+    console.log(`  ✓ ${knowledgeCount} knowledge entries embedded`);
+
+    console.log("Re-indexing distillations...");
+    const distillCount = await embedding.backfillDistillationEmbeddings();
+    console.log(`  ✓ ${distillCount} distillations embedded`);
+
+    const total = knowledgeCount + distillCount;
+    if (total === 0) {
+      console.log("\nAll embeddings are up to date.");
+    } else {
+      console.log(`\nDone — ${total} entries re-indexed.`);
+    }
+  } catch (err) {
+    console.error("Re-indexing failed:", err);
+    process.exit(1);
+  }
+}
+
 // Main dispatch
 // ---------------------------------------------------------------------------
 
@@ -686,6 +821,8 @@ Subcommands:
   delete <type> <id>    Delete a single entry
   merge                 Scan git remotes and merge duplicate projects
   recover               Re-import knowledge from .lore.md / AGENTS.md files
+  dedup                 Find and remove duplicate knowledge entries (all projects)
+  reindex               Rebuild embedding vectors (after model/config change)
 
 Options:
   --project <path>      Target project directory (default: current directory)
@@ -712,6 +849,10 @@ Examples:
   lore data merge --yes                    # skip confirmation
   lore data recover                        # re-import from .lore.md / AGENTS.md
   lore data recover --yes                  # skip confirmation
+  lore data dedup                          # dry-run: show duplicate clusters
+  lore data dedup --yes                    # apply: remove duplicates
+  lore data dedup --project /path/to/project
+  lore data reindex                        # rebuild all embedding vectors
 `.trimStart();
 
 export async function commandData(
@@ -739,6 +880,12 @@ export async function commandData(
       break;
     case "recover":
       await cmdRecover(subArgs, values);
+      break;
+    case "dedup":
+      await cmdDedup(subArgs, values);
+      break;
+    case "reindex":
+      await cmdReindex();
       break;
     case "help":
     case undefined:

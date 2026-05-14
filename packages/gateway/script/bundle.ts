@@ -7,7 +7,6 @@
  *
  * Everything is bundled except:
  *   - node:* built-ins (resolved at runtime)
- *   - fastembed + onnxruntime-* + @anush008/* (native binaries, npm installs them)
  *
  * The Bun → Node.js polyfill layer (script/node-polyfills.ts) is injected at
  * bundle time so the source code stays Bun-native.
@@ -46,12 +45,13 @@ mkdirSync(distDir, { recursive: true });
 // esbuild: single CJS bundle with polyfills injected
 // ---------------------------------------------------------------------------
 
-// External: Node built-ins + native binary packages that npm installs
+// External: Node built-ins + native/unused deps from @huggingface/transformers.
+// onnxruntime-node: .node native binaries that esbuild can't handle.
+// sharp: image processing for vision models, not needed for text embeddings.
 const external = [
   "node:*",
-  "fastembed",
-  "onnxruntime-*",
-  "@anush008/*",
+  "onnxruntime-node",
+  "sharp",
 ];
 
 // Remap @sentry/bun → @sentry/node so the CJS bundle gets Node-native

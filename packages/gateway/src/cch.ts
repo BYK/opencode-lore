@@ -49,12 +49,15 @@ import { createHash } from "crypto";
 const VERSION_SEEDS: Record<string, bigint> = {
   "2.1.37": 0x6E52736AC806831En,
   "2.1.138": 0x4D659218E32A3268n,
+  "2.1.140": 0x4D659218E32A3268n,
+  "2.1.139": 0x4D659218E32A3268n,
+  "2.1.141": 0x4D659218E32A3268n,
   // Future versions: extract and add entries here.
   // Use `bun run scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */
-const WORKER_VERSION = "2.1.138";
+const WORKER_VERSION = "2.1.141";
 const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION]!;
 
 /**

@@ -4,7 +4,8 @@ import {
   detectCompactionRequest,
   isStructuralCompaction,
   extractPreviousSummary,
-  isTitleOrSummaryRequest,
+  isMetaRequest,
+  LORE_AGENT_HEADER,
   buildCompactionResponse,
   COMPACTION_SYSTEM_PATTERNS,
   COMPACTION_USER_PATTERNS,
@@ -209,7 +210,7 @@ describe("isCompactionRequest", () => {
     expect(isCompactionRequest(req)).toBe(false);
   });
 
-  test("returns false for title/summary requests", () => {
+  test("returns false for meta requests (title/summary)", () => {
     const req = makeRequest({
       system: "Generate a title.",
       tools: [],
@@ -301,17 +302,19 @@ describe("extractPreviousSummary", () => {
 });
 
 // ---------------------------------------------------------------------------
-// isTitleOrSummaryRequest
+// isMetaRequest
 // ---------------------------------------------------------------------------
 
-describe("isTitleOrSummaryRequest", () => {
+describe("isMetaRequest", () => {
+  // -- Backward-compatible: existing structural patterns still detected ------
+
   test("detects short system prompt + single message as title request", () => {
     const req = makeRequest({
       system: "Generate a short title for the conversation.",
       tools: [],
       messages: [userMsg("Help me sort an array in JavaScript")],
     });
-    expect(isTitleOrSummaryRequest(req)).toBe(true);
+    expect(isMetaRequest(req)).toBe(true);
   });
 
   test("detects with 2 messages and 1 tool (within limits)", () => {
@@ -323,7 +326,7 @@ describe("isTitleOrSummaryRequest", () => {
         assistantMsg("Second"),
       ],
     });
-    expect(isTitleOrSummaryRequest(req)).toBe(true);
+    expect(isMetaRequest(req)).toBe(true);
   });
 
   test("returns false for normal conversation with many tools", () => {
@@ -336,7 +339,7 @@ describe("isTitleOrSummaryRequest", () => {
       ],
       messages: [userMsg("Help me with a bug")],
     });
-    expect(isTitleOrSummaryRequest(req)).toBe(false);
+    expect(isMetaRequest(req)).toBe(false);
   });
 
   test("returns false for many messages", () => {
@@ -349,7 +352,7 @@ describe("isTitleOrSummaryRequest", () => {
         userMsg("Turn 2"),
       ],
     });
-    expect(isTitleOrSummaryRequest(req)).toBe(false);
+    expect(isMetaRequest(req)).toBe(false);
   });
 
   test("returns false for long system prompt", () => {
@@ -358,7 +361,8 @@ describe("isTitleOrSummaryRequest", () => {
       tools: [],
       messages: [userMsg("Hello")],
     });
-    expect(isTitleOrSummaryRequest(req)).toBe(false);
+    // tools(3) + messages(3) + system(0) = 6 < 8 → false
+    expect(isMetaRequest(req)).toBe(false);
   });
 
   test("returns false for compaction requests (handled separately)", () => {
@@ -368,8 +372,8 @@ describe("isTitleOrSummaryRequest", () => {
       tools: [],
       messages: [userMsg("Summarize the conversation")],
     });
-    // Compaction-detected → isCompactionRequest returns true → isTitleOrSummaryRequest returns false
-    expect(isTitleOrSummaryRequest(req)).toBe(false);
+    // Compaction-detected → isCompactionRequest returns true → isMetaRequest returns false
+    expect(isMetaRequest(req)).toBe(false);
   });
 
   test("system prompt just under limit passes", () => {
@@ -378,7 +382,152 @@ describe("isTitleOrSummaryRequest", () => {
       tools: [],
       messages: [userMsg("Hello")],
     });
-    expect(isTitleOrSummaryRequest(req)).toBe(true);
+    expect(isMetaRequest(req)).toBe(true);
+  });
+
+  // -- Layer 1: x-lore-agent header -----------------------------------------
+
+  test("x-lore-agent: known meta agent → true regardless of structure", () => {
+    const req = makeRequest({
+      system: "A".repeat(2000), // would fail structural heuristics
+      tools: [
+        { name: "bash", description: "Run shell", inputSchema: {} },
+        { name: "read", description: "Read files", inputSchema: {} },
+        { name: "write", description: "Write files", inputSchema: {} },
+      ],
+      messages: [userMsg("Turn 1"), assistantMsg("Turn 2"), userMsg("Turn 3")],
+      rawHeaders: { [LORE_AGENT_HEADER]: "title" },
+    });
+    expect(isMetaRequest(req)).toBe(true);
+  });
+
+  test("x-lore-agent: known primary agent → false even if structurally meta", () => {
+    const req = makeRequest({
+      system: "Generate a short title for the conversation.",
+      tools: [],
+      messages: [userMsg("Hello")],
+      rawHeaders: { [LORE_AGENT_HEADER]: "coder" },
+    });
+    expect(isMetaRequest(req)).toBe(false);
+  });
+
+  test("x-lore-agent: unknown agent → falls through to heuristics", () => {
+    // Structurally meta — should be detected by heuristics
+    const req = makeRequest({
+      system: "Short prompt.",
+      tools: [],
+      messages: [userMsg("Hello")],
+      rawHeaders: { [LORE_AGENT_HEADER]: "custom-agent" },
+    });
+    expect(isMetaRequest(req)).toBe(true);
+  });
+
+  test("x-lore-agent: unknown agent + not structurally meta → false", () => {
+    const req = makeRequest({
+      system: "A".repeat(2000),
+      tools: [
+        { name: "bash", description: "Run shell", inputSchema: {} },
+        { name: "read", description: "Read files", inputSchema: {} },
+        { name: "write", description: "Write files", inputSchema: {} },
+      ],
+      messages: [userMsg("Turn 1"), assistantMsg("Turn 2"), userMsg("Turn 3")],
+      rawHeaders: { [LORE_AGENT_HEADER]: "custom-agent" },
+    });
+    expect(isMetaRequest(req)).toBe(false);
+  });
+
+  test("x-lore-agent: all known meta agent names detected", () => {
+    for (const agent of ["title", "summary", "summarize", "categorize", "label", "classify"]) {
+      const req = makeRequest({
+        system: "A".repeat(2000),
+        tools: [{ name: "bash", description: "Run shell", inputSchema: {} },
+                { name: "read", description: "Read", inputSchema: {} },
+                { name: "write", description: "Write", inputSchema: {} }],
+        messages: [userMsg("A"), assistantMsg("B"), userMsg("C")],
+        rawHeaders: { [LORE_AGENT_HEADER]: agent },
+      });
+      expect(isMetaRequest(req)).toBe(true);
+    }
+  });
+
+  // -- Layer 2: maxTokens signal --------------------------------------------
+
+  test("low maxTokens + few messages + few tools → detected", () => {
+    const req = makeRequest({
+      system: "A".repeat(600), // too long for short-system signal
+      tools: [],
+      messages: [userMsg("Hello")],
+      maxTokens: 100,
+    });
+    // tools(3) + messages(3) + system(0) + maxTokens(3) = 9 ≥ 8 → true
+    expect(isMetaRequest(req)).toBe(true);
+  });
+
+  test("default maxTokens + few messages + few tools + short system → detected (backward compat)", () => {
+    const req = makeRequest({
+      system: "Short.",
+      tools: [],
+      messages: [userMsg("Hello")],
+      maxTokens: 4096,
+    });
+    // tools(3) + messages(3) + system(2) = 8 ≥ 8 → true
+    expect(isMetaRequest(req)).toBe(true);
+  });
+
+  test("low maxTokens alone is not enough", () => {
+    const req = makeRequest({
+      system: "A".repeat(2000),
+      tools: [
+        { name: "bash", description: "Run shell", inputSchema: {} },
+        { name: "read", description: "Read files", inputSchema: {} },
+        { name: "write", description: "Write files", inputSchema: {} },
+      ],
+      messages: [userMsg("Turn 1"), assistantMsg("Turn 2"), userMsg("Turn 3")],
+      maxTokens: 100,
+    });
+    // tools(0) + messages(0) + system(0) + maxTokens(3) = 3 < 8 → false
+    expect(isMetaRequest(req)).toBe(false);
+  });
+
+  // -- Layer 2: keyword signal (bonus only) ---------------------------------
+
+  test("long system prompt with meta keyword + low maxTokens + few messages → detected", () => {
+    const req = makeRequest({
+      system: "Please generate a title for the conversation. " + "x".repeat(600),
+      tools: [],
+      messages: [userMsg("Help me")],
+      maxTokens: 150,
+    });
+    // tools(3) + messages(3) + system(0) + maxTokens(3) + keyword(2) = 11 ≥ 8 → true
+    expect(isMetaRequest(req)).toBe(true);
+  });
+
+  test("large system prompt mentioning 'title' casually is not detected", () => {
+    const req = makeRequest({
+      system: "You are a coding assistant. " + "x".repeat(3000) + " Always use a descriptive title for PRs.",
+      tools: [
+        { name: "bash", description: "Run shell", inputSchema: {} },
+        { name: "read", description: "Read files", inputSchema: {} },
+        { name: "write", description: "Write files", inputSchema: {} },
+      ],
+      messages: [userMsg("Help me with a bug")],
+    });
+    // tools(0) + messages(3) + system(0) + maxTokens(0) + keyword(0, system > 2000) = 3 < 8 → false
+    expect(isMetaRequest(req)).toBe(false);
+  });
+
+  test("keywords alone cannot trigger detection", () => {
+    const req = makeRequest({
+      system: "Generate a title for the conversation.",
+      tools: [
+        { name: "bash", description: "Run shell", inputSchema: {} },
+        { name: "read", description: "Read files", inputSchema: {} },
+        { name: "write", description: "Write files", inputSchema: {} },
+      ],
+      messages: [userMsg("Turn 1"), assistantMsg("Turn 2"), userMsg("Turn 3")],
+    });
+    // tools(0) + messages(0) + system(2) + keyword(2) = 4 < 8 → false
+    expect(isMetaRequest(req)).toBe(false);
   });
 });
 

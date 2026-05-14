@@ -475,13 +475,26 @@ export async function searchRecall(
     }
   }
 
+  // Determine vector boost weight: for queries with enough meaningful terms,
+  // boost vector search lists so semantic similarity outweighs keyword noise.
+  const queryTermCount = filterTerms(query).length;
+  const vectorWeight =
+    queryTermCount >= (searchConfig?.vectorBoostMinTerms ?? 3)
+      ? (searchConfig?.vectorBoostWeight ?? 1.5)
+      : 1;
+
   // Collect per-query RRF lists. Original query is always first; if expansion
   // produced extras, we still weight the original twice by adding both original
   // and expanded lists (RRF naturally weights items appearing in more lists).
   const allRrfLists: Array<{
     items: TaggedResult[];
     key: (r: TaggedResult) => string;
+    weight?: number;
   }> = [];
+
+  // Track where primary (first-query) lists end so the MAX_RRF_LISTS cap
+  // trims expanded-query lists first, preserving vector/supplemental lists.
+  let primaryListEnd = 0;
 
   for (const q of queries) {
     const knowledgeResults: ltm.ScoredKnowledgeEntry[] = [];
@@ -568,7 +581,15 @@ export async function searchRecall(
         key: (r) => `t:${r.item.id}`,
       });
     }
+
+    // Mark the end of the first (original) query's lists. Supplemental lists
+    // (vector, lat.md, cross-project, quality, exact-match) are appended after
+    // the loop and should be preserved over expanded-query lists when capping.
+    if (primaryListEnd === 0) {
+      primaryListEnd = allRrfLists.length;
+    }
   }
+  const perQueryListEnd = allRrfLists.length;
 
   // Vector search on the original query (not expansions — avoid redundant embeds).
   if (embedding.isAvailable() && scope !== "session") {
@@ -593,6 +614,7 @@ export async function searchRecall(
           allRrfLists.push({
             items: vectorTagged,
             key: (r) => `k:${r.item.id}`,
+            weight: vectorWeight,
           });
         }
       }
@@ -618,6 +640,7 @@ export async function searchRecall(
           allRrfLists.push({
             items: distVectorTagged,
             key: (r) => `d:${r.item.id}`,
+            weight: vectorWeight,
           });
         }
       }
@@ -648,6 +671,7 @@ export async function searchRecall(
           allRrfLists.push({
             items: temporalVectorTagged,
             key: (r) => `t:${r.item.id}`,
+            weight: vectorWeight,
           });
         }
       }
@@ -786,6 +810,25 @@ export async function searchRecall(
     }
   }
 
+  // Cap the number of RRF lists to prevent score inflation from marginal items.
+  // With query expansion (3 queries × 4 sources + supplemental lists), the list
+  // count can exceed 15. Each list gives marginal items enough cumulative RRF
+  // score to clear the relevance floor.
+  //
+  // Priority: primary (original query BM25 + recency) and supplemental
+  // (vector, lat.md, cross-project, quality, exact-match) are high-value.
+  // Expanded-query BM25 lists are lowest priority — trim those first.
+  const MAX_RRF_LISTS = 10;
+  if (allRrfLists.length > MAX_RRF_LISTS) {
+    // Layout: [0..primaryListEnd) = primary, [primaryListEnd..perQueryEnd) = expanded, [perQueryEnd..) = supplemental
+    const primary = allRrfLists.slice(0, primaryListEnd);
+    const expanded = allRrfLists.slice(primaryListEnd, perQueryListEnd);
+    const supplemental = allRrfLists.slice(perQueryListEnd);
+    const budget = Math.max(0, MAX_RRF_LISTS - primary.length - supplemental.length);
+    allRrfLists.length = 0;
+    allRrfLists.push(...primary, ...expanded.slice(0, budget), ...supplemental);
+  }
+
   const fused = reciprocalRankFusion<TaggedResult>(allRrfLists);
 
   // Cap output: return at most 3x the per-source limit. With 7+ RRF sources
@@ -883,11 +926,6 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
   // ID-based detail retrieval — bypass search entirely.
   if (input.id) {
     return recallById(input.id);
-  }
-
-  // Short-circuit vague queries — stopwords-only would match everything.
-  if (ftsQuery(input.query) === EMPTY_QUERY) {
-    return "Query too vague — try using specific keywords, file names, or technical terms.";
   }
 
   const fused = await searchRecall(input);

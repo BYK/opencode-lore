@@ -74,7 +74,7 @@ export type GatewayTool = {
 // Request — the normalized form after ingress translation
 // ---------------------------------------------------------------------------
 
-export type GatewayProtocol = "anthropic" | "openai";
+export type GatewayProtocol = "anthropic" | "openai" | "openai-responses";
 
 /** Normalized request after ingress translation from either protocol. */
 export type GatewayRequest = {
@@ -112,6 +112,12 @@ export type GatewayRequest = {
     user?: string;
     logprobs?: boolean;
     top_logprobs?: number;
+    /** OpenAI Responses API: previous response ID for conversation continuation. */
+    previous_response_id?: string;
+    /** OpenAI Responses API: reasoning configuration. */
+    reasoning?: unknown;
+    /** OpenAI Responses API: truncation settings. */
+    truncation?: unknown;
   };
 };
 
@@ -217,6 +223,10 @@ export type SessionState = {
   fingerprint: string;
   /** Unix timestamp (ms) of the last request in this session. */
   lastRequestTime: number;
+  /** Unix timestamp (ms) of the last user-initiated turn — excludes subagent
+   *  turns and tool-use auto-continuations. Used exclusively for inter-turn
+   *  gap histogram recording (survival analysis). */
+  lastUserTurnTime: number;
   /** Total user+assistant messages seen in this session. */
   messageCount: number;
   /** Turns since last curation run — triggers background curation. */
@@ -234,6 +244,10 @@ export type SessionState = {
   /** Resolved conversation TTL for this session ("5m" | "1h"). Updated by
    *  the auto-upgrade logic each turn. */
   resolvedConversationTTL?: "5m" | "1h";
+  /** Consecutive turns where cold fraction < 0.2 while TTL is "1h".
+   *  Used for hysteresis: only downgrade after N consecutive qualifying turns
+   *  to avoid compounding cache busts from a single fluctuation. */
+  ttlDowngradeStreak?: number;
 
   // --- Tier 1/2 session header identification ---
 
@@ -264,20 +278,23 @@ export type SessionState = {
 
   /** Cache warming state for speculative keep-alive pings. */
   warmup?: WarmupState;
-  /** Per-session survival model (inter-turn gap histogram by time slot). */
-  survivalModel?: SurvivalModel;
+  /** Per-session survival model (inter-turn gap histogram). */
+  survivalModel?: InterTurnHistogram;
   /** Model name from the last real request (for warming profile resolution). */
   lastModel?: string;
   /** Protocol from the last real request (for warming profile resolution). */
-  lastProtocol?: "anthropic" | "openai";
+  lastProtocol?: "anthropic" | "openai" | "openai-responses";
+
+  // --- Periodic persistence ---
+
+  /** Set true when session state changes that need periodic flush to DB.
+   *  Consumed by the 30s idle tick — only dirty sessions are flushed. */
+  _dirty?: boolean;
 };
 
 // ---------------------------------------------------------------------------
 // Cache warming types
 // ---------------------------------------------------------------------------
-
-/** Time-of-day slot for survival analysis — captures circadian work patterns. */
-export type TimeSlot = "work" | "evening" | "night";
 
 /** Binned histogram of inter-turn gaps for survival analysis. */
 export type InterTurnHistogram = {
@@ -285,11 +302,6 @@ export type InterTurnHistogram = {
   counts: number[];
   /** Total observations (sum of counts). */
   total: number;
-};
-
-/** Per-session survival model with time-slot segmented histograms. */
-export type SurvivalModel = {
-  slots: Record<TimeSlot, InterTurnHistogram>;
 };
 
 /** Per-session cache warming state. */

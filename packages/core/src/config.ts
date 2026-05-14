@@ -135,15 +135,25 @@ export const LoreConfig = z.object({
         .default({ title: 6.0, content: 2.0, category: 3.0 }),
       /** Max results per source in recall tool before fusion. Default: 10. */
       recallLimit: z.number().min(1).max(50).default(10),
-      /** Enable LLM-based query expansion for the recall tool. Default: false.
-       *  When enabled, the configured model generates 2–3 alternative query phrasings
-       *  before search, improving recall for ambiguous queries. */
-      queryExpansion: z.boolean().default(false),
+      /** Enable LLM-based query expansion for the recall tool. Default: true.
+       *  The configured model generates 2–3 alternative query phrasings before
+       *  search, improving recall for ambiguous queries. Guarded by a 3-second
+       *  timeout — if expansion fails or times out, the original query is used. */
+      queryExpansion: z.boolean().default(true),
+      /** RRF weight multiplier for vector search lists. Applied when the query
+       *  has >= `vectorBoostMinTerms` meaningful terms (after stopword removal).
+       *  Boosts semantic/vector results relative to keyword-based BM25 lists.
+       *  Default: 1.5. Set to 1.0 to disable. */
+      vectorBoostWeight: z.number().min(1).max(5).default(1.5),
+      /** Minimum meaningful query terms (after stopword removal) to activate
+       *  vector boost. Short keyword queries (1-2 terms) are left unweighted
+       *  since BM25 excels there. Default: 3. */
+      vectorBoostMinTerms: z.number().min(1).max(10).default(3),
       /** Vector embedding search.
        *  Supports multiple providers:
-       *  - "local" (default): fastembed + ONNX Runtime, no API key needed.
-       *    Uses bge-small-en-v1.5 (384 dims). Model downloaded on first use (~33MB),
-       *    cached in ~/.cache/fastembed. ~150ms per query embed.
+       *  - "local" (default): @huggingface/transformers + nomic-embed-text-v1.5, no API key needed.
+       *    768 dims (Matryoshka-capable: 64–768). Model downloaded on first use (~137MB INT8),
+       *    cached locally. Uses task instruction prefixes (search_document: / search_query:).
        *  - "voyage": Voyage AI (VOYAGE_API_KEY, voyage-code-3, 1024 dims)
        *  - "openai": OpenAI (OPENAI_API_KEY, text-embedding-3-small, 1536 dims)
        *  Set enabled: false to explicitly disable even with a provider available. */
@@ -153,20 +163,21 @@ export const LoreConfig = z.object({
            *  Set to false to explicitly disable. */
           enabled: z.boolean().default(true),
           /** Embedding provider. Default: "local".
-           *  - "local": fastembed + ONNX Runtime, no API key (default model: bge-small-en-v1.5, 384 dims)
+           *  - "local": @huggingface/transformers, no API key (default model: nomic-embed-text-v1.5, 768 dims)
            *  - "voyage": VOYAGE_API_KEY (default model: voyage-code-3, 1024 dims)
            *  - "openai": OPENAI_API_KEY (default model: text-embedding-3-small, 1536 dims) */
           provider: z.enum(["local", "voyage", "openai"]).default("local"),
           /** Model ID for the embedding provider. Default depends on provider. */
-          model: z.string().default("BGESmallENV15"),
-          /** Embedding dimensions. Default: 384 (local) / 1024 (voyage) / 1536 (openai). */
-          dimensions: z.number().min(64).max(2048).default(384),
+          model: z.string().default("nomic-ai/nomic-embed-text-v1.5"),
+          /** Embedding dimensions. Default: 768 (local) / 1024 (voyage) / 1536 (openai).
+           *  For the local Nomic v1.5 model, supports Matryoshka dimensions: 64, 128, 256, 512, 768. */
+          dimensions: z.number().min(64).max(2048).default(768),
         })
         .default({
           enabled: true,
           provider: "local",
-          model: "BGESmallENV15",
-          dimensions: 384,
+          model: "nomic-ai/nomic-embed-text-v1.5",
+          dimensions: 768,
         }),
       /** Recall output formatting — controls how search results are presented to the agent. */
       recall: z
@@ -186,8 +197,10 @@ export const LoreConfig = z.object({
     .default({
       ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
       recallLimit: 10,
-      queryExpansion: false,
-      embeddings: { enabled: true, provider: "local" as const, model: "BGESmallENV15", dimensions: 384 },
+      queryExpansion: true,
+      vectorBoostWeight: 1.5,
+      vectorBoostMinTerms: 3,
+      embeddings: { enabled: true, provider: "local" as const, model: "nomic-ai/nomic-embed-text-v1.5", dimensions: 768 },
       recall: { charBudget: 8000, relevanceFloor: 0.15, maxResults: 15 },
     }),
   cache: z
@@ -207,9 +220,9 @@ export const LoreConfig = z.object({
         .object({
           /** Enable cache warming. Default: true. */
           enabled: z.boolean().default(true),
-          /** Override the survival probability threshold below which warming is
-           *  skipped. Default: auto-derived from cache read/write cost ratio
-           *  (~0.08 for 5m TTL, ~0.05 for 1h TTL). */
+          /** Override the return probability threshold below which warming is
+           *  skipped. Default: auto-derived from corrected cost ratio
+           *  read/(write-read) (~0.087 for 5m TTL, ~0.042 for 1h TTL). */
           minReturnProbability: z.number().min(0).max(1).optional(),
         })
         .default({ enabled: true }),

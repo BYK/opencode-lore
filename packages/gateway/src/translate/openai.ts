@@ -297,6 +297,13 @@ function buildOpenAINonStreamResponse(resp: GatewayResponse): Response {
       completion_tokens: resp.usage.outputTokens,
       total_tokens:
         resp.usage.inputTokens + resp.usage.outputTokens,
+      ...(resp.usage.cacheReadInputTokens != null
+        ? {
+            prompt_tokens_details: {
+              cached_tokens: resp.usage.cacheReadInputTokens,
+            },
+          }
+        : {}),
     },
   };
 

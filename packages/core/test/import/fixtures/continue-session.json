@@ -1,0 +1,48 @@
+{
+  "sessionId": "sess-continue-1",
+  "title": "Database migration setup",
+  "workspaceDirectory": "/test/continue-project",
+  "history": [
+    {
+      "message": {
+        "role": "user",
+        "content": "How should I set up database migrations for this project?"
+      }
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "I recommend using a migration tool like `knex` or `drizzle-kit`. Since you're already using Drizzle ORM, drizzle-kit is the natural choice.",
+        "toolCalls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "readFile",
+              "arguments": "{\"path\": \"package.json\"}"
+            }
+          }
+        ]
+      },
+      "toolCallStates": [
+        {
+          "toolCallId": "call_1",
+          "status": "done",
+          "output": "{\"dependencies\": {\"drizzle-orm\": \"^0.30\"}}"
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "user",
+        "content": "What about rollback support?"
+      }
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "Drizzle-kit supports rollbacks via `drizzle-kit drop`. Always test migrations in a staging environment before production. A key gotcha: drizzle-kit generates SQL files, so you should commit them to version control."
+      }
+    }
+  ]
+}

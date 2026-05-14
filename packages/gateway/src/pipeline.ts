@@ -8,7 +8,7 @@
  *
  * Three request classes are handled:
  *  1. Compaction requests → intercepted, never forwarded upstream.
- *  2. Title/summary requests → forwarded transparently, no Lore processing.
+ *  2. Meta requests (title gen, summaries, etc.) → forwarded transparently, no Lore processing.
  *  3. Normal conversation turns → full pipeline.
  */
 import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
@@ -45,6 +45,9 @@ import {
   LORE_FILE,
   latReader,
   embedding,
+  saveSessionTracking,
+  loadSessionTracking,
+  loadHeaderSessionIndex,
 } from "@loreai/core";
 
 import type {
@@ -56,7 +59,7 @@ import type {
   SessionState,
 } from "./translate/types";
 import type { GatewayConfig } from "./config";
-import { getProjectPath, resolveUpstreamRoute } from "./config";
+import { getProjectPath, resolveUpstreamRoute, type ProjectPathResult } from "./config";
 import {
   generateSessionID,
   fingerprintMessages,
@@ -69,7 +72,8 @@ import {
   isCompactionRequest,
   detectCompactionRequest,
   isStructuralCompaction,
-  isTitleOrSummaryRequest,
+  isMetaRequest,
+  LORE_AGENT_HEADER,
   extractPreviousSummary,
   buildCompactionResponse,
   scaleUsageForClient,
@@ -83,6 +87,12 @@ import {
   buildOpenAIUpstreamRequest,
   buildOpenAIResponse,
 } from "./translate/openai";
+import {
+  buildOpenAIResponsesUpstreamRequest,
+} from "./translate/openai-responses";
+import {
+  accumulateResponsesSSEStream,
+} from "./stream/openai-responses";
 import {
   createStreamAccumulator,
   createRecallAwareAccumulator,
@@ -113,10 +123,10 @@ import { captureBillingPrefix, hasBillingHeader, resignBody } from "./cch";
 import { detectClientType } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
-  resolveTimeSlot,
   recordGap,
   getSessionHistogram,
   recordGlobalGap,
+  resolveProfile as resolveWarmingProfile,
 } from "./cache-warmer";
 import {
    setSentryRequestContext,
@@ -124,10 +134,11 @@ import {
    setSentryLightContext,
    setGenAiUsageAttributes,
    setCacheAnalyticsAttributes,
-    emitCostMetric,
-    emitCacheBustMetric,
-    emitWarmupHitMetric,
-    type AnthropicUsage,
+     emitCostMetric,
+     emitCacheBustMetric,
+     emitWarmupHitMetric,
+     emitCurationMetrics,
+     type AnthropicUsage,
 } from "./sentry";
 import {
   recordConversationCost,
@@ -149,6 +160,7 @@ import {
   expandRecallMarkers,
   cleanupRecallStore,
   replaceRecallWithMarker,
+  isRecallMarker,
 } from "./recall";
 
 // ---------------------------------------------------------------------------
@@ -180,13 +192,12 @@ export function setUpstreamInterceptor(
  *
  * Intended for test harnesses only — allows multiple independent gateway
  * instances to run sequentially in the same Bun process without leaking
- * session state, initialization flags, or cached project paths across test
- * suites.
+ * session state or initialization flags across test suites.
  */
 export async function resetPipelineState(): Promise<void> {
   initialized = false;
-  cachedProjectPath = null;
   sessions.clear();
+  headerSessionIndex.clear();
   ltmSessionCache.clear();
   ltmPinnedText.clear();
   // Shut down batch queue gracefully before clearing the client
@@ -207,11 +218,13 @@ export async function resetPipelineState(): Promise<void> {
   resetWorkerModelState();
 }
 
-/** Cached project path from the first request that carried a system prompt. */
-let cachedProjectPath: string | null = null;
-
 /** Per-session state tracked across requests. */
 const sessions = new Map<string, SessionState>();
+
+/** Read-only access to live session states (for dashboard rendering). */
+export function getActiveSessions(): ReadonlyMap<string, SessionState> {
+  return sessions;
+}
 
 /**
  * Reverse lookup: maps header-based session ID values to internal session IDs.
@@ -500,7 +513,6 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
   await load(projectPath);
   ensureProject(projectPath);
   initialized = true;
-  cachedProjectPath = projectPath;
 
   // Import knowledge from .lore.md at startup (picks up user/git edits
   // since last session). Falls back to agents file for backward compat.
@@ -537,6 +549,23 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
     log.error("lat-reader startup refresh error:", e);
   }
 
+  // Pre-populate headerSessionIndex from DB so Tier 1 session identification
+  // works immediately after process restart. Without this, the first request
+  // with a known session header generates a new session ID and orphans the
+  // old session's persisted state.
+  try {
+    const headerEntries = loadHeaderSessionIndex();
+    for (const entry of headerEntries) {
+      const indexKey = `${entry.headerName}:${entry.headerSessionId}`;
+      headerSessionIndex.set(indexKey, entry.sessionId);
+    }
+    if (headerEntries.length > 0) {
+      log.info(`restored ${headerEntries.length} header→session mappings from DB`);
+    }
+  } catch (e) {
+    log.warn("header session index restore failed:", e);
+  }
+
   // Pre-warm models.dev pricing/limits cache so synchronous lookups in the
   // request hot path (getModelSpec, emitCostMetric) resolve from memory.
   fetchModelData().catch((e) => log.warn("models.dev pre-warm failed:", e));
@@ -546,10 +575,7 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
   // session whose lastRequestTime exceeds the idle timeout.
   if (config && !stopIdleScheduler) {
     const llm = getLLMClient(config);
-    const idleHandler = buildIdleWorkHandler(
-      projectPath,
-      llm,
-    );
+    const idleHandler = buildIdleWorkHandler(llm);
     stopIdleScheduler = startIdleScheduler(config, sessions, idleHandler);
   }
 
@@ -592,6 +618,54 @@ function getLLMClient(config: GatewayConfig): LLMClient {
 }
 
 // ---------------------------------------------------------------------------
+// Project path resolution with session cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Upgrade a project path result using the session's cached path.
+ *
+ * Some requests (e.g. Claude Code's non-streaming prompt-caching probes)
+ * have stripped-down system prompts that lack path references, causing
+ * `getProjectPath()` to fall back to `process.cwd()`. When the session
+ * already has a known-good path from a prior turn, we use that instead.
+ *
+ * Also updates the session cache when a fresh inference or header provides
+ * a new path, so future path-less turns benefit.
+ *
+ * Returns the final resolved project path.
+ */
+export function resolveSessionProjectPath(
+  result: ProjectPathResult,
+  sessionState: SessionState,
+): string {
+  let { path: projectPath, source } = result;
+
+  // Upgrade from cwd fallback using session's cached path
+  if (source === "cwd" && sessionState.projectPath !== projectPath) {
+    projectPath = sessionState.projectPath;
+    source = "cached" as typeof source;
+  }
+
+  // Update session cache when a fresh path was resolved so future
+  // path-less turns benefit from the cached value.
+  if (source === "inferred" || source === "header") {
+    sessionState.projectPath = projectPath;
+  }
+
+  // Log warning only when the cwd fallback truly sticks (no session cache
+  // was available to upgrade from).
+  if (source === "cwd") {
+    console.error(
+      `[lore] warning: project path falling back to process.cwd() (${projectPath}). ` +
+      `Data may be misattributed. Set X-Lore-Project header or include a working ` +
+      `directory in the system prompt to fix this.`,
+    );
+  }
+
+  return projectPath;
+}
+
+// ---------------------------------------------------------------------------
 // Session management helpers
 // ---------------------------------------------------------------------------
 
@@ -601,14 +675,17 @@ function getOrCreateSession(
 ): SessionState {
   let state = sessions.get(sessionID);
   if (!state) {
+    // Restore persisted tracking state from DB (survives process restarts)
+    const persisted = loadSessionTracking(sessionID);
     state = {
       sessionID,
       projectPath,
-      fingerprint: "",
+      fingerprint: persisted?.fingerprint || "",
       lastRequestTime: Date.now(),
-      messageCount: 0,
-      turnsSinceCuration: 0,
-      consecutiveTextOnlyTurns: 0,
+      lastUserTurnTime: 0,
+      messageCount: persisted?.messageCount ?? 0,
+      turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
+      consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
       recallStore: new Map(),
       cacheAnalytics: {
         lastRequestBody: null,
@@ -619,6 +696,42 @@ function getOrCreateSession(
         bustCount: 0,
       },
     };
+
+    // Restore session identity (v24) — prevents Tier 3 fallback on restart
+    if (persisted?.headerSessionId && persisted.headerName) {
+      state.headerSessionId = persisted.headerSessionId;
+      state.headerName = persisted.headerName;
+      // Rebuild headerSessionIndex for this session
+      const indexKey = `${persisted.headerName}:${persisted.headerSessionId}`;
+      headerSessionIndex.set(indexKey, sessionID);
+    }
+
+    // Restore cache warming state (v24) — preserves earned TTL tier
+    if (persisted?.resolvedConversationTTL) {
+      const ttl = persisted.resolvedConversationTTL;
+      state.resolvedConversationTTL = (ttl === "5m" || ttl === "1h") ? ttl : "5m";
+    }
+    if (persisted?.warmupState) {
+      try {
+        state.warmup = JSON.parse(persisted.warmupState);
+      } catch {
+        log.warn(`corrupt warmup state for session ${sessionID.slice(0, 16)}, starting fresh`);
+      }
+    }
+
+    // Restore LTM cache/pin from DB
+    if (persisted?.ltmCacheText != null && persisted.ltmCacheTokens != null) {
+      ltmSessionCache.set(sessionID, {
+        formatted: persisted.ltmCacheText,
+        tokenCount: persisted.ltmCacheTokens,
+      });
+    }
+    if (persisted?.ltmPinText != null && persisted.ltmPinTokens != null) {
+      ltmPinnedText.set(sessionID, {
+        formatted: persisted.ltmPinText,
+        tokenCount: persisted.ltmPinTokens,
+      });
+    }
     sessions.set(sessionID, state);
   }
   state.lastRequestTime = Date.now();
@@ -732,6 +845,11 @@ async function identifySession(
         // Index the promoted header for future Tier 2 lookups.
         const indexKey = `${result.promoted.name}:${result.promoted.value}`;
         headerSessionIndex.set(indexKey, bestMatch.sid);
+        // Persist immediately — rare event, critical for post-restart correlation
+        saveSessionTracking(bestMatch.sid, {
+          headerSessionId: result.promoted.value,
+          headerName: result.promoted.name,
+        });
         log.info(
           `session ${bestMatch.sid.slice(0, 16)}: promoted header ${result.promoted.name} for Tier 2 identification`,
         );
@@ -754,6 +872,8 @@ type UpstreamResult = {
   response: Response;
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
+  /** The wire protocol used for the upstream request (may differ from ingress). */
+  effectiveProtocol: "anthropic" | "openai" | "openai-responses";
 };
 
 /**
@@ -777,11 +897,25 @@ async function forwardToUpstream(
   let body: unknown;
 
   // Infer upstream from model name; fall back to protocol + env-var defaults.
+  // Preserve "openai-responses" from ingress — model prefix routing returns
+  // "openai" for OpenAI models, but we must not downgrade the wire protocol.
   const route = resolveUpstreamRoute(req.model);
-  const effectiveProtocol = route?.protocol ?? req.protocol;
-  const effectiveUpstreamBase = route?.url ?? (effectiveProtocol === "openai" ? config.upstreamOpenAI : config.upstreamAnthropic);
+  const effectiveProtocol =
+    req.protocol === "openai-responses"
+      ? "openai-responses"
+      : (route?.protocol ?? req.protocol);
+  const effectiveUpstreamBase =
+    route?.url ??
+    (effectiveProtocol === "anthropic"
+      ? config.upstreamAnthropic
+      : config.upstreamOpenAI);
 
-  if (effectiveProtocol === "openai") {
+  if (effectiveProtocol === "openai-responses") {
+    const result = buildOpenAIResponsesUpstreamRequest(req, effectiveUpstreamBase);
+    url = result.url;
+    headers = result.headers;
+    body = result.body;
+  } else if (effectiveProtocol === "openai") {
     const result = buildOpenAIUpstreamRequest(req, effectiveUpstreamBase);
     url = result.url;
     headers = result.headers;
@@ -824,7 +958,7 @@ async function forwardToUpstream(
           body: serializedBody,
         }),
     );
-    return { response, serializedBody };
+    return { response, serializedBody, effectiveProtocol };
   }
 
   const response = await fetch(url, {
@@ -832,7 +966,7 @@ async function forwardToUpstream(
     headers,
     body: serializedBody,
   });
-  return { response, serializedBody };
+  return { response, serializedBody, effectiveProtocol };
 }
 
 // ---------------------------------------------------------------------------
@@ -914,6 +1048,7 @@ function buildStreamingResponse(
               recallBlock,
               recallContext.sessionState.projectPath,
               recallContext.sessionState.sessionID,
+              getLLMClient(recallContext.config),
             );
 
             const scope = input.scope ?? "all";
@@ -986,7 +1121,10 @@ function buildStreamingResponse(
                 followUp,
                 recallContext.config,
                 undefined,
-                recallContext.cacheOptions,
+                // Disable conversation caching on follow-up: the appended
+                // tool_result makes the prefix diverge from the next real turn,
+                // so the cache write would be wasted money.
+                { ...recallContext.cacheOptions, cacheConversation: false },
               ));
             } catch (fetchErr) {
               log.error(
@@ -1135,12 +1273,29 @@ function buildStreamingResponse(
 
 /**
  * Accumulate a non-streaming upstream response into a GatewayResponse.
+ *
+ * Dispatches to the correct parser based on the upstream wire protocol:
+ *  - "anthropic": Anthropic Messages API format
+ *  - "openai": OpenAI Chat Completions API format
+ *  - "openai-responses": OpenAI Responses API format
  */
 async function accumulateNonStreamResponse(
   upstreamResponse: Response,
+  protocol: "anthropic" | "openai" | "openai-responses" = "anthropic",
 ): Promise<GatewayResponse> {
   const json = (await upstreamResponse.json()) as Record<string, unknown>;
 
+  switch (protocol) {
+    case "openai":
+      return accumulateOpenAINonStreamJSON(json);
+    case "openai-responses":
+      return accumulateResponsesNonStreamJSON(json);
+    default:
+      return accumulateAnthropicNonStreamJSON(json);
+  }
+}
+
+function accumulateAnthropicNonStreamJSON(json: Record<string, unknown>): GatewayResponse {
   const content: GatewayContentBlock[] = [];
   const rawContent = json.content as Array<Record<string, unknown>> | undefined;
   if (rawContent) {
@@ -1188,11 +1343,117 @@ async function accumulateNonStreamResponse(
   };
 }
 
+function accumulateOpenAINonStreamJSON(json: Record<string, unknown>): GatewayResponse {
+  const content: GatewayContentBlock[] = [];
+  const choices = json.choices as Array<Record<string, unknown>> | undefined;
+  const firstChoice = choices?.[0];
+  const message = firstChoice?.message as Record<string, unknown> | undefined;
+
+  if (message) {
+    const textContent = message.content as string | undefined;
+    if (textContent) {
+      content.push({ type: "text", text: textContent });
+    }
+    const toolCalls = message.tool_calls as Array<Record<string, unknown>> | undefined;
+    if (toolCalls) {
+      for (const tc of toolCalls) {
+        const fn = tc.function as Record<string, unknown> | undefined;
+        let input: unknown = {};
+        if (typeof fn?.arguments === "string") {
+          try { input = JSON.parse(fn.arguments as string); } catch { input = fn.arguments; }
+        }
+        content.push({
+          type: "tool_use",
+          id: String(tc.id ?? ""),
+          name: String(fn?.name ?? ""),
+          input,
+        });
+      }
+    }
+  }
+
+  // Map OpenAI finish_reason to gateway stop reason
+  const finishReason = firstChoice?.finish_reason as string | undefined;
+  let stopReason = "end_turn";
+  if (finishReason === "stop") stopReason = "end_turn";
+  else if (finishReason === "length") stopReason = "max_tokens";
+  else if (finishReason === "tool_calls") stopReason = "tool_use";
+
+  const usage = json.usage as Record<string, unknown> | undefined;
+  const promptTokensDetails = usage?.prompt_tokens_details as Record<string, number> | undefined;
+
+  return {
+    id: String(json.id ?? ""),
+    model: String(json.model ?? ""),
+    content,
+    stopReason,
+    usage: {
+      inputTokens: (usage?.prompt_tokens as number) ?? 0,
+      outputTokens: (usage?.completion_tokens as number) ?? 0,
+      cacheReadInputTokens: promptTokensDetails?.cached_tokens,
+    },
+  };
+}
+
+function accumulateResponsesNonStreamJSON(json: Record<string, unknown>): GatewayResponse {
+  const content: GatewayContentBlock[] = [];
+  const output = json.output as Array<Record<string, unknown>> | undefined;
+
+  if (output) {
+    for (const item of output) {
+      if (item.type === "message") {
+        const msgContent = item.content as Array<Record<string, unknown>> | undefined;
+        if (msgContent) {
+          for (const part of msgContent) {
+            if (part.type === "output_text") {
+              content.push({ type: "text", text: String(part.text ?? "") });
+            }
+          }
+        }
+      } else if (item.type === "function_call") {
+        let input: unknown = {};
+        if (typeof item.arguments === "string") {
+          try { input = JSON.parse(item.arguments as string); } catch { input = item.arguments; }
+        }
+        content.push({
+          type: "tool_use",
+          id: String(item.call_id ?? item.id ?? ""),
+          name: String(item.name ?? ""),
+          input,
+        });
+      }
+    }
+  }
+
+  // Map Responses API status to gateway stop reason
+  const status = json.status as string | undefined;
+  let stopReason = "end_turn";
+  if (status === "incomplete") stopReason = "max_tokens";
+  if (content.some(b => b.type === "tool_use") && stopReason === "end_turn") {
+    stopReason = "tool_use";
+  }
+
+  const usage = json.usage as Record<string, unknown> | undefined;
+  const promptTokensDetails = usage?.prompt_tokens_details as Record<string, number> | undefined;
+
+  return {
+    id: String(json.id ?? ""),
+    model: String(json.model ?? ""),
+    content,
+    stopReason,
+    usage: {
+      inputTokens: (usage?.input_tokens as number) ?? 0,
+      outputTokens: (usage?.output_tokens as number) ?? 0,
+      cacheReadInputTokens: promptTokensDetails?.cached_tokens,
+    },
+  };
+}
+
 /**
- * Accumulate a streaming upstream SSE response into a GatewayResponse.
+ * Accumulate a streaming upstream Anthropic SSE response into a GatewayResponse.
  *
- * Used for OpenAI requests where we need to convert the accumulated
- * response to OpenAI format before returning to the client.
+ * Used for Anthropic requests where we need to convert the accumulated
+ * response to another format before returning to the client.
  */
 async function accumulateStreamResponse(
   upstreamResponse: Response,
@@ -1205,6 +1466,109 @@ async function accumulateStreamResponse(
   }
 
   return accumulator.getResponse();
+}
+
+/**
+ * Accumulate a streaming upstream OpenAI Chat Completions SSE response
+ * into a GatewayResponse.
+ *
+ * OpenAI SSE chunks have a different format from Anthropic:
+ *   data: {"id":"...","choices":[{"delta":{"content":"..."},"finish_reason":null}]}
+ */
+async function accumulateNonStreamOpenAIStream(
+  upstreamResponse: Response,
+): Promise<GatewayResponse> {
+  let id = "";
+  let model = "";
+  let stopReason = "end_turn";
+  let textContent = "";
+  const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedTokens: number | undefined;
+
+  const reader = upstreamResponse.body!.getReader();
+
+  for await (const { data } of parseSSEStream(reader)) {
+    if (data === "[DONE]") break;
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+
+    if (typeof parsed.id === "string") id = parsed.id;
+    if (typeof parsed.model === "string") model = parsed.model;
+
+    const choices = parsed.choices as Array<Record<string, unknown>> | undefined;
+    const firstChoice = choices?.[0];
+    if (firstChoice) {
+      const delta = firstChoice.delta as Record<string, unknown> | undefined;
+      if (delta) {
+        if (typeof delta.content === "string") {
+          textContent += delta.content;
+        }
+        const tcs = delta.tool_calls as Array<Record<string, unknown>> | undefined;
+        if (tcs) {
+          for (const tc of tcs) {
+            const idx = tc.index as number;
+            const fn = tc.function as Record<string, unknown> | undefined;
+            const existing = toolCalls.get(idx);
+            if (!existing) {
+              toolCalls.set(idx, {
+                id: String(tc.id ?? ""),
+                name: String(fn?.name ?? ""),
+                args: String(fn?.arguments ?? ""),
+              });
+            } else {
+              if (fn?.arguments) existing.args += fn.arguments;
+            }
+          }
+        }
+      }
+      if (typeof firstChoice.finish_reason === "string") {
+        const fr = firstChoice.finish_reason;
+        if (fr === "stop") stopReason = "end_turn";
+        else if (fr === "length") stopReason = "max_tokens";
+        else if (fr === "tool_calls") stopReason = "tool_use";
+      }
+    }
+
+    // Usage is typically in the final chunk
+    const usage = parsed.usage as Record<string, unknown> | undefined;
+    if (usage) {
+      if (typeof usage.prompt_tokens === "number") inputTokens = usage.prompt_tokens as number;
+      if (typeof usage.completion_tokens === "number") outputTokens = usage.completion_tokens as number;
+      const details = usage.prompt_tokens_details as Record<string, number> | undefined;
+      if (details?.cached_tokens !== undefined) cachedTokens = details.cached_tokens;
+    }
+  }
+
+  const content: GatewayContentBlock[] = [];
+  if (textContent) {
+    content.push({ type: "text", text: textContent });
+  }
+  for (const [, tc] of Array.from(toolCalls.entries()).sort(([a], [b]) => a - b)) {
+    let input: unknown = {};
+    if (tc.args) {
+      try { input = JSON.parse(tc.args); } catch { input = tc.args; }
+    }
+    content.push({ type: "tool_use", id: tc.id, name: tc.name, input });
+  }
+
+  return {
+    id,
+    model,
+    content,
+    stopReason,
+    usage: {
+      inputTokens,
+      outputTokens,
+      cacheReadInputTokens: cachedTokens,
+    },
+  };
 }
 
 /**
@@ -1357,6 +1721,10 @@ function postResponse(
       sessionState.sessionID,
     );
 
+    // Capture previous stop reason before it's overwritten below (line ~1667).
+    // Used to detect tool-use continuation turns for gap recording filtering.
+    const prevStopReason = sessionState.lastStopReason;
+
     // --- Temporal storage & session-state updates ---
     // Sub-agent turns are excluded from temporal storage: their tool-call
     // messages would pollute the parent session's conversation history,
@@ -1381,19 +1749,26 @@ function postResponse(
         }
       }
 
-      // Build and store the assistant response message
-      const assistantMsg = gatewayMessagesToLore(
-        [{ role: "assistant", content: resp.content }],
-        sessionID,
-      )[0];
-      updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
-      temporal.store({
-        projectPath,
-        info: assistantMsg.info,
-        parts: assistantMsg.parts,
-      });
+      // Build and store the assistant response message.
+      // Strip recall marker text blocks — they contain the raw query string
+      // and pollute FTS results with self-referential noise.
+      const assistantContent = resp.content.filter(
+        (b) => !(b.type === "text" && isRecallMarker(b.text)),
+      );
+      if (assistantContent.length > 0) {
+        const assistantMsg = gatewayMessagesToLore(
+          [{ role: "assistant", content: assistantContent }],
+          sessionID,
+        )[0];
+        updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
+        temporal.store({
+          projectPath,
+          info: assistantMsg.info,
+          parts: assistantMsg.parts,
+        });
+      }
 
-      // Update session state
+      // Update session state (persisted in the batched save after messageCount update)
       sessionState.turnsSinceCuration =
         (sessionState.turnsSinceCuration ?? 0) + 1;
 
@@ -1433,17 +1808,38 @@ function postResponse(
 
     // --- Cache warming: record inter-turn gap + track warmup hits ---
     const now = Date.now();
+
+    // (A) Record inter-turn gap — only for genuine user-initiated turns.
+    // Subagent turns (x-parent-session-id) and tool-use auto-continuations
+    // (prior stop_reason was "tool_use") produce sub-second gaps that
+    // represent automated round-trips, not human think time. Recording
+    // these would skew the survival model toward very short return times.
+    const isToolUseContinuation = prevStopReason === "tool_use";
+    if (!isSubagentTurn && !isToolUseContinuation) {
+      if (sessionState.lastUserTurnTime > 0) {
+        const gap = now - sessionState.lastUserTurnTime;
+        recordGap(getSessionHistogram(sessionState), gap);
+        recordGlobalGap(sessionState.projectPath, gap);
+      }
+      // Update baseline for next gap measurement — only after recording.
+      sessionState.lastUserTurnTime = now;
+    }
+
+    // (B) Track warmup hits and TTL savings — valid for ALL turn types.
+    // A user returning after a warmup is a hit regardless of whether it's
+    // a subagent turn or tool-use continuation.
+    // NOTE: warmup hits and TTL savings are mutually exclusive — if a turn
+    // is attributed to a warmup hit, skip TTL savings to avoid double-counting
+    // the same cacheReadTokens in both buckets.
     if (sessionState.lastRequestTime > 0) {
-      const gap = now - sessionState.lastRequestTime;
-      const slot = resolveTimeSlot(new Date(now));
-      recordGap(getSessionHistogram(sessionState, slot), gap);
-      recordGlobalGap(sessionState.projectPath, slot, gap);
+      let warmupHitThisTurn = false;
 
       // Track warmup hit: user returned after we warmed the cache
       if (sessionState.warmup?.lastWarmupAt) {
         const ttlMs = sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
         const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
         if (sinceWarmup < ttlMs) {
+          warmupHitThisTurn = true;
           sessionState.warmup.warmupHits++;
           emitWarmupHitMetric(
             sessionState.lastModel ?? req.model,
@@ -1463,25 +1859,40 @@ function postResponse(
       }
 
       // Track 1h TTL savings: if gap > 5m but we still got cache reads,
-      // the 1h TTL saved a full cache write.
-      if (gap > 300_000) {
-        const cacheRead = resp.usage.cacheReadInputTokens ?? 0;
-        if (cacheRead > 0) {
-          recordTTLSavings(sessionID, req.model, cacheRead);
+      // the 1h TTL saved a full cache write. Skip if already counted as
+      // a warmup hit to avoid double-counting the same tokens.
+      if (!warmupHitThisTurn) {
+        const requestGap = now - sessionState.lastRequestTime;
+        if (requestGap > 300_000) {
+          const cacheRead = resp.usage.cacheReadInputTokens ?? 0;
+          if (cacheRead > 0) {
+            recordTTLSavings(sessionID, req.model, cacheRead);
+          }
         }
       }
     }
     // Track model/protocol for warmup profile resolution
     sessionState.lastModel = req.model;
     sessionState.lastProtocol =
-      resolveUpstreamRoute(req.model)?.protocol ?? "anthropic";
+      req.protocol === "openai-responses"
+        ? "openai-responses"
+        : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic");
 
-    // Reset dead flag if session was marked dead but user returned
-    if (sessionState.warmup?.disabled) {
-      sessionState.warmup.disabled = false;
-      log.info(
-        `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
-      );
+    // Reset warming state if session was marked dead or had active warming.
+    // Dead flag is cleared so the next break gets a fresh ROI analysis.
+    // warmupCount is reset so the break-even cap starts from 0 on the next break.
+    // Guard: only real user turns should reset — subagent turns would falsely
+    // clear the break-even counter and re-enable dead sessions.
+    if (!isSubagentTurn && sessionState.warmup) {
+      if (sessionState.warmup.disabled) {
+        sessionState.warmup.disabled = false;
+        log.info(
+          `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
+        );
+      }
+      if (sessionState.warmup.warmupCount > 0 && !sessionState.warmup.forceKeepWarm) {
+        sessionState.warmup.warmupCount = 0;
+      }
     }
 
     // --- Shadow context tracking for counterfactual compaction estimation ---
@@ -1489,7 +1900,13 @@ function postResponse(
     // compressing it. When the shadow counter crosses the auto-compact
     // threshold, record a counterfactual compaction event.
     if (!isSubagentTurn) {
-      updateShadowContext(sessionID, actualInput, getWorkerModel()?.modelID ?? "unknown", req.model);
+      updateShadowContext(sessionID, actualInput, resp.usage.outputTokens ?? 0, getWorkerModel()?.modelID ?? "unknown", req.model);
+    }
+
+    // Mark session dirty for periodic flush (gradient + warming + costs).
+    // The 30s idle tick will persist state only for dirty sessions.
+    if (!isSubagentTurn) {
+      sessionState._dirty = true;
     }
 
     // --- Schedule background work (fire-and-forget) ---
@@ -1530,17 +1947,20 @@ function scheduleBackgroundWork(
         callType: "direct",
       })
       .catch((e) => log.error("background distillation failed:", e));
-  }
-
-  // Check if pending tokens exceed maxSegmentTokens threshold
-  const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
-  if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
-    log.info(
-      `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
-    );
-    distillation
-      .run({ llm, projectPath, sessionID, model, skipMeta: true, callType: batchQueueEnabled ? "batch" : "direct" })
-      .catch((e) => log.error("background distillation failed:", e));
+  } else {
+    // Incremental distillation: only when urgent didn't fire (urgent with
+    // force:true already processes everything, making incremental redundant).
+    // With the core p-limit(1) guard they'd serialize anyway, but this avoids
+    // a wasted run() call.
+    const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
+    if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
+      log.info(
+        `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
+      );
+      distillation
+        .run({ llm, projectPath, sessionID, model, skipMeta: true, callType: batchQueueEnabled ? "batch" : "direct" })
+        .catch((e) => log.error("background distillation failed:", e));
+    }
   }
 
   // Curation: run periodically when the knowledge system is enabled.
@@ -1558,36 +1978,48 @@ function scheduleBackgroundWork(
     cfg.curator.onIdle &&
     sessionState.turnsSinceCuration >= effectiveAfterTurns
   ) {
-    curator
-      .run({ llm, projectPath, sessionID, model })
-      .then(() => {
+    Sentry.startSpan(
+      { name: "lore.curator", op: "lore.curation", attributes: { trigger: "in-flight" } },
+      () => curator.run({ llm, projectPath, sessionID, model }),
+    )
+      .then((result) => {
         sessionState.turnsSinceCuration = 0;
-        // Invalidate LTM cache after curation changes knowledge entries
-        ltmSessionCache.delete(sessionID);
+        saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
+        if (result.created > 0 || result.updated > 0 || result.deleted > 0) {
+          // Invalidate LTM cache only when curation actually changed entries
+          ltmSessionCache.delete(sessionID);
+          saveSessionTracking(sessionID, { ltmCacheText: null, ltmCacheTokens: null });
+          log.info(
+            `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
+          );
+          emitCurationMetrics({ ...result, trigger: "in-flight" });
+        }
       })
       .catch((e) => log.error("background curation failed:", e));
   }
 }
 
 // ---------------------------------------------------------------------------
-// Case 1: Compaction interception
+// Compaction summary generation — shared by HTTP interception and /v1/compact
 // ---------------------------------------------------------------------------
 
-async function handleCompaction(
-  req: GatewayRequest,
-  config: GatewayConfig,
-): Promise<Response> {
-  // Identify session
-  const projectPath = cachedProjectPath ?? getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(projectPath, config);
-
-  const { sessionID } = await identifySession(req, projectPath);
-  const sessionState = getOrCreateSession(sessionID, projectPath);
+/**
+ * Generate a compaction summary for a session. Force-distills any pending
+ * messages, loads existing distillation summaries, builds a knowledge block,
+ * and calls the LLM to produce a compaction summary.
+ *
+ * This is the core logic shared by both:
+ *  - `handleCompaction` (HTTP-intercepted compaction from Claude Code / OpenCode)
+ *  - `handleCompactEndpoint` (explicit POST /v1/compact from Pi plugin)
+ */
+export async function generateCompactionSummary(opts: {
+  projectPath: string;
+  sessionID: string;
+  config: GatewayConfig;
+  previousSummary?: string;
+}): Promise<string> {
+  const { projectPath, sessionID, config, previousSummary } = opts;
   const llm = getLLMClient(config);
-
-  setSentryLightContext({ model: req.model, projectPath });
-
-  log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
 
   // 1. Force-distill all undistilled messages.
   // Mark urgent: true — client is blocking on the compaction response.
@@ -1605,10 +2037,7 @@ async function handleCompaction(
   // 2. Load distillation summaries
   const distillations = distillation.loadForSession(projectPath, sessionID);
 
-  // 3. Extract previous summary from the request (if any)
-  const previousSummary = extractPreviousSummary(req);
-
-  // 4. Build knowledge block
+  // 3. Build knowledge block
   const cfg = loreConfig();
   const entries = cfg.knowledge.enabled
     ? ltm.forProject(projectPath, cfg.crossProject)
@@ -1623,14 +2052,14 @@ async function handleCompaction(
       )
     : "";
 
-  // 5. Build the compact prompt
+  // 4. Build the compact prompt
   const compactPrompt = buildCompactPrompt({
     hasDistillations: distillations.length > 0,
     knowledge,
     previousSummary,
   });
 
-  // 6. Build context with distillation summaries
+  // 5. Build context with distillation summaries
   let context = "";
   if (distillations.length > 0) {
     context =
@@ -1645,7 +2074,7 @@ async function handleCompaction(
         .join("\n\n");
   }
 
-  // 7. Generate the compaction summary via LLM
+  // 6. Generate the compaction summary via LLM
   const userContent = context
     ? `${context}\n\n---\n\n${compactPrompt}`
     : compactPrompt;
@@ -1655,14 +2084,43 @@ async function handleCompaction(
   const summaryText = await llm.prompt(compactPrompt, userContent, {
     model: getWorkerModel(),
     workerID: "lore-compact",
-    urgent: true, // Client is blocking on this response
+    urgent: true,
     maxTokens: compactMaxTokens,
   });
 
-  const summary = summaryText ?? "(Compaction failed — no summary generated.)";
+  return summaryText ?? "(Compaction failed — no summary generated.)";
+}
 
-  // 8. Build and return the response
+// ---------------------------------------------------------------------------
+// Case 1: Compaction interception
+// ---------------------------------------------------------------------------
+
+async function handleCompaction(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): Promise<Response> {
+  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  await initIfNeeded(pathResult.path, config);
+
+  const { sessionID } = await identifySession(req, pathResult.path);
+  const sessionState = getOrCreateSession(sessionID, pathResult.path);
+  const projectPath = resolveSessionProjectPath(pathResult, sessionState);
+
+  setSentryLightContext({ model: req.model, projectPath });
+  log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
+
+  const summary = await generateCompactionSummary({
+    projectPath,
+    sessionID,
+    config,
+    previousSummary: extractPreviousSummary(req),
+  });
+
   const resp = buildCompactionResponse(sessionID, summary, req.model);
+
+  // Clear the cached warmup body — post-compaction the client will send
+  // entirely different messages, so the pre-compaction body is stale.
+  sessionState.cacheAnalytics.lastRequestBody = null;
 
   if (req.stream) {
     return streamHttpResponse(resp);
@@ -1671,7 +2129,112 @@ async function handleCompaction(
 }
 
 // ---------------------------------------------------------------------------
-// Case 2: Title/summary passthrough
+// Case 1b: Explicit compaction endpoint (POST /v1/compact)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle an explicit compaction summary request from a plugin (e.g. Pi).
+ * Unlike `handleCompaction` which detects compaction from request patterns,
+ * this endpoint accepts a direct JSON body with project path and optional
+ * previous summary.
+ *
+ * The caller must include a session-identifying header (e.g. x-lore-session-id)
+ * so the gateway can resolve the correct internal session.
+ */
+export async function handleCompactEndpoint(
+  req: Request,
+  config: GatewayConfig,
+): Promise<Response> {
+  let body: { project_path?: string; previous_summary?: string };
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    return new Response(
+      JSON.stringify({ error: "invalid_request", message: "Invalid JSON body" }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  const projectPath = body.project_path;
+  if (!projectPath || typeof projectPath !== "string") {
+    return new Response(
+      JSON.stringify({ error: "invalid_request", message: "project_path is required" }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  await initIfNeeded(projectPath, config);
+
+  // Build a minimal GatewayRequest for session identification.
+  // Only rawHeaders and messages are used by identifySession().
+  const rawHeaders: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    rawHeaders[key] = value;
+  });
+
+  const minimalReq: GatewayRequest = {
+    protocol: "anthropic",
+    system: "",
+    messages: [],
+    tools: [],
+    model: "",
+    maxTokens: 0,
+    stream: false,
+    metadata: {},
+    rawHeaders,
+  };
+
+  const { sessionID, isNew } = await identifySession(minimalReq, projectPath);
+
+  if (isNew) {
+    // No prior session found — the caller's session header didn't match any
+    // existing session. This typically means no conversation turns have gone
+    // through the gateway yet, so there's nothing to compact.
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No active session found for the given headers. " +
+          "Ensure at least one conversation turn has been routed through the gateway.",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  log.info(`compact endpoint: generating summary for session ${sessionID.slice(0, 16)}`);
+
+  try {
+    const summary = await generateCompactionSummary({
+      projectPath,
+      sessionID,
+      config,
+      previousSummary: typeof body.previous_summary === "string"
+        ? body.previous_summary
+        : undefined,
+    });
+
+    // Clear the cached warmup body — post-compaction the client will send
+    // entirely different messages, so the pre-compaction body is stale.
+    const sessionState = sessions.get(sessionID);
+    if (sessionState) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+    }
+
+    return new Response(
+      JSON.stringify({ summary }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Compaction failed";
+    log.error("compact endpoint error:", err);
+    return new Response(
+      JSON.stringify({ error: "compaction_failed", message: msg }),
+      { status: 500, headers: { "content-type": "application/json" } },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Case 2: Meta request passthrough (title gen, summaries, categorization, etc.)
 // ---------------------------------------------------------------------------
 
 async function handlePassthrough(
@@ -1704,6 +2267,39 @@ async function handlePassthrough(
   });
 }
 
+/**
+ * Check whether the upstream prompt cache is likely still warm for this
+ * session. Returns true when a warmup ping was successfully sent within
+ * the current cache TTL window.
+ *
+ * When true, post-idle compaction should be skipped: the warmer replayed
+ * the full (uncompacted) request body, so compacting now would produce
+ * different bytes and bust the cache the warmer just paid to preserve.
+ */
+function isCacheWarm(state: SessionState): boolean {
+  const warmup = state.warmup;
+  // Require at least one successful warmup before claiming warm.
+  // This also gates the forceKeepWarm early-return below.
+  if (!warmup?.lastWarmupAt) return false;
+
+  const profile = resolveWarmingProfile(
+    state.lastModel,
+    state.lastProtocol,
+    state.resolvedConversationTTL,
+  );
+  if (!profile) return false;
+
+  // /keep sessions: consider warm if the last warmup was within 2 TTL
+  // windows. The warmer fires once per TTL window, so 2× provides a
+  // safety margin while still expiring if the warmer has stopped
+  // (e.g. circuit breaker tripped, process-level failure).
+  if (warmup.forceKeepWarm) {
+    return (Date.now() - warmup.lastWarmupAt) < profile.ttlMs * 2;
+  }
+
+  return (Date.now() - warmup.lastWarmupAt) < profile.ttlMs;
+}
+
 // ---------------------------------------------------------------------------
 // Case 3: Normal conversation turn — full pipeline
 // ---------------------------------------------------------------------------
@@ -1713,8 +2309,8 @@ async function handleConversationTurn(
   config: GatewayConfig,
 ): Promise<Response> {
   // --- 1. Project path & init ---
-  const projectPath = getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(projectPath, config);
+  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  await initIfNeeded(pathResult.path, config);
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
@@ -1723,8 +2319,9 @@ async function handleConversationTurn(
   }
 
   // --- 3. Session identification ---
-  const { sessionID, isNew, tier } = await identifySession(req, projectPath);
-  const sessionState = getOrCreateSession(sessionID, projectPath);
+  const { sessionID, isNew, tier } = await identifySession(req, pathResult.path);
+  const sessionState = getOrCreateSession(sessionID, pathResult.path);
+  const projectPath = resolveSessionProjectPath(pathResult, sessionState);
 
   // Detect sub-agent turns (e.g. OpenCode explore/general agents) that were
   // merged into the parent session via x-parent-session-id.  These turns
@@ -1752,6 +2349,8 @@ async function handleConversationTurn(
       },
     );
     sessionState.fingerprint = fingerprint;
+    // Persist fingerprint immediately — rare event (new session only)
+    saveSessionTracking(sessionID, { fingerprint });
 
     // Seed header learning for new sessions (Tier 2 bootstrap).
     // Even Tier 1 sessions don't need this, but it's harmless and
@@ -1783,8 +2382,20 @@ async function handleConversationTurn(
     );
   }
 
-  // Always update message count for proximity matching
-  sessionState.messageCount = currMsgCount;
+  // Update message count for proximity matching & structural compaction detection.
+  // Sub-agent turns have their own independent (smaller) message arrays — updating
+  // messageCount with those would inflate then "drop" the count when the main agent
+  // resumes, triggering false structural compaction detection.
+  if (!isSubagentTurn) {
+    sessionState.messageCount = currMsgCount;
+    // Batched save: messageCount + turnsSinceCuration + consecutiveTextOnlyTurns
+    // together to avoid multiple DB writes per turn.
+    saveSessionTracking(sessionID, {
+      messageCount: currMsgCount,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
+    });
+  }
 
   // Track session model for worker model discovery
   lastSeenSessionModel = req.model;
@@ -1794,7 +2405,7 @@ async function handleConversationTurn(
     authFingerprint: cred ? authFingerprint(cred) : null,
     sessionID,
     model: req.model,
-    upstreamUrl: resolveUpstreamRoute(req.model)?.url ?? config.upstreamAnthropic,
+    upstreamUrl: resolveUpstreamRoute(req.model)?.url ?? (req.protocol === "anthropic" ? config.upstreamAnthropic : config.upstreamOpenAI),
     port: config.port,
     projectPath,
   });
@@ -1885,18 +2496,28 @@ async function handleConversationTurn(
       ? 60
       : cfg.idleResumeMinutes;
   const thresholdMs = effectiveIdleMinutes * 60_000;
-  const idleResult = onIdleResume(sessionID, thresholdMs);
+  // If the cache warmer recently refreshed this session's prompt cache,
+  // skip post-idle compaction — compacting would produce a different prompt
+  // body that doesn't match the warmed prefix, causing a cache bust.
+  const cacheWarm = isCacheWarm(sessionState);
+  const idleResult = onIdleResume(sessionID, thresholdMs, Date.now(), cacheWarm);
   sessionState.lastTurnWasIdle = idleResult.triggered;
   if (idleResult.triggered) {
     ltmSessionCache.delete(sessionID);
+    saveSessionTracking(sessionID, { ltmCacheText: null, ltmCacheTokens: null });
     log.info(
-      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches`,
+      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
+        (cacheWarm ? " (cache warm — skipping compact)" : ""),
     );
   }
 
   // --- 6. LTM injection (kept separate from host system prompt for caching) ---
   let ltmText: string | undefined;
   if (cfg.knowledge.enabled) {
+    // Track whether LTM state changed for batched DB persistence
+    let ltmDirty = false;
+    let pinDirty = false;
+
     try {
       let cached = ltmSessionCache.get(sessionID);
 
@@ -1918,6 +2539,7 @@ async function handleConversationTurn(
             const tokenCount = Math.ceil(formatted.length / 3);
             cached = { formatted, tokenCount };
             ltmSessionCache.set(sessionID, cached);
+            ltmDirty = true;
           }
         }
       }
@@ -1944,6 +2566,7 @@ async function handleConversationTurn(
         } else {
           // Substantially different or first injection — pin the new text
           ltmPinnedText.set(sessionID, cached);
+          pinDirty = true;
           ltmText = cached.formatted;
           setLtmTokens(cached.tokenCount, sessionID);
         }
@@ -1955,6 +2578,16 @@ async function handleConversationTurn(
       setLtmTokens(0, sessionID);
     } finally {
       consumeCameOutOfIdle(sessionID);
+    }
+
+    // Batched LTM state persistence — single DB write for cache + pin changes
+    if (ltmDirty || pinDirty) {
+      const cached = ltmSessionCache.get(sessionID);
+      const pinned = ltmPinnedText.get(sessionID);
+      saveSessionTracking(sessionID, {
+        ...(ltmDirty && cached ? { ltmCacheText: cached.formatted, ltmCacheTokens: cached.tokenCount } : {}),
+        ...(pinDirty && pinned ? { ltmPinText: pinned.formatted, ltmPinTokens: pinned.tokenCount } : {}),
+      });
     }
   } else {
     setLtmTokens(0, sessionID);
@@ -1980,6 +2613,71 @@ async function handleConversationTurn(
     const hasToolParts = last.parts.some((p) => p.type === "tool");
     if (hasToolParts) break;
     result.messages.pop();
+  }
+
+  // --- 7b. LTM refresh on emergency layer ---
+  // Layer 4 (emergency/transient reset) signals that the context was fully
+  // reset. Re-run forSession() to re-rank knowledge entries by relevance to
+  // the current conversation state — entries that became relevant mid-session
+  // (e.g. a gotcha discovered during debugging) are surfaced on the reset
+  // turn rather than waiting for the next session. The full cache bust from
+  // Layer 4 means there's no additional cost from changing the LTM text.
+  if (result.refreshLtm && cfg.knowledge.enabled) {
+    try {
+      const ltmFraction = cfg.budget.ltm;
+      const ltmBudget = getLtmBudget(ltmFraction);
+      const entries = ltm.forSession(projectPath, sessionID, ltmBudget);
+      let refreshed = false;
+
+      if (entries.length) {
+        const formatted = formatKnowledge(
+          entries.map((e) => ({
+            category: e.category,
+            title: e.title,
+            content: e.content,
+          })),
+          ltmBudget,
+        );
+
+        if (formatted) {
+          const tokenCount = Math.ceil(formatted.length / 3);
+          // Replace cache and pin — Layer 4 already busts the prompt cache,
+          // so there's no benefit to preserving the old pinned text.
+          ltmSessionCache.delete(sessionID);
+          ltmSessionCache.set(sessionID, { formatted, tokenCount });
+          ltmPinnedText.set(sessionID, { formatted, tokenCount });
+          ltmText = formatted;
+          setLtmTokens(tokenCount, sessionID);
+          saveSessionTracking(sessionID, {
+            ltmCacheText: formatted,
+            ltmCacheTokens: tokenCount,
+            ltmPinText: formatted,
+            ltmPinTokens: tokenCount,
+          });
+          refreshed = true;
+          log.info("LTM refreshed on emergency layer (Layer 4) for session", sessionID);
+        }
+      }
+
+      if (!refreshed) {
+        // forSession() returned no entries or formatKnowledge() returned empty —
+        // clear all LTM state so the turn doesn't carry stale knowledge.
+        ltmSessionCache.delete(sessionID);
+        ltmPinnedText.delete(sessionID);
+        ltmText = undefined;
+        setLtmTokens(0, sessionID);
+        saveSessionTracking(sessionID, {
+          ltmCacheText: null, ltmCacheTokens: null,
+          ltmPinText: null, ltmPinTokens: null,
+        });
+        log.info("LTM cleared on emergency layer (Layer 4) — no relevant entries for session", sessionID);
+      }
+    } catch (e) {
+      // On error, leave the step-6 LTM state intact (cache, pin, text)
+      // so the turn proceeds with the pre-refresh knowledge rather than
+      // an inconsistent state. The next turn will retry via step 6.
+      log.error("LTM refresh on emergency layer failed:", e);
+    }
   }
 
   // --- 8. Build the modified request ---
@@ -2025,7 +2723,7 @@ async function handleConversationTurn(
   //  - LTM: separate system block (no breakpoint, benefits from prefix)
   //  - Tools: 1h TTL on last tool (recall + git reminder are static)
   //  - Conversation: configurable TTL on last message block (5m default, 1h opt-in/auto)
-  // Title/summary passthrough (handlePassthrough) never reaches here — it
+  // Meta request passthrough (handlePassthrough) never reaches here — it
   // forwards the raw request without buildAnthropicRequest, so no caching.
 
   // Resolve conversation cache TTL: explicit "5m"/"1h" pass through,
@@ -2039,17 +2737,38 @@ async function handleConversationTurn(
     if (window && window.length >= 5) {
       const coldFraction = window.filter(Boolean).length / window.length;
       if (coldFraction > 0.4 && resolvedConversationTTL === "5m") {
+        // Upgrade immediately — switching to 1h is always beneficial
         resolvedConversationTTL = "1h";
+        sessionState.ttlDowngradeStreak = 0;
         log.info(
           `auto-upgrade conversation TTL to 1h: session=${sessionID.slice(0, 16)}` +
           ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
         );
       } else if (coldFraction < 0.2 && resolvedConversationTTL === "1h") {
-        resolvedConversationTTL = "5m";
-        log.info(
-          `auto-downgrade conversation TTL to 5m: session=${sessionID.slice(0, 16)}` +
-          ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
-        );
+        // Hysteresis: require 3 consecutive qualifying turns before downgrading.
+        // A single fluctuation below 20% shouldn't trigger a downgrade because
+        // the TTL change modifies the cached bytes AND drops the idle threshold
+        // from 60min to 5min, causing a compounding cache bust.
+        const streak = (sessionState.ttlDowngradeStreak ?? 0) + 1;
+        sessionState.ttlDowngradeStreak = streak;
+        if (streak >= 3) {
+          resolvedConversationTTL = "5m";
+          sessionState.ttlDowngradeStreak = 0;
+          log.info(
+            `auto-downgrade conversation TTL to 5m: session=${sessionID.slice(0, 16)}` +
+            ` coldFraction=${(coldFraction * 100).toFixed(0)}% streak=${streak}`,
+          );
+        } else {
+          log.info(
+            `TTL downgrade deferred (streak ${streak}/3): session=${sessionID.slice(0, 16)}` +
+            ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
+          );
+        }
+      } else {
+        // Cold fraction not qualifying for downgrade — reset streak
+        if (resolvedConversationTTL === "1h") {
+          sessionState.ttlDowngradeStreak = 0;
+        }
       }
     }
   }
@@ -2073,13 +2792,15 @@ async function handleConversationTurn(
       "gen_ai.operation.name": "chat",
       "gen_ai.request.model": req.model,
       "gen_ai.provider.name":
-        resolveUpstreamRoute(req.model)?.protocol ?? "anthropic",
+        req.protocol === "openai-responses"
+          ? "openai-responses"
+          : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic"),
       "gen_ai.response.streaming": req.stream,
       // NO gen_ai.input.messages — privacy (proxy for other people's projects)
     },
   });
 
-  const { response: upstreamResponse, serializedBody: requestBody } =
+  const { response: upstreamResponse, serializedBody: requestBody, effectiveProtocol } =
     await forwardToUpstream(
       modifiedReq,
       config,
@@ -2101,7 +2822,23 @@ async function handleConversationTurn(
   }
 
   if (req.stream && upstreamResponse.body) {
-    // Streaming: forward events and accumulate in parallel.
+    // Non-Anthropic upstream streaming responses need their own accumulator
+    // since the Anthropic SSE accumulator can't parse OpenAI SSE formats.
+    if (effectiveProtocol === "openai-responses") {
+      const resp = await accumulateResponsesSSEStream(upstreamResponse);
+      postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+      return nonStreamHttpResponse(resp);
+    }
+
+    if (effectiveProtocol === "openai") {
+      // OpenAI Chat Completions streaming — accumulate and return as
+      // non-streaming Anthropic format (same pattern as non-stream path).
+      const resp = await accumulateNonStreamOpenAIStream(upstreamResponse);
+      postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+      return nonStreamHttpResponse(resp);
+    }
+
+    // Anthropic streaming: forward events and accumulate in parallel.
     // Pass recall context so the accumulator can intercept recall tool_use.
     const hasRecallTool = modifiedReq.tools.some(
       (t) => t.name === RECALL_TOOL_NAME,
@@ -2115,8 +2852,8 @@ async function handleConversationTurn(
     );
   }
 
-  // Non-streaming (also used for OpenAI protocol via accumulateStreamResponse)
-  const resp = await accumulateNonStreamResponse(upstreamResponse);
+  // Non-streaming: dispatch to correct accumulator based on upstream protocol.
+  const resp = await accumulateNonStreamResponse(upstreamResponse, effectiveProtocol);
 
   // --- Recall interception (non-streaming) ---
   if (hasRecallToolUse(resp)) {
@@ -2125,6 +2862,7 @@ async function handleConversationTurn(
       recallBlock,
       sessionState.projectPath,
       sessionState.sessionID,
+      getLLMClient(config),
     );
 
     // Store recall result for marker round-trip expansion
@@ -2155,11 +2893,15 @@ async function handleConversationTurn(
     );
     const followUp = buildRecallFollowUp(modifiedReq, resp, result, recallBlock);
     let followUpResponse: Response;
-    ({ response: followUpResponse } = await forwardToUpstream(
+    let followUpProtocol: "anthropic" | "openai" | "openai-responses";
+    ({ response: followUpResponse, effectiveProtocol: followUpProtocol } = await forwardToUpstream(
       followUp,
       config,
       undefined,
-      cacheOptions,
+      // Disable conversation caching on follow-up: the appended
+      // tool_result makes the prefix diverge from the next real turn,
+      // so the cache write would be wasted money.
+      { ...cacheOptions, cacheConversation: false },
     ));
 
     if (!followUpResponse.ok) {
@@ -2172,7 +2914,7 @@ async function handleConversationTurn(
       return nonStreamHttpResponse(markerResp);
     }
 
-    const continuationResp = await accumulateNonStreamResponse(followUpResponse);
+    const continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
 
     // Merge usage from both requests
     continuationResp.usage.inputTokens += resp.usage.inputTokens;
@@ -2583,8 +3325,12 @@ export async function handleRequest(
       );
     }
 
-    // --- Case 2: Title/summary request → passthrough ---
-    if (isTitleOrSummaryRequest(req)) {
+    // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
+    if (isMetaRequest(req)) {
+      log.info(
+        `meta request detected: messages=${req.messages.length} tools=${req.tools.length}`
+        + ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,
+      );
       return await handlePassthrough(req, config);
     }
 

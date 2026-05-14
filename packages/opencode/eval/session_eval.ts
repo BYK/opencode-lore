@@ -10,7 +10,7 @@
  */
 import { parseArgs } from "util";
 import { Database } from "bun:sqlite";
-import { DISTILLATION_SYSTEM, distillationUser } from "@loreai/core";
+import { DISTILLATION_SYSTEM, distillationUser, dbPath } from "@loreai/core";
 
 // --- Config ---
 const BASE_URL = "http://localhost:4096";
@@ -19,9 +19,7 @@ const POLL_INTERVAL = 2000;
 const MAX_WAIT = 120000;
 const TAIL_BUDGET = 80_000; // tokens for default mode tail window
 const DISTILL_CHUNK_BUDGET = 20_000; // tokens per distillation segment
-const DB_PATH =
-  process.env.LORE_DB_PATH ??
-  `${process.env.HOME}/.local/share/opencode-lore/lore.db`;
+const DB_PATH = dbPath();
 
 // --- CLI args ---
 const { values } = parseArgs({

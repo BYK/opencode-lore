@@ -10,19 +10,20 @@ import { createInterface } from "node:readline";
 import { startGateway, type StartOptions } from "./start";
 import { detectAgents, AGENTS, type DetectedAgent } from "./agents";
 import { safeExit } from "./exit";
+import { maybeAutoImport } from "./import-auto";
 
 // ---------------------------------------------------------------------------
 // Interactive agent picker (TTY only)
 // ---------------------------------------------------------------------------
 
 async function promptAgent(agents: DetectedAgent[]): Promise<DetectedAgent> {
-  console.error("\n[lore] Multiple AI agents detected:\n");
+  console.log("\n[lore] Multiple AI agents detected:\n");
   for (let i = 0; i < agents.length; i++) {
-    console.error(`  ${i + 1}) ${agents[i].def.displayName} (${agents[i].path})`);
+    console.log(`  ${i + 1}) ${agents[i].def.displayName} (${agents[i].path})`);
   }
-  console.error();
+  console.log();
 
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
 
   return new Promise<DetectedAgent>((resolve) => {
     const ask = () => {
@@ -33,7 +34,7 @@ async function promptAgent(agents: DetectedAgent[]): Promise<DetectedAgent> {
           rl.close();
           resolve(agents[idx]);
         } else {
-          console.error(`  Invalid choice. Enter 1–${agents.length}.`);
+          console.log(`  Invalid choice. Enter 1–${agents.length}.`);
           ask();
         }
       });
@@ -55,6 +56,7 @@ interface LaunchTarget {
 async function resolveLaunchTarget(
   gatewayUrl: string,
   cmdArgs: string[],
+  extraArgs: string[],
 ): Promise<LaunchTarget | null> {
   // --- Explicit command given: inject all known env vars ---
   if (cmdArgs.length > 0) {
@@ -62,7 +64,7 @@ async function resolveLaunchTarget(
     for (const agent of AGENTS) {
       Object.assign(env, agent.envVars(gatewayUrl));
     }
-    return { command: cmdArgs[0], args: cmdArgs.slice(1), env };
+    return { command: cmdArgs[0], args: [...cmdArgs.slice(1), ...extraArgs], env };
   }
 
   // --- No command: auto-detect agents ---
@@ -79,7 +81,7 @@ async function resolveLaunchTarget(
 
   if (detected.length === 1) {
     agent = detected[0];
-    console.error(`[lore] Detected ${agent.def.displayName} at ${agent.path}`);
+    console.log(`[lore] Detected ${agent.def.displayName} at ${agent.path}`);
   } else if (process.stdin.isTTY) {
     agent = await promptAgent(detected);
   } else {
@@ -94,7 +96,7 @@ async function resolveLaunchTarget(
 
   return {
     command: agent.def.binary,
-    args: [],
+    args: [...extraArgs],
     env: agent.def.envVars(gatewayUrl),
   };
 }
@@ -121,24 +123,29 @@ function launchChild(target: LaunchTarget): ChildProcess {
 export async function commandRun(
   opts: StartOptions,
   cmdArgs: string[],
+  extraArgs: string[] = [],
 ): Promise<void> {
   // 1. Start gateway (or reuse an existing one)
   const { config, port, owned, shutdown } = await startGateway(opts);
   const gatewayUrl = `http://${config.hosts[0]}:${port}`;
 
   if (owned) {
-    console.error(`[lore] Gateway listening on ${gatewayUrl}`);
+    console.log(`[lore] Gateway listening on ${gatewayUrl}`);
   } else {
-    console.error(`[lore] Reusing existing gateway at ${gatewayUrl}`);
+    console.log(`[lore] Reusing existing gateway at ${gatewayUrl}`);
   }
+  console.log(`[lore] Dashboard: ${gatewayUrl}/ui`);
 
-  // 2. Resolve what to launch
-  const target = await resolveLaunchTarget(gatewayUrl, cmdArgs);
+  // 2. Auto-detect prior conversations (first run only)
+  await maybeAutoImport(config);
+
+  // 3. Resolve what to launch
+  const target = await resolveLaunchTarget(gatewayUrl, cmdArgs, extraArgs);
 
   if (!target) {
-    // No agent found / non-interactive — fall back to server-only mode
-    console.error("[lore] Running in server-only mode. Point your agent at the gateway manually.");
-    console.error(`[lore]   export ANTHROPIC_BASE_URL=${gatewayUrl}`);
+    // No agent found — start server without launching an agent
+    console.log("[lore] No agent detected. Point your agent at the gateway manually.");
+    console.log(`[lore]   export ANTHROPIC_BASE_URL=${gatewayUrl}`);
 
     if (owned) {
       let shuttingDown = false;
@@ -156,8 +163,8 @@ export async function commandRun(
     return new Promise(() => {});
   }
 
-  // 3. Launch agent child process
-  console.error(`[lore] Launching: ${target.command} ${target.args.join(" ")}`.trimEnd());
+  // 4. Launch agent child process
+  console.log(`[lore] Launching: ${target.command} ${target.args.join(" ")}`.trimEnd());
 
   const child = launchChild(target);
 

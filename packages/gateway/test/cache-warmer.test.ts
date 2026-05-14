@@ -4,15 +4,19 @@ import {
   recordGap,
   survivalFunction,
   conditionalReturnProbability,
-  resolveTimeSlot,
-  createSurvivalModel,
   blendHistograms,
   prepareAnthropicWarmupBody,
   buildAnthropicProfile,
   shouldWarm,
   checkCircuitBreaker,
   isCircuitBreakerTripped,
+  breakFraction,
+  pSessionFinished,
+  expectedWarmupCycles,
+  costThreshold,
+  maxProfitableCycles,
   HISTOGRAM_BINS,
+  BREAK_FLOOR_MS,
   _resetForTest,
 } from "../src/cache-warmer";
 import type {
@@ -43,6 +47,7 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
     projectPath: "/tmp/test-project",
     fingerprint: "abc123",
     lastRequestTime: Date.now() - 270_000, // 4.5 min ago (inside 5m warmup window)
+    lastUserTurnTime: Date.now() - 270_000,
     messageCount: 10,
     turnsSinceCuration: 2,
     consecutiveTextOnlyTurns: 0,
@@ -195,48 +200,6 @@ describe("conditionalReturnProbability", () => {
     // (can't distinguish any time range)
     expect(p).toBeGreaterThanOrEqual(0);
     expect(p).toBeLessThanOrEqual(1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Time slot resolution
-// ---------------------------------------------------------------------------
-
-describe("resolveTimeSlot", () => {
-  test("weekday morning → work", () => {
-    // Wednesday 10:00
-    const d = new Date(2025, 0, 8, 10, 0); // Jan 8 2025 is a Wednesday
-    expect(resolveTimeSlot(d)).toBe("work");
-  });
-
-  test("weekday evening → evening", () => {
-    // Wednesday 20:00
-    const d = new Date(2025, 0, 8, 20, 0);
-    expect(resolveTimeSlot(d)).toBe("evening");
-  });
-
-  test("weekday night → night", () => {
-    // Wednesday 02:00
-    const d = new Date(2025, 0, 8, 2, 0);
-    expect(resolveTimeSlot(d)).toBe("night");
-  });
-
-  test("late night → night", () => {
-    // Wednesday 23:30
-    const d = new Date(2025, 0, 8, 23, 30);
-    expect(resolveTimeSlot(d)).toBe("night");
-  });
-
-  test("weekend daytime → evening", () => {
-    // Saturday 14:00
-    const d = new Date(2025, 0, 11, 14, 0); // Jan 11 2025 is a Saturday
-    expect(resolveTimeSlot(d)).toBe("evening");
-  });
-
-  test("weekend night → night", () => {
-    // Sunday 03:00
-    const d = new Date(2025, 0, 12, 3, 0);
-    expect(resolveTimeSlot(d)).toBe("night");
   });
 });
 
@@ -610,8 +573,13 @@ describe("shouldWarm", () => {
     expect(shouldWarm(state, profile, hist)).toBe(false);
   });
 
-  test("dampens survival with consecutive text-only turns", () => {
+  test("text-only turns increase P(session finished) and can prevent warming", () => {
     const now = Date.now();
+
+    // Histogram: 15% breaks (6m), 85% active (30s) — realistic mix
+    const hist = createHistogram();
+    for (let i = 0; i < 15; i++) recordGap(hist, 360_000);
+    for (let i = 0; i < 85; i++) recordGap(hist, 30_000);
 
     // First: verify this session WOULD warm with 0 text-only turns
     const baseState = makeSessionState({
@@ -624,14 +592,11 @@ describe("shouldWarm", () => {
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
 
-    // Histogram with moderate return probability — just above the cost threshold
-    const hist = createHistogram();
-    for (let i = 0; i < 30; i++) recordGap(hist, 360_000); // 60% at 6m
-    for (let i = 0; i < 70; i++) recordGap(hist, 30_000);  // 70% at 30s (never return after 4.5m)
-
     expect(shouldWarm(baseState, profile, hist, now)).toBe(true);
 
-    // Now: same session but with 5 consecutive text-only turns → 0.5^5 = 3.1%× probability
+    // Now: same session but with 5 consecutive text-only turns — the
+    // pSessionFinished signal fusion pushes P(finished) above the threshold,
+    // making P(returns) too low to justify warming.
     const dampenedState = makeSessionState({
       lastRequestTime: now - 270_000,
       consecutiveTextOnlyTurns: 5,
@@ -641,7 +606,6 @@ describe("shouldWarm", () => {
       },
     });
 
-    // With dampening, the effective probability drops below threshold
     expect(shouldWarm(dampenedState, profile, hist, now)).toBe(false);
   });
 
@@ -693,6 +657,60 @@ describe("shouldWarm", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(true);
   });
 
+  test("forceKeepWarm uses tighter cooldown (ttlMs - warmupMarginMs) to prevent 2x cadence", () => {
+    const now = Date.now();
+    // Last warmup was 4m20s ago (260s). With the full ttlMs (300s) cooldown
+    // this would be blocked. With the tighter cooldown (300s - 45s = 255s)
+    // it should be allowed, provided we're in the warmup margin of a window.
+    const state = makeSessionState({
+      lastRequestTime: now - 560_000, // 9m20s ago — into_window = 560%300 = 260s (>255 → in margin)
+      warmup: {
+        lastWarmupAt: now - 260_000, // 4m20s ago — past tighter cooldown (255s) but within full TTL (300s)
+        warmupCount: 1,
+        warmupHits: 0,
+        disabled: false,
+        forceKeepWarm: true,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"test": true}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    // With old code (cooldown = ttlMs = 300s): 260s < 300s → blocked
+    // With fix (cooldown = ttlMs - margin = 255s): 260s > 255s → allowed
+    // intoWindow = 560_000 % 300_000 = 260_000 >= 255_000 → in margin → true
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("non-forced mode still uses full ttlMs cooldown", () => {
+    const now = Date.now();
+    // Same timing as above but without forceKeepWarm — should be blocked
+    // by the full ttlMs cooldown since 260s < 300s.
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000, // 4.5 min ago — in warmup margin
+      warmup: {
+        lastWarmupAt: now - 260_000, // 4m20s ago — within full TTL cooldown
+        warmupCount: 1,
+        warmupHits: 0,
+        disabled: false,
+        // no forceKeepWarm
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    // 260s < 300s (full TTL cooldown) → blocked
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
   test("forceKeepWarm still respects circuit breaker", () => {
     const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
     checkCircuitBreaker(bad);
@@ -731,7 +749,9 @@ describe("shouldWarm", () => {
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
 
-    // All gaps are very short — nobody ever comes back after 4.5m
+    // All gaps are very short — nobody ever comes back after 4.5m.
+    // With survival=0 and breakFraction=0, pSessionFinished is very high,
+    // making P(returns) well below threshold. The session gets marked dead.
     const hist = createHistogram();
     for (let i = 0; i < 100; i++) recordGap(hist, 5_000);
 
@@ -761,11 +781,682 @@ describe("buildAnthropicProfile", () => {
     expect(profile.warmupMarginMs).toBe(300_000);
   });
 
-  test("cost ratio gives reasonable threshold", () => {
+  test("cost ratio gives reasonable threshold (corrected formula)", () => {
+    const profile5m = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    // Corrected: read / (write - read) ≈ 0.087 for 5m TTL
+    const threshold5m = profile5m.cacheReadCostPerMTok /
+      (profile5m.cacheMissCostPerMTok - profile5m.cacheReadCostPerMTok);
+    expect(threshold5m).toBeGreaterThan(0.05);
+    expect(threshold5m).toBeLessThan(0.15);
+
+    const profile1h = buildAnthropicProfile("claude-sonnet-4-20250514", "1h");
+    // 1h TTL: 2× write cost → threshold ≈ 0.042
+    const threshold1h = profile1h.cacheReadCostPerMTok /
+      (profile1h.cacheMissCostPerMTok - profile1h.cacheReadCostPerMTok);
+    expect(threshold1h).toBeGreaterThan(0.02);
+    expect(threshold1h).toBeLessThan(0.08);
+    // 1h threshold should be lower than 5m (cheaper to warm relative to write cost)
+    expect(threshold1h).toBeLessThan(threshold5m);
+  });
+
+  test("1h TTL has 2x cache write cost vs 5m TTL", () => {
+    const profile5m = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const profile1h = buildAnthropicProfile("claude-sonnet-4-20250514", "1h");
+    // Same read cost
+    expect(profile1h.cacheReadCostPerMTok).toBe(profile5m.cacheReadCostPerMTok);
+    // 1h write cost = 2 × 5m write cost
+    expect(profile1h.cacheMissCostPerMTok).toBeCloseTo(profile5m.cacheMissCostPerMTok * 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Break-commitment model helpers
+// ---------------------------------------------------------------------------
+
+describe("breakFraction", () => {
+  test("empty histogram returns prior of 0.3", () => {
+    const hist = createHistogram();
+    expect(breakFraction(hist)).toBe(0.3);
+  });
+
+  test("all short gaps → breakFraction ≈ 0", () => {
+    const hist = createHistogram();
+    for (let i = 0; i < 100; i++) recordGap(hist, 5_000); // 5s — well below 3m floor
+    expect(breakFraction(hist)).toBeLessThan(0.01);
+  });
+
+  test("all long gaps → breakFraction ≈ 1", () => {
+    const hist = createHistogram();
+    for (let i = 0; i < 100; i++) recordGap(hist, 600_000); // 10m — well above 3m floor
+    expect(breakFraction(hist)).toBeGreaterThan(0.99);
+  });
+
+  test("mixed gaps give intermediate fraction", () => {
+    const hist = createHistogram();
+    for (let i = 0; i < 70; i++) recordGap(hist, 30_000);  // 30s — active
+    for (let i = 0; i < 30; i++) recordGap(hist, 600_000); // 10m — break
+    const bf = breakFraction(hist);
+    expect(bf).toBeGreaterThan(0.2);
+    expect(bf).toBeLessThan(0.4);
+  });
+
+  test("gap exactly at break floor is handled", () => {
+    const hist = createHistogram();
+    // BREAK_FLOOR_MS (180_000) is a bin edge (HISTOGRAM_BINS[7]).
+    // binIndex(180_000) returns 8 (since 180000 < 180000 is false),
+    // so these land in bin 8 (3m–4m) — fully above the floor.
+    for (let i = 0; i < 50; i++) recordGap(hist, BREAK_FLOOR_MS);
+    for (let i = 0; i < 50; i++) recordGap(hist, 600_000);
+    // All 100 gaps are at or above the break floor
+    const bf = breakFraction(hist);
+    expect(bf).toBeGreaterThan(0.95);
+  });
+
+  test("gaps just below break floor are not counted as breaks", () => {
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 150_000); // 2.5m — below 3m floor
+    for (let i = 0; i < 50; i++) recordGap(hist, 600_000); // 10m — above
+    const bf = breakFraction(hist);
+    // ~50% should be breaks (the 10m gaps)
+    expect(bf).toBeGreaterThan(0.4);
+    expect(bf).toBeLessThan(0.6);
+  });
+});
+
+describe("pSessionFinished", () => {
+  test("active session with good survival → low P(finished)", () => {
+    const p = pSessionFinished({
+      survivalAtIdle: 0.8,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: 0.3,
+      totalTurns: 10,
+    });
+    expect(p).toBeLessThan(0.3);
+  });
+
+  test("long idle with zero survival → high P(finished)", () => {
+    const p = pSessionFinished({
+      survivalAtIdle: 0.0,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: 0.0,
+      totalTurns: 5,
+    });
+    expect(p).toBeGreaterThan(0.95);
+  });
+
+  test("multiple text-only turns increase P(finished)", () => {
+    const base = pSessionFinished({
+      survivalAtIdle: 0.3,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: 0.3,
+      totalTurns: 5,
+    });
+    const withText = pSessionFinished({
+      survivalAtIdle: 0.3,
+      consecutiveTextOnlyTurns: 5,
+      breakFraction: 0.3,
+      totalTurns: 5,
+    });
+    expect(withText).toBeGreaterThan(base);
+  });
+
+  test("low break fraction increases P(finished)", () => {
+    const highBreaks = pSessionFinished({
+      survivalAtIdle: 0.3,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: 0.4,
+      totalTurns: 10,
+    });
+    const lowBreaks = pSessionFinished({
+      survivalAtIdle: 0.3,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: 0.05,
+      totalTurns: 10,
+    });
+    expect(lowBreaks).toBeGreaterThan(highBreaks);
+  });
+
+  test("short sessions (≤2 turns) are more likely finished", () => {
+    const shortSession = pSessionFinished({
+      survivalAtIdle: 0.5,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: 0.3,
+      totalTurns: 2,
+    });
+    const longSession = pSessionFinished({
+      survivalAtIdle: 0.5,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: 0.3,
+      totalTurns: 20,
+    });
+    expect(shortSession).toBeGreaterThan(longSession);
+  });
+
+  test("conservative base rate — biased toward not finished", () => {
+    // Neutral signals: moderate survival, no text-only, moderate breaks
+    const p = pSessionFinished({
+      survivalAtIdle: 0.5,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: 0.3,
+      totalTurns: 10,
+    });
+    // Should be moderate — not too aggressive
+    expect(p).toBeGreaterThan(0.1);
+    expect(p).toBeLessThan(0.7);
+  });
+});
+
+describe("expectedWarmupCycles", () => {
+  test("all short gaps → exceeds max cycles (nobody returns late)", () => {
+    const hist = createHistogram();
+    for (let i = 0; i < 100; i++) recordGap(hist, 5_000);
+    // At 270s idle, survival is ~0 → returns maxCycles+1 to trigger cap
+    const cycles = expectedWarmupCycles(hist, 270_000, 300_000, 11);
+    expect(cycles).toBe(12); // maxCycles + 1
+  });
+
+  test("all long gaps → low expected cycles (user returns soon)", () => {
+    const hist = createHistogram();
+    for (let i = 0; i < 100; i++) recordGap(hist, 360_000); // 6m gaps
+    // At 270s idle, most users return within next 5m window
+    const cycles = expectedWarmupCycles(hist, 270_000, 300_000, 11);
+    expect(cycles).toBeLessThan(3);
+  });
+
+  test("never exceeds maxCycles", () => {
+    const hist = createHistogram();
+    for (let i = 0; i < 100; i++) recordGap(hist, 7_200_000); // 2h gaps
+    const cycles = expectedWarmupCycles(hist, 270_000, 300_000, 5);
+    expect(cycles).toBeLessThanOrEqual(5);
+  });
+
+  test("empty histogram returns max cycles (flat survival = 1.0 everywhere)", () => {
+    const hist = createHistogram();
+    // Empty → survival is 1.0 everywhere → P(still idle) = 1.0 for each
+    // future window → we pay for every cycle → accumulates to maxCycles
+    const cycles = expectedWarmupCycles(hist, 270_000, 300_000, 11);
+    expect(cycles).toBe(11);
+  });
+});
+
+describe("costThreshold", () => {
+  test("returns read / (write - read)", () => {
+    // Sonnet 5m: read=0.3, write=3.75 → 0.3 / 3.45 ≈ 0.087
+    const t = costThreshold(0.3, 3.75);
+    expect(t).toBeCloseTo(0.087, 2);
+  });
+
+  test("1h TTL produces lower threshold than 5m", () => {
+    const t5m = costThreshold(0.3, 3.75);   // 5m TTL
+    const t1h = costThreshold(0.3, 7.50);   // 1h TTL (2× write)
+    expect(t1h).toBeLessThan(t5m);
+    expect(t1h).toBeCloseTo(0.042, 2);
+  });
+
+  test("degenerate case: write <= read returns 1.0", () => {
+    expect(costThreshold(1.0, 1.0)).toBe(1.0);
+    expect(costThreshold(1.0, 0.5)).toBe(1.0);
+  });
+});
+
+describe("maxProfitableCycles", () => {
+  test("5m TTL Sonnet → 11 cycles (55 min)", () => {
+    const max = maxProfitableCycles(0.3, 3.75);
+    expect(max).toBe(11);
+  });
+
+  test("1h TTL Sonnet → 24 cycles (24h)", () => {
+    const max = maxProfitableCycles(0.3, 7.50);
+    expect(max).toBe(24);
+  });
+
+  test("zero read cost → 0 cycles", () => {
+    expect(maxProfitableCycles(0, 3.75)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shouldWarm continuation path
+// ---------------------------------------------------------------------------
+
+describe("shouldWarm continuation", () => {
+  beforeEach(() => {
+    _resetForTest();
+  });
+
+  test("continues warming in subsequent TTL windows when profitable", () => {
+    const now = Date.now();
+    // Session has been idle for 9.5 minutes (past first 5m TTL window)
+    // We're in the warmup margin of the 2nd window: 9.5min % 5min = 4.5min > 4.25min
+    const state = makeSessionState({
+      lastRequestTime: now - 570_000, // 9.5 min ago
+      warmup: {
+        lastWarmupAt: now - 310_000, // last warmup 5m10s ago — previous window
+        warmupCount: 1,
+        warmupHits: 0,
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
-    const threshold = profile.cacheReadCostPerMTok / profile.cacheMissCostPerMTok;
-    // Should be around 0.08 (10% of base / 125% of base = 0.08)
-    expect(threshold).toBeGreaterThan(0.03);
-    expect(threshold).toBeLessThan(0.15);
+
+    // Histogram with lots of break-length gaps (users take 10min breaks)
+    const hist = createHistogram();
+    for (let i = 0; i < 60; i++) recordGap(hist, 600_000); // 10m
+    for (let i = 0; i < 40; i++) recordGap(hist, 60_000);  // 1m
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("stops when maxCycles exceeded", () => {
+    const now = Date.now();
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+
+    // Session has spent maxCycles already
+    const state = makeSessionState({
+      lastRequestTime: now - (maxCyc + 1) * 300_000 - 270_000, // well past break-even
+      warmup: {
+        lastWarmupAt: now - 310_000,
+        warmupCount: maxCyc, // already at max
+        warmupHits: 0,
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 3_600_000); // 1h gaps
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("stops when P(session finished) > 0.95", () => {
+    const now = Date.now();
+    // Very long idle with all-short-gap histogram → P(finished) very high
+    const state = makeSessionState({
+      lastRequestTime: now - 900_000, // 15 min ago
+      warmup: {
+        lastWarmupAt: now - 310_000,
+        warmupCount: 2,
+        warmupHits: 0,
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+
+    // All gaps very short — nobody takes 15min breaks
+    const hist = createHistogram();
+    for (let i = 0; i < 100; i++) recordGap(hist, 10_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /keep mode break-even cap
+// ---------------------------------------------------------------------------
+
+describe("shouldWarm /keep mode", () => {
+  beforeEach(() => {
+    _resetForTest();
+  });
+
+  test("/keep mode stops at break-even cap", () => {
+    const now = Date.now();
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+
+    // Session in /keep mode that has already spent maxCycles
+    const state = makeSessionState({
+      lastRequestTime: now - (maxCyc + 1) * 300_000 - 270_000,
+      warmup: {
+        lastWarmupAt: now - 270_000, // past cooldown
+        warmupCount: maxCyc,
+        warmupHits: 0,
+        disabled: false,
+        forceKeepWarm: true,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+
+    const hist = createHistogram();
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("/keep mode warms when below break-even cap", () => {
+    const now = Date.now();
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+
+    // Session in /keep mode with only 2 cycles spent, in warmup margin
+    const state = makeSessionState({
+      lastRequestTime: now - 570_000, // 9.5min — in warmup margin of 2nd window
+      warmup: {
+        lastWarmupAt: now - 270_000, // past cooldown
+        warmupCount: 2,
+        warmupHits: 0,
+        disabled: false,
+        forceKeepWarm: true,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+
+    const hist = createHistogram();
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gap recording filtering
+// ---------------------------------------------------------------------------
+
+import {
+  getSessionHistogram,
+  recordGlobalGap,
+  getGlobalHistogram,
+  loadGlobalHistograms,
+  flushGlobalHistograms,
+} from "../src/cache-warmer";
+
+describe("gap recording filtering", () => {
+  beforeEach(() => {
+    _resetForTest();
+  });
+
+  /**
+   * Helper to simulate the gap recording logic from pipeline.ts postResponse().
+   * This mirrors the guarded block that decides whether to record a gap.
+   */
+  function simulateGapRecording(
+    sessionState: SessionState,
+    opts: {
+      isSubagentTurn: boolean;
+      prevStopReason: string | undefined;
+      now: number;
+    },
+  ): void {
+    const { isSubagentTurn, prevStopReason, now } = opts;
+    const isToolUseContinuation = prevStopReason === "tool_use";
+
+    if (!isSubagentTurn && !isToolUseContinuation) {
+      if (sessionState.lastUserTurnTime > 0) {
+        const gap = now - sessionState.lastUserTurnTime;
+        recordGap(getSessionHistogram(sessionState), gap);
+        recordGlobalGap(sessionState.projectPath, gap);
+      }
+      sessionState.lastUserTurnTime = now;
+    }
+  }
+
+  test("subagent turns do not record gaps", () => {
+    const state = makeSessionState({ lastUserTurnTime: Date.now() - 60_000 });
+    const hist = getSessionHistogram(state);
+    expect(hist.total).toBe(0);
+
+    simulateGapRecording(state, {
+      isSubagentTurn: true,
+      prevStopReason: "end_turn",
+      now: Date.now(),
+    });
+
+    expect(hist.total).toBe(0);
+  });
+
+  test("tool-use continuation turns do not record gaps", () => {
+    const state = makeSessionState({ lastUserTurnTime: Date.now() - 60_000 });
+    const hist = getSessionHistogram(state);
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "tool_use",
+      now: Date.now(),
+    });
+
+    expect(hist.total).toBe(0);
+  });
+
+  test("lastUserTurnTime is not updated by subagent turns", () => {
+    const originalTime = Date.now() - 120_000;
+    const state = makeSessionState({ lastUserTurnTime: originalTime });
+
+    simulateGapRecording(state, {
+      isSubagentTurn: true,
+      prevStopReason: "end_turn",
+      now: Date.now(),
+    });
+
+    expect(state.lastUserTurnTime).toBe(originalTime);
+  });
+
+  test("lastUserTurnTime is not updated by tool-use continuations", () => {
+    const originalTime = Date.now() - 120_000;
+    const state = makeSessionState({ lastUserTurnTime: originalTime });
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "tool_use",
+      now: Date.now(),
+    });
+
+    expect(state.lastUserTurnTime).toBe(originalTime);
+  });
+
+  test("gap is computed from lastUserTurnTime, not lastRequestTime", () => {
+    const now = Date.now();
+    // lastRequestTime was updated 5s ago by a subagent, but the last
+    // actual user turn was 60s ago.
+    const state = makeSessionState({
+      lastRequestTime: now - 5_000,
+      lastUserTurnTime: now - 60_000,
+    });
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "end_turn",
+      now,
+    });
+
+    const hist = getSessionHistogram(state);
+    expect(hist.total).toBe(1);
+    // 60_000ms is NOT < HISTOGRAM_BINS[4] (60_000), so it falls through to
+    // the next bin where 60_000 < 90_000 (HISTOGRAM_BINS[5]), landing in bin 5.
+    expect(hist.counts[5]).toBe(1);
+  });
+
+  test("first turn of session records no gap but sets lastUserTurnTime", () => {
+    const now = Date.now();
+    const state = makeSessionState({ lastUserTurnTime: 0 });
+    const hist = getSessionHistogram(state);
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: undefined,
+      now,
+    });
+
+    expect(hist.total).toBe(0); // No gap recorded (no prior user turn)
+    expect(state.lastUserTurnTime).toBe(now); // But timestamp was set
+  });
+
+  test("normal user turn records gap correctly", () => {
+    const now = Date.now();
+    const state = makeSessionState({ lastUserTurnTime: now - 180_000 }); // 3 min ago
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "end_turn",
+      now,
+    });
+
+    const hist = getSessionHistogram(state);
+    expect(hist.total).toBe(1);
+    expect(state.lastUserTurnTime).toBe(now);
+  });
+
+  test("global histogram also records gap for user turns", () => {
+    const now = Date.now();
+    const state = makeSessionState({ lastUserTurnTime: now - 120_000 }); // 2 min ago
+
+    simulateGapRecording(state, {
+      isSubagentTurn: false,
+      prevStopReason: "end_turn",
+      now,
+    });
+
+    const globalHist = getGlobalHistogram(state.projectPath);
+    expect(globalHist.total).toBe(1);
+  });
+
+  test("global histogram is not polluted by subagent turns", () => {
+    const now = Date.now();
+    const state = makeSessionState({ lastUserTurnTime: now - 120_000 });
+
+    simulateGapRecording(state, {
+      isSubagentTurn: true,
+      prevStopReason: "end_turn",
+      now,
+    });
+
+    const globalHist = getGlobalHistogram(state.projectPath);
+    expect(globalHist.total).toBe(0);
+  });
+
+  test("single histogram: no time-slot segmentation", () => {
+    const state = makeSessionState({ lastUserTurnTime: 0 });
+
+    // The session's survivalModel should be a single InterTurnHistogram,
+    // not a slot-segmented record.
+    const hist = getSessionHistogram(state);
+    expect(hist).toBeDefined();
+    expect(hist.counts).toBeInstanceOf(Array);
+    expect(hist.total).toBe(0);
+
+    // survivalModel is the histogram itself, not a { slots: ... } wrapper
+    expect(state.survivalModel).toBe(hist);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Global histogram persistence: backward-compat migration
+// ---------------------------------------------------------------------------
+
+import { db, projectId } from "@loreai/core";
+
+describe("global histogram persistence", () => {
+  const TEST_PROJECT_PATH = "/tmp/test-histogram-project";
+  let pid: string;
+
+  beforeEach(() => {
+    _resetForTest();
+
+    // Ensure the project exists in the DB so projectId() returns a value.
+    const d = db();
+    const now = Date.now();
+    d.query(
+      "INSERT OR IGNORE INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).run("test-hist-pid", TEST_PROJECT_PATH, "test-hist", null, now);
+    pid = projectId(TEST_PROJECT_PATH)!;
+    expect(pid).toBe("test-hist-pid");
+
+    // Clean any leftover rows from previous test runs.
+    d.query("DELETE FROM warmup_histograms WHERE project_id = ?").run(pid);
+  });
+
+  test("merges old slot-segmented rows into single histogram on load", () => {
+    const d = db();
+    const now = Date.now();
+    const binCount = HISTOGRAM_BINS.length + 1;
+
+    // Simulate old-format DB rows: work (10 obs in bin 0), evening (5 obs in bin 3)
+    const workCounts = new Array(binCount).fill(0);
+    workCounts[0] = 10;
+    const eveningCounts = new Array(binCount).fill(0);
+    eveningCounts[3] = 5;
+
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "work", JSON.stringify(workCounts), 10, now);
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "evening", JSON.stringify(eveningCounts), 5, now);
+
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+
+    const hist = getGlobalHistogram(TEST_PROJECT_PATH);
+    expect(hist.total).toBe(15); // 10 + 5
+    expect(hist.counts[0]).toBe(10);
+    expect(hist.counts[3]).toBe(5);
+  });
+
+  test("flush writes 'all' row and deletes old slot rows", () => {
+    const d = db();
+    const now = Date.now();
+    const binCount = HISTOGRAM_BINS.length + 1;
+
+    // Insert old-format rows
+    const workCounts = new Array(binCount).fill(0);
+    workCounts[0] = 10;
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "work", JSON.stringify(workCounts), 10, now);
+
+    // Load, record a gap, then flush
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+    recordGlobalGap(TEST_PROJECT_PATH, 120_000); // 2 min gap
+    flushGlobalHistograms();
+
+    // Verify: old "work" row deleted, "all" row exists
+    const rows = d
+      .query("SELECT time_slot, total FROM warmup_histograms WHERE project_id = ?")
+      .all(pid) as Array<{ time_slot: string; total: number }>;
+
+    expect(rows.length).toBe(1);
+    expect(rows[0].time_slot).toBe("all");
+    expect(rows[0].total).toBe(11); // 10 from old work + 1 new gap
+  });
+
+  test("reload after flush does not double-count", () => {
+    const d = db();
+    const now = Date.now();
+    const binCount = HISTOGRAM_BINS.length + 1;
+
+    // Insert old-format rows
+    const workCounts = new Array(binCount).fill(0);
+    workCounts[0] = 7;
+    const nightCounts = new Array(binCount).fill(0);
+    nightCounts[5] = 3;
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "work", JSON.stringify(workCounts), 7, now);
+    d.query(
+      "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(pid, "night", JSON.stringify(nightCounts), 3, now);
+
+    // Load → flush → reset → reload
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+    flushGlobalHistograms();
+    _resetForTest(); // clears in-memory state
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+
+    const hist = getGlobalHistogram(TEST_PROJECT_PATH);
+    expect(hist.total).toBe(10); // 7 + 3, no double-count
+    expect(hist.counts[0]).toBe(7);
+    expect(hist.counts[5]).toBe(3);
   });
 });

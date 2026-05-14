@@ -183,7 +183,7 @@ export type LoreMessageWithParts = {
  * Host adapters implement this:
  * - OpenCode: wraps `client.session.create()` + `client.session.prompt()`
  * - Pi: wraps `complete()` from `@mariozechner/pi-ai`
- * - Standalone: direct `fetch()` to provider APIs
+ * - Gateway: direct `fetch()` to provider APIs
  */
 export interface LLMClient {
   /**

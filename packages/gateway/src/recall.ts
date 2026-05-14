@@ -24,6 +24,7 @@ import {
   log,
   config as loreConfig,
   type RecallScope,
+  type LLMClient,
 } from "@loreai/core";
 
 import type {
@@ -109,6 +110,11 @@ const MARKER_REGEX = /📚 Searching (.+?) for "(.+?)"…/;
 
 /** Regex to parse an id-based recall marker. */
 const ID_MARKER_REGEX = /📚 Fetching detail for (.+?)…/;
+
+/** Check if a text string is a recall marker (search or detail). */
+export function isRecallMarker(text: string): boolean {
+  return parseRecallMarker(text) !== null;
+}
 
 /**
  * Parse a recall marker text block, returning query and scope if valid.
@@ -338,6 +344,7 @@ export async function executeRecall(
   block: GatewayToolUseBlock,
   projectPath: string,
   sessionID: string,
+  llm?: LLMClient,
 ): Promise<{ result: string; input: { query: string; scope?: RecallScope; id?: string } }> {
   const { query, scope, id } = parseRecallInput(block);
   const cfg = loreConfig();
@@ -350,6 +357,7 @@ export async function executeRecall(
       projectPath,
       sessionID,
       knowledgeEnabled: cfg.knowledge?.enabled ?? true,
+      llm,
       searchConfig: cfg.search,
     });
 

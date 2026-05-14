@@ -2,8 +2,8 @@
  * Safe process exit for the Bun standalone binary.
  *
  * Bun 1.3.x panics with "A C++ exception occurred" when NAPI modules (e.g.
- * onnxruntime-node loaded by fastembed) are cleaned up during normal
- * process.exit() teardown. This module provides `safeExit()` which uses
+ * onnxruntime-node loaded by @huggingface/transformers) are cleaned up during
+ * normal process.exit() teardown. This module provides `safeExit()` which uses
  * libc `_exit()` via FFI to skip atexit handlers and NAPI teardown.
  *
  * Falls back to `process.exit()` when:

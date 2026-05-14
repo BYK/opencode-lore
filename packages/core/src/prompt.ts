@@ -222,6 +222,10 @@ Focus ONLY on knowledge that helps a coding agent work effectively on THIS codeb
 - Environment/tooling setup details that affect development
 - Important relationships between components that aren't obvious from reading the code
 - User preferences and working style specific to how they use this project
+- Repeated user instructions — when the user says things like "always", "never",
+  "make sure to", "don't forget to", these are high-value preference candidates.
+  If you see instruction-like language, prioritize extracting it as a "preference" entry.
+  These instructions represent how the user wants to work and should persist across sessions.
 
 Do NOT extract:
 - Task-specific details (file currently being edited, current bug being fixed)
@@ -316,7 +320,9 @@ IMPORTANT:
 2. When updating, REPLACE the content with a complete rewrite — never append.
 3. If entries cover the same system from different angles, merge them: update one, delete the rest.
 4. Only create a new entry for genuinely distinct knowledge with no existing home.
-5. Keep all entries under 150 words. If an existing entry is too long, use an update op to trim it.`;
+5. Keep all entries under 150 words. If an existing entry is too long, use an update op to trim it.
+6. Pay special attention to user instructions ("always do X", "never do Y", "make sure to X").
+   These are strong signals for "preference" entries with high confidence.`;
 }
 
 /**

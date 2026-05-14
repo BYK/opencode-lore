@@ -25,11 +25,10 @@
  */
 import * as esbuild from "esbuild";
 import {
-  copyFileSync,
   existsSync,
-  rmSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
   renameSync,
   unlinkSync,
@@ -43,11 +42,7 @@ import { processBinary } from "binpunch";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
 import {
   MODEL_DIR_NAME,
-  MODEL_FILE_NAME,
   MODEL_FILES,
-  sideLoadLibBasename,
-  sideLoadLibRelPath,
-  type VendorTarget,
 } from "./vendor-paths";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -59,10 +54,9 @@ const pkg = JSON.parse(
   readFileSync(join(packageDir, "package.json"), "utf8"),
 ) as { version: string };
 
-/** Targets we vendor fastembed for. darwin-x64 is intentionally absent —
- *  see packages/gateway/script/vendor-paths.ts for the reason. Binaries
- *  for unvendored targets ship without embedded fastembed and rely on the
- *  auto-fallback to a remote provider at runtime. */
+/** Targets we vendor the embedding model for. All supported targets get
+ *  the vendored model — transformers.js bundles its own ONNX runtime, so
+ *  there are no per-platform native binding issues. */
 const VENDORED_TARGETS = new Set<string>([
   "darwin-arm64",
   "linux-arm64",
@@ -80,9 +74,9 @@ const { values: flags } = parseArgs({
     binary: { type: "boolean", default: false },
     target: { type: "string" },
     release: { type: "boolean", default: false },
-    /** Skip embedding fastembed even for targets that support it.
-     *  Produces a smaller binary (~120 MB lighter) but local embeddings
-     *  won't work out-of-the-box; users must set a remote API key.
+    /** Skip embedding the model even for targets that support it.
+     *  Produces a smaller binary (~140 MB lighter) but local embeddings
+     *  require a network download on first use.
      *  Useful for iteration speed during local dev. */
     "no-vendor": { type: "boolean", default: false },
   },
@@ -122,54 +116,44 @@ function currentTarget(): CompileTarget {
 }
 
 /**
- * Prepare the per-target vendor staging tree (a real `node_modules/`
- * tree on disk that Bun's bundler walks at compile time) and the shared
- * model cache. Auto-runs `vendor-embeddings.ts` if either is missing.
- * Returns the absolute path to the staging dir, or `null` if vendoring
+ * Ensure the shared model cache is populated with the embedding model files.
+ * Auto-runs `vendor-embeddings.ts` if missing.
+ * Returns the absolute path to the model dir, or `null` if vendoring
  * is disabled / unsupported for this target.
  */
-function prepareVendorStaging(target: CompileTarget): string | null {
+function prepareVendorModelCache(target: CompileTarget): string | null {
   if (flags["no-vendor"]) {
     console.log(`  Vendor: skipped (--no-vendor)`);
     return null;
   }
   if (!VENDORED_TARGETS.has(target)) {
     console.log(
-      `  Vendor: skipped (${target} unsupported by @anush008/tokenizers — ` +
-        `runtime falls back to remote provider)`,
+      `  Vendor: skipped (${target} not in vendored targets — ` +
+        `runtime downloads model on first use)`,
     );
     return null;
   }
 
-  const stagingDir = join(repoRoot, ".vendor-build", target);
   const sharedModelCache = join(repoRoot, ".vendor-build", ".model-cache");
-  const sideLoadAbs = join(stagingDir, sideLoadLibRelPath(target as VendorTarget));
   const modelDir = join(sharedModelCache, MODEL_DIR_NAME);
 
-  // Required artefacts are: target's fastembed + native bindings, the
-  // target-specific side-load lib, and every file fastembed reads from
-  // the model dir at runtime. If all are present, skip the vendor run.
-  const requiredArtifacts = [
-    join(stagingDir, "node_modules", "fastembed", "package.json"),
-    sideLoadAbs,
-    ...MODEL_FILES.map((f) => join(modelDir, f)),
-  ];
+  // Required artefacts: every file transformers.js reads from the model
+  // dir at runtime. If all are present, skip the vendor run.
+  const requiredArtifacts = MODEL_FILES.map((f) => join(modelDir, f));
   if (requiredArtifacts.every((p) => existsSync(p))) {
-    console.log(`  Vendor: cache hit — ${target} staging + shared model ready`);
-    return stagingDir;
+    console.log(`  Vendor: cache hit — shared model ready`);
+    return modelDir;
   }
 
-  // Auto-build. The vendor script is fast (~3s warm) and idempotent.
+  // Auto-build. The vendor script downloads the model (~137 MB) and is idempotent.
   console.log(
-    `  Vendor: missing artefacts for ${target} — running vendor-embeddings.ts --target ${target}`,
+    `  Vendor: missing model artefacts — running vendor-embeddings.ts`,
   );
   const result = spawnSync(
     "bun",
     [
       "run",
       join(packageDir, "script/vendor-embeddings.ts"),
-      "--target",
-      target,
     ],
     { stdio: "inherit", cwd: repoRoot },
   );
@@ -183,7 +167,95 @@ function prepareVendorStaging(target: CompileTarget): string | null {
       process.exit(1);
     }
   }
-  return stagingDir;
+  return modelDir;
+}
+
+/**
+ * esbuild plugin for binary builds that:
+ *
+ * 1. Redirects `onnxruntime-node` → `onnxruntime-web` (node entry). The native
+ *    backend's `.node` NAPI binaries can't be loaded from Bun's `$bunfs`.
+ *    onnxruntime-web's WASM+SIMD backend is API-compatible and actually ~2x
+ *    faster on batch embedding workloads due to avoiding N-API overhead.
+ *    transformers.js's `IS_NODE_ENV` branch uses it transparently — it populates
+ *    `supportedDevices` with `cpu` (which onnxruntime-web handles via WASM).
+ *
+ * 2. Stubs `sharp` as empty — image processing for vision models, unused for
+ *    text embeddings.
+ *
+ * 3. Resolves `onnxruntime-common` and `onnxruntime-web` from Bun's `.bun/`
+ *    store (transitive deps not hoisted to `node_modules/`).
+ */
+/** Find a package directory inside Bun's `.bun/` store. Prefers stable versions. */
+function findBunPackageDir(name: string): string {
+  const bunDir = join(repoRoot, "node_modules/.bun");
+  const prefix = `${name}@`;
+  const entries = readdirSync(bunDir).filter((e) => e.startsWith(prefix));
+  if (entries.length === 0) {
+    throw new Error(`findBunPackageDir: cannot find ${name} in node_modules/.bun/`);
+  }
+  const stable = entries.filter((m) => !m.includes("-", prefix.length));
+  const pick = (stable.length > 0 ? stable : entries).sort().reverse()[0];
+  return join(bunDir, pick, "node_modules", name);
+}
+
+/** Find a package's main entry inside Bun's `.bun/` store. Prefers stable versions. */
+function findBunPackageEntry(name: string, entryOverride?: string): string {
+  const pkgDir = findBunPackageDir(name);
+  if (entryOverride) return join(pkgDir, entryOverride);
+  const pkgJson = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+  return join(pkgDir, pkgJson.main || "index.js");
+}
+
+function binaryExternalsPlugin(): esbuild.Plugin {
+
+  return {
+    name: "binary-externals",
+    setup(build) {
+      // Stub sharp as an empty module.
+      build.onResolve({ filter: /^sharp$/ }, (args) => ({
+        path: args.path,
+        namespace: "empty-module",
+      }));
+      build.onLoad({ filter: /.*/, namespace: "empty-module" }, () => ({
+        contents: "module.exports = {};",
+        loader: "js",
+      }));
+
+      // Redirect onnxruntime-node → onnxruntime-web's Node.js entry.
+      // The WASM runtime is API-compatible with the native one.
+      const ortWebNodeEntry = findBunPackageEntry("onnxruntime-web", "dist/ort.node.min.mjs");
+      build.onResolve({ filter: /^onnxruntime-node$/ }, () => ({
+        path: ortWebNodeEntry,
+      }));
+
+      // Resolve transitive deps from .bun/ so esbuild can bundle them.
+      for (const pkg of ["onnxruntime-common", "onnxruntime-web"]) {
+        const resolved = findBunPackageEntry(pkg);
+        build.onResolve({ filter: new RegExp(`^${pkg}$`) }, () => ({
+          path: resolved,
+        }));
+      }
+
+      // Patch transformers.js onnx.js to read wasmPaths from globalThis
+      // instead of the CDN URL. The binary wrapper sets
+      // __LORE_VENDOR_WASM_PATHS__ = { mjs, wasm } with $bunfs paths
+      // before the worker evaluates. transformers.js checks
+      // `!ONNX_ENV.wasm.wasmPaths` and falls back to a CDN URL — we
+      // replace that fallback with a globalThis read.
+      build.onLoad({ filter: /transformers\.node\.mjs$/ }, (args) => {
+        let src = readFileSync(args.path, "utf8");
+        // The CDN default looks like:
+        //   ONNX_ENV.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/@huggingface/transformers@${env.version}/dist/`;
+        // Replace it to prefer __LORE_VENDOR_WASM_PATHS__ when available.
+        src = src.replace(
+          /ONNX_ENV\.wasm\.wasmPaths\s*=\s*`https:\/\/cdn\.jsdelivr\.net[^`]*`;/,
+          "ONNX_ENV.wasm.wasmPaths = globalThis.__LORE_VENDOR_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths;",
+        );
+        return { contents: src, loader: "js", resolveDir: dirname(args.path) };
+      });
+    },
+  };
 }
 
 async function buildBinary() {
@@ -198,10 +270,9 @@ async function buildBinary() {
   const distBinDir = join(packageDir, "dist-bin");
   mkdirSync(distBinDir, { recursive: true });
 
-  // Step 0: prepare the per-target vendor staging tree (auto-builds if
-  // missing). May return null for targets that don't support vendoring
-  // or when --no-vendor is set.
-  const stagingDir = prepareVendorStaging(target);
+  // Step 0: ensure the shared model cache is populated (auto-downloads if
+  // missing). May return null when --no-vendor is set.
+  const vendorModelDir = prepareVendorModelCache(target);
 
   // Step 1: esbuild bundle — single ESM file with everything inlined
   const bundlePath = join(distBinDir, "bin.js");
@@ -214,9 +285,11 @@ async function buildBinary() {
     target: "esnext",
     platform: "node",
     conditions: ["bun"],
-    // Bun built-ins + native binary packages (fastembed/onnxruntime contain
-    // platform-specific .node files that esbuild can't bundle)
-    external: ["bun:*", "fastembed", "onnxruntime-*", "@anush008/*"],
+    // Bun built-ins stay external. onnxruntime-node and sharp are stubbed
+    // as empty modules — transformers.js falls back to the bundled WASM
+    // ONNX runtime, and sharp is only used for vision models.
+    external: ["bun:*"],
+    plugins: [binaryExternalsPlugin()],
     outfile: bundlePath,
     // "linked" produces an external .map file with a //# sourceMappingURL=
     // comment in the JS. This map is uploaded to Sentry (never shipped to users).
@@ -238,24 +311,14 @@ async function buildBinary() {
   // resolves against Bun's virtual $bunfs. Bun only includes files that
   // are explicit entrypoints in `bun build --compile`, so we must:
   //   (a) produce a standalone embedding-worker.js via esbuild (same
-  //       externals as the main bundle — fastembed is resolved by Bun),
+  //       externals as the main bundle),
   //   (b) pass it as a second entrypoint to `bun build --compile`.
   //
   // The worker doesn't need Sentry debug IDs or external sourcemaps —
-  // it's a small leaf file that delegates to fastembed.
+  // it's a leaf file that delegates to @huggingface/transformers.
   const workerSrc = join(repoRoot, "packages/core/src/embedding-worker.ts");
   const workerBundlePath = join(distBinDir, "embedding-worker.js");
 
-  // For the binary build, we produce TWO worker bundles:
-  //   (1) A "slim" worker for the npm dist (fastembed external) — this is
-  //       the standard one used in dev/dist where fastembed is in node_modules.
-  //   (2) A "fat" worker for the binary (fastembed bundled in, only native
-  //       addons external) — this is embedded as a Bun file asset in the
-  //       wrapper. It must be self-contained because Bun's $bunfs doesn't
-  //       support bare specifier resolution from embedded assets.
-  //
-  // Both are produced by esbuild; the slim one is used by the npm build
-  // (core package build.ts handles that), the fat one is only for the binary.
   await esbuild.build({
     entryPoints: [workerSrc],
     bundle: true,
@@ -263,7 +326,8 @@ async function buildBinary() {
     target: "esnext",
     platform: "node",
     conditions: ["bun"],
-    external: ["bun:*", "fastembed", "onnxruntime-*", "@anush008/*"],
+    external: ["bun:*"],
+    plugins: [binaryExternalsPlugin()],
     outfile: workerBundlePath,
     minify: true,
     logLevel: "info",
@@ -303,98 +367,76 @@ async function buildBinary() {
     }
   }
 
-  // Step 2.5: For vendored targets, generate a wrapper.ts inside the
-  // per-target staging dir that:
+  // Step 2.5: For vendored targets, generate a wrapper.ts in dist-bin/
+  // that:
   //
-  //   (a) Pre-loads the side-load `libonnxruntime.so.1` / .dylib / .dll
-  //       via `bun:ffi.dlopen` BEFORE fastembed evaluates, so the
-  //       bundled `onnxruntime_binding.node`'s runtime dlopen finds the
-  //       cached handle in the process's address space.
-  //   (b) Materialises the bge-small model files from Bun assets to a
-  //       stable on-disk dir (`~/.lore/embeddings-vendored/v{ver}-{tgt}/`)
-  //       — fastembed in CUSTOM mode reads them via @anush008/tokenizers
-  //       Rust code, which uses raw libc fs and can't see Bun's $bunfs.
-  //   (c) Sets `globalThis.__LORE_VENDOR_MODEL__` so the LocalProvider
-  //       knows where the model dir is.
-  //   (d) Dynamically imports bin.js so its module body runs after (a-c).
+  //   (a) Materialises the nomic-embed-text-v1.5 model files from Bun
+  //       assets to a stable on-disk dir (`~/.lore/embeddings-vendored/
+  //       v{ver}-{tgt}/nomic-ai/nomic-embed-text-v1.5/`) —
+  //       @huggingface/transformers reads them via ONNX Runtime's native
+  //       fs, which can't see Bun's $bunfs.
+  //   (b) Sets `globalThis.__LORE_VENDOR_MODEL__` so the LocalProvider
+  //       configures transformers.js to load from the local path.
+  //   (c) Dynamically imports bin.js so its module body runs after (a-b).
   //
-  // The wrapper lives IN the staging dir (not dist-bin/) because Bun's
-  // bundler resolves bare specifiers like "fastembed" relative to the
-  // entry's location — putting wrapper.ts next to the staging's
-  // node_modules/ is what gets the per-target native bindings into the
-  // bundle. We also copy bin.js into the staging dir so the wrapper's
-  // `await import("./bin.js")` resolves cleanly.
+  // The wrapper also handles worker thread routing: when spawned as a
+  // worker thread, it runs embedding-worker.js directly.
   //
-  // For unvendored targets (linux-arm64, --no-vendor), we skip the
-  // wrapper and feed bin.js straight to `bun --compile`. The runtime
-  // then sees no registration, `import("fastembed")` resolves to the
-  // bundled module (which is the host platform's, since esbuild ran on
-  // this host) — so embed() throws and auto-switches to remote provider.
+  // For unvendored targets or --no-vendor, we skip the wrapper and feed
+  // bin.js straight to `bun --compile`. transformers.js then downloads
+  // the model from HuggingFace Hub on first use.
   let wrapperPath: string | null = null;
-  let copiedBinPath: string | null = null;
-  if (stagingDir) {
-    // (a) Side-load lib: keep the lib at its existing relative path
-    //     inside the staging tree so the wrapper imports it directly
-    //     from `./node_modules/...` — no copy needed.
-    const sideLoadRel = sideLoadLibRelPath(target as VendorTarget);
-    const sideLoadBasename = sideLoadLibBasename(target as VendorTarget);
-
-    // (b) Model files: imported directly from the shared, platform-
-    //     independent cache via a `../` relative path. Bun's bundler
-    //     happily resolves `with { type: "file" }` imports across the
-    //     staging boundary, so we don't need to copy the 33 MB model
-    //     into each per-target staging dir.
-
-    // (c) bin.js, embedding-worker.js, + sourcemap. We bring the sourcemap
-    //     along because Bun's `--sourcemap=linked` references it by sibling
-    //     filename; if it can't find bin.js.map next to bin.js the embedded
-    //     map is empty.
-    copiedBinPath = join(stagingDir, "bin.js");
-    copyFileSync(bundlePath, copiedBinPath);
-    copyFileSync(mapPath, `${copiedBinPath}.map`);
-    copyFileSync(workerBundlePath, join(stagingDir, "embedding-worker.js"));
-
-    // (d) The wrapper itself.
-    wrapperPath = join(stagingDir, "wrapper.ts");
-    // Path from staging/wrapper.ts to the shared per-version model cache:
-    // .vendor-build/<target>/wrapper.ts → .vendor-build/.model-cache/<dir>/<file>.
-    const modelImportPrefix = `../.model-cache/${MODEL_DIR_NAME}`;
+  if (vendorModelDir) {
+    wrapperPath = join(distBinDir, "wrapper.ts");
+    // Model files are imported directly from the shared model cache.
     const modelImports = MODEL_FILES.map(
-      (f, i) => `import _model_${i} from ${JSON.stringify(`${modelImportPrefix}/${f}`)} with { type: "file" };`,
+      (f, i) => `import _model_${i} from ${JSON.stringify(join(vendorModelDir, f))} with { type: "file" };`,
     ).join("\n");
     const modelEntries = MODEL_FILES.map(
       (f, i) => `  [${JSON.stringify(f)}, _model_${i}],`,
     ).join("\n");
+
+    // WASM runtime files from onnxruntime-web. In the compiled binary,
+    // onnxruntime-node is redirected to onnxruntime-web (WASM backend).
+    // The WASM files are embedded as Bun assets — onnxruntime-web's node
+    // entry loads them via readFile(), which can read from Bun's $bunfs.
+    const ortWebDistDir = findBunPackageDir("onnxruntime-web") + "/dist";
+    const wasmFiles = [
+      "ort-wasm-simd-threaded.mjs",
+      "ort-wasm-simd-threaded.wasm",
+    ];
+    const wasmImports = wasmFiles.map(
+      (f, i) => `import _wasm_${i} from ${JSON.stringify(join(ortWebDistDir, f))} with { type: "file" };`,
+    ).join("\n");
+
     const wrapperSrc = [
       `// AUTO-GENERATED by packages/gateway/script/build.ts. Do not commit.`,
-      `// Embeds the side-load onnxruntime lib and bge-small model files`,
-      `// as Bun assets, materialises them at process start, and hands off`,
-      `// to bin.js. See the (a-d) notes in build.ts for the rationale.`,
+      `// Embeds the nomic-embed-text-v1.5 model files + WASM runtime as Bun`,
+      `// assets, materialises model files at process start, and hands off to bin.js.`,
       ``,
       `// --- Static imports (must be top-level in ESM) ---`,
       `import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";`,
       `import { homedir } from "node:os";`,
-      `import { dirname, join } from "node:path";`,
-      `import { dlopen, FFIType } from "bun:ffi";`,
+      `import { join } from "node:path";`,
       `import { isMainThread } from "node:worker_threads";`,
-      `import _libOnnx from "./${sideLoadRel}" with { type: "file" };`,
       modelImports,
+      wasmImports,
       ``,
       `// --- Worker thread shortcut ---`,
       `// When spawned as a worker thread, run the embedding worker code path`,
-      `// directly. The worker's import("fastembed") resolves from $bunfs where`,
-      `// Bun bundled it as part of this entrypoint's module graph. This avoids`,
-      `// needing a separate worker entrypoint — Bun's --compile silently drops`,
-      `// additional entrypoints on macOS and Windows.`,
+      `// directly. This avoids needing a separate worker entrypoint — Bun's`,
+      `// --compile silently drops additional entrypoints on macOS and Windows.`,
       `if (!isMainThread) {`,
+      `  // Register WASM file paths for the esbuild-bundled worker. The`,
+      `  // binaryExternalsPlugin patches transformers.js to read wasmPaths`,
+      `  // from this globalThis key instead of the CDN fallback URL.`,
+      `  // Bun hashes $bunfs filenames, so we pass exact paths as an object.`,
+      `  (globalThis as Record<string, unknown>).__LORE_VENDOR_WASM_PATHS__ = { mjs: _wasm_0, wasm: _wasm_1 };`,
       `  await import("./embedding-worker.js");`,
       `} else {`,
       `  // --- Main thread: materialise vendor assets and hand off ---`,
       ``,
       `  // Race-safe materialisation: write to a per-pid tmp then rename.`,
-      `  // renameSync is atomic on POSIX (overwrites if dest exists, but we`,
-      `  // guard with existsSync first), and on Windows it errors EEXIST —`,
-      `  // we drop our tmp in that case since the other process won.`,
       `  const materialize = (src: string, dest: string): void => {`,
       `    if (existsSync(dest)) return;`,
       `    const tmp = \`\${dest}.tmp.\${process.pid}\`;`,
@@ -402,7 +444,6 @@ async function buildBinary() {
       `    try {`,
       `      renameSync(tmp, dest);`,
       `    } catch {`,
-      `      // Another process beat us. Drop our tmp.`,
       `      try { unlinkSync(tmp); } catch { /* ignore */ }`,
       `    }`,
       `  };`,
@@ -410,45 +451,27 @@ async function buildBinary() {
       `  const TARGET = ${JSON.stringify(target)};`,
       `  const VERSION = ${JSON.stringify(pkg.version)};`,
       ``,
-      `  // (a) Materialise the side-load lib next to the binary's per-user`,
-      `  // data dir, then dlopen it to seat it in the process's address`,
-      `  // space. Once cached, onnxruntime_binding.node's runtime`,
-      `  // dlopen("${sideLoadBasename}") finds the same handle.`,
+      `  // (a) Materialise the model files. ONNX Runtime reads these via`,
+      `  // native fs, so they must be at a real disk path — Bun's $bunfs`,
+      `  // only works for our own JS-side fs calls.`,
+      `  // Layout matches HF repo structure that transformers.js expects:`,
+      `  //   <modelDir>/config.json`,
+      `  //   <modelDir>/tokenizer.json`,
+      `  //   <modelDir>/onnx/model_quantized.onnx`,
       `  const vendorRoot = join(homedir(), ".lore", "embeddings-vendored", \`v\${VERSION}-\${TARGET}\`);`,
-      `  const libDir = join(vendorRoot, "lib");`,
-      `  mkdirSync(libDir, { recursive: true });`,
-      `  const libPath = join(libDir, ${JSON.stringify(sideLoadBasename)});`,
-      `  materialize(_libOnnx, libPath);`,
-      `  // OrtGetApiBase is exported by libonnxruntime across all`,
-      `  // platforms we ship; we don't call it — the symbol entry is just`,
-      `  // here because bun:ffi rejects an empty symbols set. If`,
-      `  // onnxruntime ever drops/renames it (or the dylib install_name`,
-      `  // doesn't match what we wrote), let fastembed's later init`,
-      `  // produce the user-facing error rather than crashing here.`,
-      `  try {`,
-      `    dlopen(libPath, { OrtGetApiBase: { args: [], returns: FFIType.ptr } });`,
-      `  } catch {`,
-      `    // Lib loaded into address space anyway via a previous dlopen,`,
-      `    // or we'll fail downstream with a clearer diagnostic.`,
-      `  }`,
-      ``,
-      `  // (b) Materialise the model files. fastembed CUSTOM mode reads`,
-      `  // these from the dir via libc fs (through native code), so they`,
-      `  // must be at a real disk path — Bun's $bunfs only works for our`,
-      `  // own JS-side fs calls.`,
       `  const modelDir = join(vendorRoot, ${JSON.stringify(MODEL_DIR_NAME)});`,
-      `  mkdirSync(modelDir, { recursive: true });`,
       `  const modelEntries: Array<[string, string]> = [`,
       modelEntries,
       `  ];`,
       `  for (const [name, src] of modelEntries) {`,
-      `    materialize(src, join(modelDir, name));`,
+      `    const dest = join(modelDir, name);`,
+      `    mkdirSync(join(modelDir, name.includes("/") ? name.slice(0, name.lastIndexOf("/")) : ""), { recursive: true });`,
+      `    materialize(src, dest);`,
       `  }`,
       ``,
-      `  // (c) Register for the LocalProvider.`,
+      `  // (b) Register for the LocalProvider.`,
       `  (globalThis as Record<string, unknown>).__LORE_VENDOR_MODEL__ = {`,
-      `    modelAbsoluteDirPath: modelDir,`,
-      `    modelName: ${JSON.stringify(MODEL_FILE_NAME)},`,
+      `    localModelPath: vendorRoot,`,
       `    target: TARGET,`,
       `    version: VERSION,`,
       `  };`,
@@ -457,13 +480,16 @@ async function buildBinary() {
       `  // above routes worker threads to embedding-worker.js automatically.`,
       `  (globalThis as Record<string, unknown>).__LORE_VENDOR_WORKER_URL__ = import.meta.url;`,
       ``,
-      `  // (d) Hand off. Dynamic import so bin.js's module body evaluates`,
+      `  // (c) Hand off. Dynamic import so bin.js's module body evaluates`,
       `  // after the registration above (static imports get hoisted).`,
       `  await import("./bin.js");`,
       `}`,
       ``,
     ].join("\n");
     writeFileSync(wrapperPath, wrapperSrc);
+    // bin.js, embedding-worker.js, and wrapper.ts are all in distBinDir,
+    // so the wrapper's `import("./bin.js")` and `import("./embedding-worker.js")`
+    // resolve without any copies.
     console.log(`✓ vendor wrapper: ${wrapperPath}`);
   }
 
@@ -481,29 +507,11 @@ async function buildBinary() {
   const binaryName = `lore-${target}${ext}`;
   const binaryPath = join(distBinDir, binaryName);
 
-  // The compile entry is the wrapper when vendoring (which lives inside
-  // the staging dir, so Bun resolves "fastembed" + transitive deps from
-  // the per-target node_modules), otherwise the esbuild bundle directly.
-  //
-  // Vendored targets: no --external flags — we WANT Bun to bundle
-  // fastembed + onnxruntime-node + @anush008/tokenizers (including their
-  // .node addons) into the binary.
-  //
-  // Unvendored targets (e.g. linux-arm64): the esbuild bundle (bin.js)
-  // contains bare `import("fastembed")` (marked external by esbuild).
-  // Without a staging dir's node_modules nearby, Bun can't resolve it.
-  // We pass --external so Bun leaves the import as-is; at runtime the
-  // dynamic import fails, the try/catch in embedding.ts catches it, and
-  // the auto-fallback to a remote provider kicks in.
+  // The compile entry is the wrapper when vendoring (embeds model files
+  // as Bun assets), otherwise the esbuild bundle directly (transformers.js
+  // downloads the model on first use).
   const compileEntry = wrapperPath ?? bundlePath;
-  // Use Bun.build() JS API instead of the CLI for reliable cross-platform
-  // builds. We use a SINGLE entrypoint because Bun silently drops additional
-  // entrypoints on macOS and Windows (both CLI and JS API). The worker file
-  // is instead embedded as a Bun asset via `import ... with { type: "file" }`
-  // in the wrapper and materialised to disk at runtime.
-  const externals = !stagingDir
-    ? ["fastembed", "onnxruntime-*", "@anush008/*"]
-    : [];
+  const externals: string[] = [];
 
   try {
     const result = await Bun.build({
@@ -534,12 +542,10 @@ async function buildBinary() {
   renameSync(esbuildMapBackup, mapPath);
 
   // Bun --compile of wrapper.ts also produces wrapper.js.map (its own
-  // external map; same data as the embedded map, named after the entry).
-  // We don't want to upload it to Sentry — it has no debug ID matching our
-  // app code, just noise in the project's release. Delete it.
+  // external map). Delete it — we don't upload it to Sentry.
   if (wrapperPath) {
     try {
-      unlinkSync(`${wrapperPath.replace(/\.ts$/, ".js")}.map`);
+      unlinkSync(wrapperPath.replace(/\.ts$/, ".js.map"));
     } catch {
       /* not all Bun versions emit this — ignore if missing */
     }
@@ -596,13 +602,7 @@ async function buildBinary() {
     console.log("  No SENTRY_AUTH_TOKEN — skipping sourcemap upload");
   }
 
-  // Clean up intermediate files (only the binary is the artifact). The
-  // staging dir itself stays in `.vendor-build/<target>/` because
-  // re-running compile will reuse the per-target node_modules and the
-  // model cache; deleting it would force a re-install on the next run.
-  // We do delete the per-build copies of bin.js, embedding-worker.js,
-  // and wrapper.ts inside the staging dir though — they're regenerated
-  // every run.
+  // Clean up intermediate files (only the binary is the artifact).
   try {
     unlinkSync(bundlePath);
     unlinkSync(workerBundlePath);
@@ -611,11 +611,6 @@ async function buildBinary() {
       console.log("✓ Sourcemap deleted (uploaded to Sentry)");
     }
     if (wrapperPath) unlinkSync(wrapperPath);
-    if (copiedBinPath) {
-      unlinkSync(copiedBinPath);
-      try { unlinkSync(`${copiedBinPath}.map`); } catch { /* ignore */ }
-      try { unlinkSync(join(dirname(copiedBinPath), "embedding-worker.js")); } catch { /* ignore */ }
-    }
   } catch {
     // Ignore
   }

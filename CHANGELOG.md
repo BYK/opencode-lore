@@ -1,4 +1,68 @@
 # Changelog
+## 0.18.0
+
+### New Features ✨
+
+- (cch) Add seeds for Claude Code up to 2.1.140 by @github-actions in [#283](https://github.com/BYK/loreai/pull/283)
+- (cli) Forward extra arguments to launched agent by @BYK in [#284](https://github.com/BYK/loreai/pull/284)
+- (core) Detect repeated user instructions for LTM curation by @BYK in [#269](https://github.com/BYK/loreai/pull/269)
+- (gateway) Add OpenAI Responses API wire protocol support by @BYK in [#263](https://github.com/BYK/loreai/pull/263)
+- (warming) Replace per-window survival with commitment-based warming model by @BYK in [#280](https://github.com/BYK/loreai/pull/280)
+- Add embedding-based dedup and 'lore data reindex' command by @BYK in [#288](https://github.com/BYK/loreai/pull/288)
+- Migrate embeddings from fastembed/BGE Small to transformers.js/Nomic v1.5 by @BYK in [#287](https://github.com/BYK/loreai/pull/287)
+- Add nightly build support to install script by @BYK in [#275](https://github.com/BYK/loreai/pull/275)
+- Change default port from 6969 to 3207 with fallback chain by @BYK in [#273](https://github.com/BYK/loreai/pull/273)
+- Decouple Pi plugin from @loreai/core via gateway /v1/compact endpoint by @BYK in [#271](https://github.com/BYK/loreai/pull/271)
+- Boost vector search weight in RRF for semantic queries by @BYK in [#260](https://github.com/BYK/loreai/pull/260)
+- Rename data directory from opencode-lore to lore with auto-migration by @BYK in [#259](https://github.com/BYK/loreai/pull/259)
+- Add curator observability and fix pattern extraction false positives by @BYK in [#257](https://github.com/BYK/loreai/pull/257)
+- Add cache warming dashboard page and session section by @BYK in [#256](https://github.com/BYK/loreai/pull/256)
+- Show dashboard URL on startup and add `lore logs` command by @BYK in [#255](https://github.com/BYK/loreai/pull/255)
+- Improve meta-request detection to prevent distilling title/summary conversations by @BYK in [#253](https://github.com/BYK/loreai/pull/253)
+- Add conversation import system for extracting knowledge from prior AI agent history by @BYK in [#252](https://github.com/BYK/loreai/pull/252)
+- Add user-level knowledge page to dashboard by @BYK in [#248](https://github.com/BYK/loreai/pull/248)
+
+### Bug Fixes 🐛
+
+- (cch) Make seed check CI version-agnostic and extract all missing versions by @BYK in [#279](https://github.com/BYK/loreai/pull/279)
+- Include global entries in dedup scan by @BYK in [#295](https://github.com/BYK/loreai/pull/295)
+- Tune embedding dedup threshold to 0.935 by @BYK in [#293](https://github.com/BYK/loreai/pull/293)
+- Raise embedding dedup threshold from 0.85 to 0.92 by @BYK in [#291](https://github.com/BYK/loreai/pull/291)
+- Use token-budget batching to prevent OOM on long texts by @BYK in [#290](https://github.com/BYK/loreai/pull/290)
+- Prevent OOM in embedding backfill with long texts by @BYK in [#289](https://github.com/BYK/loreai/pull/289)
+- Add word-overlap dedup for knowledge entries by @BYK in [#286](https://github.com/BYK/loreai/pull/286)
+- Raise default maxListeners to suppress benign gz stream warning by @BYK in [#285](https://github.com/BYK/loreai/pull/285)
+- Deduplicate concurrent models.dev fetch requests by @BYK in [#282](https://github.com/BYK/loreai/pull/282)
+- Improve lore import UX — stdout logging, prompt ordering, only-ask-once by @BYK in [#278](https://github.com/BYK/loreai/pull/278)
+- Upgrade double-lock, flag parsing, and message ordering by @BYK in [#277](https://github.com/BYK/loreai/pull/277)
+- Cache inferred project path in session state to avoid cwd fallback by @BYK in [#276](https://github.com/BYK/loreai/pull/276)
+- Correct cost intelligence accuracy and add overhead breakdown by @BYK in [#272](https://github.com/BYK/loreai/pull/272)
+- Filter automated turns from cache warming gap histograms by @BYK in [#270](https://github.com/BYK/loreai/pull/270)
+- Streaming robustness, RRF list priority, and CLI suggestion quality by @BYK in [#268](https://github.com/BYK/loreai/pull/268)
+- Quality improvements across cache, recall, streaming, and CLI by @BYK in [#267](https://github.com/BYK/loreai/pull/267)
+- Prevent post-idle compaction from busting /keep sessions on 5m TTL by @BYK in [#266](https://github.com/BYK/loreai/pull/266)
+- Use persisted real worker costs in historical estimates instead of heuristic by @BYK in [#265](https://github.com/BYK/loreai/pull/265)
+- Remove stale project path caching that caused cross-project misattribution by @BYK in [#262](https://github.com/BYK/loreai/pull/262)
+- Filter distilled messages from temporal FTS search and purge worker boilerplate by @BYK in [#261](https://github.com/BYK/loreai/pull/261)
+- Skip post-idle compaction when cache warmer kept the cache warm by @BYK in [#258](https://github.com/BYK/loreai/pull/258)
+- Prevent subagent turns from inflating session messageCount by @BYK in [#254](https://github.com/BYK/loreai/pull/254)
+- Write informational CLI messages to stdout instead of stderr by @BYK in [#249](https://github.com/BYK/loreai/pull/249)
+- Import knowledge from .lore.md on file change and new session start by @BYK in [#247](https://github.com/BYK/loreai/pull/247)
+- Reuse existing gateway instead of crashing on EADDRINUSE by @BYK in [#246](https://github.com/BYK/loreai/pull/246)
+- Avoid Bun NAPI teardown crash on gateway exit by @BYK in [#245](https://github.com/BYK/loreai/pull/245)
+
+### Documentation 📚
+
+- Comprehensive mobile layout and grid overflow fixes by @sylncnr in [#250](https://github.com/BYK/loreai/pull/250)
+
+### Internal Changes 🔧
+
+- (ci) Upgrade GitHub Actions to Node.js 24 compatible versions by @BYK in [#281](https://github.com/BYK/loreai/pull/281)
+
+### Other
+
+- cleanup: remove "gateway mode" language by @BYK in [#274](https://github.com/BYK/loreai/pull/274)
+
 ## 0.17.1
 
 ### Bug Fixes 🐛

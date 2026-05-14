@@ -72,8 +72,12 @@ export type SessionCosts = {
     avoidedCompactionCost: number;
   };
 
-  /** Shadow context counter — tracks virtual context growth for compaction estimation. */
+  /** Shadow context counter — tracks virtual uncompressed context growth for compaction estimation. */
   _shadowContextTokens: number;
+  /** Previous turn's actual (compressed) input tokens — for delta estimation. */
+  _lastActualInput: number;
+  /** Previous turn's output tokens (always uncompressed) — for growth estimation. */
+  _lastOutputTokens: number;
 };
 
 /** Backdated historical estimates from stored data. */
@@ -99,11 +103,16 @@ export type HistoricalEstimates = {
     model: string;
     /** Persisted live-session cost data (null if not available for this session). */
     persisted: {
+      conversationCost: number;
+      workerCost: number;
+      conversationTurns: number;
       warmupSavings: number;
       warmupHits: number;
       ttlSavings: number;
       ttlHits: number;
       batchSavings: number;
+      avoidedCompactions: number;
+      avoidedCompactionCost: number;
     } | null;
   }>;
   /** Totals across all sessions. */
@@ -121,6 +130,14 @@ export type HistoricalEstimates = {
     batchSavings: number;
     sessionCount: number;
     messageCount: number;
+    /**
+     * Total worker cost using persisted real API data where available,
+     * falling back to heuristic distillation estimates for sessions
+     * without a persisted snapshot.
+     */
+    totalWorkerCost: number;
+    /** Persisted conversation cost (from sessions that went idle). */
+    persistedConversationCost: number;
   };
 };
 
@@ -167,6 +184,8 @@ function emptyCosts(): SessionCosts {
       avoidedCompactionCost: 0,
     },
     _shadowContextTokens: 0,
+    _lastActualInput: 0,
+    _lastOutputTokens: 0,
   };
 }
 
@@ -365,35 +384,55 @@ function estimateCompactionCost(
 /**
  * Update the shadow context counter after a conversation turn.
  *
- * Maintains a virtual "what would context size be without Lore?" counter.
- * When it crosses the compaction threshold, records a counterfactual
- * compaction event and resets.
+ * Maintains a virtual "what would context size be without Lore?" counter
+ * using additive growth tracking. Instead of snapshotting the compressed
+ * API token count (which underestimates because Lore's gradient manager
+ * already trimmed the context), we accumulate per-turn growth from
+ * uncompressed signals:
+ *
+ * - Output tokens are always uncompressed (the model's full response).
+ * - The previous turn's output becomes part of the next turn's context.
+ * - New user input is estimated from the delta in actual input tokens.
+ *
+ * When the shadow counter crosses the compaction threshold, a
+ * counterfactual compaction event is recorded and the counter resets.
  *
  * @param totalInputTokens - Total input tokens for this turn (input + cache_read + cache_write)
+ * @param outputTokens - Output tokens for this turn (always uncompressed)
  * @param workerModel - Model ID used for worker calls (for compaction cost estimation)
  */
 export function updateShadowContext(
   sessionID: string,
   totalInputTokens: number,
+  outputTokens: number,
   workerModel: string,
   conversationModel?: string,
 ): void {
   const costs = getOrCreate(sessionID);
 
-  // On first turn, initialize shadow context to the actual input size
+  // On first turn, initialize shadow context to the actual input size.
+  // No compression has happened yet, so the actual count is accurate.
+  // NOTE: this check relies on recordConversationCost() having already
+  // incremented turns for this turn (called earlier in postResponse).
   if (costs.conversation.turns <= 1) {
     costs._shadowContextTokens = totalInputTokens;
+    costs._lastActualInput = totalInputTokens;
+    costs._lastOutputTokens = outputTokens;
     return;
   }
 
-  // Estimate context growth this turn. In reality, each turn adds roughly
-  // the output tokens from the previous turn + new user message tokens.
-  // We approximate by looking at the delta between current total input
-  // and the previous turn's total input (tracked separately in session state).
-  // For simplicity, use the actual total input as the shadow context.
-  // This slightly overestimates because Lore might have trimmed context,
-  // but that's fine — we want a conservative counterfactual.
-  costs._shadowContextTokens = totalInputTokens;
+  // Estimate uncompressed context growth since the last turn.
+  // Growth is at least prevOutput (the assistant's response is always
+  // added to context, uncompressed) and at most inputDelta (when new
+  // user content exceeds the response size). If gradient compression
+  // makes the delta negative, we fall back to prevOutput as the floor.
+  const inputDelta = totalInputTokens - costs._lastActualInput;
+  const prevOutput = costs._lastOutputTokens;
+  const growth = Math.max(inputDelta, prevOutput);
+
+  costs._shadowContextTokens += growth;
+  costs._lastActualInput = totalInputTokens;
+  costs._lastOutputTokens = outputTokens;
 
   if (costs._shadowContextTokens > AUTOCOMPACT_THRESHOLD) {
     costs.counterfactual.avoidedCompactions++;
@@ -572,6 +611,8 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
     batchSavings: 0,
     sessionCount: 0,
     messageCount: 0,
+    totalWorkerCost: 0,
+    persistedConversationCost: 0,
   };
 
   const sessionEstimates: HistoricalEstimates["sessions"] = [];
@@ -657,25 +698,55 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
         }
 
         const sessionCompactionCost = avoidedCompactions * estimateCompactionCost(workerModelID, model);
-        totals.avoidedCompactions += avoidedCompactions;
-        totals.avoidedCompactionCost += sessionCompactionCost;
 
         // --- 3. Look up persisted live-session cost data ---
+        // Avoided compaction and worker cost totals are accumulated here
+        // (not above) because persisted real data is preferred over simulation.
         const persisted = persistedCosts.get(sess.session_id);
         let sessionPersisted: HistoricalEstimates["sessions"][number]["persisted"] = null;
         if (persisted) {
           sessionPersisted = {
+            conversationCost: persisted.conversationCost,
+            workerCost: persisted.workerCost,
+            conversationTurns: persisted.conversationTurns,
             warmupSavings: persisted.warmupSavings,
             warmupHits: persisted.warmupHits,
             ttlSavings: persisted.ttlSavings,
             ttlHits: persisted.ttlHits,
             batchSavings: persisted.batchSavings,
+            avoidedCompactions: persisted.avoidedCompactions,
+            avoidedCompactionCost: persisted.avoidedCompactionCost,
           };
           totals.warmupSavings += persisted.warmupSavings;
           totals.warmupHits += persisted.warmupHits;
           totals.ttlSavings += persisted.ttlSavings;
           totals.ttlHits += persisted.ttlHits;
           totals.batchSavings += persisted.batchSavings;
+          totals.persistedConversationCost += persisted.conversationCost;
+
+          // Prefer persisted real worker cost over heuristic distillation estimate.
+          // The persisted workerCost includes all 5 buckets (distillation, curation,
+          // compaction, recall, warmup) from exact API-reported usage.
+          totals.totalWorkerCost += persisted.workerCost;
+
+          // Prefer persisted avoided compaction data over re-simulation.
+          // Live tracking uses real API-reported total input tokens; the
+          // simulation uses chars/3 estimates that miss system prompt and
+          // tool definition overhead.
+          if (persisted.avoidedCompactions > 0) {
+            totals.avoidedCompactions += persisted.avoidedCompactions;
+            totals.avoidedCompactionCost += persisted.avoidedCompactionCost;
+          } else {
+            // No persisted compaction data — use simulation fallback
+            totals.avoidedCompactions += avoidedCompactions;
+            totals.avoidedCompactionCost += sessionCompactionCost;
+          }
+        } else {
+          // No persisted snapshot — use heuristic distillation estimate as
+          // worker cost and simulation for avoided compactions.
+          totals.totalWorkerCost += sessionDistillCost;
+          totals.avoidedCompactions += avoidedCompactions;
+          totals.avoidedCompactionCost += sessionCompactionCost;
         }
 
         sessionEstimates.push({
@@ -690,8 +761,8 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
           distillationCalls: distillations.length,
           distillationBatchCalls: sessionBatchCalls,
           distillationDirectCalls: sessionDirectCalls,
-          avoidedCompactions,
-          avoidedCompactionCost: sessionCompactionCost,
+          avoidedCompactions: persisted?.avoidedCompactions || avoidedCompactions,
+          avoidedCompactionCost: persisted?.avoidedCompactionCost || sessionCompactionCost,
           model,
           persisted: sessionPersisted,
         });
@@ -709,7 +780,8 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
 
   log.info(
     `cost-tracker: computed historical estimates for ${totals.sessionCount} sessions — ` +
-      `distillation=$${totals.distillationCost.toFixed(4)}, ` +
+      `worker overhead=$${totals.totalWorkerCost.toFixed(4)} (distillation-only=$${totals.distillationCost.toFixed(4)}), ` +
+      `conversation=$${totals.persistedConversationCost.toFixed(4)}, ` +
       `avoided compactions=${totals.avoidedCompactions} ($${totals.avoidedCompactionCost.toFixed(4)}), ` +
       `warmup=$${totals.warmupSavings.toFixed(4)} (${totals.warmupHits} hits), ` +
       `ttl=$${totals.ttlSavings.toFixed(4)} (${totals.ttlHits} hits), ` +

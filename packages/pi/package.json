@@ -1,6 +1,6 @@
 {
   "name": "@loreai/pi",
-  "version": "0.17.1",
+  "version": "0.18.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "description": "Lore memory engine as a Pi (@mariozechner/pi-coding-agent) extension",
@@ -22,7 +22,6 @@
     "build": "bun run script/build.ts"
   },
   "dependencies": {
-    "@loreai/core": "workspace:*",
     "@loreai/gateway": "workspace:*"
   },
   "peerDependencies": {

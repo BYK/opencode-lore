@@ -27,6 +27,16 @@ import {
   costWithoutLore,
   type SessionCosts,
 } from "./cost-tracker";
+import { getActiveSessions } from "./pipeline";
+import {
+  computeWarmingSnapshot,
+  getCircuitBreakerStatus,
+  getGlobalHistogramsSnapshot,
+  HISTOGRAM_BINS,
+  BLEND_PSEUDOCOUNT,
+  type WarmingSnapshot,
+} from "./cache-warmer";
+import type { InterTurnHistogram } from "./translate/types";
 
 // ---------------------------------------------------------------------------
 // HTML template helpers
@@ -304,6 +314,73 @@ th[data-sort].desc::after { content: " \\25BC"; opacity: 0.8; }
   border-radius: var(--radius); background: var(--bg); color: var(--fg);
   font-size: 0.85em; width: 260px; }
 .table-filter .count { font-size: 0.8em; color: var(--fg3); }
+/* --- Cache warming histogram bars --- */
+.histogram { margin: 8px 0; }
+.histogram .bin {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.8em; font-family: var(--mono); line-height: 1.8;
+}
+.histogram .bin-label {
+  width: 48px; text-align: right; color: var(--fg3); flex-shrink: 0;
+}
+.histogram .bin-bars {
+  flex: 1; position: relative; height: 14px;
+  background: var(--bg3); border-radius: 2px; overflow: hidden;
+}
+.histogram .bin-bar {
+  position: absolute; top: 0; left: 0; height: 100%;
+  border-radius: 2px; opacity: 0.7;
+}
+.histogram .bin-bar.session { background: #60a5fa; z-index: 2; }
+.histogram .bin-bar.global  { background: #888; z-index: 1; }
+.histogram .bin-bar.blended { background: #34d399; z-index: 3; }
+.histogram .bin-pct {
+  width: 42px; font-size: 0.75em; color: var(--fg3); flex-shrink: 0;
+}
+.histogram .bin-ttl-marker {
+  color: var(--danger); font-weight: 600; font-size: 0.75em; margin-left: 4px;
+}
+.histogram-legend {
+  display: flex; gap: 16px; font-size: 0.75em; color: var(--fg3); margin: 4px 0 8px;
+}
+.histogram-legend span::before {
+  content: ""; display: inline-block; width: 10px; height: 10px;
+  border-radius: 2px; margin-right: 4px; vertical-align: middle;
+}
+.histogram-legend .leg-session::before { background: #60a5fa; }
+.histogram-legend .leg-global::before  { background: #888; }
+.histogram-legend .leg-blended::before { background: #34d399; }
+/* --- Expandable details --- */
+details.warming { margin: 8px 0; }
+details.warming summary {
+  cursor: pointer; font-weight: 600; font-size: 0.9em;
+  color: var(--fg2); padding: 6px 0;
+}
+details.warming summary:hover { color: var(--accent); }
+details.warming[open] summary { margin-bottom: 8px; }
+/* --- Circuit breaker bar --- */
+.cb-bar {
+  display: inline-block; width: 120px; height: 12px;
+  background: var(--bg3); border-radius: 6px; overflow: hidden;
+  vertical-align: middle; margin: 0 8px;
+}
+.cb-bar-fill { height: 100%; border-radius: 6px; transition: width 0.3s; }
+.cb-ok .cb-bar-fill { background: #34d399; }
+.cb-warn .cb-bar-fill { background: #fbbf24; }
+.cb-tripped .cb-bar-fill { background: #f87171; }
+/* --- Warming status badges --- */
+.badge-warming { background: #dcfce7; color: #166534; }
+.badge-waiting { background: #dbeafe; color: #1e40af; }
+.badge-dead { background: #fef2f2; color: #991b1b; }
+.badge-forced { background: #f3e8ff; color: #6b21a8; }
+.badge-disabled { background: var(--bg3); color: var(--fg3); }
+@media (prefers-color-scheme: dark) {
+  .badge-warming { background: #14532d; color: #86efac; }
+  .badge-waiting { background: #1e3a5f; color: #93c5fd; }
+  .badge-dead { background: #450a0a; color: #fca5a5; }
+  .badge-forced { background: #3b0764; color: #d8b4fe; }
+  .badge-disabled { background: var(--bg3); color: var(--fg3); }
+}
 `;
 
 function layout(title: string, body: string): string {
@@ -322,6 +399,7 @@ function layout(title: string, body: string): string {
   <a href="/ui/knowledge">Knowledge</a>
   <a href="/ui/search">Search</a>
   <a href="/ui/costs">Costs</a>
+  <a href="/ui/warming">Warming</a>
 </nav>
 <div class="container">
 ${body}
@@ -427,6 +505,114 @@ function redirect(url: string): Response {
     status: 302,
     headers: { location: url },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Cache warming helpers
+// ---------------------------------------------------------------------------
+
+/** Format a duration in ms to a human-readable string. */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return "<1s";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return rs > 0 ? `${m}m ${rs}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
+}
+
+/** Human-readable histogram bin label. */
+function binLabel(index: number): string {
+  if (index >= HISTOGRAM_BINS.length) return ">4h";
+  const ms = HISTOGRAM_BINS[index];
+  if (ms < 60_000) return `${ms / 1000}s`;
+  if (ms < 3_600_000) return `${ms / 60_000}m`;
+  return `${(ms / 3_600_000).toFixed(1)}h`;
+}
+
+/** Return a TTL boundary label if this bin edge is a TTL boundary. */
+function ttlMarker(index: number): string | null {
+  if (index >= HISTOGRAM_BINS.length) return null;
+  const ms = HISTOGRAM_BINS[index];
+  if (ms === 300_000) return "5m TTL";
+  if (ms === 3_600_000) return "1h TTL";
+  return null;
+}
+
+/**
+ * Render a CSS bar chart for up to 3 overlaid histograms.
+ * Bars are scaled relative to the max count across all provided histograms.
+ */
+function renderHistogram(opts: {
+  session?: InterTurnHistogram;
+  global?: InterTurnHistogram;
+  blended?: InterTurnHistogram;
+}): string {
+  let maxCount = 1;
+  for (const h of [opts.session, opts.global, opts.blended]) {
+    if (!h) continue;
+    for (const c of h.counts) {
+      if (c > maxCount) maxCount = c;
+    }
+  }
+
+  const binCount = HISTOGRAM_BINS.length + 1;
+  let html = `<div class="histogram">`;
+
+  for (let i = 0; i < binCount; i++) {
+    const label = binLabel(i);
+    const marker = ttlMarker(i);
+
+    const sPct = opts.session ? (opts.session.counts[i] / maxCount) * 100 : 0;
+    const gPct = opts.global ? (opts.global.counts[i] / maxCount) * 100 : 0;
+    const bPct = opts.blended ? (opts.blended.counts[i] / maxCount) * 100 : 0;
+
+    const displayHist = opts.blended ?? opts.session ?? opts.global;
+    const displayPct =
+      displayHist && displayHist.total > 0
+        ? ((displayHist.counts[i] / displayHist.total) * 100).toFixed(0) + "%"
+        : "";
+
+    html += `<div class="bin">`;
+    html += `<span class="bin-label">${esc(label)}</span>`;
+    html += `<span class="bin-bars">`;
+    if (gPct > 0) html += `<span class="bin-bar global" style="width:${gPct.toFixed(1)}%"></span>`;
+    if (sPct > 0) html += `<span class="bin-bar session" style="width:${sPct.toFixed(1)}%"></span>`;
+    if (bPct > 0) html += `<span class="bin-bar blended" style="width:${bPct.toFixed(1)}%"></span>`;
+    html += `</span>`;
+    html += `<span class="bin-pct">${displayPct}</span>`;
+    if (marker) html += `<span class="bin-ttl-marker">${esc(marker)}</span>`;
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+
+  // Legend
+  const layers: string[] = [];
+  if (opts.session) layers.push(`<span class="leg-session">Session (${opts.session.total} obs)</span>`);
+  if (opts.global) layers.push(`<span class="leg-global">Global (${opts.global.total} obs)</span>`);
+  if (opts.blended) layers.push(`<span class="leg-blended">Blended</span>`);
+  if (layers.length > 1) {
+    html += `<div class="histogram-legend">${layers.join("")}</div>`;
+  }
+
+  return html;
+}
+
+/** Render a warming status badge from a snapshot. */
+function warmingStatusBadge(snap: WarmingSnapshot): string {
+  if (snap.circuitBreaker.tripped)
+    return `<span class="badge badge-dead">TRIPPED</span>`;
+  if (snap.disabled)
+    return `<span class="badge badge-dead">dead</span>`;
+  if (snap.forceKeepWarm)
+    return `<span class="badge badge-forced">forced</span>`;
+  if (snap.shouldWarmNow)
+    return `<span class="badge badge-warming">warming</span>`;
+  return `<span class="badge badge-waiting">waiting</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +845,62 @@ function pageKnowledge(id: string): string | null {
   return layout(entry.title, body);
 }
 
+/** Render cache warming heuristics section for a live session. */
+function renderWarmingSection(sessionId: string): string {
+  const sessions = getActiveSessions();
+  const state = [...sessions.values()].find((s) => s.sessionID === sessionId);
+  if (!state) return ""; // historical session — no live warming data
+
+  const snap = computeWarmingSnapshot(state);
+  const hitRate =
+    snap.warmupCount > 0
+      ? `${snap.warmupHits}/${snap.warmupCount} (${((snap.warmupHits / snap.warmupCount) * 100).toFixed(0)}%)`
+      : "0";
+
+  let html = `<h2>Cache Warming</h2>`;
+
+  // Stat cards
+  html += `<div class="stats">
+    <div class="stat"><div class="label">Status</div><div class="value">${warmingStatusBadge(snap)}</div></div>
+    <div class="stat"><div class="label">Warmups</div><div class="value">${snap.warmupCount}</div></div>
+    <div class="stat"><div class="label">Hits</div><div class="value">${hitRate}</div></div>
+    <div class="stat"><div class="label">P(returns)</div><div class="value">${(snap.pReturns * 100).toFixed(1)}%</div></div>
+    <div class="stat"><div class="label">P(finished)</div><div class="value">${(snap.pSessionFinished * 100).toFixed(1)}%</div></div>
+    <div class="stat"><div class="label">S(t)</div><div class="value">${(snap.survivalAtIdle * 100).toFixed(1)}%</div></div>
+  </div>`;
+
+  // Expandable decision details
+  html += `<details class="warming"><summary>Decision Details</summary>
+    <div class="card">
+      <div class="field"><span class="key">Idle:</span> ${formatDuration(snap.idleMs)}</div>
+      <div class="field"><span class="key">TTL:</span> ${snap.ttl ?? "5m (default)"}</div>
+      <div class="field"><span class="key">Phase:</span> ${snap.warmingPhase}</div>
+      <div class="field"><span class="key">Turns:</span> ${snap.messageCount}</div>
+      <div class="field"><span class="key">Text-only runs:</span> ${snap.consecutiveTextOnlyTurns}</div>
+      <div class="field"><span class="key">Break fraction:</span> ${(snap.breakFrac * 100).toFixed(1)}%</div>
+      <div class="field"><span class="key">Threshold:</span> ${(snap.threshold * 100).toFixed(1)}%</div>
+      <div class="field"><span class="key">P(session finished):</span> ${(snap.pSessionFinished * 100).toFixed(1)}%</div>
+      <div class="field"><span class="key">P(returns):</span> ${(snap.pReturns * 100).toFixed(1)}%</div>
+      <div class="field"><span class="key">Cycles spent:</span> ${snap.cyclesSpent} / ${snap.maxCycles} max</div>
+      <div class="field"><span class="key">Expected cycles:</span> ${snap.expectedCycles.toFixed(1)}</div>
+      <div class="field"><span class="key">Session weight:</span> ${snap.sessionWeight.toFixed(2)} (${snap.sessionHistogram.total} obs / ${BLEND_PSEUDOCOUNT} pseudocount)</div>
+      ${snap.notWarmingReason ? `<div class="field"><span class="key">Not warming:</span> ${esc(snap.notWarmingReason)}</div>` : ""}
+      <div class="field"><span class="key">Circuit breaker:</span> ${snap.circuitBreaker.tripped ? '<span style="color:var(--danger)">TRIPPED</span>' : `OK (${snap.circuitBreaker.failures}/${snap.circuitBreaker.maxFailures})`}</div>
+    </div>
+  </details>`;
+
+  // Expandable histogram
+  html += `<details class="warming"><summary>Survival Histogram</summary>
+    ${renderHistogram({
+      session: snap.sessionHistogram,
+      global: snap.globalHistogram,
+      blended: snap.blendedHistogram,
+    })}
+  </details>`;
+
+  return html;
+}
+
 function pageSession(pid: string, sessionId: string): string | null {
   // Find the project path from the project ID
   const projects = data.listProjects();
@@ -686,6 +928,9 @@ function pageSession(pid: string, sessionId: string): string | null {
 
   // Cost intelligence
   body += renderCostSummary(sessionId);
+
+  // Cache warming heuristics (live sessions only)
+  body += renderWarmingSection(sessionId);
 
   // Messages
   body += `<h2>Messages (${messages.length})</h2>`;
@@ -920,6 +1165,114 @@ function pageSearchDetail(fullId: string): string | null {
 
 
 // ---------------------------------------------------------------------------
+// Cache Warming page
+// ---------------------------------------------------------------------------
+
+function pageWarming(): string {
+  let body = breadcrumb([
+    { label: "Dashboard", href: "/ui" },
+    { label: "Cache Warming" },
+  ]);
+  body += `<h1>Cache Warming</h1>`;
+
+  const sessions = getActiveSessions();
+  const cbStatus = getCircuitBreakerStatus();
+
+  // Collect snapshots for all live sessions
+  const snapshots: WarmingSnapshot[] = [];
+  for (const [, state] of sessions) {
+    snapshots.push(computeWarmingSnapshot(state));
+  }
+
+  // Aggregate stats
+  const totalWarmups = snapshots.reduce((s, x) => s + x.warmupCount, 0);
+  const totalHits = snapshots.reduce((s, x) => s + x.warmupHits, 0);
+  const warmingNow = snapshots.filter((x) => x.shouldWarmNow).length;
+  const deadCount = snapshots.filter((x) => x.disabled).length;
+
+  // Summary stat cards
+  body += `<div class="stats">
+    <div class="stat"><div class="label">Live Sessions</div><div class="value">${snapshots.length}</div></div>
+    <div class="stat"><div class="label">Warming Now</div><div class="value">${warmingNow}</div></div>
+    <div class="stat"><div class="label">Dead</div><div class="value">${deadCount}</div></div>
+    <div class="stat"><div class="label">Total Warmups</div><div class="value">${totalWarmups}</div></div>
+    <div class="stat"><div class="label">Hit Rate</div><div class="value">${totalWarmups > 0 ? ((totalHits / totalWarmups) * 100).toFixed(0) + "%" : "N/A"}</div></div>
+    <div class="stat"><div class="label">Circuit Breaker</div><div class="value">${
+      cbStatus.tripped
+        ? '<span style="color:var(--danger)">TRIPPED</span>'
+        : `OK <span style="color:var(--fg3)">${cbStatus.failures}/${cbStatus.maxFailures}</span>`
+    }</div></div>
+  </div>`;
+
+  // Circuit breaker detail (if non-zero failures or tripped)
+  if (cbStatus.failures > 0 || cbStatus.tripped) {
+    const cls = cbStatus.tripped ? "cb-tripped" : cbStatus.failures > 1 ? "cb-warn" : "cb-ok";
+    const pct = (cbStatus.failures / cbStatus.maxFailures) * 100;
+    body += `<div class="card ${cls}">
+      <strong>Circuit Breaker:</strong> ${cbStatus.failures}/${cbStatus.maxFailures} uncached warmups
+      <span class="cb-bar"><span class="cb-bar-fill" style="width:${pct}%"></span></span>
+      ${cbStatus.tripped ? '<strong style="color:var(--danger)">ALL WARMING DISABLED</strong>' : ""}
+    </div>`;
+  }
+
+  // Live sessions table
+  body += `<h2>Live Sessions</h2>`;
+  if (snapshots.length === 0) {
+    body += `<p class="empty">No active sessions. Cache warming data appears when sessions are processed through the gateway.</p>`;
+  } else {
+    body += `<div class="table-filter"><input type="text" placeholder="Filter sessions\u2026"><span class="count"></span></div>
+    <table>
+      <tr>
+        <th>Session</th>
+        <th data-sort="num">Turns</th>
+        <th data-sort="num">Idle</th>
+        <th data-sort="text">TTL</th>
+        <th data-sort="num">S(t)</th>
+        <th data-sort="num">P(returns)</th>
+        <th data-sort="text">Status</th>
+        <th data-sort="num">Warmups</th>
+        <th data-sort="num">Hits</th>
+      </tr>`;
+    for (const snap of snapshots) {
+      body += `<tr>
+        <td><code>${esc(snap.sessionId.slice(0, 16))}</code></td>
+        <td>${snap.messageCount}</td>
+        <td>${formatDuration(snap.idleMs)}</td>
+        <td>${snap.ttl ?? "5m"}</td>
+        <td>${(snap.survivalAtIdle * 100).toFixed(1)}%</td>
+        <td>${(snap.pReturns * 100).toFixed(1)}%</td>
+        <td>${warmingStatusBadge(snap)}</td>
+        <td>${snap.warmupCount}</td>
+        <td>${snap.warmupHits}</td>
+      </tr>`;
+    }
+    body += `</table>`;
+  }
+
+  // Global histograms
+  const globalHists = getGlobalHistogramsSnapshot();
+  if (globalHists.size > 0) {
+    body += `<h2>Global Histograms</h2>`;
+    body += `<p style="color:var(--fg3);font-size:0.9em">
+      Per-project inter-turn gap distributions from all historical sessions.
+      Used as Bayesian prior for sessions with few observations.
+    </p>`;
+
+    for (const [projectPath, hist] of globalHists) {
+      const name = projectPath.split("/").pop() ?? projectPath;
+      body += `<details class="warming">
+        <summary>${esc(name)} &mdash; ${hist.total} observations</summary>`;
+      if (hist.total > 0) {
+        body += renderHistogram({ global: hist });
+      }
+      body += `</details>`;
+    }
+  }
+
+  return layout("Cache Warming", body);
+}
+
+// ---------------------------------------------------------------------------
 // Global Costs page
 // ---------------------------------------------------------------------------
 
@@ -944,6 +1297,11 @@ function pageCosts(): string {
   let liveTtlSavings = 0;
   let liveAvoidedCompactions = 0;
   let liveAvoidedCompactionCost = 0;
+  let liveDistillCost = 0;
+  let liveCurateCost = 0;
+  let liveCompactCost = 0;
+  let liveWarmupCost = 0;
+  let liveRecallCost = 0;
 
   for (const [, c] of allCosts) {
     liveTotalSpend += totalActualCost(c);
@@ -958,6 +1316,11 @@ function pageCosts(): string {
     liveTtlSavings += c.counterfactual.ttlSavings;
     liveAvoidedCompactions += c.counterfactual.avoidedCompactions;
     liveAvoidedCompactionCost += c.counterfactual.avoidedCompactionCost;
+    liveDistillCost += c.workers.distillation.cost;
+    liveCurateCost += c.workers.curation.cost;
+    liveCompactCost += c.workers.compaction.cost;
+    liveWarmupCost += c.workers.warmup.cost;
+    liveRecallCost += c.workers.recall.cost;
   }
 
   // --- Historical (backdated) estimates ---
@@ -965,7 +1328,9 @@ function pageCosts(): string {
   const hist = historical.totals;
 
   // --- Combined totals ---
-  const combinedWorkerCost = liveTotalWorker + hist.distillationCost;
+  // Use totalWorkerCost (persisted real API data where available, heuristic
+  // distillation estimate as fallback) instead of distillationCost alone.
+  const combinedWorkerCost = liveTotalWorker + hist.totalWorkerCost;
   const combinedAvoidedCompactions = liveAvoidedCompactions + hist.avoidedCompactions;
   const combinedAvoidedCompactionCost = liveAvoidedCompactionCost + hist.avoidedCompactionCost;
   const combinedWarmupSavings = liveWarmupSavings + hist.warmupSavings;
@@ -998,7 +1363,15 @@ function pageCosts(): string {
       <table class="cost-table">
         <tr class="section-header"><td colspan="2"><strong>Aggregated Spend</strong></td></tr>
         <tr><td>Conversation</td><td>${formatUSD(liveTotalConversation)} <span style="color:var(--fg3);font-size:0.85em">(${liveTotalTurns} turns)</span></td></tr>
-        <tr><td>+ Lore overhead</td><td>${formatUSD(liveTotalWorker)}</td></tr>
+        <tr><td>+ Lore overhead</td><td>${formatUSD(liveTotalWorker)}${(() => {
+          const parts: string[] = [];
+          if (liveDistillCost > 0) parts.push(`distill: ${formatUSD(liveDistillCost)}`);
+          if (liveCurateCost > 0) parts.push(`curate: ${formatUSD(liveCurateCost)}`);
+          if (liveCompactCost > 0) parts.push(`compact: ${formatUSD(liveCompactCost)}`);
+          if (liveWarmupCost > 0) parts.push(`warmup: ${formatUSD(liveWarmupCost)}`);
+          if (liveRecallCost > 0) parts.push(`recall: ${formatUSD(liveRecallCost)}`);
+          return parts.length ? ` <span style="color:var(--fg3);font-size:0.85em">(${parts.join(", ")})</span>` : "";
+        })()}</td></tr>
         <tr style="border-top:1px solid var(--border)"><td><strong>Total</strong></td><td><strong>${formatUSD(liveTotalSpend)}</strong></td></tr>`;
 
     if (liveTotalSavings !== 0) {
@@ -1034,19 +1407,27 @@ function pageCosts(): string {
   // =====================================================
   body += `<h2>Historical Estimates (from stored data)</h2>`;
   body += `<p style="color:var(--fg3);font-size:0.9em">
-    Estimated from ${hist.messageCount.toLocaleString()} stored messages across ${hist.sessionCount} sessions.
-    Distillation overhead, avoided compactions, and net savings are estimated from stored data.
-    Cache warming, 1h TTL, and batch API savings are persisted from live sessions on idle.
+    Aggregated from ${hist.sessionCount} sessions (${hist.messageCount.toLocaleString()} messages).
+    Worker overhead and savings use persisted live-session data where available,
+    with heuristic estimates as fallback for sessions without a snapshot.
   </p>`;
 
   if (hist.sessionCount === 0) {
     body += `<p class="empty">No historical sessions found in the database.</p>`;
   } else {
-    const histNetSavings = hist.avoidedCompactionCost + hist.warmupSavings + hist.ttlSavings + hist.batchSavings - hist.distillationCost;
+    const histNetSavings = hist.avoidedCompactionCost + hist.warmupSavings + hist.ttlSavings + hist.batchSavings - hist.totalWorkerCost;
     body += `<div class="card">
-      <table class="cost-table">
-        <tr class="section-header"><td colspan="2"><strong>Estimated Lore Overhead</strong></td></tr>
-        <tr><td>Distillation calls</td><td>${formatUSD(hist.distillationCost)} <span style="color:var(--fg3);font-size:0.85em">(${hist.distillationCalls} calls: ${hist.distillationBatchCalls} batched, ${hist.distillationDirectCalls} direct)</span></td></tr>
+      <table class="cost-table">`;
+    if (hist.persistedConversationCost > 0) {
+      body += `<tr class="section-header"><td colspan="2"><strong>Historical Spend</strong></td></tr>
+        <tr><td>Conversation</td><td>${formatUSD(hist.persistedConversationCost)}</td></tr>`;
+    }
+    body += `<tr class="section-header"><td colspan="2"${hist.persistedConversationCost > 0 ? ' style="padding-top:0.8em"' : ""}><strong>Lore Overhead</strong></td></tr>
+        <tr><td>Total worker cost</td><td>${formatUSD(hist.totalWorkerCost)}`;
+    if (hist.totalWorkerCost !== hist.distillationCost) {
+      body += ` <span style="color:var(--fg3);font-size:0.85em">(distillation-only estimate: ${formatUSD(hist.distillationCost)})</span>`;
+    }
+    body += `</td></tr>
         <tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Estimated Savings</strong></td></tr>
         <tr><td>Avoided compactions</td><td>${formatUSD(hist.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${hist.avoidedCompactions})</span></td></tr>
         ${hist.warmupSavings > 0 ? `<tr><td>Cache warming</td><td>${formatUSD(hist.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.warmupHits} hits)</span></td></tr>` : ""}
@@ -1061,14 +1442,15 @@ function pageCosts(): string {
     body += `<h3>Per Session (top ${displayed.length} by recency)</h3>
     <div class="table-filter"><input type="text" placeholder="Filter sessions\u2026"><span class="count"></span></div>
     <table>
-      <tr><th data-sort="text">Project</th><th>Session</th><th data-sort="num">Messages</th><th data-sort="text">Model</th><th data-sort="num">Distill Cost</th><th data-sort="num">Avoided Compactions</th><th data-sort="date">Last Active</th></tr>`;
+      <tr><th data-sort="text">Project</th><th>Session</th><th data-sort="num">Messages</th><th data-sort="text">Model</th><th data-sort="num">Worker Cost</th><th data-sort="num">Avoided Compactions</th><th data-sort="date">Last Active</th></tr>`;
     for (const s of displayed) {
+      const sessionWorkerCost = s.persisted?.workerCost ?? s.distillationCost;
       body += `<tr>
         <td><a href="/ui/projects/${esc(s.projectId)}">${esc(s.projectName ?? "(unnamed)")}</a></td>
         <td><a href="/ui/sessions/${esc(s.projectId)}/${esc(s.sessionId)}"><code>${esc(s.sessionId.slice(0, 12))}</code></a></td>
         <td>${s.messageCount}</td>
         <td style="font-size:0.85em">${esc(s.model.replace("claude-", "").slice(0, 20))}</td>
-        <td>${formatUSD(s.distillationCost)}</td>
+        <td>${formatUSD(sessionWorkerCost)}</td>
         <td>${s.avoidedCompactions > 0 ? `${s.avoidedCompactions} (${formatUSD(s.avoidedCompactionCost)})` : "-"}</td>
         <td>${timeAgo(s.lastMessage)}</td>
       </tr>`;
@@ -1170,6 +1552,11 @@ export async function handleUIRequest(
     // Costs
     if (pathname === "/ui/costs") {
       return htmlResponse(pageCosts());
+    }
+
+    // Cache warming
+    if (pathname === "/ui/warming") {
+      return htmlResponse(pageWarming());
     }
 
     // Search detail (by source-prefixed ID)

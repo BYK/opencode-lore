@@ -1,6 +1,6 @@
 import type { LoreMessage, LorePart, LoreMessageWithParts, LoreToolPart, LoreTextPart, LoreToolState, LoreToolStateCompleted } from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
-import { db, ensureProject, loadForceMinLayer, saveForceMinLayer } from "./db";
+import { db, ensureProject, loadForceMinLayer, saveForceMinLayer, saveSessionTracking, loadSessionTracking } from "./db";
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
 import { normalize } from "./markdown";
@@ -319,6 +319,27 @@ function getSessionState(sessionID: string): SessionState {
     // forceMinLayer=2, but if OpenCode restarts before the next turn,
     // the in-memory escalation would be lost without this.
     state.forceMinLayer = loadForceMinLayer(sessionID) as SafetyLayer;
+
+    // Restore gradient calibration state from DB (v24) — avoids uncalibrated
+    // first turns after restart. Without this, dynamicContextCap reverts to
+    // the static ceiling, bustRateEMA is uninitialized, and lastTurnAt=0
+    // prevents onIdleResume() from detecting idle gaps.
+    //
+    // Atomic restore: lastTurnAt > 0 is the proxy for "gradient state was
+    // ever flushed to DB". Restore all fields together or none — avoids
+    // per-field sentinel fragility where a valid value (e.g. lastLayer=0)
+    // could be mistaken for "never persisted".
+    const persisted = loadSessionTracking(sessionID);
+    if (persisted && persisted.lastTurnAt > 0) {
+      state.dynamicContextCap = persisted.dynamicContextCap;
+      state.bustRateEMA = persisted.bustRateEMA;
+      state.interBustIntervalEMA = persisted.interBustIntervalEMA;
+      state.lastLayer = persisted.lastLayer as SafetyLayer;
+      state.lastKnownInput = persisted.lastKnownInput;
+      state.lastTurnAt = persisted.lastTurnAt;
+      state.lastBustAt = persisted.lastBustAt;
+    }
+
     sessionStates.set(sessionID, state);
   }
   return state;
@@ -354,11 +375,19 @@ function getSessionState(sessionID: string): SessionState {
  *
  * Set `thresholdMs <= 0` to disable. Returns true if a reset fired so the
  * caller can log/observe.
+ *
+ * @param skipCompact  When true, perform all idle-resume housekeeping
+ *   (clear caches, set cameOutOfIdle) but do NOT set postIdleCompact.
+ *   Used when the caller knows the upstream prompt cache is still warm
+ *   (e.g. cache warmer recently refreshed it) — compacting would produce
+ *   a different prompt body that doesn't match the warmed prefix, causing
+ *   a cache bust and wasting the warming cost.
  */
 export function onIdleResume(
   sessionID: string,
   thresholdMs: number,
   now: number = Date.now(),
+  skipCompact: boolean = false,
 ): { triggered: false } | { triggered: true; idleMs: number } {
   if (thresholdMs <= 0) return { triggered: false };
   const state = getSessionState(sessionID);
@@ -369,7 +398,7 @@ export function onIdleResume(
   state.rawWindowCache = null;
   state.distillationSnapshot = null;
   state.cameOutOfIdle = true;
-  state.postIdleCompact = true;
+  state.postIdleCompact = !skipCompact;
   return { triggered: true, idleMs };
 }
 
@@ -596,6 +625,28 @@ export function inspectSessionState(sessionID: string): {
  */
 export function setLastTurnAtForTest(sessionID: string, ms: number): void {
   getSessionState(sessionID).lastTurnAt = ms;
+}
+
+/**
+ * Persist gradient calibration state to the session_state table.
+ *
+ * Designed to be called periodically (e.g. every 30s from the idle scheduler
+ * tick) rather than on every mutation, to avoid write amplification on the
+ * hot path. Max data loss on crash is one tick interval (~30s).
+ */
+export function saveGradientState(sessionID: string): void {
+  const state = sessionStates.get(sessionID);
+  if (!state) return;
+
+  saveSessionTracking(sessionID, {
+    dynamicContextCap: state.dynamicContextCap,
+    bustRateEMA: state.bustRateEMA,
+    interBustIntervalEMA: state.interBustIntervalEMA,
+    lastLayer: state.lastLayer,
+    lastKnownInput: state.lastKnownInput,
+    lastTurnAt: state.lastTurnAt,
+    lastBustAt: state.lastBustAt,
+  });
 }
 
 type Distillation = {
@@ -1124,8 +1175,54 @@ function buildPrefixMessages(formatted: string): MessageWithParts[] {
   ];
 }
 
+// --- Importance-aware distillation selection ---
+//
+// When a compression stage limits distillation count (distLimit < Infinity),
+// selects the most valuable distillations rather than blindly taking the last N.
+// Scoring: 70% recency (position in chronological order) + 30% content signal.
+// Results are re-sorted chronologically after selection so the prefix cache
+// (Approach C) remains byte-stable when the same distillations are selected.
+//
+// Content signals (lightweight keyword detection, no LLM call):
+//   - Decisions: "decision"/"decided"/"chose" → +0.3
+//   - Gotchas/bugs: "gotcha"/"bug"/"fix"/"error" → +0.2
+//   - Architecture: "architecture"/"pattern" → +0.1
+//   - Meta-distilled (gen >= 1): +0.2 (consolidation = higher value density)
+
+const DECISION_RE = /\b(?:decision|decided|chose|chosen|agreed)\b/i;
+const GOTCHA_RE = /\b(?:gotcha|(?:critical|known|subtle)\s+bug|broken|crash(?:ed|es)?|regression)\b/i;
+const ARCH_RE = /\b(?:architecture|design.(?:decision|pattern)|system.design)\b/i;
+
+function importanceBonus(d: Distillation): number {
+  let bonus = 0;
+  if (DECISION_RE.test(d.observations)) bonus += 0.3;
+  if (GOTCHA_RE.test(d.observations)) bonus += 0.2;
+  if (ARCH_RE.test(d.observations)) bonus += 0.1;
+  if (d.generation >= 1) bonus += 0.2;
+  return Math.min(bonus, 1.0);
+}
+
+function selectDistillations(all: Distillation[], limit: number): Distillation[] {
+  if (all.length <= limit) return all;
+
+  // Recency: normalize to [0, 0.7] where oldest = 0.0, newest = 0.7.
+  // Use (length - 1) as divisor so the last entry gets full recency weight.
+  const maxIdx = all.length - 1;
+  const scored = all.map((d, i) => ({
+    d,
+    score: (maxIdx > 0 ? (i / maxIdx) : 1) * 0.7 + importanceBonus(d) * 0.3,
+  }));
+
+  // Keep top N by score, then re-sort chronologically (cache-safe).
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((s) => s.d)
+    .sort((a, b) => a.created_at - b.created_at);
+}
+
 // Build a synthetic message pair containing the distilled history.
-// Non-cached path — used by layers 2-4 which already cause full cache invalidation.
+// Non-cached path — used by layers 2+ which already cause full cache invalidation.
 function distilledPrefix(distillations: Distillation[]): MessageWithParts[] {
   if (!distillations.length) return [];
   const formatted = formatDistillations(distillations);
@@ -1316,7 +1413,7 @@ function tryFitStable(input: {
   rawBudget: number;
   sessionID: string;
   sessState: SessionState;
-}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget"> | null {
+}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"> | null {
   // If the prefix already overflows its budget there's no point trying.
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
@@ -1417,6 +1514,25 @@ function tryFitStable(input: {
 
 export type SafetyLayer = 0 | 1 | 2 | 3 | 4;
 
+// --- Compression stage table ---
+// Defines the escalation path for layers 1-3. Each stage tries increasingly
+// aggressive compression: tool stripping, tighter budgets, distillation trimming.
+// Adding a new intermediate stage = one table entry.
+type CompressionStage = {
+  strip: "none" | "old-tools" | "all-tools";
+  rawFrac: number | null;     // fraction of usable; null = use default rawBudget
+  distFrac: number | null;    // fraction of usable; null = use default distilledBudget
+  distLimit: number;          // Infinity = all, 5 = last 5, etc.
+  protectedTurns: number;     // turns exempt from tool stripping
+  useStableWindow: boolean;   // use tryFitStable (Approach B pin cache)
+};
+
+const COMPRESSION_STAGES: CompressionStage[] = [
+  { strip: "none",      rawFrac: null, distFrac: null, distLimit: Infinity, protectedTurns: 0, useStableWindow: true },
+  { strip: "old-tools", rawFrac: 0.50, distFrac: null, distLimit: Infinity, protectedTurns: 2, useStableWindow: false },
+  { strip: "all-tools", rawFrac: 0.55, distFrac: 0.15, distLimit: 5,        protectedTurns: 0, useStableWindow: false },
+];
+
 export type TransformResult = {
   messages: MessageWithParts[];
   layer: SafetyLayer;
@@ -1427,6 +1543,10 @@ export type TransformResult = {
   usable: number;
   distilledBudget: number;
   rawBudget: number;
+  // Signals that the pipeline should re-run forSession() to refresh LTM
+  // relevance scoring. Set on Layer 4 (emergency) where the context is
+  // fully reset and mid-session knowledge may have changed relevance.
+  refreshLtm: boolean;
 };
 
 // Per-session urgent distillation tracking.
@@ -1522,7 +1642,10 @@ function transformInner(input: {
   // Pinning to the *actual* last layer prevents all downward oscillation.
   // Only applied when calibrated (same session, per-session state) to avoid
   // affecting other sessions including worker sessions.
-  if (calibrated && sessState.lastLayer >= 1 && input.messages.length >= sessState.lastKnownMessageCount) {
+  // Layer 4 (emergency) already blows the cache — stickiness there just traps
+  // the session at emergency permanently. Only apply stickiness for layers 1-3
+  // where dropping back would bust a warm cache.
+  if (calibrated && sessState.lastLayer >= 1 && sessState.lastLayer <= 3 && input.messages.length >= sessState.lastKnownMessageCount) {
     effectiveMinLayer = Math.max(effectiveMinLayer, sessState.lastLayer) as SafetyLayer;
   }
 
@@ -1600,6 +1723,7 @@ function transformInner(input: {
       usable,
       distilledBudget,
       rawBudget,
+      refreshLtm: false,
     };
   }
 
@@ -1619,7 +1743,7 @@ function transformInner(input: {
 
   // Layer 1 uses the append-only cached prefix (Approach C) to keep the
   // distilled content byte-identical between distillation runs, preserving
-  // the prompt cache. Layers 2-4 already cause full cache invalidation via
+  // the prompt cache. Layers 2+ already cause full cache invalidation via
   // tool stripping / message restructuring, so they use the non-cached path.
   const cached = sid
     ? distilledPrefixCached(distillations, sid, sessState)
@@ -1628,79 +1752,71 @@ function transformInner(input: {
         return { messages: msgs, tokens: msgs.reduce((sum, m) => sum + estimateMessage(m), 0) };
       })();
 
-  // Layer 1: Normal budget allocation with lazy raw window eviction (Approach B).
-  // tryFitStable reuses the previous cutoff when it still fits, keeping the raw
-  // window byte-identical across turns for prompt caching. Only advances the
-  // cutoff when a genuinely oversized message forces eviction.
-  // Skipped when force-escalated to layer 2+ (previous attempt already failed at this level).
-  if (effectiveMinLayer <= 1) {
-    const layer1 = sid
-      ? tryFitStable({
-          messages: dedupMessages,
-          prefix: cached.messages,
-          prefixTokens: cached.tokens,
-          distilledBudget,
-          rawBudget,
-          sessionID: sid,
-          sessState,
-        })
-      : tryFit({
-          messages: dedupMessages,
-          prefix: cached.messages,
-          prefixTokens: cached.tokens,
-          distilledBudget,
-          rawBudget,
-          strip: "none",
-        });
-    if (fitsWithSafetyMargin(layer1)) {
-      if (cached.tokens === 0 && sid) {
+  // --- Compression stages (layers 1-3) ---
+  // Data-driven table replaces three hardcoded layer blocks. Each stage
+  // escalates tool stripping and/or tightens distillation budgets.
+  // Stage 0 (layer 1): stable window (Approach B), no stripping
+  // Stage 1 (layer 2): strip old tool outputs, protect last 2 turns
+  // Stage 2 (layer 3): strip ALL tool outputs, keep only 5 distillations
+  for (let s = 0; s < COMPRESSION_STAGES.length; s++) {
+    const stageLayer = (s + 1) as SafetyLayer;
+    if (effectiveMinLayer > stageLayer) continue;
+
+    const stage = COMPRESSION_STAGES[s];
+    const stageRawBudget = stage.rawFrac !== null ? Math.floor(usable * stage.rawFrac) : rawBudget;
+    const stageDistBudget = stage.distFrac !== null ? Math.floor(usable * stage.distFrac) : distilledBudget;
+
+    // Determine prefix: if distLimit is finite, re-render with trimmed distillations.
+    // Otherwise use the cached prefix (Approach C, byte-identical for cache).
+    let stagePrefix = cached.messages;
+    let stagePrefixTokens = cached.tokens;
+    if (stage.distLimit !== Infinity && distillations.length > stage.distLimit) {
+      const trimmed = selectDistillations(distillations, stage.distLimit);
+      stagePrefix = distilledPrefix(trimmed);
+      stagePrefixTokens = stagePrefix.reduce((sum, m) => sum + estimateMessage(m), 0);
+    }
+
+    // Stage 0 (layer 1) uses tryFitStable for Approach B pin cache.
+    // Higher stages reset the raw window cache and use plain tryFit.
+    let result: Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"> | null;
+    if (stage.useStableWindow && sid) {
+      result = tryFitStable({
+        messages: dedupMessages,
+        prefix: stagePrefix,
+        prefixTokens: stagePrefixTokens,
+        distilledBudget: stageDistBudget,
+        rawBudget: stageRawBudget,
+        sessionID: sid,
+        sessState,
+      });
+    } else {
+      // Reset raw window cache when leaving stage 0 — higher stages use full
+      // scans and already break the prompt cache. Must fire even when stage 1
+      // is skipped via effectiveMinLayer (e.g. forceMinLayer = 3).
+      sessState.rawWindowCache = null;
+      result = tryFit({
+        messages: dedupMessages,
+        prefix: stagePrefix,
+        prefixTokens: stagePrefixTokens,
+        distilledBudget: stageDistBudget,
+        rawBudget: stageRawBudget,
+        strip: stage.strip,
+        protectedTurns: stage.protectedTurns,
+      });
+    }
+
+    if (fitsWithSafetyMargin(result)) {
+      // Trigger urgent distillation when: (a) higher stages always need it, or
+      // (b) stage 0 with no distillations = first time in gradient mode.
+      if (sid && (s > 0 || cached.tokens === 0)) {
         urgentDistillationMap.set(sid, true);
       }
-      return { ...layer1!, layer: 1, usable, distilledBudget, rawBudget };
+      return { ...result!, layer: stageLayer, usable, distilledBudget, rawBudget, refreshLtm: false };
     }
   }
 
-  // Layer 1 didn't fit (or was force-skipped) — reset the raw window cache.
-  // Layers 2-4 use full scans and already break the prompt cache.
+  // All compression stages exhausted — reset raw window cache before emergency.
   sessState.rawWindowCache = null;
-
-  // Layer 2: Strip tool outputs from older messages, keep last 2 turns
-  // Skipped when force-escalated to layer 3+.
-  if (effectiveMinLayer <= 2) {
-    const layer2 = tryFit({
-      messages: dedupMessages,
-      prefix: cached.messages,
-      prefixTokens: cached.tokens,
-      distilledBudget,
-      rawBudget: Math.floor(usable * 0.5), // give raw more room
-      strip: "old-tools",
-      protectedTurns: 2,
-    });
-    if (fitsWithSafetyMargin(layer2)) {
-      if (sid) urgentDistillationMap.set(sid, true);
-      return { ...layer2!, layer: 2, usable, distilledBudget, rawBudget };
-    }
-  }
-
-  // Layer 3: Strip ALL tool outputs, drop oldest distillations
-  const trimmedDistillations = distillations.slice(-5);
-  const trimmedPrefix = distilledPrefix(trimmedDistillations);
-  const trimmedPrefixTokens = trimmedPrefix.reduce(
-    (sum, m) => sum + estimateMessage(m),
-    0,
-  );
-  const layer3 = tryFit({
-    messages: dedupMessages,
-    prefix: trimmedPrefix,
-    prefixTokens: trimmedPrefixTokens,
-    distilledBudget: Math.floor(usable * 0.15),
-    rawBudget: Math.floor(usable * 0.55),
-    strip: "all-tools",
-  });
-  if (fitsWithSafetyMargin(layer3)) {
-    if (sid) urgentDistillationMap.set(sid, true);
-    return { ...layer3!, layer: 3, usable, distilledBudget, rawBudget };
-  }
 
   // Layer 4: Emergency — last 2 distillations + token-budget raw tail.
   // We do NOT strip tool parts here: doing so would cause an infinite tool-call loop because
@@ -1716,7 +1832,7 @@ function transformInner(input: {
   // and must always return. Remaining budget is filled backward with older
   // messages.
   if (sid) urgentDistillationMap.set(sid, true);
-  const nuclearDistillations = distillations.slice(-2);
+  const nuclearDistillations = selectDistillations(distillations, 2);
   const nuclearPrefix = distilledPrefix(nuclearDistillations);
   const nuclearPrefixTokens = nuclearPrefix.reduce(
     (sum, m) => sum + estimateMessage(m),
@@ -1765,6 +1881,7 @@ function transformInner(input: {
     usable,
     distilledBudget,
     rawBudget,
+    refreshLtm: true,
   };
 }
 
@@ -1885,7 +2002,7 @@ function tryFit(input: {
   rawBudget: number;
   strip: "none" | "old-tools" | "all-tools";
   protectedTurns?: number;
-}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget"> | null {
+}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"> | null {
   // If distilled prefix exceeds its budget, fail this layer
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;

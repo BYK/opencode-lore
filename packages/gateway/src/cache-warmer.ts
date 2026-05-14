@@ -23,11 +23,9 @@
  *    are wrong.
  */
 
-import { log, config as loreConfig, db, projectId } from "@loreai/core";
+import { log, config as loreConfig, db, projectId, getKV, setKV } from "@loreai/core";
 import type {
   InterTurnHistogram,
-  SurvivalModel,
-  TimeSlot,
   WarmupResult,
   WarmupState,
   SessionState,
@@ -74,17 +72,22 @@ export const HISTOGRAM_BINS: readonly number[] = [
 const BIN_COUNT = HISTOGRAM_BINS.length + 1;
 
 /** Pseudocount for Bayesian blending of session vs global histograms. */
-const BLEND_PSEUDOCOUNT = 20;
+export const BLEND_PSEUDOCOUNT = 20;
 
 /** Survival probability below which a session is marked dead. */
-const DEAD_SESSION_THRESHOLD = 0.02;
+export const DEAD_SESSION_THRESHOLD = 0.02;
 
 /** Minimum completed turns before warming is eligible. Filters out one-shot
  *  sessions and ensures the survival model has ≥2 gap observations. */
-const MIN_TURNS_FOR_WARMING = 3;
+export const MIN_TURNS_FOR_WARMING = 3;
 
 /** Max uncached warmup responses before the global circuit breaker trips. */
 const CIRCUIT_BREAKER_MAX_FAILURES = 3;
+
+/** Gap duration floor (ms) separating "active coding turns" from "breaks".
+ *  3 minutes is well past typical agent think time (10s–60s) but before
+ *  the 5m TTL warmup window (4:15–5:00). */
+export const BREAK_FLOOR_MS = 180_000;
 
 // ---------------------------------------------------------------------------
 // Global circuit breaker
@@ -92,6 +95,30 @@ const CIRCUIT_BREAKER_MAX_FAILURES = 3;
 
 let circuitBreakerFailures = 0;
 let circuitBreakerTripped = false;
+let circuitBreakerLoaded = false;
+
+const CB_KV_KEY = "warmup_circuit_breaker";
+
+/** Load circuit breaker state from DB on first access. */
+function ensureCircuitBreakerLoaded(): void {
+  if (circuitBreakerLoaded) return;
+  circuitBreakerLoaded = true;
+  try {
+    const raw = getKV(CB_KV_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { tripped?: boolean; failures?: number };
+      circuitBreakerTripped = parsed.tripped ?? false;
+      circuitBreakerFailures = parsed.failures ?? 0;
+    }
+  } catch {
+    // Corrupted value — start fresh
+  }
+}
+
+/** Persist circuit breaker state to DB. */
+function saveCircuitBreaker(): void {
+  setKV(CB_KV_KEY, JSON.stringify({ tripped: circuitBreakerTripped, failures: circuitBreakerFailures }));
+}
 
 /**
  * Check if the global circuit breaker has tripped.
@@ -103,7 +130,22 @@ let circuitBreakerTripped = false;
  * afford to keep trying.
  */
 export function isCircuitBreakerTripped(): boolean {
+  ensureCircuitBreakerLoaded();
   return circuitBreakerTripped;
+}
+
+/** Snapshot of circuit breaker state for dashboard rendering. */
+export function getCircuitBreakerStatus(): {
+  tripped: boolean;
+  failures: number;
+  maxFailures: number;
+} {
+  ensureCircuitBreakerLoaded();
+  return {
+    tripped: circuitBreakerTripped,
+    failures: circuitBreakerFailures,
+    maxFailures: CIRCUIT_BREAKER_MAX_FAILURES,
+  };
 }
 
 /**
@@ -117,6 +159,7 @@ export function isCircuitBreakerTripped(): boolean {
  * Returns true if the circuit breaker has tripped (warming should stop).
  */
 export function checkCircuitBreaker(result: WarmupResult): boolean {
+  ensureCircuitBreakerLoaded();
   if (circuitBreakerTripped) return true;
 
   if (result.ok && result.cacheCreationTokens > 0 && result.cacheReadTokens === 0) {
@@ -126,8 +169,10 @@ export function checkCircuitBreaker(result: WarmupResult): boolean {
         `(${circuitBreakerFailures}/${CIRCUIT_BREAKER_MAX_FAILURES}). ` +
         `cacheCreation=${result.cacheCreationTokens} cacheRead=${result.cacheReadTokens}`,
     );
+    saveCircuitBreaker();
     if (circuitBreakerFailures >= CIRCUIT_BREAKER_MAX_FAILURES) {
       circuitBreakerTripped = true;
+      saveCircuitBreaker();
       log.error(
         `cache-warmer CIRCUIT BREAKER TRIPPED: ${CIRCUIT_BREAKER_MAX_FAILURES} consecutive ` +
           `uncached warmups detected. ALL cache warming disabled for this process. ` +
@@ -139,6 +184,7 @@ export function checkCircuitBreaker(result: WarmupResult): boolean {
   } else if (result.ok && result.cacheReadTokens > 0) {
     // Successful cache read — reset the failure counter
     circuitBreakerFailures = 0;
+    saveCircuitBreaker();
   }
 
   return circuitBreakerTripped;
@@ -227,53 +273,19 @@ export function conditionalReturnProbability(
 }
 
 // ---------------------------------------------------------------------------
-// Time slot resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve the current time-of-day slot for survival analysis.
- *
- * - `work`:    Mon–Fri 08:00–18:00 local
- * - `evening`: Mon–Fri 18:00–23:00, weekends 08:00–23:00
- * - `night`:   23:00–08:00 any day
- */
-export function resolveTimeSlot(date: Date): TimeSlot {
-  const hour = date.getHours();
-  const day = date.getDay(); // 0=Sun, 6=Sat
-  const isWeekend = day === 0 || day === 6;
-
-  if (hour < 8 || hour >= 23) return "night";
-  if (isWeekend) return "evening";
-  if (hour >= 18) return "evening";
-  return "work";
-}
-
-// ---------------------------------------------------------------------------
 // Survival model helpers
 // ---------------------------------------------------------------------------
 
-/** Create an empty survival model with all three time slots. */
-export function createSurvivalModel(): SurvivalModel {
-  return {
-    slots: {
-      work: createHistogram(),
-      evening: createHistogram(),
-      night: createHistogram(),
-    },
-  };
-}
-
 /**
- * Get (or create) the session-level histogram for a given time slot.
+ * Get (or create) the session-level histogram.
  */
 export function getSessionHistogram(
   state: SessionState,
-  slot: TimeSlot,
 ): InterTurnHistogram {
   if (!state.survivalModel) {
-    state.survivalModel = createSurvivalModel();
+    state.survivalModel = createHistogram();
   }
-  return state.survivalModel.slots[slot];
+  return state.survivalModel;
 }
 
 /**
@@ -306,29 +318,189 @@ export function blendHistograms(
 // Global histograms (per-project, in-memory)
 // ---------------------------------------------------------------------------
 
-/** Global histograms keyed by projectPath → time slot. */
-const globalModels = new Map<string, SurvivalModel>();
+/** Global histograms keyed by projectPath. */
+const globalHistograms = new Map<string, InterTurnHistogram>();
 
 export function getGlobalHistogram(
   projectPath: string,
-  slot: TimeSlot,
 ): InterTurnHistogram {
-  let model = globalModels.get(projectPath);
-  if (!model) {
-    model = createSurvivalModel();
-    globalModels.set(projectPath, model);
+  let hist = globalHistograms.get(projectPath);
+  if (!hist) {
+    hist = createHistogram();
+    globalHistograms.set(projectPath, hist);
   }
-  return model.slots[slot];
+  return hist;
 }
 
-/** Get blended histogram for a session (session + global for current slot). */
+/** Get blended histogram for a session (session + global). */
 export function blendedHistogramForSession(
   state: SessionState,
-  slot: TimeSlot,
 ): InterTurnHistogram {
-  const sessionHist = getSessionHistogram(state, slot);
-  const globalHist = getGlobalHistogram(state.projectPath, slot);
+  const sessionHist = getSessionHistogram(state);
+  const globalHist = getGlobalHistogram(state.projectPath);
   return blendHistograms(sessionHist, globalHist);
+}
+
+// ---------------------------------------------------------------------------
+// Break-commitment model helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Fraction of observed inter-turn gaps that are "breaks" (≥ BREAK_FLOOR_MS).
+ *
+ * Logically splits the histogram at query time — no structural changes to
+ * the histogram itself. Uses linear interpolation within the floor bin,
+ * same technique as survivalFunction().
+ *
+ * For an empty histogram, returns 0.3 (prior: ~30% of gaps are breaks).
+ */
+export function breakFraction(hist: InterTurnHistogram): number {
+  if (hist.total === 0) return 0.3;
+
+  const floorIdx = binIndex(BREAK_FLOOR_MS);
+
+  // Sum all observations in bins strictly above the floor bin
+  let breakCount = 0;
+  for (let i = floorIdx + 1; i < BIN_COUNT; i++) {
+    breakCount += hist.counts[i];
+  }
+
+  // Fractional inclusion of the floor bin via linear interpolation
+  const binStart = floorIdx > 0 ? HISTOGRAM_BINS[floorIdx - 1] : 0;
+  const binEnd = floorIdx < HISTOGRAM_BINS.length ? HISTOGRAM_BINS[floorIdx] : Infinity;
+  const binWidth = binEnd - binStart;
+  if (binWidth > 0 && isFinite(binWidth)) {
+    const fractionAbove = Math.max(0, Math.min(1, (binEnd - BREAK_FLOOR_MS) / binWidth));
+    breakCount += hist.counts[floorIdx] * fractionAbove;
+  }
+
+  return breakCount / hist.total;
+}
+
+/**
+ * Signals used by the session-finished estimator.
+ */
+export type SessionEndSignals = {
+  /** Survival function value S(elapsed) from the blended histogram. */
+  survivalAtIdle: number;
+  /** Consecutive assistant turns ending with text-only (no tool calls). */
+  consecutiveTextOnlyTurns: number;
+  /** Fraction of all observed gaps that are breaks (≥ BREAK_FLOOR_MS). */
+  breakFraction: number;
+  /** Total completed turns (messageCount / 2). */
+  totalTurns: number;
+};
+
+/**
+ * Estimate P(session is finished | signals).
+ *
+ * Log-linear model combining four independent signals into a probability
+ * via sigmoid(logOdds). Conservative bias (low base rate) because the cost
+ * of a false positive (one unnecessary warmup, ~$0.01) is much smaller
+ * than the cost of a false negative (cache miss, ~$0.70 at 200K tokens).
+ */
+export function pSessionFinished(signals: SessionEndSignals): number {
+  // Base rate: ~12% — most checks happen when the session is NOT finished
+  let logOdds = -2.0;
+
+  // Signal 1: Survival function — low survival = unprecedented idle
+  //   S ≈ 0    → +4.0 (almost certainly done)
+  //   S ≈ 0.5  → +0.5
+  //   S ≈ 1.0  → -0.5 (no evidence of end)
+  if (signals.survivalAtIdle < 0.01) {
+    logOdds += 4.0;
+  } else {
+    logOdds += 2.0 * (1.0 - signals.survivalAtIdle) - 0.5;
+  }
+
+  // Signal 2: Consecutive text-only turns — task wrapping up
+  //   0 runs → 0, 1 run → +0.5, capped at +3.5
+  //   At 5 runs: +2.5, at 7 runs: +3.5 (strong signal — model finished with text repeatedly)
+  logOdds += Math.min(3.5, signals.consecutiveTextOnlyTurns * 0.5);
+
+  // Signal 3: Break fraction from histogram
+  //   If breaks are rare for this user/project, a long idle is more
+  //   likely a session end than a break.
+  //   breakFraction = 0   → +1.5 (no breaks ever observed — very likely session end)
+  //   breakFraction = 5%  → +0.85
+  //   breakFraction = 40% → -0.2
+  logOdds += 1.5 - 3.0 * Math.min(signals.breakFraction, 0.5);
+
+  // Signal 4: Very short sessions are more likely one-shots
+  if (signals.totalTurns <= 2) {
+    logOdds += 1.0;
+  } else if (signals.totalTurns <= 5) {
+    logOdds += 0.3;
+  }
+
+  // Sigmoid: p = 1 / (1 + exp(-logOdds))
+  return 1.0 / (1.0 + Math.exp(-logOdds));
+}
+
+/**
+ * Expected number of warmup cycles during a break, given elapsed idle time.
+ *
+ * Uses the survival function conditioned on the current idle time to walk
+ * forward through TTL windows and accumulate the expected cycle count.
+ * Stops when P(still idle) drops below 1% or maxCycles is reached.
+ */
+export function expectedWarmupCycles(
+  hist: InterTurnHistogram,
+  elapsedMs: number,
+  ttlMs: number,
+  maxCycles: number,
+): number {
+  // S(elapsed) — probability of still being idle at current time
+  const sNow = survivalFunction(hist, elapsedMs);
+  if (sNow < 0.001) return maxCycles + 1; // essentially dead — exceeds budget to trigger cap
+
+  let expected = 0;
+
+  for (let k = 1; k <= maxCycles; k++) {
+    const futureMs = elapsedMs + k * ttlMs;
+    const sFuture = survivalFunction(hist, futureMs);
+
+    // P(still idle at window k | idle at elapsed) = S(futureMs) / S(elapsedMs)
+    const pStillIdle = sFuture / sNow;
+
+    // We pay for this cycle if we're still idle when it fires
+    expected += pStillIdle;
+
+    // Negligible probability of reaching further windows
+    if (pStillIdle < 0.01) break;
+  }
+
+  return Math.min(expected, maxCycles);
+}
+
+/**
+ * Compute the corrected cost threshold for a warming decision.
+ *
+ * Accounts for the fact that a successful warmup sequence costs
+ * cache_read twice: once for the keepalive and once when the user
+ * returns. Break-even: read / (write - read).
+ */
+export function costThreshold(
+  cacheReadCostPerMTok: number,
+  cacheMissCostPerMTok: number,
+): number {
+  const denominator = cacheMissCostPerMTok - cacheReadCostPerMTok;
+  if (denominator <= 0) return 1.0; // degenerate — never warm
+  return cacheReadCostPerMTok / denominator;
+}
+
+/**
+ * Maximum profitable warmup cycles before total warming cost exceeds
+ * the savings from avoiding a cache write on user return.
+ *
+ * maxCycles = floor((write - read) / read)
+ */
+export function maxProfitableCycles(
+  cacheReadCostPerMTok: number,
+  cacheMissCostPerMTok: number,
+): number {
+  if (cacheReadCostPerMTok <= 0) return 0;
+  return Math.floor((cacheMissCostPerMTok - cacheReadCostPerMTok) / cacheReadCostPerMTok);
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +566,9 @@ export function buildAnthropicProfile(
 ): CacheWarmingProfile {
   const entry = getModelEntrySync(model);
   const cacheReadCost = entry.cost?.cache_read ?? (entry.cost?.input ?? 3) * 0.1;
-  const cacheWriteCost = entry.cost?.cache_write ?? (entry.cost?.input ?? 3) * 1.25;
+  // Base cache_write is the 5m TTL price. Anthropic charges 2× for 1h TTL writes.
+  const baseCacheWrite = entry.cost?.cache_write ?? (entry.cost?.input ?? 3) * 1.25;
+  const cacheWriteCost = ttl === "1h" ? baseCacheWrite * 2 : baseCacheWrite;
 
   const ttlMs = ttl === "1h" ? 3_600_000 : 300_000;
   // For 5m TTL: warm in the last 45s (4:15–5:00)
@@ -422,7 +596,7 @@ export function buildAnthropicProfile(
  */
 export function resolveProfile(
   model: string | undefined,
-  protocol: "anthropic" | "openai" | undefined,
+  protocol: "anthropic" | "openai" | "openai-responses" | undefined,
   ttl: "5m" | "1h" | undefined,
   upstreamBase?: string,
 ): CacheWarmingProfile | null {
@@ -442,14 +616,16 @@ export function resolveProfile(
 /**
  * Determine whether to warm a session's cache right now.
  *
- * Returns true if all conditions are met:
- *  1. Cache is about to expire (within warmupMargin of TTL)
- *  2. Cache hasn't already expired (past TTL)
- *  3. Session has enough turns (≥3) for reliable survival prediction
- *  4. Session is not marked dead
- *  5. Session hasn't been warmed in this TTL window
- *  6. Survival probability exceeds cost threshold
- *  7. Global circuit breaker hasn't tripped
+ * Uses a commitment-based model instead of per-window survival analysis:
+ *  1. Asks "Is this session finished?" via signal fusion (pSessionFinished)
+ *  2. Computes expected warming cost across a potential break
+ *  3. Compares P(returns) against the corrected cost threshold
+ *
+ * Gate checks (circuit breaker, config, body, /keep, cooldown) are unchanged.
+ *
+ * Two phases for the normal path:
+ *  - Initial commitment (first TTL window): full ROI analysis
+ *  - Continuation (subsequent windows): check break-even cap + re-evaluate
  */
 export function shouldWarm(
   state: SessionState,
@@ -467,31 +643,34 @@ export function shouldWarm(
   if (!state.cacheAnalytics.lastRequestBody) return false;
 
   const elapsed = now - state.lastRequestTime;
-  const { ttlMs, warmupMarginMs } = profile;
+  const { ttlMs, warmupMarginMs, cacheReadCostPerMTok, cacheMissCostPerMTok } = profile;
   const forced = state.warmup?.forceKeepWarm === true;
 
-  // Already warmed in this TTL window (prevents double-warming even with /keep)
-  if (state.warmup?.lastWarmupAt && (now - state.warmup.lastWarmupAt) < ttlMs) {
+  // Already warmed recently — prevent double-warming.
+  // For /keep mode, use a tighter cooldown (ttlMs - warmupMarginMs) so the
+  // next warmup fires before the current cache expires. Without this, the
+  // full-ttlMs guard combined with margin positioning produces a ~2x TTL
+  // cadence (e.g. 10 min on a 5 min TTL), leaving a dead zone each cycle.
+  const cooldownMs = forced ? Math.max(ttlMs - warmupMarginMs, 0) : ttlMs;
+  if (state.warmup?.lastWarmupAt && (now - state.warmup.lastWarmupAt) < cooldownMs) {
     return false;
   }
 
   if (forced) {
-    // /keep mode: only requirement is that we're within the warmup margin
-    // of *some* TTL window. Compute which window we're in relative to
-    // lastRequestTime (each window is ttlMs wide) and check if we're in
-    // the last warmupMarginMs of that window.
+    // /keep mode: skip survival/signal analysis but still respect the
+    // break-even cap — warming beyond maxCycles is always unprofitable,
+    // even when the user explicitly asked for /keep.
+    const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
+    const cyclesSpent = state.warmup?.warmupCount ?? 0;
+    if (cyclesSpent >= maxCycles) return false;
+
+    // Check we're in the warmup margin of *some* TTL window.
     const intoWindow = elapsed % ttlMs;
     if (intoWindow < ttlMs - warmupMarginMs) return false;
     return true;
   }
 
-  // --- Normal (non-forced) path ---
-
-  // Cache still fresh — no warmup needed yet
-  if (elapsed < ttlMs - warmupMarginMs) return false;
-
-  // Cache already expired — warmup is pointless (would cause a write, not a read)
-  if (elapsed >= ttlMs) return false;
+  // --- Normal (non-forced) commitment-based path ---
 
   // Not enough turns — survival model has insufficient data and the
   // session may be a one-shot question not worth warming ($0.30 per
@@ -501,42 +680,294 @@ export function shouldWarm(
   // Session marked dead
   if (state.warmup?.disabled) return false;
 
-  // Survival check: P(return within next TTL window | idle for `elapsed`)
-  let pReturn = conditionalReturnProbability(blendedHist, elapsed, ttlMs);
-
-  // Dampen survival estimate based on consecutive text-only end_turn
-  // responses. Each consecutive text-only turn halves the probability —
-  // the model finishing with text (no tool calls) multiple times in a
-  // row suggests the task is wrapping up.
+  // Compute commitment model signals
+  const survivalAtIdle = survivalFunction(blendedHist, elapsed);
+  const breakFrac = breakFraction(blendedHist);
   const textOnlyRuns = state.consecutiveTextOnlyTurns ?? 0;
-  if (textOnlyRuns > 0) {
-    pReturn *= Math.pow(0.5, textOnlyRuns);
-  }
+  const totalTurns = Math.floor(state.messageCount / 2);
 
-  // Cost threshold: warm if P(return) > cacheReadCost / cacheMissCost
-  // This is the break-even point where expected savings = 0.
-  const autoThreshold =
-    profile.cacheReadCostPerMTok / profile.cacheMissCostPerMTok;
+  const pFinished = pSessionFinished({
+    survivalAtIdle,
+    consecutiveTextOnlyTurns: textOnlyRuns,
+    breakFraction: breakFrac,
+    totalTurns,
+  });
+  const pReturns = 1.0 - pFinished;
+
+  // Corrected cost threshold: read / (write - read)
+  const autoThreshold = costThreshold(cacheReadCostPerMTok, cacheMissCostPerMTok);
   const threshold = cfg.cache.warming.minReturnProbability ?? autoThreshold;
 
-  if (pReturn <= threshold) {
-    // Check if session should be marked dead
-    const survival = survivalFunction(blendedHist, elapsed);
-    if (survival < DEAD_SESSION_THRESHOLD) {
-      if (!state.warmup) {
-        state.warmup = { lastWarmupAt: 0, warmupCount: 0, warmupHits: 0, disabled: true };
-      } else {
-        state.warmup.disabled = true;
-      }
-      log.info(
-        `cache-warmer: session=${state.sessionID.slice(0, 16)} marked dead ` +
-          `(survival=${(survival * 100).toFixed(1)}% < ${(DEAD_SESSION_THRESHOLD * 100).toFixed(0)}%)`,
-      );
+  // Max cycles before warming becomes unprofitable
+  const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
+
+  // Determine if this is the initial commitment or a continuation
+  const cyclesSpent = state.warmup?.warmupCount ?? 0;
+  const isFirstWindow = elapsed < ttlMs;
+
+  if (isFirstWindow) {
+    // --- Phase A: Initial commitment ---
+    // Cache is about to expire for the first time.
+
+    // Cache still fresh — no warmup needed yet
+    if (elapsed < ttlMs - warmupMarginMs) return false;
+
+    // P(returns) too low to justify even one warmup
+    if (pReturns <= threshold) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
     }
-    return false;
+
+    return true;
+  } else {
+    // --- Phase B: Continuation ---
+    // Cache already expired at least once. We're maintaining warmth
+    // across a longer break. Check if still profitable.
+
+    // Hard break-even cap: stop if we've spent too many cycles
+    if (cyclesSpent >= maxCycles) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
+    }
+
+    // Session almost certainly finished — stop warming
+    if (pFinished > 0.95) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
+    }
+
+    // Re-evaluate: expected remaining cycles must keep total under maxCycles
+    const remaining = expectedWarmupCycles(blendedHist, elapsed, ttlMs, maxCycles - cyclesSpent);
+    if (cyclesSpent + remaining > maxCycles) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
+    }
+
+    // Check we're in the warmup margin of the current TTL window
+    const intoWindow = elapsed % ttlMs;
+    if (intoWindow < ttlMs - warmupMarginMs) return false;
+
+    return true;
+  }
+}
+
+/** Mark session dead if survival is below the dead session threshold. */
+function markDeadIfSurvivalLow(state: SessionState, survivalAtIdle: number): void {
+  if (survivalAtIdle < DEAD_SESSION_THRESHOLD) {
+    if (!state.warmup) {
+      state.warmup = { lastWarmupAt: 0, warmupCount: 0, warmupHits: 0, disabled: true };
+    } else {
+      state.warmup.disabled = true;
+    }
+    log.info(
+      `cache-warmer: session=${state.sessionID.slice(0, 16)} marked dead ` +
+        `(survival=${(survivalAtIdle * 100).toFixed(1)}% < ${(DEAD_SESSION_THRESHOLD * 100).toFixed(0)}%)`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard snapshot
+// ---------------------------------------------------------------------------
+
+/** All data the dashboard needs for one session's warming visualization. */
+export type WarmingSnapshot = {
+  sessionId: string;
+  projectPath: string;
+  // State
+  messageCount: number;
+  idleMs: number;
+  consecutiveTextOnlyTurns: number;
+  ttl: "5m" | "1h" | undefined;
+  // Warmup state
+  warmupCount: number;
+  warmupHits: number;
+  lastWarmupAt: number;
+  disabled: boolean;
+  forceKeepWarm: boolean;
+  // Survival analysis
+  sessionHistogram: InterTurnHistogram;
+  globalHistogram: InterTurnHistogram;
+  blendedHistogram: InterTurnHistogram;
+  sessionWeight: number;
+  survivalAtIdle: number;
+  // Commitment model
+  pSessionFinished: number;
+  pReturns: number;
+  breakFrac: number;
+  expectedCycles: number;
+  maxCycles: number;
+  cyclesSpent: number;
+  warmingPhase: "initial" | "continuation" | "none";
+  threshold: number;
+  // Legacy (kept for backward compat in dashboard)
+  pReturn: number;
+  pReturnDampened: number;
+  costThreshold: number;
+  // Decision
+  shouldWarmNow: boolean;
+  notWarmingReason: string | null;
+  // Circuit breaker (global, same for all sessions)
+  circuitBreaker: { tripped: boolean; failures: number; maxFailures: number };
+};
+
+/**
+ * Compute a read-only snapshot of all warming heuristics for a session.
+ *
+ * Used by the dashboard to render warming state without importing
+ * internal functions. All calls are pure or idempotent (read-only).
+ */
+export function computeWarmingSnapshot(
+  state: SessionState,
+  now: number = Date.now(),
+): WarmingSnapshot {
+  const cfg = loreConfig();
+  const idleMs = now - state.lastRequestTime;
+
+  // Histograms
+  const sessionHist = state.survivalModel ?? createHistogram();
+  loadGlobalHistograms(state.projectPath);
+  const globalHist = getGlobalHistogram(state.projectPath);
+  const blendedHist = blendHistograms(sessionHist, globalHist);
+  const sessionWeight = Math.min(sessionHist.total / BLEND_PSEUDOCOUNT, 1.0);
+
+  // Survival & return probability
+  const survivalAtIdle = survivalFunction(blendedHist, idleMs);
+
+  const profile = resolveProfile(
+    state.lastModel,
+    state.lastProtocol,
+    state.resolvedConversationTTL,
+  );
+  const ttlMs = profile?.ttlMs ?? 300_000;
+  const warmupMarginMs = profile?.warmupMarginMs ?? 45_000;
+
+  // Legacy: conditional return probability (kept for dashboard backward compat)
+  const pReturn = conditionalReturnProbability(blendedHist, idleMs, ttlMs);
+  const textOnlyRuns = state.consecutiveTextOnlyTurns ?? 0;
+  const pReturnDampened =
+    textOnlyRuns > 0 ? pReturn * Math.pow(0.5, textOnlyRuns) : pReturn;
+
+  // Commitment model signals
+  const breakFrac = breakFraction(blendedHist);
+  const totalTurns = Math.floor(state.messageCount / 2);
+  const pFinished = pSessionFinished({
+    survivalAtIdle,
+    consecutiveTextOnlyTurns: textOnlyRuns,
+    breakFraction: breakFrac,
+    totalTurns,
+  });
+  const pReturns = 1.0 - pFinished;
+
+  // Corrected threshold
+  const autoThreshold = profile
+    ? costThreshold(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok)
+    : 0.1;
+  const thresholdVal = cfg.cache.warming.minReturnProbability ?? autoThreshold;
+
+  // Commitment model cost analysis
+  const maxCyclesVal = profile
+    ? maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok)
+    : 0;
+  const cyclesSpent = state.warmup?.warmupCount ?? 0;
+  const expectedCycles = profile
+    ? expectedWarmupCycles(blendedHist, idleMs, ttlMs, maxCyclesVal)
+    : 0;
+
+  // Determine warming phase
+  const isFirstWindow = idleMs < ttlMs;
+  const hasWarmed = cyclesSpent > 0;
+  const warmingPhase: "initial" | "continuation" | "none" =
+    isFirstWindow ? "initial" : hasWarmed ? "continuation" : "none";
+
+  // Decision + reason
+  const warmNow =
+    profile != null &&
+    shouldWarm(state, profile, blendedHist, now);
+
+  let notWarmingReason: string | null = null;
+  if (!warmNow) {
+    if (circuitBreakerTripped) {
+      notWarmingReason = "Circuit breaker tripped";
+    } else if (!cfg.cache.warming.enabled) {
+      notWarmingReason = "Warming disabled in config";
+    } else if (!state.cacheAnalytics.lastRequestBody) {
+      notWarmingReason = "No stored request body";
+    } else if (!profile) {
+      notWarmingReason = "No warming profile (non-Anthropic or unknown model)";
+    } else if (state.warmup?.forceKeepWarm) {
+      const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+      if (cyclesSpent >= maxCyc) {
+        notWarmingReason = `Force-keep: break-even exceeded (${cyclesSpent} >= ${maxCyc} cycles)`;
+      } else {
+        const intoWindow = idleMs % ttlMs;
+        if (intoWindow < ttlMs - warmupMarginMs) {
+          notWarmingReason = "Force-keep: not in warmup window yet";
+        } else {
+          notWarmingReason = "Force-keep: cooldown active";
+        }
+      }
+    } else if (state.warmup?.lastWarmupAt && now - state.warmup.lastWarmupAt < cooldownFor(state, ttlMs, warmupMarginMs)) {
+      notWarmingReason = "Already warmed in this TTL window";
+    } else if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
+      notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
+    } else if (state.warmup?.disabled) {
+      notWarmingReason = "Session marked dead";
+    } else if (isFirstWindow && idleMs < ttlMs - warmupMarginMs) {
+      notWarmingReason = "Cache still fresh";
+    } else if (pReturns <= thresholdVal) {
+      notWarmingReason = `P(returns) ${(pReturns * 100).toFixed(1)}% <= threshold ${(thresholdVal * 100).toFixed(1)}%`;
+    } else if (!isFirstWindow && cyclesSpent >= maxCyclesVal) {
+      notWarmingReason = `Break-even exceeded (${cyclesSpent} >= ${maxCyclesVal} cycles)`;
+    } else if (!isFirstWindow && pFinished > 0.95) {
+      notWarmingReason = `Session finished (P=${(pFinished * 100).toFixed(0)}%)`;
+    } else {
+      notWarmingReason = "Unknown";
+    }
   }
 
-  return true;
+  return {
+    sessionId: state.sessionID,
+    projectPath: state.projectPath,
+    messageCount: state.messageCount,
+    idleMs,
+    consecutiveTextOnlyTurns: textOnlyRuns,
+    ttl: state.resolvedConversationTTL,
+    warmupCount: cyclesSpent,
+    warmupHits: state.warmup?.warmupHits ?? 0,
+    lastWarmupAt: state.warmup?.lastWarmupAt ?? 0,
+    disabled: state.warmup?.disabled ?? false,
+    forceKeepWarm: state.warmup?.forceKeepWarm ?? false,
+    sessionHistogram: sessionHist,
+    globalHistogram: globalHist,
+    blendedHistogram: blendedHist,
+    sessionWeight,
+    survivalAtIdle,
+    // Commitment model
+    pSessionFinished: pFinished,
+    pReturns,
+    breakFrac,
+    expectedCycles,
+    maxCycles: maxCyclesVal,
+    cyclesSpent,
+    warmingPhase,
+    threshold: thresholdVal,
+    // Legacy
+    pReturn,
+    pReturnDampened,
+    costThreshold: thresholdVal,
+    // Decision
+    shouldWarmNow: warmNow,
+    notWarmingReason,
+    circuitBreaker: getCircuitBreakerStatus(),
+  };
+}
+
+/** Compute cooldown based on forced/normal mode. */
+function cooldownFor(state: SessionState, ttlMs: number, warmupMarginMs: number): number {
+  return state.warmup?.forceKeepWarm
+    ? Math.max(ttlMs - warmupMarginMs, 0)
+    : ttlMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -716,27 +1147,27 @@ export async function executeWarmup(
 // Global histogram persistence (SQLite)
 // ---------------------------------------------------------------------------
 
-/** Tracks which project×slot combos have been modified since last flush. */
-const dirtyHistograms = new Set<string>();
-
-function dirtyKey(projectPath: string, slot: TimeSlot): string {
-  return `${projectPath}\0${slot}`;
-}
+/** Tracks which projects have been modified since last flush. */
+const dirtyProjects = new Set<string>();
 
 /**
  * Load persisted global histograms for a project from SQLite.
  *
  * Called once per project on first access. Populates the in-memory
- * globalModels map so survival analysis has data immediately after
+ * globalHistograms map so survival analysis has data immediately after
  * a gateway restart.
+ *
+ * Backward compatibility: if the DB contains old time-slot-segmented rows
+ * (work/evening/night), they are merged by summing bin counts into a single
+ * histogram. New data is written under the "all" time_slot key.
  */
 export function loadGlobalHistograms(projectPath: string): void {
-  if (globalModels.has(projectPath)) return; // already loaded
+  if (globalHistograms.has(projectPath)) return; // already loaded
 
-  const model = createSurvivalModel();
+  const merged = createHistogram();
   const pid = projectId(projectPath);
   if (!pid) {
-    globalModels.set(projectPath, model);
+    globalHistograms.set(projectPath, merged);
     return;
   }
 
@@ -746,36 +1177,30 @@ export function loadGlobalHistograms(projectPath: string): void {
       .all(pid) as Array<{ time_slot: string; counts: string; total: number }>;
 
     for (const row of rows) {
-      const slot = row.time_slot as TimeSlot;
-      if (!(slot in model.slots)) continue;
-
       try {
         const counts = JSON.parse(row.counts) as number[];
         if (Array.isArray(counts) && counts.length === BIN_COUNT) {
-          model.slots[slot] = { counts, total: row.total };
+          // Merge this row into the single histogram (handles both old
+          // slot-segmented rows and the new "all" row).
+          for (let i = 0; i < BIN_COUNT; i++) {
+            merged.counts[i] += counts[i];
+          }
+          merged.total += row.total;
         }
       } catch {
-        // Corrupt JSON — start fresh for this slot
+        // Corrupt JSON — skip this row
       }
     }
 
     log.info(
-      `cache-warmer: loaded global histograms for project=${projectPath.slice(-30)} ` +
-        `(work=${model.slots.work.total} evening=${model.slots.evening.total} night=${model.slots.night.total})`,
+      `cache-warmer: loaded global histogram for project=${projectPath.slice(-30)} ` +
+        `(${merged.total} observations)`,
     );
   } catch (e) {
     log.warn("cache-warmer: failed to load global histograms:", e);
   }
 
-  globalModels.set(projectPath, model);
-}
-
-/**
- * Mark a global histogram as dirty (modified since last flush).
- * Called internally by recordGap when targeting a global histogram.
- */
-function markDirty(projectPath: string, slot: TimeSlot): void {
-  dirtyHistograms.add(dirtyKey(projectPath, slot));
+  globalHistograms.set(projectPath, merged);
 }
 
 /**
@@ -784,43 +1209,55 @@ function markDirty(projectPath: string, slot: TimeSlot): void {
  * Designed to be called periodically (e.g. every 60s from the idle
  * scheduler) rather than on every recordGap call, to avoid write
  * amplification on a hot path.
+ *
+ * Writes a single row per project under time_slot="all". Old slot-segmented
+ * rows (work/evening/night) are deleted on first flush to avoid double-counting
+ * on the next load.
  */
 export function flushGlobalHistograms(): void {
-  if (dirtyHistograms.size === 0) return;
+  if (dirtyProjects.size === 0) return;
 
   const d = db();
   const now = Date.now();
 
-  for (const key of dirtyHistograms) {
-    const [projectPath, slot] = key.split("\0") as [string, TimeSlot];
+  for (const projectPath of dirtyProjects) {
     const pid = projectId(projectPath);
     if (!pid) continue;
 
-    const model = globalModels.get(projectPath);
-    if (!model) continue;
-
-    const hist = model.slots[slot];
+    const hist = globalHistograms.get(projectPath);
     if (!hist) continue;
 
     try {
-      d.query(
-        `INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(project_id, time_slot) DO UPDATE SET
-           counts = excluded.counts,
-           total = excluded.total,
-           updated_at = excluded.updated_at`,
-      ).run(pid, slot, JSON.stringify(hist.counts), hist.total, now);
+      // Atomic: delete old slot rows + upsert the unified "all" row.
+      // Without the transaction, a crash between DELETE and INSERT
+      // would lose all histogram data for this project.
+      d.exec("BEGIN");
+      try {
+        // Delete old slot-segmented rows (backward compat cleanup)
+        d.query(
+          "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot != 'all'",
+        ).run(pid);
+
+        d.query(
+          `INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at)
+           VALUES (?, 'all', ?, ?, ?)
+           ON CONFLICT(project_id, time_slot) DO UPDATE SET
+             counts = excluded.counts,
+             total = excluded.total,
+             updated_at = excluded.updated_at`,
+        ).run(pid, JSON.stringify(hist.counts), hist.total, now);
+        d.exec("COMMIT");
+      } catch (e) {
+        d.exec("ROLLBACK");
+        throw e;
+      }
     } catch (e) {
-      log.warn(`cache-warmer: failed to flush histogram ${slot}:`, e);
+      log.warn(`cache-warmer: failed to flush histogram:`, e);
     }
   }
 
-  dirtyHistograms.clear();
+  dirtyProjects.clear();
 }
-
-// Override getGlobalHistogram to load from DB on first access and mark dirty on write
-const _originalGetGlobalHistogram = getGlobalHistogram;
 
 /**
  * Record an inter-turn gap in a global histogram, with dirty tracking.
@@ -830,13 +1267,21 @@ const _originalGetGlobalHistogram = getGlobalHistogram;
  */
 export function recordGlobalGap(
   projectPath: string,
-  slot: TimeSlot,
   gapMs: number,
 ): void {
   loadGlobalHistograms(projectPath); // ensure loaded
-  const hist = getGlobalHistogram(projectPath, slot);
+  const hist = getGlobalHistogram(projectPath);
   recordGap(hist, gapMs);
-  markDirty(projectPath, slot);
+  dirtyProjects.add(projectPath);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard helpers
+// ---------------------------------------------------------------------------
+
+/** Read-only snapshot of all loaded global histograms (for dashboard). */
+export function getGlobalHistogramsSnapshot(): ReadonlyMap<string, InterTurnHistogram> {
+  return globalHistograms;
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +1292,8 @@ export function recordGlobalGap(
 export function _resetForTest(): void {
   circuitBreakerFailures = 0;
   circuitBreakerTripped = false;
-  globalModels.clear();
-  dirtyHistograms.clear();
+  circuitBreakerLoaded = true; // Mark as loaded so it doesn't re-read stale DB state
+  try { setKV(CB_KV_KEY, JSON.stringify({ tripped: false, failures: 0 })); } catch { /* DB may not be available in all test contexts */ }
+  globalHistograms.clear();
+  dirtyProjects.clear();
 }

@@ -171,6 +171,8 @@ export function markDistilled(ids: string[]) {
     .run(...ids);
 }
 
+// Only searches undistilled messages — distilled content is already represented
+// in distillation search results and would duplicate/dilute temporal hits.
 // LIKE-based fallback for when FTS5 fails unexpectedly.
 function searchLike(input: {
   pid: string;
@@ -186,8 +188,8 @@ function searchLike(input: {
   const conditions = terms.map(() => "LOWER(content) LIKE ?").join(" AND ");
   const likeParams = terms.map((t) => `%${t}%`);
   const query = input.sessionID
-    ? `SELECT * FROM temporal_messages WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
-    : `SELECT * FROM temporal_messages WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
+    ? `SELECT * FROM temporal_messages WHERE project_id = ? AND session_id = ? AND distilled = 0 AND ${conditions} ORDER BY created_at DESC LIMIT ?`
+    : `SELECT * FROM temporal_messages WHERE project_id = ? AND distilled = 0 AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
   const params = input.sessionID
     ? [input.pid, input.sessionID, ...likeParams, input.limit]
     : [input.pid, ...likeParams, input.limit];
@@ -208,11 +210,11 @@ export function search(input: {
   const ftsSQL = input.sessionID
     ? `SELECT m.* FROM temporal_fts f
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
-       WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ?
+       WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ? AND m.distilled = 0
        ORDER BY rank LIMIT ?`
     : `SELECT m.* FROM temporal_fts f
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
-       WHERE f.content MATCH ? AND m.project_id = ?
+       WHERE f.content MATCH ? AND m.project_id = ? AND m.distilled = 0
        ORDER BY rank LIMIT ?`;
 
   try {
@@ -251,11 +253,11 @@ export function searchScored(input: {
   const ftsSQL = input.sessionID
     ? `SELECT m.*, rank FROM temporal_fts f
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
-       WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ?
+       WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ? AND m.distilled = 0
        ORDER BY rank LIMIT ?`
     : `SELECT m.*, rank FROM temporal_fts f
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
-       WHERE f.content MATCH ? AND m.project_id = ?
+       WHERE f.content MATCH ? AND m.project_id = ? AND m.distilled = 0
        ORDER BY rank LIMIT ?`;
 
   try {

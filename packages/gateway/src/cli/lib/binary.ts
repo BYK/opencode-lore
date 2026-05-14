@@ -269,6 +269,13 @@ function handleExistingLock(lockPath: string): void {
   const existingPid = Number.parseInt(content, 10);
 
   if (!Number.isNaN(existingPid) && isProcessRunning(existingPid)) {
+    // Allow re-entry from the same process (e.g. downloadBinaryToTemp
+    // acquires the lock, then installBinary tries to acquire the same lock
+    // when source and target directories are identical).
+    if (existingPid === process.pid) {
+      return;
+    }
+    // Allow child process to take over parent's lock (exec-based restart).
     if (existingPid === process.ppid) {
       writeFileSync(lockPath, String(process.pid));
       return;
