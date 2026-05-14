@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
-    href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:wght@200;300;400&display=swap"
+    href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:wght@200;300;400;500;700&display=swap"
     rel="stylesheet" />
 
   <style>
@@ -95,19 +95,38 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 1.4rem 3rem;
-      background: rgba(247, 242, 232, 0.85);
-      backdrop-filter: blur(16px);
-      border-bottom: 1px solid rgba(90, 143, 99, .12);
+      padding: 1rem 3rem;
+      background: var(--ink); /* Very dark background like the example */
+      border-bottom: none;
+      color: var(--c0);
+    }
+
+    .nav-left {
+      display: flex;
+      align-items: center;
+      gap: 3rem;
     }
 
     .logo {
-      font-family: var(--serif);
-      font-size: 1.5rem;
-      color: var(--g0);
       display: flex;
       align-items: center;
       gap: .5rem;
+      color: var(--c0); /* Light logo text and stroke */
+      transition: color 0.3s ease;
+    }
+
+    .logo:hover {
+      color: var(--g5);
+    }
+
+    .logo-img {
+      height: 48px; /* Slightly smaller to fit the tight dark header */
+      width: auto;
+      display: block;
+    }
+
+    .logo-text {
+      font-family: var(--serif); /* Garantili bir şekilde Playfair Display uygulamak için */
     }
 
     .logo-dot {
@@ -134,12 +153,13 @@
 
     .nav-links {
       display: flex;
-      gap: 2.5rem;
+      gap: 2.2rem;
       list-style: none;
       font-size: .75rem;
       letter-spacing: .14em;
       text-transform: uppercase;
-      color: var(--mid);
+      color: rgba(247, 242, 232, 0.8); /* Faded white */
+      font-weight: 700;
     }
 
     .nav-links a {
@@ -147,22 +167,24 @@
     }
 
     .nav-links a:hover {
-      color: var(--g1);
+      color: var(--c0); /* Solid white on hover */
     }
 
     .nav-btn {
       font-size: .73rem;
       letter-spacing: .13em;
       text-transform: uppercase;
-      padding: .55rem 1.4rem;
-      background: var(--g0);
-      color: var(--c0);
-      border-radius: 1px;
-      transition: background .3s;
+      padding: .6rem 1.6rem;
+      background: var(--c0);
+      color: var(--ink);
+      border-radius: 3px;
+      transition: background .3s, color .3s;
+      font-weight: 700;
     }
 
     .nav-btn:hover {
-      background: var(--g1);
+      background: var(--g5);
+      color: var(--ink);
     }
 
     /* HERO */
@@ -788,13 +810,25 @@
 
   <!-- NAV -->
   <nav>
-    <div class="logo">LoreAI <span class="logo-dot"></span></div>
-    <ul class="nav-links">
-      <li><a href="#how">How It Works</a></li>
-      <li><a href="#features">Features</a></li>
-      <li><a href="https://github.com/byk/loreai" target="_blank">GitHub</a></li>
-    </ul>
-    <a href="#waitlist" class="nav-btn">Join Waitlist</a>
+    <div class="nav-left">
+      <a href="#" class="logo">
+        <svg class="logo-img" viewBox="0 0 280 80" xmlns="http://www.w3.org/2000/svg">
+          <path d="M 30 10 L 10 10 L 10 70 L 30 70" fill="none" stroke="currentColor" stroke-width="8" />
+          <line x1="25" y1="20" x2="90" y2="20" stroke="var(--g5)" stroke-width="4" stroke-linecap="square" />
+          <line x1="25" y1="40" x2="75" y2="40" stroke="var(--g5)" stroke-width="4" stroke-linecap="square" />
+          <line x1="25" y1="60" x2="60" y2="60" stroke="var(--g5)" stroke-width="4" stroke-linecap="square" />
+          <text class="logo-text" x="110" y="64" font-size="66" fill="currentColor" stroke="none" font-weight="400">Lore</text>
+        </svg>
+      </a>
+      <ul class="nav-links">
+        <li><a href="#how">How It Works</a></li>
+        <li><a href="#features">Features</a></li>
+        <li><a href="https://github.com/byk/loreai" target="_blank">GitHub</a></li>
+      </ul>
+    </div>
+    <div class="nav-right">
+      <a href="#waitlist" class="nav-btn">Join Waitlist</a>
+    </div>
   </nav>
 
   <!-- HERO -->
@@ -834,15 +868,14 @@
     <div class="hero-visual sr">
       <div class="graph-wrap">
         <svg viewBox="0 0 400 400" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="200" cy="200" r="30" fill="#2a4d32" class="mn" />
-          <text x="200" y="205" text-anchor="middle" fill="#e8f2e9" font-family="Playfair Display,serif"
-            font-size="12">Lore</text>
-          <circle cx="90" cy="100" r="15" fill="#c4ddc7" opacity=".8" />
-          <circle cx="310" cy="100" r="15" fill="#c4ddc7" opacity=".8" />
-          <circle cx="200" cy="330" r="15" fill="#dfd5bb" opacity=".8" />
           <line x1="200" y1="200" x2="90" y2="100" stroke="#8fba96" stroke-width="1" class="mg-edge" />
           <line x1="200" y1="200" x2="310" y2="100" stroke="#8fba96" stroke-width="1" class="mg-edge" />
           <line x1="200" y1="200" x2="200" y2="330" stroke="#8fba96" stroke-width="1" class="mg-edge" />
+          <circle cx="200" cy="200" r="54" fill="#2a4d32" class="mn" />
+          <text class="logo-text" x="200" y="210" text-anchor="middle" fill="#e8f2e9" font-size="28">Lore</text>
+          <circle cx="90" cy="100" r="15" fill="#c4ddc7" opacity=".8" />
+          <circle cx="310" cy="100" r="15" fill="#c4ddc7" opacity=".8" />
+          <circle cx="200" cy="330" r="15" fill="#dfd5bb" opacity=".8" />
         </svg>
         <div class="g-chip gc1">@loreai/gateway</div>
         <div class="g-chip gc2">Anthropic + OpenAI</div>
