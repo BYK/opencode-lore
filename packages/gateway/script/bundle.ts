@@ -203,24 +203,83 @@ writeFileSync(join(distDir, "bin.cjs"), binScript, { mode: 0o755 });
 // Type declarations — dist/index.d.cts
 // ---------------------------------------------------------------------------
 
-const typeDeclarations = `export type GatewayConfig = {
-  /** Port to listen on. Defaults to 4141. */
+const typeDeclarations = `/** Gateway configuration — loaded from environment variables with sensible defaults. */
+export interface GatewayConfig {
+  /** Port to listen on. Default: 3207. Env: LORE_LISTEN_PORT */
+  port: number;
+  /** True when the port was explicitly set via LORE_LISTEN_PORT or --port. */
+  portExplicit: boolean;
+  /**
+   * Hosts to bind to. Default: ["127.0.0.1"].
+   * Env: LORE_LISTEN_HOST (comma-separated for multiple addresses).
+   */
+  hosts: string[];
+  /** Upstream Anthropic API URL. Default: "https://api.anthropic.com". Env: LORE_UPSTREAM_ANTHROPIC */
+  upstreamAnthropic: string;
+  /** Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI */
+  upstreamOpenAI: string;
+  /** Idle timeout in seconds before triggering background work. Default: 60 */
+  idleTimeoutSeconds: number;
+  /** Whether to log requests. Default: false. Env: LORE_DEBUG */
+  debug: boolean;
+}
+
+export interface StartOptions {
   port?: number;
-  /** Host to bind to. Defaults to "127.0.0.1". */
-  host?: string;
-};
+  hosts?: string[];
+  debug?: boolean;
+  /** Suppress verbose banner (env vars, export hints). Used in embedded mode. */
+  quiet?: boolean;
+}
+
+export interface GatewayHandle {
+  config: GatewayConfig;
+  port: number;
+  /** Whether this process owns the server (started it). False when reusing an existing instance. */
+  owned: boolean;
+  /** Shut down the gateway. No-op when owned is false. */
+  shutdown: () => Promise<void>;
+}
+
+/** Default port preference order when LORE_LISTEN_PORT is not set. */
+export declare const DEFAULT_PORTS: readonly [3207, 5673];
+
+/** The primary default port (first in the fallback chain). */
+export declare const DEFAULT_PORT: 3207;
 
 /** Load Lore gateway configuration from the environment. */
 export declare function loadConfig(): GatewayConfig;
 
-/** Start the Lore gateway server. */
-export declare function startServer(config?: GatewayConfig): Promise<void>;
+/**
+ * Start the Lore gateway server.
+ *
+ * Prefer startGateway() for most use cases — it handles port fallback,
+ * port file management, and existing-instance reuse automatically.
+ */
+export declare function startServer(config: GatewayConfig): {
+  stop: () => void;
+  port: number;
+  hosts: string[];
+};
 
-/** Handle an incoming request through the Lore pipeline. */
-export declare function handleRequest(req: Request): Promise<Response>;
+/**
+ * Start the gateway with port fallback, port file management, and
+ * existing-instance detection. This is the recommended entry point
+ * for plugins and programmatic use.
+ */
+export declare function startGateway(opts?: StartOptions): Promise<GatewayHandle>;
+
+/**
+ * Probe a running gateway at the given URL via its /health endpoint.
+ * Returns true if the response is 2xx, false on any error or timeout.
+ */
+export declare function probeGateway(baseURL: string, timeoutMs?: number): Promise<boolean>;
+
+/** Read the port file. Returns the port number or null if not found/invalid. */
+export declare function readPortFile(): number | null;
 
 /** Reset internal pipeline state (for testing). */
-export declare function resetPipelineState(): void;
+export declare function resetPipelineState(): Promise<void>;
 
 /** CLI entry point — called by dist/bin.cjs. */
 export declare function _cli(): Promise<void>;
