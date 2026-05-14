@@ -1,0 +1,10 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Bracket -->
+  <path d="M 80 45 L 60 45 L 60 105 L 80 105" fill="none" stroke="#2B2B2B" stroke-width="8" />
+  <!-- Lines -->
+  <line x1="75" y1="55" x2="140" y2="55" stroke="#2B2B2B" stroke-width="4" stroke-linecap="square" />
+  <line x1="75" y1="75" x2="125" y2="75" stroke="#2B2B2B" stroke-width="4" stroke-linecap="square" />
+  <line x1="75" y1="95" x2="110" y2="95" stroke="#2B2B2B" stroke-width="4" stroke-linecap="square" />
+  <!-- Text -->
+  <text x="100" y="160" font-family="'DM Sans', sans-serif" font-size="56" fill="#2B2B2B" text-anchor="middle" font-weight="400">lore</text>
+</svg>
