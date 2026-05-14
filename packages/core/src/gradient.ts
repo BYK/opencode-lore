@@ -1413,7 +1413,7 @@ function tryFitStable(input: {
   rawBudget: number;
   sessionID: string;
   sessState: SessionState;
-}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget"> | null {
+}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"> | null {
   // If the prefix already overflows its budget there's no point trying.
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
@@ -1543,6 +1543,10 @@ export type TransformResult = {
   usable: number;
   distilledBudget: number;
   rawBudget: number;
+  // Signals that the pipeline should re-run forSession() to refresh LTM
+  // relevance scoring. Set on Layer 4 (emergency) where the context is
+  // fully reset and mid-session knowledge may have changed relevance.
+  refreshLtm: boolean;
 };
 
 // Per-session urgent distillation tracking.
@@ -1719,6 +1723,7 @@ function transformInner(input: {
       usable,
       distilledBudget,
       rawBudget,
+      refreshLtm: false,
     };
   }
 
@@ -1773,7 +1778,7 @@ function transformInner(input: {
 
     // Stage 0 (layer 1) uses tryFitStable for Approach B pin cache.
     // Higher stages reset the raw window cache and use plain tryFit.
-    let result: Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget"> | null;
+    let result: Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"> | null;
     if (stage.useStableWindow && sid) {
       result = tryFitStable({
         messages: dedupMessages,
@@ -1806,7 +1811,7 @@ function transformInner(input: {
       if (sid && (s > 0 || cached.tokens === 0)) {
         urgentDistillationMap.set(sid, true);
       }
-      return { ...result!, layer: stageLayer, usable, distilledBudget, rawBudget };
+      return { ...result!, layer: stageLayer, usable, distilledBudget, rawBudget, refreshLtm: false };
     }
   }
 
@@ -1876,6 +1881,7 @@ function transformInner(input: {
     usable,
     distilledBudget,
     rawBudget,
+    refreshLtm: true,
   };
 }
 
@@ -1996,7 +2002,7 @@ function tryFit(input: {
   rawBudget: number;
   strip: "none" | "old-tools" | "all-tools";
   protectedTurns?: number;
-}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget"> | null {
+}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"> | null {
   // If distilled prefix exceeds its budget, fail this layer
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
