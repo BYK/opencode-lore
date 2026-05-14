@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, getKV, setKV } from "../src/db";
+import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, loadHeaderSessionIndex, getKV, setKV } from "../src/db";
 
 
 describe("db", () => {
@@ -632,6 +632,39 @@ describe("db", () => {
     expect(loaded!.lastKnownInput).toBe(0);
     expect(loaded!.lastTurnAt).toBe(0);
     expect(loaded!.lastBustAt).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // loadHeaderSessionIndex
+  // -------------------------------------------------------------------------
+
+  test("loadHeaderSessionIndex only returns sessions with non-null headers", () => {
+    const sid1 = `test-hsi-1-${crypto.randomUUID()}`;
+    const sid2 = `test-hsi-2-${crypto.randomUUID()}`;
+    saveSessionTracking(sid1, {
+      headerSessionId: "uuid-aaa",
+      headerName: "x-claude-code-session-id",
+    });
+    saveSessionTracking(sid2, {
+      headerSessionId: "uuid-bbb",
+      headerName: "x-session-affinity",
+    });
+    // Session without headers should NOT appear
+    const sid3 = `test-hsi-3-${crypto.randomUUID()}`;
+    saveSessionTracking(sid3, { messageCount: 5 });
+
+    const entries = loadHeaderSessionIndex();
+    const found1 = entries.find((e) => e.sessionId === sid1);
+    const found2 = entries.find((e) => e.sessionId === sid2);
+    const found3 = entries.find((e) => e.sessionId === sid3);
+
+    expect(found1).toBeDefined();
+    expect(found1!.headerSessionId).toBe("uuid-aaa");
+    expect(found1!.headerName).toBe("x-claude-code-session-id");
+    expect(found2).toBeDefined();
+    expect(found2!.headerSessionId).toBe("uuid-bbb");
+    expect(found2!.headerName).toBe("x-session-affinity");
+    expect(found3).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------

@@ -47,6 +47,7 @@ import {
   embedding,
   saveSessionTracking,
   loadSessionTracking,
+  loadHeaderSessionIndex,
 } from "@loreai/core";
 
 import type {
@@ -195,6 +196,7 @@ export function setUpstreamInterceptor(
 export async function resetPipelineState(): Promise<void> {
   initialized = false;
   sessions.clear();
+  headerSessionIndex.clear();
   ltmSessionCache.clear();
   ltmPinnedText.clear();
   // Shut down batch queue gracefully before clearing the client
@@ -544,6 +546,23 @@ async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promis
     latReader.refresh(projectPath);
   } catch (e) {
     log.error("lat-reader startup refresh error:", e);
+  }
+
+  // Pre-populate headerSessionIndex from DB so Tier 1 session identification
+  // works immediately after process restart. Without this, the first request
+  // with a known session header generates a new session ID and orphans the
+  // old session's persisted state.
+  try {
+    const headerEntries = loadHeaderSessionIndex();
+    for (const entry of headerEntries) {
+      const indexKey = `${entry.headerName}:${entry.headerSessionId}`;
+      headerSessionIndex.set(indexKey, entry.sessionId);
+    }
+    if (headerEntries.length > 0) {
+      log.info(`restored ${headerEntries.length} header→session mappings from DB`);
+    }
+  } catch (e) {
+    log.warn("header session index restore failed:", e);
   }
 
   // Pre-warm models.dev pricing/limits cache so synchronous lookups in the

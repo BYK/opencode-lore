@@ -75,6 +75,7 @@ export {
   type SessionCostSnapshot,
   saveSessionTracking,
   loadSessionTracking,
+  loadHeaderSessionIndex,
   type SessionTrackingState,
   type LoadedSessionTracking,
   getKV,
