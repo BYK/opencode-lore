@@ -83,7 +83,8 @@ jobs:
 
           # 2. Get bump type from craft (analyzes conventional commits since last tag)
           BUMP_TYPE="patch"  # conservative fallback
-          if CRAFT_JSON=$(craft changelog --format json 2>/dev/null); then
+          CRAFT_ERR=$(mktemp)
+          if CRAFT_JSON=$(craft changelog --format json 2>"$CRAFT_ERR"); then
             DETECTED=$(echo "$CRAFT_JSON" | jq -r '.bumpType // empty')
             if [ -n "$DETECTED" ]; then
               BUMP_TYPE="$DETECTED"
@@ -93,7 +94,9 @@ jobs:
             fi
           else
             echo "::warning::craft changelog failed, falling back to bump type: ${BUMP_TYPE}"
+            cat "$CRAFT_ERR"
           fi
+          rm -f "$CRAFT_ERR"
 
           # 3. Get current version from package.json
           CURRENT=$(jq -r .version packages/gateway/package.json)
