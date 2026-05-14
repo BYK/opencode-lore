@@ -67,12 +67,6 @@ function formatDate(ts: number): string {
   return new Date(ts).toISOString().replace("T", " ").slice(0, 19);
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 /** Render markdown to HTML, wrapped in a scoped container. */
 function md(markdown: string): string {
   return `<div class="md">${renderMarkdown(markdown)}</div>`;
@@ -624,25 +618,22 @@ function pageDashboard(): string {
   const stats = data.globalStats();
 
   let body = `<h1>Dashboard</h1>`;
-  // Aggregate cost stats across all tracked sessions
+  // Compute lifetime net savings (live + historical)
   const allCosts = getAllSessionCosts();
-  let totalSpend = 0;
-  let totalSaved = 0;
+  let liveSavings = 0;
   for (const [, c] of allCosts) {
-    totalSpend += totalActualCost(c);
-    const s = totalSavings(c);
-    if (s > 0) totalSaved += s;
+    liveSavings += totalSavings(c);
   }
+  const hist = computeHistoricalEstimates().totals;
+  const histSavings = hist.warmupSavings + hist.ttlSavings + hist.batchSavings +
+    hist.avoidedCompactionCost - hist.totalWorkerCost;
+  const netSavings = liveSavings + histSavings;
 
   body += `<div class="stats">
     <div class="stat"><div class="label">Projects</div><div class="value">${stats.project_count}</div></div>
     <div class="stat"><div class="label">Knowledge</div><div class="value">${stats.knowledge_count}</div></div>
     <div class="stat"><div class="label">Sessions</div><div class="value">${stats.session_count}</div></div>
-    <div class="stat"><div class="label">Messages</div><div class="value">${stats.message_count}</div></div>
-    <div class="stat"><div class="label">Distillations</div><div class="value">${stats.distillation_count}</div></div>
-    <div class="stat"><div class="label">DB Size</div><div class="value">${formatBytes(stats.db_size_bytes)}</div></div>
-    ${allCosts.size > 0 ? `<div class="stat"><div class="label">Session Spend</div><div class="value">${formatUSD(totalSpend)}</div></div>` : ""}
-    ${totalSaved > 0 ? `<div class="stat"><div class="label">Est. Saved</div><div class="value" style="color:#10b981">${formatUSD(totalSaved)}</div></div>` : ""}
+    ${netSavings > 0 ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(netSavings)}</div></div>` : ""}
   </div>`;
 
   if (!projects.length) {
@@ -1340,12 +1331,13 @@ function pageCosts(): string {
   const combinedNetSavings =
     combinedWarmupSavings + combinedTtlSavings + combinedBatchSavings +
     combinedAvoidedCompactionCost - combinedWorkerCost;
+  const combinedSessionCount = allCosts.size + hist.sessionCount;
+  const combinedTotalSpend = liveTotalSpend + hist.persistedConversationCost + hist.totalWorkerCost;
 
-  // Summary stats
+  // Summary stats (all lifetime-scoped)
   body += `<div class="stats">
-    <div class="stat"><div class="label">Live Sessions</div><div class="value">${allCosts.size}</div></div>
-    <div class="stat"><div class="label">Historical Sessions</div><div class="value">${hist.sessionCount}</div></div>
-    <div class="stat"><div class="label">Live Spend</div><div class="value">${formatUSD(liveTotalSpend)}</div></div>
+    <div class="stat"><div class="label">Sessions</div><div class="value">${combinedSessionCount}</div></div>
+    <div class="stat"><div class="label">Total Spend</div><div class="value">${formatUSD(combinedTotalSpend)}</div></div>
     <div class="stat"><div class="label">Avoided Compactions</div><div class="value">${combinedAvoidedCompactions}</div></div>
     ${combinedNetSavings > 0 ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(combinedNetSavings)}</div></div>` : ""}
     ${combinedNetSavings < 0 ? `<div class="stat"><div class="label">Net Overhead</div><div class="value" style="color:#e06c75">${formatUSD(-combinedNetSavings)}</div></div>` : ""}
