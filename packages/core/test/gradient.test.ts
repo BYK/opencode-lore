@@ -2428,9 +2428,11 @@ describe("tier-based context management", () => {
       expect(shouldCompress(2_000_000, 100_000, 4)).toBe(true);
     });
 
-    test("falls back to conservative (always compress) when no pricing", () => {
+    test("falls back to conservative (do NOT compress) when no pricing", () => {
       setCachePricing(0, 0);
-      expect(shouldCompress(250_000, 150_000, 0)).toBe(true);
+      // Without pricing data, we can't prove compression is worthwhile,
+      // so err on the side of keeping the cache (don't bust).
+      expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
     });
   });
 
@@ -2441,30 +2443,39 @@ describe("tier-based context management", () => {
       resetCalibration(SID);
     });
 
-    test("tracks consecutive busts (>50% writes)", () => {
-      recordCacheUsage(100_000, 0, SID);
+    test("tracks consecutive busts (>50% writes of total input)", () => {
+      // 100K write, 0 read, 100K total input → 100% bust
+      recordCacheUsage(100_000, 0, 100_000, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
 
-      recordCacheUsage(80_000, 20_000, SID);
+      // 80K write, 20K read, 120K total input → 66% bust
+      recordCacheUsage(80_000, 20_000, 120_000, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
     });
 
+    test("uses total input tokens (not just cache tokens) for bust ratio", () => {
+      // 60K write, 0 read, but 160K total input (100K uncached)
+      // bustRatio = 60K/160K = 37.5% — NOT a bust
+      recordCacheUsage(60_000, 0, 160_000, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
+    });
+
     test("resets consecutive busts on cache-hit turn (<50% writes)", () => {
-      recordCacheUsage(100_000, 0, SID);
-      recordCacheUsage(100_000, 0, SID);
+      recordCacheUsage(100_000, 0, 100_000, SID);
+      recordCacheUsage(100_000, 0, 100_000, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
 
       // Good cache hit — resets counter
-      recordCacheUsage(10_000, 90_000, SID);
+      recordCacheUsage(10_000, 90_000, 100_000, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
     });
 
     test("zero-usage turn does not change consecutive bust count", () => {
-      recordCacheUsage(100_000, 0, SID);
+      recordCacheUsage(100_000, 0, 100_000, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
 
       // Zero usage — no change
-      recordCacheUsage(0, 0, SID);
+      recordCacheUsage(0, 0, 0, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
     });
   });

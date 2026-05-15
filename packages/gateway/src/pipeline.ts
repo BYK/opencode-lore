@@ -1799,6 +1799,7 @@ function postResponse(
     recordCacheUsage(
       resp.usage.cacheCreationInputTokens ?? 0,
       resp.usage.cacheReadInputTokens ?? 0,
+      resp.usage.inputTokens ?? 0,
       sessionState.sessionID,
     );
 
@@ -2800,6 +2801,27 @@ async function handleConversationTurn(
       // an inconsistent state. The next turn will retry via step 6.
       log.error("LTM refresh on emergency layer failed:", e);
     }
+  }
+
+  // --- 7c. Unsustainable conversation warning ---
+  // When 5+ consecutive cache busts are detected, the conversation is growing
+  // faster than compression can keep up. Inject a warning into the last user
+  // message so the model can advise the user to compact or start fresh.
+  if (result.unsustainable) {
+    const warning = result.messages.findLast((m) => m.info.role === "user");
+    if (warning) {
+      warning.parts.push({
+        type: "text",
+        text: "\n\n<system-reminder>WARNING: This conversation is growing unsustainably — " +
+          "it has exceeded the context limit 5+ times in a row and compression cannot keep up. " +
+          "Consider running /compact to reset the context window or starting a new conversation " +
+          "to maintain response quality.</system-reminder>",
+      });
+    }
+    log.warn(
+      `session ${sessionID}: unsustainable conversation detected (5+ consecutive cache busts). ` +
+      `Warning injected.`,
+    );
   }
 
   // --- 8. Build the modified request ---

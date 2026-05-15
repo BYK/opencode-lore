@@ -107,8 +107,10 @@ export function shouldCompress(
   // stop trying to compress — it's clearly not helping.
   if (consecutiveBusts >= 5) return false;
 
-  // If no pricing data, fall back to conservative: always compress at boundary
-  if (cacheWriteCostPerToken <= 0 || cacheReadCostPerToken <= 0) return true;
+  // If no pricing data, fall back to conservative: do NOT compress.
+  // Compression busts the cache, which is expensive. Without pricing data
+  // we can't prove it's worthwhile, so err on the side of keeping the cache.
+  if (cacheWriteCostPerToken <= 0 || cacheReadCostPerToken <= 0) return false;
 
   const bustCost = compressedTokens * cacheWriteCostPerToken;
   const continueCost = currentTokens * cacheReadCostPerToken;
@@ -132,16 +134,25 @@ export function getTier(tokens: number): number {
  * the rolling bust detection used by shouldCompress().
  *
  * A "bust" is when cache_write > 50% of total input tokens.
+ *
+ * @param cacheWrite - cache_creation_input_tokens from the API response
+ * @param cacheRead  - cache_read_input_tokens from the API response
+ * @param inputTokens - total input_tokens from the API response (includes uncached)
+ * @param sessionID  - session that produced this response
  */
 export function recordCacheUsage(
   cacheWrite: number,
   cacheRead: number,
+  inputTokens: number,
   sessionID?: string,
 ): void {
   if (!sessionID) return;
   const state = getSessionState(sessionID);
 
-  const total = cacheWrite + cacheRead;
+  // Use total input tokens as denominator (includes uncached input),
+  // not just cacheWrite + cacheRead, to avoid inflated bust ratios
+  // when a large fraction of tokens is uncached.
+  const total = inputTokens > 0 ? inputTokens : cacheWrite + cacheRead;
   if (total > 0) {
     if (cacheWrite / total > 0.5) {
       state.consecutiveBusts++;
@@ -305,6 +316,9 @@ function getSessionState(sessionID: string): SessionState {
       state.lastLayer = persisted.lastLayer as SafetyLayer;
       state.lastKnownInput = persisted.lastKnownInput;
       state.lastTurnAt = persisted.lastTurnAt;
+      // consecutiveBusts is persisted in the dynamicContextCap column
+      // (repurposed, see saveGradientState).
+      state.consecutiveBusts = persisted.dynamicContextCap;
     }
 
     sessionStates.set(sessionID, state);
@@ -548,6 +562,8 @@ export function setForceMinLayer(layer: SafetyLayer, sessionID?: string) {
 // For testing only — reset all calibration and force-escalation state
 export function resetCalibration(sessionID?: string) {
   calibratedOverhead = null;
+  cacheWriteCostPerToken = 0;
+  cacheReadCostPerToken = 0;
   if (sessionID) {
     saveForceMinLayer(sessionID, 0); // clear persisted state
     sessionStates.delete(sessionID);
@@ -611,6 +627,9 @@ export function saveGradientState(sessionID: string): void {
     lastLayer: state.lastLayer,
     lastKnownInput: state.lastKnownInput,
     lastTurnAt: state.lastTurnAt,
+    // Repurpose the dead dynamicContextCap column (v24, always 0 now)
+    // to persist consecutiveBusts — avoids a new DB migration.
+    dynamicContextCap: state.consecutiveBusts,
   });
 }
 
@@ -1549,9 +1568,10 @@ function transformInner(input: {
     contextLimit - outputReserved - overhead - sessLtmTokens,
   );
 
-  // No artificial cap — use the full available context. Tier-based
-  // bust-vs-continue decisions are made per-turn at layer boundaries
-  // using actual cache pricing, not a static ceiling.
+  // No EMA-driven adaptive cap — use the full available context budget.
+  // The layer-0 cap (maxLayer0Tokens) still applies for per-turn read cost,
+  // and tier-based bust-vs-continue decisions control whether to compress
+  // at quality boundaries.
   const usable = usableRaw;
 
   const distilledBudget = Math.floor(usable * cfg.budget.distilled);
@@ -1684,6 +1704,46 @@ function transformInner(input: {
       rawBudget,
       refreshLtm: false,
     };
+  }
+
+  // --- Tier-based bust-vs-continue gate ---
+  // When expectedInput exceeds the layer-0 cap but still fits in the model's
+  // context window, check whether compression is economically justified.
+  // If not (bust cost ≥ 85% of continue cost), skip compression and pass
+  // through at layer 0 — the cache reads are cheap enough to justify the
+  // larger context, and raw messages are better quality than distilled.
+  if (
+    effectiveMinLayer === 0 &&
+    layer0Input > layer0Ceiling &&
+    layer0Input <= maxInput &&
+    sid
+  ) {
+    const busts = getSessionState(sid).consecutiveBusts;
+    // For compression, estimate the compressed size as the layer-1 budget
+    // (distilled + raw fractions). This is a rough upper bound — actual
+    // compressed output may be smaller.
+    const compressedEstimate = distilledBudget + rawBudget;
+    if (!shouldCompress(Math.round(layer0Input), compressedEstimate, busts)) {
+      const messageTokens = calibrated
+        ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm)
+        : expectedInput - overhead - sessLtmTokens;
+      log.info(
+        `tier gate: session=${sid} skipping compression — bustCost not justified` +
+        ` (input=${Math.round(layer0Input)} compressed=${compressedEstimate} busts=${busts})`,
+      );
+      return {
+        messages: input.messages,
+        layer: 0,
+        distilledTokens: 0,
+        rawTokens: Math.max(0, messageTokens),
+        totalTokens: Math.max(0, messageTokens),
+        usable,
+        distilledBudget,
+        rawBudget,
+        refreshLtm: false,
+        unsustainable: busts >= 5,
+      };
+    }
   }
 
   // --- Gradient mode: context exhausted (or force-escalated), compress older messages ---
