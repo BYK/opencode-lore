@@ -118,6 +118,8 @@ export {
   setLastTurnAtForTest,
   inspectSessionState,
   getConsecutiveBusts,
+  BUST_PRESSURE_THRESHOLD,
+  effectiveMetaThreshold,
 } from "./gradient";
 export {
   formatKnowledge,

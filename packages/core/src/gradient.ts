@@ -604,12 +604,31 @@ export function inspectSessionState(sessionID: string): {
 }
 
 /**
- * Return the consecutive-bust counter for a session.
- * Used by the gateway idle handler and urgent-distillation scheduler to
- * lower the meta-distillation threshold under bust pressure.
+ * Return the consecutive-bust counter for a session (read-only).
+ * Returns 0 if the session has no in-memory state — callers treat this
+ * as "no bust pressure" which is the safe default.
+ *
+ * Uses Map.get() instead of getSessionState() to avoid creating phantom
+ * SessionState entries with zeroed calibration fields, which would cause
+ * the next transform() call to treat the session as uncalibrated.
  */
 export function getConsecutiveBusts(sessionID: string): number {
-  return getSessionState(sessionID).consecutiveBusts;
+  return sessionStates.get(sessionID)?.consecutiveBusts ?? 0;
+}
+
+/** Bust-pressure threshold for meta-distillation: consecutive busts ≥ this
+ *  value trigger earlier consolidation of gen-0 segments. */
+export const BUST_PRESSURE_THRESHOLD = 3;
+
+/**
+ * Compute the effective meta-distillation threshold under bust pressure.
+ * When busts ≥ BUST_PRESSURE_THRESHOLD, lowers the threshold to 1/4 of the
+ * configured value (min 3) to consolidate the distilled prefix earlier.
+ */
+export function effectiveMetaThreshold(busts: number, configThreshold: number): number {
+  return busts >= BUST_PRESSURE_THRESHOLD
+    ? Math.max(3, Math.floor(configThreshold / 4))
+    : configThreshold;
 }
 
 /**
