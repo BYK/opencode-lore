@@ -346,9 +346,12 @@ describe("buildRecallFollowUp", () => {
       recallBlock.id,
     );
 
-    // Tools list should NOT include recall
-    expect(followUp.tools).toHaveLength(1);
+    // Tools list preserves all tools including recall (required by API —
+    // the assistant message contains a recall tool_use block, so the tool
+    // definition must remain in the tools list).
+    expect(followUp.tools).toHaveLength(2);
     expect(followUp.tools[0].name).toBe("Read");
+    expect(followUp.tools[1].name).toBe("recall");
   });
 
   test("preserves other request properties", () => {

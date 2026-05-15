@@ -423,11 +423,6 @@ export function buildRecallFollowUp(
     ],
   };
 
-  // Strip recall from tools list
-  const toolsWithoutRecall = originalReq.tools.filter(
-    (t) => t.name !== RECALL_TOOL_NAME,
-  );
-
   return {
     ...originalReq,
     messages: [
@@ -435,7 +430,6 @@ export function buildRecallFollowUp(
       assistantMessage,
       toolResultMessage,
     ],
-    tools: toolsWithoutRecall,
   };
 }
 
