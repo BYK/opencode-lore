@@ -67,7 +67,6 @@ import {
   fingerprintMessages,
   MESSAGE_COUNT_PROXIMITY_THRESHOLD,
   extractKnownSessionHeader,
-  extractParentSessionId,
   learnHeaders,
 } from "./session";
 import {
@@ -810,19 +809,10 @@ async function identifySession(
   const headers = req.rawHeaders;
 
   // --- Tier 1: Known headers ---
-
-  // Check for parent session header first (sub-agent → parent merge).
-  const parentId = extractParentSessionId(headers);
-  if (parentId) {
-    // Look up the parent session by its header value across all known headers.
-    for (const [indexKey, sid] of headerSessionIndex) {
-      if (indexKey.endsWith(`:${parentId}`)) {
-        return { sessionID: sid, isNew: false, tier: 1 };
-      }
-    }
-    // Parent not found — fall through to check if this request also carries
-    // its own session header (some clients send both).
-  }
+  // Sub-agent requests (carrying x-parent-session-id) are NOT merged into the
+  // parent session. They carry their own x-session-affinity nanoid and get
+  // independent sessions, benefiting from the full Lore pipeline (LTM,
+  // gradient, distillation) on their own state without corrupting the parent.
 
   const known = extractKnownSessionHeader(headers);
   if (known) {
@@ -1721,8 +1711,6 @@ function postResponse(
   requestBody?: string,
   /** Active gen_ai.chat span to finalize with usage attributes. */
   genAiSpan?: Sentry.Span,
-  /** When true, skip output EMA / max_tokens state updates (sub-agent turn). */
-  isSubagentTurn = false,
 ): void {
   const { sessionID, projectPath } = sessionState;
 
@@ -1805,12 +1793,7 @@ function postResponse(
     const prevStopReason = sessionState.lastStopReason;
 
     // --- Temporal storage & session-state updates ---
-    // Sub-agent turns are excluded from temporal storage: their tool-call
-    // messages would pollute the parent session's conversation history,
-    // trigger distillation of sub-agent content, and inject a synthetic
-    // "I'm ready to continue" prefix that primes the model to echo the
-    // plan mode system prompt instead of continuing with the actual task.
-    if (!isSubagentTurn) {
+    {
       // Store all messages (user + assistant) from this turn.
       // Convert gateway messages to Lore format.
       const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
@@ -1862,39 +1845,33 @@ function postResponse(
     }
 
     // --- Output tracking for dynamic max_tokens sizing ---
-    // Sub-agent turns are excluded: their short tool-call responses would
-    // contaminate the parent session's EMA, causing the next parent turn to
-    // receive an artificially low max_tokens (floor of 8192) which truncates
-    // comprehensive planning responses.
-    if (!isSubagentTurn) {
-      sessionState.lastStopReason = resp.stopReason;
-      sessionState.lastInputTokens =
-        (resp.usage.inputTokens ?? 0) +
-        (resp.usage.cacheReadInputTokens ?? 0) +
-        (resp.usage.cacheCreationInputTokens ?? 0);
-      const outputTokens = resp.usage.outputTokens;
-      if (outputTokens > 0) {
-        const EMA_ALPHA = 0.3;
-        sessionState.outputTokensEMA =
-          sessionState.outputTokensEMA == null
-            ? outputTokens
-            : Math.round(
-                sessionState.outputTokensEMA * (1 - EMA_ALPHA) +
-                  outputTokens * EMA_ALPHA,
-              );
-      }
+    sessionState.lastStopReason = resp.stopReason;
+    sessionState.lastInputTokens =
+      (resp.usage.inputTokens ?? 0) +
+      (resp.usage.cacheReadInputTokens ?? 0) +
+      (resp.usage.cacheCreationInputTokens ?? 0);
+    const outputTokens = resp.usage.outputTokens;
+    if (outputTokens > 0) {
+      const EMA_ALPHA = 0.3;
+      sessionState.outputTokensEMA =
+        sessionState.outputTokensEMA == null
+          ? outputTokens
+          : Math.round(
+              sessionState.outputTokensEMA * (1 - EMA_ALPHA) +
+                outputTokens * EMA_ALPHA,
+            );
     }
 
     // --- Cache warming: record inter-turn gap + track warmup hits ---
     const now = Date.now();
 
     // (A) Record inter-turn gap — only for genuine user-initiated turns.
-    // Subagent turns (x-parent-session-id) and tool-use auto-continuations
-    // (prior stop_reason was "tool_use") produce sub-second gaps that
-    // represent automated round-trips, not human think time. Recording
-    // these would skew the survival model toward very short return times.
+    // Tool-use auto-continuations (prior stop_reason was "tool_use") produce
+    // sub-second gaps that represent automated round-trips, not human think
+    // time. Recording these would skew the survival model toward very short
+    // return times.
     const isToolUseContinuation = prevStopReason === "tool_use";
-    if (!isSubagentTurn && !isToolUseContinuation) {
+    if (!isToolUseContinuation) {
       if (sessionState.lastUserTurnTime > 0) {
         const gap = now - sessionState.lastUserTurnTime;
         recordGap(getSessionHistogram(sessionState), gap);
@@ -1960,9 +1937,7 @@ function postResponse(
     // Reset warming state if session was marked dead or had active warming.
     // Dead flag is cleared so the next break gets a fresh ROI analysis.
     // warmupCount is reset so the break-even cap starts from 0 on the next break.
-    // Guard: only real user turns should reset — subagent turns would falsely
-    // clear the break-even counter and re-enable dead sessions.
-    if (!isSubagentTurn && sessionState.warmup) {
+    if (sessionState.warmup) {
       if (sessionState.warmup.disabled) {
         sessionState.warmup.disabled = false;
         log.info(
@@ -1978,22 +1953,14 @@ function postResponse(
     // Track how large the context *would* be without Lore's distillation
     // compressing it. When the shadow counter crosses the auto-compact
     // threshold, record a counterfactual compaction event.
-    if (!isSubagentTurn) {
-      updateShadowContext(sessionID, actualInput, resp.usage.outputTokens ?? 0, getWorkerModel()?.modelID ?? "unknown", req.model);
-    }
+    updateShadowContext(sessionID, actualInput, resp.usage.outputTokens ?? 0, getWorkerModel()?.modelID ?? "unknown", req.model);
 
     // Mark session dirty for periodic flush (gradient + warming + costs).
     // The 30s idle tick will persist state only for dirty sessions.
-    if (!isSubagentTurn) {
-      sessionState._dirty = true;
-    }
+    sessionState._dirty = true;
 
     // --- Schedule background work (fire-and-forget) ---
-    // Skip for sub-agent turns: no temporal messages were stored above,
-    // so there's nothing new to distill or curate.
-    if (!isSubagentTurn) {
-      scheduleBackgroundWork(sessionState, config);
-    }
+    scheduleBackgroundWork(sessionState, config);
   } catch (e) {
     log.error("post-response processing failed:", e);
   }
@@ -2405,11 +2372,6 @@ async function handleConversationTurn(
   const sessionState = getOrCreateSession(sessionID, pathResult.path);
   const projectPath = resolveSessionProjectPath(pathResult, sessionState);
 
-  // Detect sub-agent turns (e.g. OpenCode explore/general agents) that were
-  // merged into the parent session via x-parent-session-id.  These turns
-  // must NOT pollute the parent's output EMA or max_tokens state.
-  const isSubagentTurn = extractParentSessionId(req.rawHeaders) != null;
-
   // Bind auth credential to this session for background workers
   if (cred) {
     setSessionAuth(sessionID, cred);
@@ -2465,19 +2427,14 @@ async function handleConversationTurn(
   }
 
   // Update message count for proximity matching & structural compaction detection.
-  // Sub-agent turns have their own independent (smaller) message arrays — updating
-  // messageCount with those would inflate then "drop" the count when the main agent
-  // resumes, triggering false structural compaction detection.
-  if (!isSubagentTurn) {
-    sessionState.messageCount = currMsgCount;
-    // Batched save: messageCount + turnsSinceCuration + consecutiveTextOnlyTurns
-    // together to avoid multiple DB writes per turn.
-    saveSessionTracking(sessionID, {
-      messageCount: currMsgCount,
-      turnsSinceCuration: sessionState.turnsSinceCuration,
-      consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
-    });
-  }
+  sessionState.messageCount = currMsgCount;
+  // Batched save: messageCount + turnsSinceCuration + consecutiveTextOnlyTurns
+  // together to avoid multiple DB writes per turn.
+  saveSessionTracking(sessionID, {
+    messageCount: currMsgCount,
+    turnsSinceCuration: sessionState.turnsSinceCuration,
+    consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
+  });
 
   // Track session model for worker model discovery
   lastSeenSessionModel = req.model;
@@ -2508,8 +2465,7 @@ async function handleConversationTurn(
 
   log.info(
     `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
-      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier}` +
-      (isSubagentTurn ? ` subagent=true` : ``),
+      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier}`,
   );
 
   // --- 4. Set model limits ---
@@ -2544,14 +2500,9 @@ async function handleConversationTurn(
   // clients (OpenCode, generic) often send low/missing values (defaults to
   // 4096 in ingress parsing). Apply a hybrid headroom + history algorithm
   // that tightens from the 32K ceiling based on actual output patterns.
-  //
-  // Sub-agent turns are excluded: their output patterns differ wildly from
-  // the parent conversation (many short tool-call responses) and would
-  // contaminate the EMA, causing the parent's next turn to receive an
-  // artificially low max_tokens.
   const clientType = detectClientType(req.rawHeaders);
   const isCC = clientType === "claude-code" || hasBillingHeader(req.system);
-  if (!isCC && !isSubagentTurn) {
+  if (!isCC) {
     const computed = computeMaxTokens(
       modelSpec.output,
       modelSpec.context,
@@ -2978,7 +2929,7 @@ async function handleConversationTurn(
     // since the Anthropic SSE accumulator can't parse OpenAI SSE formats.
     if (effectiveProtocol === "openai-responses") {
       const resp = await accumulateResponsesSSEStream(upstreamResponse);
-      postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+      postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
       return nonStreamHttpResponse(resp);
     }
 
@@ -2986,7 +2937,7 @@ async function handleConversationTurn(
       // OpenAI Chat Completions streaming — accumulate and return as
       // non-streaming Anthropic format (same pattern as non-stream path).
       const resp = await accumulateNonStreamOpenAIStream(upstreamResponse);
-      postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+      postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
       return nonStreamHttpResponse(resp);
     }
 
@@ -2997,7 +2948,7 @@ async function handleConversationTurn(
     );
     return buildStreamingResponse(
       upstreamResponse,
-      (resp) => postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn),
+      (resp) => postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
       hasRecallTool
         ? { modifiedReq, config, sessionState, cacheOptions }
         : undefined,
@@ -3035,7 +2986,7 @@ async function handleConversationTurn(
       log.info(
         `recall (non-stream, mixed): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
       );
-      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
       return nonStreamHttpResponse(markerResp);
     }
 
@@ -3063,7 +3014,7 @@ async function handleConversationTurn(
         new Error(`recall follow-up upstream ${followUpResponse.status}`),
       );
       // Fall back to response with marker (no continuation)
-      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
       return nonStreamHttpResponse(markerResp);
     }
 
@@ -3091,11 +3042,11 @@ async function handleConversationTurn(
         resp.usage.cacheCreationInputTokens;
     }
 
-    postResponse(req, continuationResp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+    postResponse(req, continuationResp, sessionState, config, requestBody, genAiSpan);
     return nonStreamHttpResponse(continuationResp);
   }
 
-  postResponse(req, resp, sessionState, config, requestBody, genAiSpan, isSubagentTurn);
+  postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
   return nonStreamHttpResponse(resp);
 }
 
@@ -3451,20 +3402,9 @@ export async function handleRequest(
 
     // --- Case 1: Compaction request → intercept ---
     // Structural detection (session-aware) first, pattern matching as fallback.
-    //
-    // IMPORTANT: structural detection catches post-compaction autocontinue turns
-    // (OpenCode already compacted internally, now sends ~3 messages to continue).
-    // For subagent sessions, intercepting these is fatal: the gateway returns a
-    // compaction summary which becomes the subagent's task_result and leaks into
-    // the parent session.  Structural detection is skipped for subagents.
-    //
-    // Pattern-detected compaction (system prompt / user keywords / template) IS
-    // a real compaction request from OpenCode.  Intercepting with our
-    // distillation-based summary is cheaper than an upstream model call and works
-    // correctly for both main and subagent sessions (the summary flows into
-    // OpenCode's compaction processor, not directly as task_result).
-    const isSubagent = extractParentSessionId(req.rawHeaders) != null;
-    const structuralCompaction = !isSubagent && isStructuralCompaction(req, priorState);
+    // Sub-agents now get their own sessions (separate x-session-affinity), so
+    // priorState is the sub-agent's own state — structural detection is safe.
+    const structuralCompaction = isStructuralCompaction(req, priorState);
     const patternDetection = structuralCompaction ? undefined : detectCompactionRequest(req);
     if (structuralCompaction || patternDetection?.detected) {
       const reason = structuralCompaction
@@ -3478,12 +3418,6 @@ export async function handleRequest(
           : "unknown";
       log.info(`compaction detected: ${reason} messages=${req.messages.length} tools=${req.tools.length}`);
       return await handleCompaction(req, config);
-    }
-    if (isSubagent && isStructuralCompaction(req, priorState)) {
-      log.info(
-        `structural compaction skipped for subagent: prior=${priorState?.messageCount ?? "?"} curr=${req.messages.length}`
-        + ` — post-compaction autocontinue, passing through to upstream`,
-      );
     }
 
     // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
