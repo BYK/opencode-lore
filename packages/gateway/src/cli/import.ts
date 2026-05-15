@@ -151,7 +151,8 @@ export async function commandImport(
   // Start gateway for LLM access
   console.log("\n[lore] Starting gateway for LLM access...");
 
-  const startOpts: StartOptions = { quiet: true };
+  // Import always runs locally — reading local agent history files.
+  const startOpts: StartOptions = { quiet: true, local: true };
   const { config, port, owned, shutdown } = await startGateway(startOpts);
   const cfg = loreConfig();
   const defaultModel = cfg.model ?? {
