@@ -6,9 +6,19 @@
  *   show <type> <id>      Show full detail for an entry
  *   clear [options]       Clear data for a project or wipe the database
  *   delete <type> <id>    Delete a single entry (type: knowledge, session, distillation, project)
+ *
+ * When `LORE_REMOTE_URL` is set, most subcommands delegate to the remote
+ * gateway REST API instead of accessing the local database.
  */
 import { createInterface } from "node:readline";
 import { resolve } from "path";
+import {
+  getRemoteUrl,
+  projectQueryParams,
+  remoteGet,
+  remotePost,
+  remoteDelete,
+} from "./remote";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -71,6 +81,9 @@ async function cmdList(
   args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) return cmdListRemote(remote, args, flags);
+
   const { data, ltm } = await import("@loreai/core");
   const type = args[0];
   const limit = flags.limit ? Number(flags.limit) : 50;
@@ -193,6 +206,9 @@ async function cmdShow(
   args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) return cmdShowRemote(remote, args, flags);
+
   const { data, ltm, temporal } = await import("@loreai/core");
   const type = args[0];
   const rawId = args[1];
@@ -316,11 +332,16 @@ async function cmdClear(
   _args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
-  const { data } = await import("@loreai/core");
+  const remote = getRemoteUrl();
   const skipConfirm = !!flags.yes;
 
-  // Nuclear option: wipe entire database
+  // Nuclear option: wipe entire database (local-only)
   if (flags.all) {
+    if (remote) {
+      console.error("Error: --all (wipe entire database) is not supported in remote mode.");
+      process.exit(1);
+    }
+    const { data } = await import("@loreai/core");
     if (!skipConfirm) {
       const stats = data.globalStats();
       const confirmed = await confirm(
@@ -343,6 +364,10 @@ async function cmdClear(
   }
 
   const projectPath = resolve((flags.project as string) ?? process.cwd());
+
+  if (remote) return cmdClearRemote(remote, projectPath, flags);
+
+  const { data } = await import("@loreai/core");
   const onlyKnowledge = !!flags.knowledge;
   const onlyTemporal = !!flags.temporal;
   const onlyDistillations = !!flags.distillations;
@@ -411,6 +436,9 @@ async function cmdDelete(
   args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) return cmdDeleteRemote(remote, args, flags);
+
   const { data } = await import("@loreai/core");
   const type = args[0];
   const rawId = args[1];
@@ -531,6 +559,12 @@ async function cmdRecover(
   _args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) {
+    console.error("Error: recover is not supported in remote mode (requires local filesystem access).");
+    process.exit(1);
+  }
+
   const { existsSync } = await import("fs");
   const { join } = await import("path");
   const { data, importLoreFile, importFromFile, loreFileExists, clearLoreFileCache, LORE_FILE } =
@@ -634,6 +668,9 @@ async function cmdMerge(
   _args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) return cmdMergeRemote(remote, flags);
+
   const { data } = await import("@loreai/core");
   const skipConfirm = !!flags.yes;
   const asJson = !!flags.json;
@@ -759,6 +796,9 @@ async function cmdDedup(
   _args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) return cmdDedupRemote(remote, flags);
+
   const { ltm, data, projectId: getProjectId, embedding: emb } = await import("@loreai/core");
   const apply = !!flags.yes;
   const interactive = !!flags.interactive;
@@ -1044,7 +1084,12 @@ async function cmdDedupInteractive(
   }
 }
 
-async function cmdReindex(): Promise<void> {
+async function cmdReindex(
+  flags?: Record<string, unknown>,
+): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) return cmdReindexRemote(remote, flags ?? {});
+
   const { embedding } = await import("@loreai/core");
 
   if (!embedding.isAvailable()) {
@@ -1077,6 +1122,442 @@ async function cmdReindex(): Promise<void> {
     console.error("Re-indexing failed:", err);
     process.exit(1);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Remote CLI handlers
+// ---------------------------------------------------------------------------
+
+async function cmdListRemote(
+  remote: string,
+  args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const type = args[0];
+  const limit = flags.limit ? Number(flags.limit) : 50;
+  const asJson = !!flags.json;
+  const projectPath = resolve((flags.project as string) ?? process.cwd());
+
+  switch (type) {
+    case "projects": {
+      const projects = await remoteGet<Array<{
+        id: string; path: string; name: string | null; git_remote: string | null;
+        created_at: number; knowledge_count: number; session_count: number;
+      }>>(remote, "/api/v1/projects");
+      if (asJson) { console.log(JSON.stringify(projects, null, 2)); return; }
+      if (!projects.length) { console.log("No projects found."); return; }
+      printTable(
+        ["Name", "Path", "Git Remote", "ID", "Knowledge", "Sessions", "Created"],
+        projects.map((p) => [
+          p.name ?? "(unnamed)", truncate(p.path, 35), truncate(p.git_remote ?? "-", 30),
+          p.id.slice(0, 8), String(p.knowledge_count), String(p.session_count), formatDate(p.created_at),
+        ]),
+        [16, 35, 30, 10, 10, 10, 20],
+      );
+      break;
+    }
+
+    case "knowledge": {
+      // Find project ID first
+      const projects = await remoteGet<Array<{ id: string }>>(remote, "/api/v1/projects");
+      const pq = projectQueryParams(projectPath);
+      // Use first project matching, or list all if none match
+      let entries: Array<{ id: string; category: string; title: string; confidence: number; updated_at: number }>;
+      const matchingProject = await resolveRemoteProject(remote, projectPath);
+      if (!matchingProject) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
+      entries = await remoteGet(remote, `/api/v1/projects/${matchingProject}/knowledge`);
+      const limited = entries.slice(0, limit);
+      if (asJson) { console.log(JSON.stringify(limited, null, 2)); return; }
+      if (!limited.length) { console.log("No knowledge entries found for this project."); return; }
+      printTable(
+        ["Category", "Title", "Confidence", "Updated", "ID"],
+        limited.map((e) => [
+          e.category, truncate(e.title, 40), e.confidence.toFixed(2),
+          formatDate(e.updated_at), e.id.slice(0, 8),
+        ]),
+        [14, 40, 12, 20, 10],
+      );
+      break;
+    }
+
+    case "sessions": {
+      const projectId = await resolveRemoteProject(remote, projectPath);
+      if (!projectId) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
+      const sessions = await remoteGet<Array<{
+        session_id: string; message_count: number; distilled_count: number;
+        distillation_count: number; first_message_at: number; last_message_at: number;
+      }>>(remote, `/api/v1/projects/${projectId}/sessions?limit=${limit}`);
+      if (asJson) { console.log(JSON.stringify(sessions, null, 2)); return; }
+      if (!sessions.length) { console.log("No sessions found for this project."); return; }
+      printTable(
+        ["Session ID", "Messages", "Distilled", "Distillations", "First", "Last"],
+        sessions.map((s) => [
+          s.session_id.slice(0, 12), String(s.message_count), String(s.distilled_count),
+          String(s.distillation_count), formatDate(s.first_message_at), formatDate(s.last_message_at),
+        ]),
+        [14, 10, 10, 14, 20, 20],
+      );
+      break;
+    }
+
+    case "distillations": {
+      const projectId = await resolveRemoteProject(remote, projectPath);
+      if (!projectId) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
+      const dists = await remoteGet<Array<{
+        id: string; session_id: string; generation: number; token_count: number;
+        r_compression: number | null; c_norm: number | null; archived: number; created_at: number;
+      }>>(remote, `/api/v1/projects/${projectId}/distillations?limit=${limit}`);
+      if (asJson) { console.log(JSON.stringify(dists, null, 2)); return; }
+      if (!dists.length) { console.log("No distillations found for this project."); return; }
+      printTable(
+        ["Session", "Gen", "Tokens", "R_comp", "C_norm", "Archived", "Created", "ID"],
+        dists.map((d) => [
+          d.session_id.slice(0, 12), String(d.generation), String(d.token_count),
+          d.r_compression?.toFixed(2) ?? "-", d.c_norm?.toFixed(2) ?? "-",
+          d.archived ? "yes" : "no", formatDate(d.created_at), d.id.slice(0, 8),
+        ]),
+        [14, 5, 8, 8, 8, 10, 20, 10],
+      );
+      break;
+    }
+
+    default:
+      console.error(
+        `Unknown type "${type ?? "(none)"}". Use: projects, knowledge, sessions, distillations`,
+      );
+      process.exit(1);
+  }
+}
+
+async function cmdShowRemote(
+  remote: string,
+  args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const type = args[0];
+  const rawId = args[1];
+  const asJson = !!flags.json;
+  const projectPath = resolve((flags.project as string) ?? process.cwd());
+
+  if (!rawId) {
+    console.error("Error: Missing <id> argument.");
+    process.exit(1);
+  }
+
+  switch (type) {
+    case "knowledge": {
+      const entry = await remoteGet<{
+        id: string; category: string; title: string; content: string; confidence: number;
+        project_id: string | null; cross_project: boolean; source_session: string | null;
+        created_at: number; updated_at: number; metadata: string | null;
+      }>(remote, `/api/v1/knowledge/${encodeURIComponent(rawId)}`);
+      if (asJson) { console.log(JSON.stringify(entry, null, 2)); return; }
+      console.log(`ID:          ${entry.id}`);
+      console.log(`Category:    ${entry.category}`);
+      console.log(`Title:       ${entry.title}`);
+      console.log(`Confidence:  ${entry.confidence}`);
+      console.log(`Project ID:  ${entry.project_id ?? "(global)"}`);
+      console.log(`Cross-proj:  ${entry.cross_project ? "yes" : "no"}`);
+      console.log(`Session:     ${entry.source_session ?? "(none)"}`);
+      console.log(`Created:     ${formatDate(entry.created_at)}`);
+      console.log(`Updated:     ${formatDate(entry.updated_at)}`);
+      if (entry.metadata) console.log(`Metadata:    ${entry.metadata}`);
+      console.log(`\nContent:\n${entry.content}`);
+      break;
+    }
+
+    case "session": {
+      const pq = projectQueryParams(projectPath);
+      const data = await remoteGet<{
+        messages: Array<{ role: string; content: string; created_at: number }>;
+        distillations: Array<{ id: string; generation: number; token_count: number; created_at: number }>;
+      }>(remote, `/api/v1/sessions/${encodeURIComponent(rawId)}?${pq}`);
+      if (asJson) { console.log(JSON.stringify(data, null, 2)); return; }
+      console.log(`Session: ${rawId}`);
+      console.log(`Messages: ${data.messages.length}`);
+      console.log(`Distillations: ${data.distillations.length}`);
+      if (data.messages.length) {
+        console.log(`\n--- Messages (${data.messages.length}) ---\n`);
+        for (const msg of data.messages) {
+          const prefix = msg.role === "user" ? ">" : "<";
+          console.log(`${prefix} [${formatDate(msg.created_at)}] ${msg.role}: ${truncate(msg.content, 120)}`);
+        }
+      }
+      if (data.distillations.length) {
+        console.log(`\n--- Distillations (${data.distillations.length}) ---\n`);
+        for (const d of data.distillations) {
+          console.log(`  gen=${d.generation} tokens=${d.token_count} ${formatDate(d.created_at)} ${d.id.slice(0, 8)}`);
+        }
+      }
+      break;
+    }
+
+    case "distillation": {
+      const dist = await remoteGet<{
+        id: string; session_id: string; project_id: string; generation: number;
+        token_count: number; r_compression: number | null; c_norm: number | null;
+        archived: number; created_at: number; source_ids: string; observations: string;
+      }>(remote, `/api/v1/distillations/${encodeURIComponent(rawId)}`);
+      if (asJson) { console.log(JSON.stringify(dist, null, 2)); return; }
+      console.log(`ID:            ${dist.id}`);
+      console.log(`Session:       ${dist.session_id}`);
+      console.log(`Project ID:    ${dist.project_id}`);
+      console.log(`Generation:    ${dist.generation}`);
+      console.log(`Tokens:        ${dist.token_count}`);
+      console.log(`R_compression: ${dist.r_compression?.toFixed(3) ?? "-"}`);
+      console.log(`C_norm:        ${dist.c_norm?.toFixed(3) ?? "-"}`);
+      console.log(`Archived:      ${dist.archived ? "yes" : "no"}`);
+      console.log(`Created:       ${formatDate(dist.created_at)}`);
+      console.log(`Source IDs:    ${dist.source_ids}`);
+      console.log(`\nObservations:\n${dist.observations}`);
+      break;
+    }
+
+    default:
+      console.error(`Unknown type "${type ?? "(none)"}". Use: knowledge, session, distillation`);
+      process.exit(1);
+  }
+}
+
+async function cmdClearRemote(
+  remote: string,
+  projectPath: string,
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const skipConfirm = !!flags.yes;
+  const projectId = await resolveRemoteProject(remote, projectPath);
+  if (!projectId) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
+
+  const body: Record<string, boolean> = {};
+  if (flags.knowledge) body.knowledge = true;
+  if (flags.temporal) body.temporal = true;
+  if (flags.distillations) body.distillations = true;
+
+  const hasFlags = body.knowledge || body.temporal || body.distillations;
+  const label = hasFlags
+    ? `selected data (${Object.keys(body).join(", ")})`
+    : "ALL data";
+
+  if (!skipConfirm) {
+    const confirmed = await confirm(`\nClear ${label} for project at:\n  ${projectPath}\n`);
+    if (!confirmed) { console.log("Cancelled."); return; }
+  }
+
+  const result = await remotePost<Record<string, number>>(remote, `/api/v1/projects/${projectId}/clear`, body);
+  const parts = Object.entries(result).map(([k, v]) => `${v} ${k.replace("_", " ")}`);
+  console.log(`Cleared: ${parts.join(", ")}.`);
+}
+
+async function cmdDeleteRemote(
+  remote: string,
+  args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const type = args[0];
+  const rawId = args[1];
+  const skipConfirm = !!flags.yes;
+  const projectPath = resolve((flags.project as string) ?? process.cwd());
+
+  if (!rawId) { console.error("Error: Missing <id> argument."); process.exit(1); }
+
+  switch (type) {
+    case "knowledge": {
+      if (!skipConfirm) {
+        const confirmed = await confirm(`\nDelete knowledge entry ${rawId}?`);
+        if (!confirmed) { console.log("Cancelled."); return; }
+      }
+      await remoteDelete(remote, `/api/v1/knowledge/${encodeURIComponent(rawId)}`);
+      console.log(`Deleted knowledge entry: ${rawId}`);
+      break;
+    }
+
+    case "session": {
+      if (!skipConfirm) {
+        const confirmed = await confirm(`\nDelete all messages and distillations for session ${rawId}?`);
+        if (!confirmed) { console.log("Cancelled."); return; }
+      }
+      const pq = projectQueryParams(projectPath);
+      const result = await remoteDelete<{ messages_deleted: number; distillations_deleted: number }>(
+        remote, `/api/v1/sessions/${encodeURIComponent(rawId)}?${pq}`,
+      );
+      console.log(`Deleted: ${result.messages_deleted} messages, ${result.distillations_deleted} distillations.`);
+      break;
+    }
+
+    case "distillation": {
+      if (!skipConfirm) {
+        const confirmed = await confirm(`\nDelete distillation ${rawId}?`);
+        if (!confirmed) { console.log("Cancelled."); return; }
+      }
+      await remoteDelete(remote, `/api/v1/distillations/${encodeURIComponent(rawId)}`);
+      console.log(`Deleted distillation: ${rawId}`);
+      break;
+    }
+
+    case "project": {
+      // Resolve project: rawId can be UUID or path
+      let projectId = rawId;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId)) {
+        const resolved = await resolveRemoteProject(remote, resolve(rawId));
+        if (!resolved) { console.error(`No project found for path: ${rawId}`); process.exit(1); }
+        projectId = resolved;
+      }
+      if (!skipConfirm) {
+        const confirmed = await confirm(`\nDelete project ${projectId.slice(0, 12)}... and ALL its data?`);
+        if (!confirmed) { console.log("Cancelled."); return; }
+      }
+      const result = await remoteDelete<{
+        knowledge_deleted: number; temporal_deleted: number;
+        distillations_deleted: number; sessions_cleared: number;
+      }>(remote, `/api/v1/projects/${encodeURIComponent(projectId)}`);
+      console.log(
+        `Deleted project: ${result.knowledge_deleted} knowledge, ` +
+          `${result.temporal_deleted} messages, ` +
+          `${result.distillations_deleted} distillations, ` +
+          `${result.sessions_cleared} sessions.`,
+      );
+      break;
+    }
+
+    default:
+      console.error(`Unknown type "${type ?? "(none)"}". Use: knowledge, session, distillation, project`);
+      process.exit(1);
+  }
+}
+
+async function cmdMergeRemote(
+  remote: string,
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const skipConfirm = !!flags.yes;
+  const asJson = !!flags.json;
+
+  if (!skipConfirm) {
+    const confirmed = await confirm(
+      `This will scan git remotes and merge duplicate projects on the remote gateway.`,
+    );
+    if (!confirmed) { console.log("Cancelled."); return; }
+  }
+
+  const result = await remotePost<{
+    updated: number; merged: number; namesBackfilled: number;
+    mergeDetails: Array<{ sourcePath: string; targetPath: string; gitRemote: string; result: Record<string, number> }>;
+  }>(remote, "/api/v1/projects/merge");
+
+  if (asJson) { console.log(JSON.stringify(result, null, 2)); return; }
+
+  console.log(`\nResults:`);
+  console.log(`  Updated: ${result.updated} project(s) with git remote info`);
+  console.log(`  Merged:  ${result.merged} duplicate project(s)`);
+  console.log(`  Renamed: ${result.namesBackfilled} project(s) with repo name`);
+
+  if (result.mergeDetails?.length) {
+    console.log(`\nMerge details:`);
+    for (const detail of result.mergeDetails) {
+      console.log(`  ${detail.sourcePath}`);
+      console.log(`    → merged into: ${detail.targetPath}`);
+      console.log(`    git remote:    ${detail.gitRemote}`);
+    }
+  }
+}
+
+async function cmdDedupRemote(
+  remote: string,
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const asJson = !!flags.json;
+  const interactive = !!flags.interactive;
+  const explicitProject = typeof flags.project === "string" ? resolve(flags.project) : null;
+
+  if (interactive) {
+    console.error("Error: --interactive mode is not supported in remote mode. Use --yes for non-interactive.");
+    process.exit(1);
+  }
+
+  let projectId: string | undefined;
+  if (explicitProject) {
+    projectId = await resolveRemoteProject(remote, explicitProject) ?? undefined;
+    if (!projectId) { console.error(`No project found for: ${explicitProject}`); process.exit(1); }
+  }
+
+  console.log("Scanning for duplicate knowledge entries (dry run, remote)...\n");
+
+  const endpoint = projectId
+    ? `/api/v1/projects/${projectId}/dedup`
+    : `/api/v1/projects/_/dedup`; // placeholder — we need a project ID
+  // For remote dedup, use a specific project or list projects and pick first
+  if (!projectId) {
+    const projects = await remoteGet<Array<{ id: string; name: string | null }>>(remote, "/api/v1/projects");
+    if (!projects.length) { console.log("No projects found."); return; }
+    // Dedup each project
+    for (const p of projects) {
+      const result = await remotePost(remote, `/api/v1/projects/${p.id}/dedup`);
+      if (asJson) { console.log(JSON.stringify({ project: p.name ?? p.id, ...result as object }, null, 2)); }
+      else { console.log(`[${p.name ?? p.id}] ${JSON.stringify(result)}`); }
+    }
+  } else {
+    const result = await remotePost(remote, `/api/v1/projects/${projectId}/dedup`);
+    if (asJson) { console.log(JSON.stringify(result, null, 2)); }
+    else { console.log(JSON.stringify(result, null, 2)); }
+  }
+
+  console.log("\nNote: Remote dedup is always a dry run. Apply changes locally or via the gateway.");
+}
+
+async function cmdReindexRemote(
+  remote: string,
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const projectPath = resolve((flags.project as string) ?? process.cwd());
+  const projectId = await resolveRemoteProject(remote, projectPath);
+  if (!projectId) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
+
+  console.log("Re-indexing embeddings on remote gateway...");
+  const result = await remotePost<{
+    knowledge_embedded: number; distillations_embedded: number;
+  }>(remote, `/api/v1/projects/${projectId}/reindex`);
+
+  const total = result.knowledge_embedded + result.distillations_embedded;
+  console.log(`  ${result.knowledge_embedded} knowledge entries embedded`);
+  console.log(`  ${result.distillations_embedded} distillations embedded`);
+  if (total === 0) {
+    console.log("\nAll embeddings are up to date.");
+  } else {
+    console.log(`\nDone — ${total} entries re-indexed.`);
+  }
+}
+
+/**
+ * Resolve a local project path to a remote project UUID.
+ * Lists projects from the remote and matches by git_remote (preferred) or path.
+ */
+async function resolveRemoteProject(
+  remote: string,
+  projectPath: string,
+): Promise<string | null> {
+  const { getGitRemote, normalizeRemoteUrl } = await import("@loreai/core");
+  const gitRemote = getGitRemote(projectPath);
+  const normalizedRemote = gitRemote ? normalizeRemoteUrl(gitRemote) : null;
+
+  const projects = await remoteGet<Array<{
+    id: string; path: string; git_remote: string | null;
+  }>>(remote, "/api/v1/projects");
+
+  // Prefer git_remote match
+  if (normalizedRemote) {
+    for (const p of projects) {
+      if (p.git_remote && normalizeRemoteUrl(p.git_remote) === normalizedRemote) {
+        return p.id;
+      }
+    }
+  }
+
+  // Fallback: exact path match
+  for (const p of projects) {
+    if (p.path === projectPath) return p.id;
+  }
+
+  return null;
 }
 
 // Main dispatch
@@ -1162,7 +1643,7 @@ export async function commandData(
       await cmdDedup(subArgs, values);
       break;
     case "reindex":
-      await cmdReindex();
+      await cmdReindex(values);
       break;
     case "help":
     case undefined:

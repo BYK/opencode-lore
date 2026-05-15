@@ -908,6 +908,39 @@ export function projectId(path: string): string | undefined {
   return alias?.project_id;
 }
 
+/**
+ * Look up a project by git_remote (preferred) or path. Returns the project ID
+ * or null if not found. Unlike `ensureProject()`, this is read-only — it never
+ * creates a project or registers path aliases.
+ */
+export function resolveProjectByRemoteOrPath(
+  gitRemote?: string,
+  path?: string,
+): string | null {
+  if (gitRemote) {
+    const row = db()
+      .query("SELECT id FROM projects WHERE git_remote = ? LIMIT 1")
+      .get(gitRemote) as { id: string } | null;
+    if (row) return row.id;
+  }
+  if (path) {
+    return projectId(path) ?? null;
+  }
+  return null;
+}
+
+/**
+ * Look up the path for a project by its internal ID.
+ * Used by the REST API to resolve project UUID → path for core functions
+ * that require a path argument.
+ */
+export function projectPath(id: string): string | null {
+  const row = db()
+    .query("SELECT path FROM projects WHERE id = ?")
+    .get(id) as { path: string } | null;
+  return row?.path ?? null;
+}
+
 /** Look up a project's display name by its internal ID. */
 export function projectName(id: string): string | null {
   const row = db()

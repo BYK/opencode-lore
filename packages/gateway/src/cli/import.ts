@@ -3,6 +3,10 @@
  *
  * Scans for conversation history from Claude Code, OpenCode, and Aider,
  * then extracts knowledge entries via the curator LLM.
+ *
+ * When `LORE_REMOTE_URL` is set, detection and chunk reading happen locally
+ * (they require filesystem access), but extraction is delegated to the remote
+ * gateway via the REST API. No local gateway startup is needed.
  */
 import { createInterface } from "node:readline";
 import { resolve } from "path";
@@ -19,6 +23,12 @@ import { resolveAuth } from "../auth";
 import { exportLoreFile } from "@loreai/core";
 import { startGateway, type StartOptions } from "./start";
 import { safeExit } from "./exit";
+import {
+  getRemoteUrl,
+  projectQueryParams,
+  remoteGet,
+  remotePost,
+} from "./remote";
 
 const {
   detectAll,
@@ -148,6 +158,13 @@ export async function commandImport(
     }
   }
 
+  // Check for remote mode
+  const remote = getRemoteUrl();
+  if (remote) {
+    await importRemote(remote, projectPath, results);
+    return;
+  }
+
   // Start gateway for LLM access
   console.log("\n[lore] Starting gateway for LLM access...");
 
@@ -242,4 +259,88 @@ export async function commandImport(
   } finally {
     if (owned) await shutdown();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Remote import — detection + chunk reading local, extraction via gateway API
+// ---------------------------------------------------------------------------
+
+async function importRemote(
+  remote: string,
+  projectPath: string,
+  results: ReturnType<typeof detectAll>,
+): Promise<void> {
+  const { getGitRemote, normalizeRemoteUrl } = await import("@loreai/core");
+  const gitRemote = getGitRemote(projectPath);
+  const normalized = gitRemote ? normalizeRemoteUrl(gitRemote) : undefined;
+
+  console.log(`\n[lore] Using remote gateway at ${remote}`);
+
+  let totalCreated = 0;
+  let totalUpdated = 0;
+  let totalDeleted = 0;
+  let totalChunks = 0;
+  let totalFailed = 0;
+
+  for (const result of results) {
+    const provider = getProvider(result.agentName);
+    if (!provider) continue;
+
+    const sessionIds = result.sessions.map((s) => s.id);
+    console.log(`[lore] Reading ${result.agentDisplayName} conversations...`);
+
+    const chunks = provider.readChunks(projectPath, sessionIds);
+    if (chunks.length === 0) {
+      console.log(`[lore] No extractable content from ${result.agentDisplayName}.`);
+      continue;
+    }
+
+    console.log(`[lore] Extracting knowledge from ${chunks.length} chunks via remote gateway (${result.agentDisplayName})...`);
+
+    // Send chunks to remote gateway for extraction (zstd-compressed)
+    const extractResult = await remotePost<{
+      created: number; updated: number; deleted: number;
+      chunksProcessed: number; chunksFailed: number;
+    }>(remote, "/api/v1/import/extract", {
+      git_remote: normalized,
+      path: projectPath,
+      chunks: chunks.map((c) => ({
+        label: c.label,
+        text: c.text,
+        estimatedTokens: c.estimatedTokens,
+        timestamp: c.timestamp,
+      })),
+    }, { compress: true });
+
+    // Record imports remotely for each session
+    for (const sess of result.sessions) {
+      const hash = computeHash({
+        messageCount: sess.messageCount,
+        lastTimestamp: sess.lastActivityAt,
+      });
+      await remotePost(remote, "/api/v1/import/record", {
+        git_remote: normalized,
+        path: projectPath,
+        agent_name: result.agentName,
+        source_id: sess.id,
+        source_hash: hash,
+        stats: { created: extractResult.created, updated: extractResult.updated },
+      });
+    }
+
+    totalCreated += extractResult.created;
+    totalUpdated += extractResult.updated;
+    totalDeleted += extractResult.deleted;
+    totalChunks += extractResult.chunksProcessed;
+    totalFailed += extractResult.chunksFailed;
+  }
+
+  // Summary
+  console.log(
+    `\n[lore] Import complete: ${totalCreated} entries created, ${totalUpdated} updated` +
+      (totalDeleted ? `, ${totalDeleted} deleted` : "") +
+      (totalFailed ? ` (${totalFailed} chunks failed)` : "") +
+      ".",
+  );
+  console.log("[lore] Run `lore data list knowledge` to review.");
 }

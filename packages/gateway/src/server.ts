@@ -321,6 +321,12 @@ export function startServer(config: GatewayConfig): {
         return handleHealth();
       }
 
+      // GET/POST/DELETE /api/* — REST API (lazy-imported to keep proxy hot path fast)
+      if (pathname.startsWith("/api/")) {
+        const { handleAPIRequest } = await import("./api");
+        return withCors(await handleAPIRequest(req, url, config));
+      }
+
       // GET/POST /ui/* — Web dashboard (lazy-imported to keep proxy hot path fast)
       if (pathname === "/ui" || pathname.startsWith("/ui/")) {
         const { handleUIRequest } = await import("./ui");

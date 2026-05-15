@@ -66,6 +66,8 @@ export {
   isFirstRun,
   projectId,
   projectName,
+  projectPath,
+  resolveProjectByRemoteOrPath,
   mergeProjectInternal,
   loadForceMinLayer,
   saveForceMinLayer,
