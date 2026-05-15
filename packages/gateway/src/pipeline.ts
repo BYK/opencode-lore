@@ -588,7 +588,7 @@ async function initIfNeeded(projectPath: string, config: GatewayConfig, gitRemot
     log.info("metric backfill failed:", e);
   }
   embedding.runStartupBackfill().catch((e) => {
-    log.info("embedding backfill failed:", e);
+    log.error("embedding backfill failed:", e);
   });
 
   // Index lat.md/ directory sections (content-hash-based, skips unchanged files).

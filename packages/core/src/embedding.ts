@@ -28,6 +28,15 @@ import type {
  *  embedding calls but bounded enough to avoid minutes-long hangs. */
 const EMBED_TIMEOUT_MS = 10_000;
 
+/**
+ * Safe per-text character limit for local ONNX inference. The Nomic v1.5 model
+ * supports up to 8192 tokens, but ONNX runtime OOMs on inputs near that ceiling
+ * (error codes 284432024, 287180544, 144786472). Pre-truncating to ~4096 tokens
+ * worth of characters keeps the tensor well within safe allocation bounds.
+ * The worker's `truncation: true` remains as a safety net.
+ */
+const LOCAL_MAX_CHARS = 4096 * 4; // ~4096 tokens × ~4 chars/token
+
 // ---------------------------------------------------------------------------
 // Provider interface
 // ---------------------------------------------------------------------------
@@ -332,9 +341,10 @@ class LocalProvider implements EmbeddingProvider {
             localProviderKnownBroken = true;
             if (!localProviderErrorLogged) {
               localProviderErrorLogged = true;
-              log.info(
+              log.error(
                 `local embedding provider failed to init: ${msg.error}. ` +
                   `Set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback.`,
+                new Error(`embedding worker init failed: ${msg.error}`),
               );
             }
             for (const [, p] of this.pendingRequests) {
@@ -351,6 +361,7 @@ class LocalProvider implements EmbeddingProvider {
       this.worker.on("error", (err: Error) => {
         this.workerInitError = err.message;
         this.workerReady = false;
+        log.error("embedding worker crashed:", err);
         for (const [, p] of this.pendingRequests) {
           p.reject(new LocalProviderUnavailableError(err));
         }
@@ -361,6 +372,10 @@ class LocalProvider implements EmbeddingProvider {
       this.worker.on("exit", (code) => {
         if (code !== 0 && !this.workerInitError) {
           this.workerInitError = `embedding worker exited with code ${code}`;
+          log.error(
+            this.workerInitError,
+            new Error(this.workerInitError),
+          );
         }
         this.workerReady = false;
         for (const [, p] of this.pendingRequests) {
@@ -396,9 +411,15 @@ class LocalProvider implements EmbeddingProvider {
   async embed(texts: string[], inputType: "document" | "query"): Promise<Float32Array[]> {
     await this.ensureWorker();
 
+    // Pre-truncate texts that exceed the safe ONNX inference limit.
+    // This prevents OOM on single inputs near the model's 8192-token max.
+    const truncated = texts.map((t) =>
+      t.length > LOCAL_MAX_CHARS ? t.slice(0, LOCAL_MAX_CHARS) : t,
+    );
+
     // Prepend Nomic task instruction prefix.
     const prefix = inputType === "document" ? "search_document: " : "search_query: ";
-    const prefixed = texts.map((t) => prefix + t);
+    const prefixed = truncated.map((t) => prefix + t);
 
     const id = this.nextRequestId++;
     // Recall queries (single query-type texts) get high priority so they
@@ -850,7 +871,7 @@ export function embedKnowledgeEntry(
         .run(toBlob(vec), id);
     })
     .catch((err) => {
-      log.info("embedding failed for knowledge entry", id, ":", err);
+      log.error("embedding failed for knowledge entry", id, ":", err);
     });
 }
 
@@ -870,7 +891,7 @@ export function embedDistillation(
         .run(toBlob(vec), id);
     })
     .catch((err) => {
-      log.info("embedding failed for distillation", id, ":", err);
+      log.error("embedding failed for distillation", id, ":", err);
     });
 }
 
@@ -895,7 +916,7 @@ export function embedTemporalMessage(
         .run(toBlob(vec), id);
     })
     .catch((err) => {
-      log.info("embedding failed for temporal message", id, ":", err);
+      log.error("embedding failed for temporal message", id, ":", err);
     });
 }
 
