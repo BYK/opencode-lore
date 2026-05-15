@@ -27,9 +27,8 @@ import {
   getLtmBudget,
   setMaxLayer0Tokens,
   computeLayer0Cap,
-  setMaxContextTokens,
-  computeContextCap,
-  updateBustRate,
+  setCachePricing,
+  recordCacheUsage,
   calibrate,
   getLastTransformedCount,
   getLastLayer,
@@ -1796,12 +1795,11 @@ function postResponse(
       genAiSpan.end();
     }
 
-    // --- Bust rate feedback for dynamic context cap ---
-    updateBustRate(
+    // --- Consecutive bust tracking for tier-based decisions ---
+    recordCacheUsage(
       resp.usage.cacheCreationInputTokens ?? 0,
       resp.usage.cacheReadInputTokens ?? 0,
       sessionState.sessionID,
-      getLastLayer(sessionState.sessionID),
     );
 
     // Capture previous stop reason before it's overwritten below (line ~1667).
@@ -2503,16 +2501,9 @@ async function handleConversationTurn(
     ));
   }
 
-  // Cost-aware total context cap (layer 1+): explicit config wins > cost formula > disabled.
-  // Limits per-bust cache write cost. Dynamic adaptation per session is handled
-  // in gradient.ts via updateBustRate() feedback from postResponse().
-  if (cfg.budget.maxContextTokens !== undefined) {
-    setMaxContextTokens(cfg.budget.maxContextTokens);
-  } else if (modelSpec.cacheWriteCost && cfg.budget.targetBustCost > 0) {
-    setMaxContextTokens(computeContextCap(
-      cfg.budget.targetBustCost,
-      modelSpec.cacheWriteCost,
-    ));
+  // Set cache pricing for tier-based bust-vs-continue decisions in gradient.ts.
+  if (modelSpec.cacheWriteCost && modelSpec.cacheReadCost) {
+    setCachePricing(modelSpec.cacheWriteCost, modelSpec.cacheReadCost);
   }
 
   // --- 4c. Dynamic max_tokens sizing for non-Claude-Code clients ---
