@@ -233,7 +233,7 @@ export async function _cli(): Promise<void> {
   const rest = positionals.slice(1);
 
   const startOpts = buildStartOptions(
-    values as { port?: string; host?: string[]; debug?: boolean; remote?: string },
+    values as { port?: string; host?: string[]; debug?: boolean; remote?: string; local?: boolean },
   );
 
   // Start background update check (non-blocking).

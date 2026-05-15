@@ -428,6 +428,7 @@ export function computeMaxTokens(
  * Returns true if entries were actually imported.
  */
 function tryImportKnowledge(projectPath: string): boolean {
+  if (isHostedMode()) return false;
   const cfg = loreConfig();
   if (!cfg.knowledge.enabled) return false;
 
@@ -535,12 +536,12 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
  * One-time init: load Lore config, ensure project exists in DB, start idle scheduler.
  * Safe to call multiple times — only the first call does work.
  */
-async function initIfNeeded(projectPath: string, config?: GatewayConfig, gitRemote?: string): Promise<void> {
+async function initIfNeeded(projectPath: string, config: GatewayConfig, gitRemote?: string): Promise<void> {
   if (initialized) return;
 
   // Enable hosted mode before any FS operations — once set, all core
   // functions that touch client-controlled paths become safe no-ops.
-  if (config?.hostedMode) {
+  if (config.hostedMode) {
     enableHostedMode();
   }
 

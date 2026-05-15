@@ -186,6 +186,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log(`[lore] Dashboard: ${addrs[0]}/ui`);
     if (!opts.quiet) {
       console.log("[lore] Use that instance, or stop it first to start a new one.");
+      console.log("[lore] Note: hosted mode setting reflects the running instance, not this invocation.");
     }
     safeExit(0);
   }
