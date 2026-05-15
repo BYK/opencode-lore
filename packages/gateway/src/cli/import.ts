@@ -81,7 +81,9 @@ export async function commandImport(
 
   // Initialize core (loads config, opens DB, runs migrations).
   // In remote mode we still need load() for detectAll / readChunks which use
-  // core's provider registry, but we DON'T create a local project record.
+  // core's provider registry. A local project record may be created later by
+  // the belt-and-suspenders recordImport() call — that's intentional so the
+  // local DB has dedup history if the user later runs without LORE_REMOTE_URL.
   load(projectPath);
   if (!remote) {
     ensureProject(projectPath);
@@ -110,16 +112,17 @@ export async function commandImport(
   let remoteImports: Array<{ agent_name: string; source_id: string; source_hash: string }> | undefined;
   if (remote) {
     try {
-      const { getGitRemote, normalizeRemoteUrl } = await import("@loreai/core");
-      const gitRemote = getGitRemote(projectPath);
-      const normalized = gitRemote ? normalizeRemoteUrl(gitRemote) : undefined;
-      const pq = normalized
-        ? `git_remote=${encodeURIComponent(normalized)}`
-        : `path=${encodeURIComponent(projectPath)}`;
+      const pq = projectQueryParams(projectPath);
       remoteImports = await remoteGet<typeof remoteImports>(remote, `/api/v1/import/history?${pq}`);
-    } catch {
-      // If remote history fetch fails, proceed without dedup (safer than double-importing)
-      console.error("[lore] Warning: could not fetch remote import history — dedup check skipped.");
+    } catch (err: unknown) {
+      // 400/404 = project doesn't exist on remote yet (first import) — proceed without dedup
+      const status = err instanceof Error && "status" in err ? (err as { status: number }).status : 0;
+      if (status === 400 || status === 404) {
+        console.error("[lore] Note: project not yet known to remote gateway — all sessions will be imported.");
+      } else {
+        // Server errors, auth failures, network issues — re-throw (don't silently double-import)
+        throw err;
+      }
     }
   }
 
@@ -300,8 +303,8 @@ async function importRemote(
   results: ReturnType<typeof detectAll>,
 ): Promise<void> {
   const { getGitRemote, normalizeRemoteUrl } = await import("@loreai/core");
-  const gitRemote = getGitRemote(projectPath);
-  const normalized = gitRemote ? normalizeRemoteUrl(gitRemote) : undefined;
+  const raw = getGitRemote(projectPath);
+  const normalized = raw ? normalizeRemoteUrl(raw) : undefined;
 
   console.log(`\n[lore] Using remote gateway at ${remote}`);
 
@@ -327,19 +330,26 @@ async function importRemote(
     console.log(`[lore] Extracting knowledge from ${chunks.length} chunks via remote gateway (${result.agentDisplayName})...`);
 
     // Send chunks to remote gateway for extraction (zstd-compressed)
-    const extractResult = await remotePost<{
+    let extractResult: {
       created: number; updated: number; deleted: number;
       chunksProcessed: number; chunksFailed: number;
-    }>(remote, "/api/v1/import/extract", {
-      git_remote: normalized,
-      path: projectPath,
-      chunks: chunks.map((c) => ({
-        label: c.label,
-        text: c.text,
-        estimatedTokens: c.estimatedTokens,
-        timestamp: c.timestamp,
-      })),
-    }, { compress: true });
+    };
+    try {
+      extractResult = await remotePost(remote, "/api/v1/import/extract", {
+        git_remote: normalized,
+        path: projectPath,
+        chunks: chunks.map((c) => ({
+          label: c.label,
+          text: c.text,
+          estimatedTokens: c.estimatedTokens,
+          timestamp: c.timestamp,
+        })),
+      }, { compress: true });
+    } catch (err) {
+      console.error(`[lore] Extraction failed for ${result.agentDisplayName}: ${err instanceof Error ? err.message : err}`);
+      totalFailed += chunks.length;
+      continue;
+    }
 
     // Record imports on remote gateway + locally (belt-and-suspenders:
     // remote is source of truth, local prevents re-detection if user
@@ -349,15 +359,19 @@ async function importRemote(
         messageCount: sess.messageCount,
         lastTimestamp: sess.lastActivityAt,
       });
-      await remotePost(remote, "/api/v1/import/record", {
-        git_remote: normalized,
-        path: projectPath,
-        agent_name: result.agentName,
-        source_id: sess.id,
-        source_hash: hash,
-        stats: { created: extractResult.created, updated: extractResult.updated },
-      });
-      // Also record locally
+      try {
+        await remotePost(remote, "/api/v1/import/record", {
+          git_remote: normalized,
+          path: projectPath,
+          agent_name: result.agentName,
+          source_id: sess.id,
+          source_hash: hash,
+          stats: { created: extractResult.created, updated: extractResult.updated },
+        });
+      } catch (err) {
+        console.error(`[lore] Warning: failed to record import on remote: ${err instanceof Error ? err.message : err}`);
+      }
+      // Also record locally (belt-and-suspenders)
       try {
         recordImport(projectPath, result.agentName, sess.id, hash, {
           created: extractResult.created,
@@ -380,7 +394,6 @@ async function importRemote(
 
   // Export .lore.md locally so knowledge appears in the local file
   try {
-    const { exportLoreFile } = await import("@loreai/core");
     exportLoreFile(projectPath);
   } catch {
     // Non-fatal
