@@ -1217,6 +1217,11 @@ function buildStreamingResponse(
             const contReader = followUpResponse.body!.getReader();
             activeReader = contReader;
             let contEventCount = 0;
+            // Defense-in-depth: suppress any recall tool_use blocks that
+            // leak through in the follow-up (shouldn't happen since recall
+            // is stripped from the tools list, but guards against edge cases).
+            const contSuppressedIndices = new Set<number>();
+            let contSuppressedCount = 0;
 
             for await (const { event: contEvent, data: contData } of parseSSEStream(contReader)) {
               contEventCount++;
@@ -1233,15 +1238,30 @@ function buildStreamingResponse(
               ) {
                 try {
                   const parsed = JSON.parse(contData) as Record<string, unknown>;
-                  if (typeof parsed.index === "number") {
-                    parsed.index = (parsed.index as number) + blockOffset;
-                    const adjusted = formatSSEEvent(
-                      contEvent,
-                      JSON.stringify(parsed),
-                    );
-                    if (!safeEnqueue(encoder.encode(adjusted))) break;
-                    continue;
+                  const idx = parsed.index as number;
+                  if (typeof idx !== "number") break;
+
+                  // Suppress recall tool_use blocks in continuation
+                  if (contEvent === "content_block_start") {
+                    const block = parsed.content_block as Record<string, unknown> | undefined;
+                    if (block?.type === "tool_use" && block.name === RECALL_TOOL_NAME) {
+                      log.warn("recall follow-up stream contained recall tool_use — suppressing");
+                      contSuppressedIndices.add(idx);
+                      contSuppressedCount++;
+                      continue;
+                    }
                   }
+                  if (contSuppressedIndices.has(idx)) {
+                    continue; // Skip delta/stop for suppressed blocks
+                  }
+
+                  parsed.index = idx - contSuppressedCount + blockOffset;
+                  const adjusted = formatSSEEvent(
+                    contEvent,
+                    JSON.stringify(parsed),
+                  );
+                  if (!safeEnqueue(encoder.encode(adjusted))) break;
+                  continue;
                 } catch {
                   // Fall through to forward as-is
                 }
@@ -3035,7 +3055,15 @@ async function handleConversationTurn(
       return nonStreamHttpResponse(markerResp);
     }
 
-    const continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
+    let continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
+
+    // Defense-in-depth: if the model called recall again in the follow-up
+    // (shouldn't happen since recall is stripped from tools), replace it
+    // with marker text so the client never sees a raw recall tool_use.
+    if (hasRecallToolUse(continuationResp)) {
+      log.warn("recall follow-up contained another recall tool_use — stripping");
+      continuationResp = replaceRecallWithMarker(continuationResp);
+    }
 
     // Merge usage from both requests
     continuationResp.usage.inputTokens += resp.usage.inputTokens;
