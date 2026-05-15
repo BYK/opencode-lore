@@ -312,6 +312,20 @@ function textDiffRatio(a: string, b: string): number {
   return Math.min(1, estimatedMismatches / maxLen);
 }
 
+/**
+ * Cost-aware diff threshold for LTM diff-pinning. More expensive models
+ * tolerate larger diffs before busting the cache prefix, since each bust
+ * costs more. Used by both step-6 (normal turn) and step-7b (Layer 4
+ * refresh) to keep the threshold in sync.
+ */
+function ltmDiffThreshold(inputCostPerMillion?: number): number {
+  const base = 0.05;
+  const cost = inputCostPerMillion ?? 3;
+  if (cost >= 5) return Math.min(base * 3, 0.20);   // opus: 15%
+  if (cost >= 1) return Math.min(base * 2, 0.15);   // sonnet: 10%
+  return base;                                        // haiku: 5%
+}
+
 /** Cached LLM client for background workers. */
 let llmClient: LLMClient | null = null;
 /** Whether the batch queue wrapper is active (set once in getLLMClient). */
@@ -2642,17 +2656,8 @@ async function handleConversationTurn(
           // new content differs by more than a threshold from what's currently
           // pinned. This prevents cache busts from minor re-ranking after
           // background curation/consolidation invalidates the LTM cache.
-          // Cost-aware threshold: on expensive models, tolerate larger diffs
-          // before busting the cache prefix (opus: 15%, sonnet: 10%, haiku: 5%).
-          const baseDiffThreshold = 0.05;
-          const effectiveDiffThreshold = (modelSpec.inputCostPerMillion ?? 3) >= 5
-            ? Math.min(baseDiffThreshold * 3, 0.20)  // opus: 15%
-            : (modelSpec.inputCostPerMillion ?? 3) >= 1
-              ? Math.min(baseDiffThreshold * 2, 0.15)  // sonnet: 10%
-              : baseDiffThreshold;                       // haiku: 5%
-
           const pinned = ltmPinnedText.get(sessionID);
-          if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < effectiveDiffThreshold) {
+          if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < ltmDiffThreshold(modelSpec.inputCostPerMillion)) {
             // Near-identical — keep the pinned text to preserve cache prefix
             ltmText = pinned.formatted;
           } else {
@@ -2756,16 +2761,10 @@ async function handleConversationTurn(
           // Apply diff-pinning: on consecutive Layer 4 turns, system[2]
           // stability matters because system[0]+[1] ARE still cache reads
           // at 1h TTL. Only update the pin if the new text differs
-          // substantially — same threshold as step 6 (lines 2639-2655).
+          // substantially — same threshold as step 6.
           const pinned = ltmPinnedText.get(sessionID);
-          const baseDiffThreshold = 0.05;
-          const effectiveDiffThreshold = (modelSpec.inputCostPerMillion ?? 3) >= 5
-            ? Math.min(baseDiffThreshold * 3, 0.20)  // opus: 15%
-            : (modelSpec.inputCostPerMillion ?? 3) >= 1
-              ? Math.min(baseDiffThreshold * 2, 0.15)  // sonnet: 10%
-              : baseDiffThreshold;                       // haiku: 5%
 
-          if (pinned && textDiffRatio(pinned.formatted, formatted) < effectiveDiffThreshold) {
+          if (pinned && textDiffRatio(pinned.formatted, formatted) < ltmDiffThreshold(modelSpec.inputCostPerMillion)) {
             // Near-identical — keep the pinned text to preserve cache prefix
             ltmText = pinned.formatted;
             setLtmTokens(stableTokens + pinned.tokenCount, sessionID);
