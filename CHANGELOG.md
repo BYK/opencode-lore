@@ -1,4 +1,10 @@
 # Changelog
+## 0.20.1
+
+### Internal Changes 🔧
+
+- Replace EMA-driven context cap with tier-based cost-aware decisions by @BYK in [#348](https://github.com/BYK/loreai/pull/348)
+
 ## 0.20.0
 
 ### New Features ✨
