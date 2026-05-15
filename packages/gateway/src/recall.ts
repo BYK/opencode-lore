@@ -393,43 +393,63 @@ export function buildRecallFollowUp(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
 ): GatewayRequest {
-  // Build assistant message with thinking blocks (if any) + the recall tool_use.
-  // Text blocks are excluded — they carry no semantic state needed for the
-  // follow-up, and for the streaming path they were already sent to the client.
+  // Build the follow-up using plain text blocks instead of tool_use/tool_result.
+  //
+  // Why: recall is stripped from the tools list to prevent the model from
+  // calling it again in the follow-up (the follow-up response is piped raw
+  // without recall interception). But the Anthropic API validates that every
+  // tool_use block in messages references a tool in the tools list. Using
+  // text blocks avoids this constraint entirely while still providing the
+  // model with the recall context it needs to continue.
+  //
   // Thinking blocks MUST be preserved: the Anthropic API requires thinking
-  // blocks (with their cryptographic signatures) to precede any tool_use
-  // blocks in assistant messages when extended thinking is enabled.
-  // Omitting them causes a 400 validation error from the API.
+  // blocks (with their cryptographic signatures) to precede content blocks
+  // in assistant messages when extended thinking is enabled.
   // Using a deny-list (exclude text/tool_use/tool_result) rather than an
   // allow-list so future block types (e.g. redacted_thinking) are preserved
   // by default.
   const prefixBlocks = resp.content.filter(
     (b) => b.type !== "text" && b.type !== "tool_use" && b.type !== "tool_result",
   );
+
+  // Build a marker text for what was recalled
+  const input = recallToolUseBlock.input as Record<string, unknown>;
+  const query = typeof input.query === "string" ? input.query : "";
+  const scope = (input.scope as string) ?? "all";
+  const id = typeof input.id === "string" && input.id ? input.id : undefined;
+  const markerText = buildRecallMarker(query, scope, id);
+
   const assistantMessage: GatewayMessage = {
     role: "assistant",
-    content: [...prefixBlocks, recallToolUseBlock],
+    content: [...prefixBlocks, { type: "text" as const, text: markerText }],
   };
 
-  // Build user message with tool_result
-  const toolResultMessage: GatewayMessage = {
+  // Provide recall results as plain text in the user message
+  const resultMessage: GatewayMessage = {
     role: "user",
     content: [
       {
-        type: "tool_result",
-        toolUseId: recallToolUseBlock.id,
-        content: recallResult || "[No results found.]",
+        type: "text" as const,
+        text: recallResult || "[No results found.]",
       },
     ],
   };
+
+  // Strip recall from tools — the model must not call it again in the
+  // follow-up because the continuation response is piped without recall
+  // interception.
+  const toolsWithoutRecall = originalReq.tools.filter(
+    (t) => t.name !== RECALL_TOOL_NAME,
+  );
 
   return {
     ...originalReq,
     messages: [
       ...originalReq.messages,
       assistantMessage,
-      toolResultMessage,
+      resultMessage,
     ],
+    tools: toolsWithoutRecall,
   };
 }
 

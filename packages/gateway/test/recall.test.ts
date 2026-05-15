@@ -307,7 +307,7 @@ describe("recallStoreKey", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildRecallFollowUp", () => {
-  test("builds correct follow-up request structure", () => {
+  test("builds correct follow-up request structure with text blocks", () => {
     const req = makeRequest(
       [{ role: "user", content: [{ type: "text", text: "hello" }] }],
       [
@@ -329,29 +329,30 @@ describe("buildRecallFollowUp", () => {
       recallBlock,
     );
 
-    // Original messages + assistant + tool_result
+    // Original messages + assistant (marker text) + user (recall results as text)
     expect(followUp.messages).toHaveLength(3);
     expect(followUp.messages[0].role).toBe("user");
     expect(followUp.messages[1].role).toBe("assistant");
     expect(followUp.messages[2].role).toBe("user");
 
-    // Assistant message contains ONLY the recall tool_use (text blocks excluded)
+    // Assistant message contains a marker text block (not tool_use)
     expect(followUp.messages[1].content).toHaveLength(1);
-    expect(followUp.messages[1].content[0]).toBe(recallBlock);
-
-    // User message contains tool_result
-    const toolResult = followUp.messages[2].content[0];
-    expect(toolResult.type).toBe("tool_result");
-    expect((toolResult as { toolUseId: string }).toolUseId).toBe(
-      recallBlock.id,
+    expect(followUp.messages[1].content[0].type).toBe("text");
+    expect((followUp.messages[1].content[0] as { text: string }).text).toContain(
+      "find config",
     );
 
-    // Tools list preserves all tools including recall (required by API —
-    // the assistant message contains a recall tool_use block, so the tool
-    // definition must remain in the tools list).
-    expect(followUp.tools).toHaveLength(2);
+    // User message contains recall results as plain text (not tool_result)
+    const resultBlock = followUp.messages[2].content[0];
+    expect(resultBlock.type).toBe("text");
+    expect((resultBlock as { text: string }).text).toBe(
+      "## Recall Results\n* config is in /root",
+    );
+
+    // Tools list should NOT include recall — prevents model from calling
+    // it again in the follow-up (which is piped without recall interception).
+    expect(followUp.tools).toHaveLength(1);
     expect(followUp.tools[0].name).toBe("Read");
-    expect(followUp.tools[1].name).toBe("recall");
   });
 
   test("preserves other request properties", () => {
@@ -396,7 +397,7 @@ describe("buildRecallFollowUp", () => {
       recallBlock,
     );
 
-    // Assistant message should contain thinking block + recall tool_use
+    // Assistant message should contain thinking block + marker text
     const assistant = followUp.messages[1];
     expect(assistant.content).toHaveLength(2);
     expect(assistant.content[0].type).toBe("thinking");
@@ -406,7 +407,8 @@ describe("buildRecallFollowUp", () => {
     expect((assistant.content[0] as { signature: string }).signature).toBe(
       "sig_abc123",
     );
-    expect(assistant.content[1]).toBe(recallBlock);
+    expect(assistant.content[1].type).toBe("text");
+    expect((assistant.content[1] as { text: string }).text).toContain("find config");
   });
 
   test("excludes text blocks but keeps thinking blocks", () => {
@@ -428,10 +430,11 @@ describe("buildRecallFollowUp", () => {
     const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
 
     const assistant = followUp.messages[1];
-    // Only thinking + tool_use — text blocks excluded
+    // Only thinking + marker text — original text blocks excluded
     expect(assistant.content).toHaveLength(2);
     expect(assistant.content[0].type).toBe("thinking");
-    expect(assistant.content[1].type).toBe("tool_use");
+    expect(assistant.content[1].type).toBe("text");
+    expect((assistant.content[1] as { text: string }).text).toContain("test query");
   });
 
   test("handles multiple thinking blocks", () => {
@@ -455,7 +458,8 @@ describe("buildRecallFollowUp", () => {
     expect(assistant.content).toHaveLength(3);
     expect(assistant.content[0].type).toBe("thinking");
     expect(assistant.content[1].type).toBe("thinking");
-    expect(assistant.content[2]).toBe(recallBlock);
+    expect(assistant.content[2].type).toBe("text");
+    expect((assistant.content[2] as { text: string }).text).toContain("test query");
   });
 
   test("works without thinking blocks (non-thinking model)", () => {
@@ -472,9 +476,25 @@ describe("buildRecallFollowUp", () => {
     const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
 
     const assistant = followUp.messages[1];
-    // No thinking blocks — just the tool_use
+    // No thinking blocks — just the marker text
     expect(assistant.content).toHaveLength(1);
-    expect(assistant.content[0]).toBe(recallBlock);
+    expect(assistant.content[0].type).toBe("text");
+    expect((assistant.content[0] as { text: string }).text).toContain("test query");
+  });
+
+  test("uses '[No results found.]' for empty recall result", () => {
+    const req = makeRequest(
+      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    );
+
+    const recallBlock = makeRecallToolUse();
+    const resp = makeResponse([recallBlock], "tool_use");
+
+    const followUp = buildRecallFollowUp(req, resp, "", recallBlock);
+
+    const resultBlock = followUp.messages[2].content[0];
+    expect(resultBlock.type).toBe("text");
+    expect((resultBlock as { text: string }).text).toBe("[No results found.]");
   });
 });
 
