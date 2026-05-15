@@ -37,6 +37,48 @@ function estimateMessage(msg: MessageWithParts): number {
 let contextLimit = 200_000; // sensible default
 let outputReserved = 32_000;
 
+// ---------------------------------------------------------------------------
+// Tier-based context management
+//
+// Three quality tiers based on empirical model effectiveness:
+//   Tier 1: 0 – 200K tokens (best quality, preferred operating range)
+//   Tier 2: 200K – 500K tokens (acceptable quality)
+//   Tier 3: 500K – model context limit (degraded, compress when economical)
+//
+// At each tier boundary, a per-turn economic comparison decides whether to
+// compress (bust the cache) or continue growing:
+//   bustCost    = compressedSize × cacheWriteCostPerToken
+//   continueCost = currentSize   × cacheReadCostPerToken
+// If bustCost ≥ threshold × continueCost, don't compress — reads are cheap.
+//
+// Rolling bust detection: if 5+ consecutive turns bust the cache, stop trying
+// to compress — something structural is causing busts, and compression just
+// adds cost on top.
+// ---------------------------------------------------------------------------
+
+/** Tier boundary tokens. Configurable for testing. */
+const TIER_BOUNDARIES = [200_000, 500_000] as const;
+
+/** Cache pricing per token (USD). Set by host adapter via setCachePricing(). */
+let cacheWriteCostPerToken = 0;
+let cacheReadCostPerToken = 0;
+
+/**
+ * Set cache pricing for the current model. Called by the host adapter after
+ * looking up model cost data. Required for tier-based bust-vs-continue
+ * decisions. When not set (both 0), tier decisions fall back to conservative
+ * defaults: always compress at tier boundaries.
+ */
+export function setCachePricing(writeCost: number, readCost: number) {
+  cacheWriteCostPerToken = Math.max(0, writeCost);
+  cacheReadCostPerToken = Math.max(0, readCost);
+}
+
+/** Returns current pricing (for tests). */
+export function getCachePricing(): { write: number; read: number } {
+  return { write: cacheWriteCostPerToken, read: cacheReadCostPerToken };
+}
+
 // Cost-aware layer-0 token cap. When > 0, the layer-0 passthrough gate uses
 // min(maxInput, maxLayer0Tokens) instead of maxInput alone. Derived from the
 // model's cache-read cost: cap = targetCostPerTurn / costPerToken. This prevents
@@ -46,158 +88,78 @@ let maxLayer0Tokens = 0;
 
 const MIN_LAYER0_FLOOR = 40_000;
 
-// ---------------------------------------------------------------------------
-// Cost-aware context token cap (layer 1+)
-//
-// Limits total tokens (distilled + raw) to keep per-bust cache write cost
-// bounded. For opus-4-6 at $6.25/M write, a $1.00 target yields a 160K cap.
-// For sonnet-4 at $3.75/M write, the cap is 267K (effectively uncapped).
-//
-// The cap is further adjusted dynamically per session via bust rate EMA and
-// inter-bust interval tracking: tighten when busts are frequent, relax when
-// the cache is working well. Asymmetric rates: tighten fast, relax slowly.
-// ---------------------------------------------------------------------------
+/**
+ * Decide whether compression is economical at a tier boundary.
+ *
+ * @param currentTokens   - expected input tokens if we stay at the current layer
+ * @param compressedTokens - expected tokens after compression
+ * @param consecutiveBusts - how many turns in a row we've busted the cache
+ * @param threshold        - bust cost must be < threshold × continue cost to compress (default 0.85)
+ * @returns true if compression is worth it
+ */
+export function shouldCompress(
+  currentTokens: number,
+  compressedTokens: number,
+  consecutiveBusts: number,
+  threshold = 0.85,
+): boolean {
+  // Rolling bust detection: if we've been busting 5+ turns in a row,
+  // stop trying to compress — it's clearly not helping.
+  if (consecutiveBusts >= 5) return false;
 
-/** Static ceiling for total context tokens, derived from model pricing.
- *  0 = disabled (no cap). Set via setMaxContextTokens(). */
-let maxContextTokensCeiling = 0;
+  // If no pricing data, fall back to conservative: do NOT compress.
+  // Compression busts the cache, which is expensive. Without pricing data
+  // we can't prove it's worthwhile, so err on the side of keeping the cache.
+  if (cacheWriteCostPerToken <= 0 || cacheReadCostPerToken <= 0) return false;
 
-const MIN_CONTEXT_FLOOR = 130_000;
+  const bustCost = compressedTokens * cacheWriteCostPerToken;
+  const continueCost = currentTokens * cacheReadCostPerToken;
 
-/** Compute the context ceiling from a per-bust cost target and cache-write price per token. */
-export function computeContextCap(
-  targetBustCost: number,
-  cacheWriteCostPerToken: number,
-): number {
-  if (targetBustCost <= 0 || cacheWriteCostPerToken <= 0) return 0;
-  return Math.max(MIN_CONTEXT_FLOOR, Math.floor(targetBustCost / cacheWriteCostPerToken));
-}
-
-/** Set the static context ceiling. Called by the host adapter after computing
- *  from model pricing. The effective per-session cap may be lower due to
- *  dynamic adaptation (bust rate EMA). */
-export function setMaxContextTokens(tokens: number) {
-  maxContextTokensCeiling = Math.max(0, Math.floor(tokens));
-}
-
-/** Returns the current static ceiling (for external callers / tests). */
-export function getMaxContextTokens(): number {
-  return maxContextTokensCeiling;
+  // Compress only if the bust cost is meaningfully less than continuing
+  return bustCost < threshold * continueCost;
 }
 
 /**
- * Feed cache usage data after each API response. Updates the per-session
- * bust rate EMA and inter-bust interval, which adjust the effective context
- * cap dynamically.
+ * Determine which tier the given token count falls into.
+ * Returns 0, 1, or 2 corresponding to the tier index.
+ */
+export function getTier(tokens: number): number {
+  if (tokens <= TIER_BOUNDARIES[0]) return 0;
+  if (tokens <= TIER_BOUNDARIES[1]) return 1;
+  return 2;
+}
+
+/**
+ * Record cache usage from an API response. Tracks consecutive busts for
+ * the rolling bust detection used by shouldCompress().
+ *
+ * A "bust" is when cache_write > 50% of total input tokens.
  *
  * @param cacheWrite - cache_creation_input_tokens from the API response
  * @param cacheRead  - cache_read_input_tokens from the API response
+ * @param inputTokens - total input_tokens from the API response (includes uncached)
  * @param sessionID  - session that produced this response
  */
-export function updateBustRate(
+export function recordCacheUsage(
   cacheWrite: number,
   cacheRead: number,
+  inputTokens: number,
   sessionID?: string,
-  lastLayer?: number,
 ): void {
   if (!sessionID) return;
   const state = getSessionState(sessionID);
 
-  // Layer 4 (emergency) is structurally a full cache write — feeding its
-  // bust stats into the EMA and cap adaptation creates a death spiral where
-  // the cap ratchets down to MIN_CONTEXT_FLOOR and prevents the session from
-  // ever fitting in layers 1-3 again. Skip EMA updates entirely.
-  // This check is BEFORE the total===0 guard so that the consecutiveLayer4
-  // counter is always updated regardless of whether usage was reported.
-  if (lastLayer === 4) {
-    state.consecutiveLayer4++;
-
-    // Recovery hatch: after 5+ consecutive Layer 4 turns, the shrunken cap
-    // may be what's trapping us. Relax it by 10% per turn to give layers
-    // 1-3 a chance to fit. From 130K floor: turns 5-9 → 143K→157K→173K→190K→209K.
-    if (
-      state.consecutiveLayer4 >= 5 &&
-      state.dynamicContextCap > 0 &&
-      maxContextTokensCeiling > 0
-    ) {
-      state.dynamicContextCap = Math.min(
-        maxContextTokensCeiling,
-        Math.floor(state.dynamicContextCap * 1.10),
-      );
-    }
-    return;
-  }
-
-  // Non-Layer-4 turn: reset the consecutive counter (also before total===0
-  // guard — a zero-usage non-L4 turn must not leave a stale count).
-  if (lastLayer !== undefined) {
-    state.consecutiveLayer4 = 0;
-  }
-
-  const total = cacheWrite + cacheRead;
-  if (total === 0) return;
-
-  // Bust ratio: fraction of total input that was cache-written (0 = all reads, 1 = all writes)
-  const bustRatio = cacheWrite / total;
-
-  // EMA update (α = 0.3 for smoothing — responsive but not twitchy)
-  state.bustRateEMA =
-    state.bustRateEMA < 0
-      ? bustRatio  // first observation
-      : state.bustRateEMA * 0.7 + bustRatio * 0.3;
-
-  // Inter-bust interval tracking: a "bust" is when >50% of input is writes
-  const now = Date.now();
-  if (bustRatio > 0.5) {
-    if (state.lastBustAt > 0) {
-      const interval = now - state.lastBustAt;
-      state.interBustIntervalEMA =
-        state.interBustIntervalEMA < 0
-          ? interval
-          : state.interBustIntervalEMA * 0.7 + interval * 0.3;
-    }
-    state.lastBustAt = now;
-  }
-
-  // Adapt per-session cap based on bust rate and interval
-  adaptContextCap(state);
-}
-
-/** Adapt the per-session context cap based on bust rate and break frequency. */
-function adaptContextCap(state: SessionState): void {
-  if (maxContextTokensCeiling <= 0) return; // disabled
-
-  const cap = state.dynamicContextCap > 0
-    ? state.dynamicContextCap
-    : maxContextTokensCeiling;
-
-  let newCap = cap;
-
-  // Primary signal: bust rate EMA
-  if (state.bustRateEMA > 0.8) {
-    // Mostly writes — tighten by 10%
-    newCap = Math.floor(cap * 0.90);
-  } else if (state.bustRateEMA < 0.3) {
-    // Mostly reads — relax by 5% (slower than tightening)
-    newCap = Math.floor(cap * 1.05);
-  }
-
-  // Secondary signal: inter-bust interval
-  if (state.interBustIntervalEMA > 0) {
-    if (state.interBustIntervalEMA < 2 * 60_000) {
-      // Busts less than 2 min apart — proactively tighten by extra 5%
-      newCap = Math.floor(newCap * 0.95);
-    } else if (state.interBustIntervalEMA > 10 * 60_000) {
-      // Busts more than 10 min apart — allow extra relaxation
-      newCap = Math.floor(newCap * 1.03);
+  // Use total input tokens as denominator (includes uncached input),
+  // not just cacheWrite + cacheRead, to avoid inflated bust ratios
+  // when a large fraction of tokens is uncached.
+  const total = inputTokens > 0 ? inputTokens : cacheWrite + cacheRead;
+  if (total > 0) {
+    if (cacheWrite / total > 0.5) {
+      state.consecutiveBusts++;
+    } else {
+      state.consecutiveBusts = 0;
     }
   }
-
-  // Clamp to [floor, ceiling]
-  state.dynamicContextCap = Math.max(
-    MIN_CONTEXT_FLOOR,
-    Math.min(maxContextTokensCeiling, newCap),
-  );
 }
 
 // Conservative overhead reserve for first-turn (before calibration):
@@ -286,22 +248,10 @@ type SessionState = {
   postIdleCompact: boolean;
   /** Consecutive turns at layer >= 2. When >= 3, log a compaction hint. */
   consecutiveHighLayer: number;
-  /** Consecutive Layer 4 turns — used to skip bust-rate EMA updates
-   *  (Layer 4 busts are structural, not a caching signal) and to trigger
-   *  a recovery hatch that relaxes dynamicContextCap after prolonged trapping. */
-  consecutiveLayer4: number;
-
-  // --- Cost-aware context cap dynamic state ---
-
-  /** EMA of bust ratio (cacheWrite / total). -1 = uninitialized. */
-  bustRateEMA: number;
-  /** EMA of time between full busts (ms). -1 = uninitialized. */
-  interBustIntervalEMA: number;
-  /** Epoch ms of the last full bust (cacheWrite > 50% of total). 0 = never. */
-  lastBustAt: number;
-  /** Per-session dynamic context cap (tokens). Adjusted by adaptContextCap().
-   *  0 = use the static ceiling (maxContextTokensCeiling). */
-  dynamicContextCap: number;
+  /** Consecutive turns where the cache was busted (>50% writes).
+   *  Used for rolling bust detection: after 5+ consecutive busts, stop
+   *  trying to compress and warn that the conversation is unsustainable. */
+  consecutiveBusts: number;
 
   /**
    * Distillation row snapshot — cached to avoid hitting the DB on every
@@ -335,12 +285,7 @@ function makeSessionState(): SessionState {
     cameOutOfIdle: false,
     postIdleCompact: false,
     consecutiveHighLayer: 0,
-    consecutiveLayer4: 0,
-
-    bustRateEMA: -1,
-    interBustIntervalEMA: -1,
-    lastBustAt: 0,
-    dynamicContextCap: 0,
+    consecutiveBusts: 0,
 
     distillationSnapshot: null,
   };
@@ -359,9 +304,8 @@ function getSessionState(sessionID: string): SessionState {
     state.forceMinLayer = loadForceMinLayer(sessionID) as SafetyLayer;
 
     // Restore gradient calibration state from DB (v24) — avoids uncalibrated
-    // first turns after restart. Without this, dynamicContextCap reverts to
-    // the static ceiling, bustRateEMA is uninitialized, and lastTurnAt=0
-    // prevents onIdleResume() from detecting idle gaps.
+    // first turns after restart. Without this, lastTurnAt=0 prevents
+    // onIdleResume() from detecting idle gaps.
     //
     // Atomic restore: lastTurnAt > 0 is the proxy for "gradient state was
     // ever flushed to DB". Restore all fields together or none — avoids
@@ -369,13 +313,12 @@ function getSessionState(sessionID: string): SessionState {
     // could be mistaken for "never persisted".
     const persisted = loadSessionTracking(sessionID);
     if (persisted && persisted.lastTurnAt > 0) {
-      state.dynamicContextCap = persisted.dynamicContextCap;
-      state.bustRateEMA = persisted.bustRateEMA;
-      state.interBustIntervalEMA = persisted.interBustIntervalEMA;
       state.lastLayer = persisted.lastLayer as SafetyLayer;
       state.lastKnownInput = persisted.lastKnownInput;
       state.lastTurnAt = persisted.lastTurnAt;
-      state.lastBustAt = persisted.lastBustAt;
+      // consecutiveBusts is persisted in the dynamicContextCap column
+      // (repurposed, see saveGradientState).
+      state.consecutiveBusts = persisted.dynamicContextCap;
     }
 
     sessionStates.set(sessionID, state);
@@ -619,6 +562,8 @@ export function setForceMinLayer(layer: SafetyLayer, sessionID?: string) {
 // For testing only — reset all calibration and force-escalation state
 export function resetCalibration(sessionID?: string) {
   calibratedOverhead = null;
+  cacheWriteCostPerToken = 0;
+  cacheReadCostPerToken = 0;
   if (sessionID) {
     saveForceMinLayer(sessionID, 0); // clear persisted state
     sessionStates.delete(sessionID);
@@ -643,9 +588,7 @@ export function inspectSessionState(sessionID: string): {
   postIdleCompact: boolean;
   lastTurnAt: number;
   distillationSnapshot: DistillationSnapshot | null;
-  bustRateEMA: number;
-  dynamicContextCap: number;
-  consecutiveLayer4: number;
+  consecutiveBusts: number;
 } | null {
   const state = sessionStates.get(sessionID);
   if (!state) return null;
@@ -656,9 +599,7 @@ export function inspectSessionState(sessionID: string): {
     postIdleCompact: state.postIdleCompact,
     lastTurnAt: state.lastTurnAt,
     distillationSnapshot: state.distillationSnapshot,
-    bustRateEMA: state.bustRateEMA,
-    dynamicContextCap: state.dynamicContextCap,
-    consecutiveLayer4: state.consecutiveLayer4,
+    consecutiveBusts: state.consecutiveBusts,
   };
 }
 
@@ -683,13 +624,12 @@ export function saveGradientState(sessionID: string): void {
   if (!state) return;
 
   saveSessionTracking(sessionID, {
-    dynamicContextCap: state.dynamicContextCap,
-    bustRateEMA: state.bustRateEMA,
-    interBustIntervalEMA: state.interBustIntervalEMA,
     lastLayer: state.lastLayer,
     lastKnownInput: state.lastKnownInput,
     lastTurnAt: state.lastTurnAt,
-    lastBustAt: state.lastBustAt,
+    // Repurpose the dead dynamicContextCap column (v24, always 0 now)
+    // to persist consecutiveBusts — avoids a new DB migration.
+    dynamicContextCap: state.consecutiveBusts,
   });
 }
 
@@ -1591,6 +1531,10 @@ export type TransformResult = {
   // relevance scoring. Set on Layer 4 (emergency) where the context is
   // fully reset and mid-session knowledge may have changed relevance.
   refreshLtm: boolean;
+  /** When set, the conversation is growing unsustainably — 5+ consecutive
+   *  cache busts detected. The pipeline should inject a warning message
+   *  advising the user to compact or start a new conversation. */
+  unsustainable?: boolean;
 };
 
 // Per-session urgent distillation tracking.
@@ -1624,17 +1568,11 @@ function transformInner(input: {
     contextLimit - outputReserved - overhead - sessLtmTokens,
   );
 
-  // Cost-aware context cap: limit total distilled + raw tokens to keep
-  // per-bust cache write cost bounded. On opus-4-6 at $6.25/M, a $1.00
-  // target yields a 160K ceiling; on sonnet-4 at $3.75/M, 267K (effectively
-  // uncapped at 200K context). Per-session dynamic adaptation may reduce
-  // this further based on observed bust rate and break frequency.
-  const effectiveCap = sid && sessState.dynamicContextCap > 0
-    ? sessState.dynamicContextCap
-    : maxContextTokensCeiling;
-  const usable = effectiveCap > 0 && usableRaw > effectiveCap
-    ? effectiveCap
-    : usableRaw;
+  // No EMA-driven adaptive cap — use the full available context budget.
+  // The layer-0 cap (maxLayer0Tokens) still applies for per-turn read cost,
+  // and tier-based bust-vs-continue decisions control whether to compress
+  // at quality boundaries.
+  const usable = usableRaw;
 
   const distilledBudget = Math.floor(usable * cfg.budget.distilled);
   // Base raw budget. May be overridden below for post-idle compact mode.
@@ -1705,11 +1643,8 @@ function transformInner(input: {
     sessState.postIdleCompact = false;
     // Skip layer 0 — don't pass through all raw messages on a cold cache.
     effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
-    // Use a tighter raw budget. When the cost-aware context cap is active,
-    // total write size is already bounded — use a moderate 30%. Without
-    // the cap, use a tighter 20% to limit cold-write cost directly.
-    const postIdleRawFraction = effectiveCap > 0 ? 0.30 : 0.20;
-    rawBudget = Math.floor(usable * postIdleRawFraction);
+    // Use a tighter raw budget on cold cache to limit write cost.
+    rawBudget = Math.floor(usable * 0.20);
     log.info(
       `post-idle compact: session=${sid} rawBudget=${rawBudget}` +
       ` (${Math.floor(usable * cfg.budget.raw)}→${rawBudget})`,
@@ -1769,6 +1704,46 @@ function transformInner(input: {
       rawBudget,
       refreshLtm: false,
     };
+  }
+
+  // --- Tier-based bust-vs-continue gate ---
+  // When expectedInput exceeds the layer-0 cap but still fits in the model's
+  // context window, check whether compression is economically justified.
+  // If not (bust cost ≥ 85% of continue cost), skip compression and pass
+  // through at layer 0 — the cache reads are cheap enough to justify the
+  // larger context, and raw messages are better quality than distilled.
+  if (
+    effectiveMinLayer === 0 &&
+    layer0Input > layer0Ceiling &&
+    layer0Input <= maxInput &&
+    sid
+  ) {
+    const busts = getSessionState(sid).consecutiveBusts;
+    // For compression, estimate the compressed size as the layer-1 budget
+    // (distilled + raw fractions). This is a rough upper bound — actual
+    // compressed output may be smaller.
+    const compressedEstimate = distilledBudget + rawBudget;
+    if (!shouldCompress(Math.round(layer0Input), compressedEstimate, busts)) {
+      const messageTokens = calibrated
+        ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm)
+        : expectedInput - overhead - sessLtmTokens;
+      log.info(
+        `tier gate: session=${sid} skipping compression — bustCost not justified` +
+        ` (input=${Math.round(layer0Input)} compressed=${compressedEstimate} busts=${busts})`,
+      );
+      return {
+        messages: input.messages,
+        layer: 0,
+        distilledTokens: 0,
+        rawTokens: Math.max(0, messageTokens),
+        totalTokens: Math.max(0, messageTokens),
+        usable,
+        distilledBudget,
+        rawBudget,
+        refreshLtm: false,
+        unsustainable: busts >= 5,
+      };
+    }
   }
 
   // --- Gradient mode: context exhausted (or force-escalated), compress older messages ---
@@ -1916,6 +1891,8 @@ function transformInner(input: {
   const nuclearRaw = [...olderMessages, ...currentTurn];
   const nuclearRawTokens = olderTokens + currentTurnTokens;
 
+  const unsustainable = sid ? getSessionState(sid).consecutiveBusts >= 5 : false;
+
   return {
     messages: [...nuclearPrefix, ...nuclearRaw],
     layer: 4,
@@ -1926,6 +1903,7 @@ function transformInner(input: {
     distilledBudget,
     rawBudget,
     refreshLtm: true,
+    unsustainable,
   };
 }
 
@@ -1977,7 +1955,7 @@ export function transform(input: {
     log.info(
       `gradient: session=${sid} layer=${result.layer} tokens=${result.totalTokens}` +
       ` (distilled=${result.distilledTokens} raw=${result.rawTokens})` +
-      ` usable=${result.usable} cap=${maxLayer0Tokens || "off"}`,
+      ` usable=${result.usable} tier=${getTier(result.totalTokens)} l0cap=${maxLayer0Tokens || "off"}`,
     );
   }
   return result;

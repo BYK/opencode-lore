@@ -20,8 +20,10 @@ import {
   consumeCameOutOfIdle,
   inspectSessionState,
   setLastTurnAtForTest,
-  updateBustRate,
-  setMaxContextTokens,
+  recordCacheUsage,
+  setCachePricing,
+  shouldCompress,
+  getTier,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
 import { isToolPart } from "../src/types";
@@ -2365,106 +2367,116 @@ describe("gradient — sanitizeToolParts determinism", () => {
   });
 });
 
-describe("updateBustRate — Layer 4 handling", () => {
-  const SID = "bust-rate-layer4-sess";
+describe("tier-based context management", () => {
+  describe("getTier", () => {
+    test("returns tier 0 for tokens under 200K", () => {
+      expect(getTier(0)).toBe(0);
+      expect(getTier(100_000)).toBe(0);
+      expect(getTier(200_000)).toBe(0);
+    });
 
-  beforeEach(() => {
-    resetCalibration(SID);
-    setMaxContextTokens(200_000);
+    test("returns tier 1 for tokens between 200K and 500K", () => {
+      expect(getTier(200_001)).toBe(1);
+      expect(getTier(350_000)).toBe(1);
+      expect(getTier(500_000)).toBe(1);
+    });
+
+    test("returns tier 2 for tokens above 500K", () => {
+      expect(getTier(500_001)).toBe(2);
+      expect(getTier(1_000_000)).toBe(2);
+    });
   });
 
-  test("skips EMA update and cap tightening at Layer 4", () => {
-    // Prime with high bust rate to ratchet cap below ceiling — ensures
-    // the cap assertion is meaningful (not just clamped at ceiling).
-    for (let i = 0; i < 10; i++) {
-      updateBustRate(100_000, 0, SID);
-    }
-    const stateAfterPrime = inspectSessionState(SID)!;
-    const emaBefore = stateAfterPrime.bustRateEMA;
-    const capBefore = stateAfterPrime.dynamicContextCap;
-    expect(capBefore).toBeLessThan(200_000); // verify cap was actually tightened
+  describe("shouldCompress", () => {
+    beforeEach(() => {
+      // Opus 4.6 pricing: write=$6.25/M, read=$0.50/M
+      setCachePricing(6.25 / 1_000_000, 0.50 / 1_000_000);
+    });
 
-    // Layer 4 turn: 100% writes — should NOT affect EMA or cap
-    updateBustRate(100_000, 0, SID, 4);
-    const stateAfter = inspectSessionState(SID)!;
+    test("compresses when bust cost is much less than continue cost", () => {
+      // 250K current → 150K compressed
+      // bustCost = 150K × $6.25/M = $0.9375
+      // continueCost = 250K × $0.50/M = $0.125
+      // bustCost > continueCost — but shouldCompress returns false because
+      // bust is MORE expensive, not less
+      expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
+    });
 
-    // EMA should NOT have changed
-    expect(stateAfter.bustRateEMA).toBe(emaBefore);
-    // Cap should NOT have tightened further
-    expect(stateAfter.dynamicContextCap).toBe(capBefore);
-    // L4 counter should have been incremented
-    expect(stateAfter.consecutiveLayer4).toBe(1);
+    test("does not compress when bust cost exceeds threshold of continue cost", () => {
+      // 250K current → 150K compressed
+      // bustCost = 150K × $6.25/M = $0.9375
+      // continueCost = 250K × $0.50/M = $0.125
+      // bustCost (0.9375) >> threshold * continueCost (0.85 × 0.125 = 0.106)
+      expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
+    });
+
+    test("compresses when large context makes reads more expensive than bust", () => {
+      // Very large context: 2M current → 100K compressed
+      // bustCost = 100K × $6.25/M = $0.625
+      // continueCost = 2M × $0.50/M = $1.00
+      // bustCost (0.625) < threshold * continueCost (0.85 × 1.00 = 0.85) → compress
+      expect(shouldCompress(2_000_000, 100_000, 0)).toBe(true);
+    });
+
+    test("does not compress after 5 consecutive busts", () => {
+      // Even when compression would be economical, stop after 5 busts
+      expect(shouldCompress(2_000_000, 100_000, 5)).toBe(false);
+      expect(shouldCompress(2_000_000, 100_000, 10)).toBe(false);
+    });
+
+    test("compresses with 4 or fewer consecutive busts", () => {
+      expect(shouldCompress(2_000_000, 100_000, 4)).toBe(true);
+    });
+
+    test("falls back to conservative (do NOT compress) when no pricing", () => {
+      setCachePricing(0, 0);
+      // Without pricing data, we can't prove compression is worthwhile,
+      // so err on the side of keeping the cache (don't bust).
+      expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
+    });
   });
 
-  test("tracks consecutiveLayer4 and resets on non-Layer-4 turn", () => {
-    updateBustRate(100_000, 0, SID, 4);
-    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(1);
+  describe("recordCacheUsage — consecutive bust tracking", () => {
+    const SID = "bust-rate-tracking-sess";
 
-    updateBustRate(100_000, 0, SID, 4);
-    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(2);
+    beforeEach(() => {
+      resetCalibration(SID);
+    });
 
-    updateBustRate(100_000, 0, SID, 4);
-    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(3);
+    test("tracks consecutive busts (>50% writes of total input)", () => {
+      // 100K write, 0 read, 100K total input → 100% bust
+      recordCacheUsage(100_000, 0, 100_000, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
 
-    // Non-Layer-4 turn resets the counter
-    updateBustRate(50_000, 50_000, SID, 1);
-    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(0);
-  });
+      // 80K write, 20K read, 120K total input → 66% bust
+      recordCacheUsage(80_000, 20_000, 120_000, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
+    });
 
-  test("recovery hatch relaxes cap after 5 consecutive Layer 4 turns", () => {
-    // Prime with high bust rate to ratchet cap down
-    for (let i = 0; i < 20; i++) {
-      updateBustRate(100_000, 0, SID);
-    }
-    const cappedState = inspectSessionState(SID)!;
-    const cappedValue = cappedState.dynamicContextCap;
-    // Cap should have been tightened significantly
-    expect(cappedValue).toBeLessThan(200_000);
+    test("uses total input tokens (not just cache tokens) for bust ratio", () => {
+      // 60K write, 0 read, but 160K total input (100K uncached)
+      // bustRatio = 60K/160K = 37.5% — NOT a bust
+      recordCacheUsage(60_000, 0, 160_000, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
+    });
 
-    // First 4 Layer 4 turns: no recovery yet
-    for (let i = 0; i < 4; i++) {
-      updateBustRate(100_000, 0, SID, 4);
-    }
-    expect(inspectSessionState(SID)!.dynamicContextCap).toBe(cappedValue);
+    test("resets consecutive busts on cache-hit turn (<50% writes)", () => {
+      recordCacheUsage(100_000, 0, 100_000, SID);
+      recordCacheUsage(100_000, 0, 100_000, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
 
-    // 5th Layer 4 turn: recovery hatch kicks in
-    updateBustRate(100_000, 0, SID, 4);
-    const recoveredCap = inspectSessionState(SID)!.dynamicContextCap;
-    expect(recoveredCap).toBeGreaterThan(cappedValue);
+      // Good cache hit — resets counter
+      recordCacheUsage(10_000, 90_000, 100_000, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
+    });
 
-    // 6th Layer 4 turn: continues relaxing
-    updateBustRate(100_000, 0, SID, 4);
-    expect(inspectSessionState(SID)!.dynamicContextCap).toBeGreaterThan(recoveredCap);
-  });
+    test("zero-usage turn does not change consecutive bust count", () => {
+      recordCacheUsage(100_000, 0, 100_000, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
 
-  test("Layer 4 without lastLayer param still updates EMA normally (backward compat)", () => {
-    // When lastLayer is not passed, existing behavior is preserved
-    updateBustRate(50_000, 50_000, SID);
-    const emaBefore = inspectSessionState(SID)!.bustRateEMA;
-
-    // Call without lastLayer — should update EMA
-    updateBustRate(100_000, 0, SID);
-    const emaAfter = inspectSessionState(SID)!.bustRateEMA;
-    expect(emaAfter).toBeGreaterThan(emaBefore);
-  });
-
-  test("zero-usage Layer 4 turn still increments consecutiveLayer4", () => {
-    // API response with no cache metrics (e.g. error, or model doesn't report them)
-    updateBustRate(0, 0, SID, 4);
-    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(1);
-
-    updateBustRate(0, 0, SID, 4);
-    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(2);
-  });
-
-  test("zero-usage non-Layer-4 turn resets consecutiveLayer4", () => {
-    // Build up a count
-    updateBustRate(100_000, 0, SID, 4);
-    updateBustRate(100_000, 0, SID, 4);
-    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(2);
-
-    // Zero-usage non-L4 turn — must reset, not leave stale count
-    updateBustRate(0, 0, SID, 1);
-    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(0);
+      // Zero usage — no change
+      recordCacheUsage(0, 0, 0, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
+    });
   });
 });

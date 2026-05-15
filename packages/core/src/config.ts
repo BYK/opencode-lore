@@ -36,20 +36,12 @@ export const LoreConfig = z.object({
        *  cost-aware formula from targetCacheReadCostPerTurn. 0 = disabled
        *  (no cap, use full context). Default: undefined (use cost-aware auto). */
       maxLayer0Tokens: z.number().min(0).optional(),
-      /** Target maximum cost (USD) for a single full cache bust (cold write of
-       *  the entire context). Controls the total-context token cap at layer 1+:
-       *  maxContextTokens = targetBustCost / cacheWriteCostPerToken.
-       *  For opus-4-6 ($6.25/M write): $1.00 → 160K cap.
-       *  For sonnet-4 ($3.75/M write): $1.00 → 267K (effectively uncapped at 200K).
-       *  The cap is further adjusted dynamically per session based on observed
-       *  bust rate (EMA) and break frequency. Default: 1.00. Set to 0 to disable. */
-      targetBustCost: z.number().min(0).default(1.00),
-      /** Direct override for the total-context token cap at layer 1+. When set,
-       *  bypasses the cost-aware formula from targetBustCost. 0 = disabled.
-       *  Default: undefined (use cost-aware auto). */
+      /** @deprecated Ignored. Tier-based bust-vs-continue replaces static cap. */
+      targetBustCost: z.number().min(0).default(1.00).optional(),
+      /** @deprecated Ignored. Tier-based bust-vs-continue replaces static cap. */
       maxContextTokens: z.number().min(0).optional(),
     })
-    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.05, targetCacheReadCostPerTurn: 0.10, targetBustCost: 1.00 }),
+    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.05, targetCacheReadCostPerTurn: 0.10 }),
   /**
    * Cold-cache idle-resume handling.
    *
