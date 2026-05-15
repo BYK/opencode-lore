@@ -98,9 +98,42 @@ export function updateBustRate(
   cacheWrite: number,
   cacheRead: number,
   sessionID?: string,
+  lastLayer?: number,
 ): void {
   if (!sessionID) return;
   const state = getSessionState(sessionID);
+
+  // Layer 4 (emergency) is structurally a full cache write — feeding its
+  // bust stats into the EMA and cap adaptation creates a death spiral where
+  // the cap ratchets down to MIN_CONTEXT_FLOOR and prevents the session from
+  // ever fitting in layers 1-3 again. Skip EMA updates entirely.
+  // This check is BEFORE the total===0 guard so that the consecutiveLayer4
+  // counter is always updated regardless of whether usage was reported.
+  if (lastLayer === 4) {
+    state.consecutiveLayer4++;
+
+    // Recovery hatch: after 5+ consecutive Layer 4 turns, the shrunken cap
+    // may be what's trapping us. Relax it by 10% per turn to give layers
+    // 1-3 a chance to fit. From 130K floor: turns 5-9 → 143K→157K→173K→190K→209K.
+    if (
+      state.consecutiveLayer4 >= 5 &&
+      state.dynamicContextCap > 0 &&
+      maxContextTokensCeiling > 0
+    ) {
+      state.dynamicContextCap = Math.min(
+        maxContextTokensCeiling,
+        Math.floor(state.dynamicContextCap * 1.10),
+      );
+    }
+    return;
+  }
+
+  // Non-Layer-4 turn: reset the consecutive counter (also before total===0
+  // guard — a zero-usage non-L4 turn must not leave a stale count).
+  if (lastLayer !== undefined) {
+    state.consecutiveLayer4 = 0;
+  }
+
   const total = cacheWrite + cacheRead;
   if (total === 0) return;
 
@@ -253,6 +286,10 @@ type SessionState = {
   postIdleCompact: boolean;
   /** Consecutive turns at layer >= 2. When >= 3, log a compaction hint. */
   consecutiveHighLayer: number;
+  /** Consecutive Layer 4 turns — used to skip bust-rate EMA updates
+   *  (Layer 4 busts are structural, not a caching signal) and to trigger
+   *  a recovery hatch that relaxes dynamicContextCap after prolonged trapping. */
+  consecutiveLayer4: number;
 
   // --- Cost-aware context cap dynamic state ---
 
@@ -298,6 +335,7 @@ function makeSessionState(): SessionState {
     cameOutOfIdle: false,
     postIdleCompact: false,
     consecutiveHighLayer: 0,
+    consecutiveLayer4: 0,
 
     bustRateEMA: -1,
     interBustIntervalEMA: -1,
@@ -605,6 +643,9 @@ export function inspectSessionState(sessionID: string): {
   postIdleCompact: boolean;
   lastTurnAt: number;
   distillationSnapshot: DistillationSnapshot | null;
+  bustRateEMA: number;
+  dynamicContextCap: number;
+  consecutiveLayer4: number;
 } | null {
   const state = sessionStates.get(sessionID);
   if (!state) return null;
@@ -615,6 +656,9 @@ export function inspectSessionState(sessionID: string): {
     postIdleCompact: state.postIdleCompact,
     lastTurnAt: state.lastTurnAt,
     distillationSnapshot: state.distillationSnapshot,
+    bustRateEMA: state.bustRateEMA,
+    dynamicContextCap: state.dynamicContextCap,
+    consecutiveLayer4: state.consecutiveLayer4,
   };
 }
 
