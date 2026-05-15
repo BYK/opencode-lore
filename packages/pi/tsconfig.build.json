@@ -6,7 +6,10 @@
     "emitDeclarationOnly": true,
     "declaration": true,
     "declarationMap": true,
-    "noEmit": false
+    "noEmit": false,
+    "paths": {
+      "@loreai/core": ["../core/src/index.ts"]
+    }
   },
   "include": ["src"]
 }

@@ -59,7 +59,7 @@ import type {
   SessionState,
 } from "./translate/types";
 import type { GatewayConfig } from "./config";
-import { getProjectPath, resolveUpstreamRoute, type ProjectPathResult } from "./config";
+import { getProjectPath, extractGitRemoteHeader, resolveUpstreamRoute, type ProjectPathResult } from "./config";
 import {
   generateSessionID,
   fingerprintMessages,
@@ -530,11 +530,11 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
  * One-time init: load Lore config, ensure project exists in DB, start idle scheduler.
  * Safe to call multiple times — only the first call does work.
  */
-async function initIfNeeded(projectPath: string, config?: GatewayConfig): Promise<void> {
+async function initIfNeeded(projectPath: string, config?: GatewayConfig, gitRemote?: string): Promise<void> {
   if (initialized) return;
 
   await load(projectPath);
-  ensureProject(projectPath);
+  ensureProject(projectPath, undefined, gitRemote);
   initialized = true;
 
   // Import knowledge from .lore.md at startup (picks up user/git edits
@@ -662,6 +662,17 @@ export function resolveSessionProjectPath(
   sessionState: SessionState,
 ): string {
   let { path: projectPath, source } = result;
+
+  // Cache git remote on the session so subsequent turns benefit even if
+  // the header is absent (e.g. prompt-cache probes or follow-up requests).
+  // Also backfill ensureProject() — initIfNeeded is one-shot, so if the
+  // first request lacked the header, the project row has no git_remote.
+  // Calling ensureProject() again is safe: it's idempotent and will
+  // backfill git_remote on the existing row if missing.
+  if (result.gitRemote && !sessionState.gitRemote) {
+    sessionState.gitRemote = result.gitRemote;
+    ensureProject(projectPath, undefined, result.gitRemote);
+  }
 
   // Upgrade from cwd fallback using session's cached path
   if (source === "cwd" && sessionState.projectPath !== projectPath) {
@@ -2136,7 +2147,7 @@ async function handleCompaction(
   config: GatewayConfig,
 ): Promise<Response> {
   const pathResult = getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(pathResult.path, config);
+  await initIfNeeded(pathResult.path, config, pathResult.gitRemote);
 
   const { sessionID } = await identifySession(req, pathResult.path);
   const sessionState = getOrCreateSession(sessionID, pathResult.path);
@@ -2199,14 +2210,17 @@ export async function handleCompactEndpoint(
     );
   }
 
-  await initIfNeeded(projectPath, config);
-
-  // Build a minimal GatewayRequest for session identification.
-  // Only rawHeaders and messages are used by identifySession().
+  // Extract git remote from header if available (Pi plugin injects this).
   const rawHeaders: Record<string, string> = {};
   req.headers.forEach((value, key) => {
     rawHeaders[key] = value;
   });
+  const gitRemote = extractGitRemoteHeader(rawHeaders);
+
+  await initIfNeeded(projectPath, config, gitRemote);
+
+  // Build a minimal GatewayRequest for session identification.
+  // Only rawHeaders and messages are used by identifySession().
 
   const minimalReq: GatewayRequest = {
     protocol: "anthropic",
@@ -2346,7 +2360,7 @@ async function handleConversationTurn(
 ): Promise<Response> {
   // --- 1. Project path & init ---
   const pathResult = getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(pathResult.path, config);
+  await initIfNeeded(pathResult.path, config, pathResult.gitRemote);
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);

@@ -21,6 +21,7 @@
  *   pi install npm:@loreai/pi
  */
 import { createHash } from "node:crypto";
+import { getGitRemote } from "@loreai/core";
 import type {
   ExtensionAPI,
   SessionBeforeCompactEvent,
@@ -96,6 +97,13 @@ async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean>
  * Returns the URL of a running gateway, or null if none found.
  */
 async function resolveGatewayUrl(): Promise<string | null> {
+  // 0. Remote gateway — skip local discovery/startup entirely.
+  if (process.env.LORE_REMOTE_URL) {
+    const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
+    if (await probeGateway(url)) return url;
+    console.info(`pi: remote gateway at ${url} not reachable, falling through to local discovery`);
+  }
+
   // 1. Explicit env var — probe it to verify it's actually reachable.
   if (process.env.LORE_GATEWAY_URL) {
     const url = process.env.LORE_GATEWAY_URL.replace(/\/$/, "");
@@ -221,11 +229,16 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
    * once the real session ID is known.
    */
   function registerProviders(): void {
+    const headers: Record<string, string> = {
+      "x-lore-session-id": currentSessionID,
+    };
+    // Inject git remote so the gateway can group worktrees/clones of the
+    // same repo without filesystem access (important for remote gateways).
+    const remote = getGitRemote(projectPath);
+    if (remote) headers["x-lore-git-remote"] = remote;
+
     for (const provider of GATEWAY_PROVIDERS) {
-      pi.registerProvider(provider, {
-        baseUrl: gatewayBase,
-        headers: { "x-lore-session-id": currentSessionID },
-      });
+      pi.registerProvider(provider, { baseUrl: gatewayBase, headers });
     }
   }
 

@@ -22,6 +22,7 @@
     "build": "bun run script/build.ts"
   },
   "dependencies": {
+    "@loreai/core": "workspace:*",
     "@loreai/gateway": "workspace:*"
   },
   "peerDependencies": {

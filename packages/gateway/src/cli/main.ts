@@ -90,6 +90,7 @@ const OPTIONS = {
   port: { type: "string" as const, short: "p" },
   host: { type: "string" as const, short: "H", multiple: true },
   debug: { type: "boolean" as const, short: "d" },
+  remote: { type: "string" as const, short: "r" },
   version: { type: "boolean" as const, short: "v" },
   help: { type: "boolean" as const, short: "h" },
   yes: { type: "boolean" as const, short: "y" },
@@ -130,6 +131,7 @@ function buildStartOptions(values: {
   port?: string;
   host?: string[];
   debug?: boolean;
+  remote?: string;
 }): StartOptions {
   // Flatten: each --host value may itself be comma-separated
   const hosts = values.host
@@ -138,6 +140,7 @@ function buildStartOptions(values: {
     port: values.port ? parsePort(values.port) : undefined,
     hosts: hosts?.length ? hosts : undefined,
     debug: values.debug ?? undefined,
+    remoteUrl: values.remote ?? undefined,
   };
 }
 
@@ -226,7 +229,7 @@ export async function _cli(): Promise<void> {
   const rest = positionals.slice(1);
 
   const startOpts = buildStartOptions(
-    values as { port?: string; host?: string[]; debug?: boolean },
+    values as { port?: string; host?: string[]; debug?: boolean; remote?: string },
   );
 
   // Start background update check (non-blocking).

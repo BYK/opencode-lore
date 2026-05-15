@@ -25,6 +25,8 @@ Options:
   -p, --port <port>   Gateway port (default: 3207, env: LORE_LISTEN_PORT)
   -H, --host <host>   Gateway host(s), repeatable or comma-separated
                       (default: 127.0.0.1, env: LORE_LISTEN_HOST)
+  -r, --remote <url>  Use a remote gateway instead of starting a local one
+                      (env: LORE_REMOTE_URL)
   -d, --debug         Enable debug logging (env: LORE_DEBUG=1)
   -v, --version       Print version and exit
   -h, --help          Show this help text
@@ -77,6 +79,7 @@ Examples:
   lore claude --dangerously-skip-permissions  # Forward flags to Claude Code
   lore run claude --model gpt-4              # Forward --model gpt-4 to claude
   lore -- --verbose --debug                  # Use -- to forward lore-like flags
+  lore run --remote http://remote:3207  # Use a remote gateway
   lore start                    # Start gateway without launching an agent
   lore start -p 8080            # Start gateway on a custom port
   lore start -H 127.0.0.1 -H 100.69.65.125  # Bind to multiple interfaces
@@ -106,6 +109,7 @@ Environment variables:
   LORE_LISTEN_HOST              Gateway host(s), comma-separated (overridden by --host)
   LORE_UPSTREAM_ANTHROPIC       Upstream Anthropic API URL
   LORE_UPSTREAM_OPENAI          Upstream OpenAI API URL
+  LORE_REMOTE_URL               Remote gateway URL for \`lore run\` (overridden by --remote)
   LORE_DEBUG                    Enable debug logging (1 or true)
   LORE_NO_UPDATE_CHECK          Disable background update checks (set to 1)
 `.trimStart();

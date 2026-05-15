@@ -219,6 +219,10 @@ export type CacheAnalytics = {
 export type SessionState = {
   sessionID: string;
   projectPath: string;
+  /** Normalized git remote URL received via `X-Lore-Git-Remote` header.
+   *  Cached on the session so subsequent turns benefit even if the header
+   *  is absent (e.g. prompt-cache probes). */
+  gitRemote?: string;
   /** SHA-256 fingerprint of the first user message — used for Tier 3 session correlation. */
   fingerprint: string;
   /** Unix timestamp (ms) of the last request in this session. */

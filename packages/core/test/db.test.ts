@@ -265,6 +265,75 @@ describe("db", () => {
     expect(id2).toBe(id1);
   });
 
+  test("ensureProject with supplied gitRemote groups different paths", () => {
+    // Create a project with an explicit git remote (simulates a remote gateway
+    // receiving the X-Lore-Git-Remote header from a client).
+    const id1 = ensureProject(
+      "/test/supplied-remote/path-a",
+      undefined,
+      "github.com/test/supplied-remote-repo",
+    );
+
+    // Verify the git_remote was stored
+    const row = db()
+      .query("SELECT git_remote FROM projects WHERE id = ?")
+      .get(id1) as { git_remote: string | null };
+    expect(row.git_remote).toBe("github.com/test/supplied-remote-repo");
+
+    // A different path with the same supplied git remote should resolve
+    // to the same project (via step 3: git remote match) and register
+    // the new path as an alias.
+    const id2 = ensureProject(
+      "/test/supplied-remote/path-b",
+      undefined,
+      "github.com/test/supplied-remote-repo",
+    );
+    expect(id2).toBe(id1);
+
+    // Verify the alias was registered for O(1) future lookups
+    const alias = db()
+      .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
+      .get("/test/supplied-remote/path-b") as { project_id: string } | null;
+    expect(alias).not.toBeNull();
+    expect(alias!.project_id).toBe(id1);
+  });
+
+  test("ensureProject with supplied gitRemote backfills existing project", () => {
+    // Create a project without a git remote (simulates pre-v14 or local-only)
+    const id1 = ensureProject("/test/backfill-remote/original");
+    const rowBefore = db()
+      .query("SELECT git_remote FROM projects WHERE id = ?")
+      .get(id1) as { git_remote: string | null };
+    expect(rowBefore.git_remote).toBeNull();
+
+    // Re-visit with a supplied git remote — should backfill the remote
+    const id2 = ensureProject(
+      "/test/backfill-remote/original",
+      undefined,
+      "github.com/test/backfill-repo",
+    );
+    expect(id2).toBe(id1);
+
+    const rowAfter = db()
+      .query("SELECT git_remote FROM projects WHERE id = ?")
+      .get(id1) as { git_remote: string | null };
+    expect(rowAfter.git_remote).toBe("github.com/test/backfill-repo");
+  });
+
+  test("ensureProject with supplied gitRemote=null falls through to create", () => {
+    // Passing null explicitly should behave like not passing it at all
+    // (no git remote, no deduplication by remote).
+    const id = ensureProject(
+      "/test/null-remote/project",
+      undefined,
+      null,
+    );
+    const row = db()
+      .query("SELECT git_remote FROM projects WHERE id = ?")
+      .get(id) as { git_remote: string | null };
+    expect(row.git_remote).toBeNull();
+  });
+
   test("mergeProjectInternal moves all data from source to target", () => {
     // Create two projects
     const sourceId = ensureProject("/test/merge/source");

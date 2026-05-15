@@ -1,5 +1,5 @@
 import type { Plugin, Hooks } from "@opencode-ai/plugin";
-import { log } from "@loreai/core";
+import { log, getGitRemote } from "@loreai/core";
 
 /** Providers the plugin will redirect through the gateway. */
 const GATEWAY_PROVIDERS: string[] = [
@@ -37,6 +37,13 @@ export async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<b
  * Returns the URL of a running gateway, or null if none found.
  */
 async function resolveGatewayUrl(): Promise<string | null> {
+  // 0. Remote gateway — skip local discovery/startup entirely.
+  if (process.env.LORE_REMOTE_URL) {
+    const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
+    if (await probeGateway(url)) return url;
+    log.info(`remote gateway at ${url} not reachable, falling through to local discovery`);
+  }
+
   // 1. Explicit env var — probe it to verify it's actually reachable.
   if (process.env.LORE_GATEWAY_URL) {
     const url = process.env.LORE_GATEWAY_URL.replace(/\/$/, "");
@@ -158,6 +165,10 @@ export const LorePlugin: Plugin = async (ctx) => {
     }
   }
 
+  // Cache the git remote URL once per process (computed lazily on first
+  // chat.headers call). Avoids spawning `git remote -v` on every turn.
+  let cachedGitRemote: string | undefined;
+
   try {
   const hooks: Hooks = {
     // Disable built-in compaction (gateway handles it), register hidden
@@ -197,8 +208,17 @@ export const LorePlugin: Plugin = async (ctx) => {
 
     // Inject the agent name so the gateway can distinguish meta requests
     // (title generation, summary agents, etc.) from real conversation turns.
+    // Also inject the git remote URL so the remote gateway can group
+    // worktrees/clones of the same repo without filesystem access.
     "chat.headers": async (input, output) => {
       output.headers["x-lore-agent"] = input.agent;
+      if (cachedGitRemote === undefined) {
+        const projectPath = ctx.worktree || ctx.directory;
+        cachedGitRemote = getGitRemote(projectPath) ?? "";
+      }
+      if (cachedGitRemote) {
+        output.headers["x-lore-git-remote"] = cachedGitRemote;
+      }
     },
   };
 

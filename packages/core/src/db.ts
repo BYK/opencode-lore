@@ -813,7 +813,7 @@ export function close() {
  * an alias so subsequent calls skip the subprocess. If the matched project's
  * git_remote was not yet populated (pre-v14 rows), it is backfilled lazily.
  */
-export function ensureProject(path: string, name?: string): string {
+export function ensureProject(path: string, name?: string, suppliedGitRemote?: string | null): string {
   // Guard: reject synthetic test paths when targeting the production DB.
   // Test paths like "/test/ltm/project" are absolute paths that don't exist
   // on any real filesystem — they're only valid in test suites running against
@@ -836,21 +836,21 @@ export function ensureProject(path: string, name?: string): string {
   if (existing) {
     // Lazy backfill: populate git_remote on pre-v14 rows
     if (!existing.git_remote) {
-      const gitRemote = getGitRemote(path);
-      if (gitRemote) {
+      const resolvedRemote = suppliedGitRemote ?? getGitRemote(path);
+      if (resolvedRemote) {
         // Check for conflict: another project already has this git_remote.
         // If so, merge the conflicting project into this one (one-time).
         const conflict = db()
           .query(
             "SELECT id FROM projects WHERE git_remote = ? AND id != ? LIMIT 1",
           )
-          .get(gitRemote, existing.id) as { id: string } | null;
+          .get(resolvedRemote, existing.id) as { id: string } | null;
         if (conflict) {
           mergeProjectInternal(conflict.id, existing.id);
         }
         db()
           .query("UPDATE projects SET git_remote = ? WHERE id = ?")
-          .run(gitRemote, existing.id);
+          .run(resolvedRemote, existing.id);
       }
     }
     return existing.id;
@@ -863,7 +863,7 @@ export function ensureProject(path: string, name?: string): string {
   if (alias) return alias.project_id;
 
   // 3. Git remote identification
-  const gitRemote = getGitRemote(path);
+  const gitRemote = suppliedGitRemote ?? getGitRemote(path);
   if (gitRemote) {
     const byRemote = db()
       .query("SELECT id FROM projects WHERE git_remote = ? LIMIT 1")

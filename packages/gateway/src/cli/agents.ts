@@ -6,6 +6,7 @@
  *  - How to detect it (binary name on PATH)
  *  - What env vars to set so it talks through the gateway
  */
+import { getGitRemote } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // which() — cross-runtime binary lookup
@@ -49,8 +50,33 @@ export interface AgentDef {
   binary: string;
   /** Returns the binary path if found, or null */
   detect: () => string | null;
-  /** Env vars to inject given the gateway URL (e.g. "http://127.0.0.1:3207") */
-  envVars: (gatewayUrl: string) => Record<string, string>;
+  /** Env vars to inject given the gateway URL (e.g. "http://127.0.0.1:3207") and project cwd */
+  envVars: (gatewayUrl: string, cwd: string) => Record<string, string>;
+}
+
+/**
+ * Sanitize a git remote URL for safe embedding in env vars / headers.
+ * Strips control characters to prevent injection attacks.
+ */
+function safeRemote(cwd: string): string | null {
+  const remote = getGitRemote(cwd);
+  if (!remote) return null;
+  return remote.replace(/[\x00-\x1f\x7f]/g, "");
+}
+
+/**
+ * Append a header to ANTHROPIC_CUSTOM_HEADERS (curl-style format:
+ * "Name: Value" newline-separated).
+ */
+function appendCustomHeader(
+  env: Record<string, string>,
+  envKey: string,
+  name: string,
+  value: string,
+): void {
+  const existing = process.env[envKey] ?? "";
+  const header = `${name}: ${value}`;
+  env[envKey] = existing ? `${existing}\n${header}` : header;
 }
 
 export const AGENTS: AgentDef[] = [
@@ -59,31 +85,58 @@ export const AGENTS: AgentDef[] = [
     displayName: "Claude Code",
     binary: "claude",
     detect: () => which("claude"),
-    envVars: (url) => ({
-      ANTHROPIC_BASE_URL: url,
-      DISABLE_AUTO_COMPACT: "1",
-    }),
+    envVars: (url, cwd) => {
+      const env: Record<string, string> = {
+        ANTHROPIC_BASE_URL: url,
+        DISABLE_AUTO_COMPACT: "1",
+      };
+      // Inject git remote via ANTHROPIC_CUSTOM_HEADERS so the remote gateway
+      // can identify the project by git remote without filesystem access.
+      const remote = safeRemote(cwd);
+      if (remote) {
+        appendCustomHeader(env, "ANTHROPIC_CUSTOM_HEADERS", "X-Lore-Git-Remote", remote);
+      }
+      return env;
+    },
   },
   {
     name: "codex",
     displayName: "Codex",
     binary: "codex",
     detect: () => which("codex"),
-    envVars: (url) => ({ OPENAI_BASE_URL: `${url}/v1` }),
+    envVars: (url, cwd) => {
+      const env: Record<string, string> = { OPENAI_BASE_URL: `${url}/v1` };
+      // Codex supports custom headers via env_http_headers config (since 0.3.0).
+      // Set LORE_GIT_REMOTE so users can map it in their config.toml:
+      //   [model_provider.custom.env_http_headers]
+      //   X-Lore-Git-Remote = "LORE_GIT_REMOTE"
+      const remote = safeRemote(cwd);
+      if (remote) env.LORE_GIT_REMOTE = remote;
+      return env;
+    },
   },
   {
     name: "pi",
     displayName: "Pi",
     binary: "pi",
     detect: () => which("pi"),
-    envVars: (url) => ({ ANTHROPIC_BASE_URL: url, LORE_GATEWAY_URL: url }),
+    envVars: (url, _cwd) => ({
+      ANTHROPIC_BASE_URL: url,
+      LORE_GATEWAY_URL: url,
+      // Pi's @loreai/pi extension handles git remote header injection
+      // via registerProviders() when LORE_GATEWAY_URL is set.
+    }),
   },
   {
     name: "opencode",
     displayName: "OpenCode",
     binary: "opencode",
     detect: () => which("opencode"),
-    envVars: (url) => ({ OPENAI_BASE_URL: `${url}/v1` }),
+    envVars: (url, _cwd) => ({
+      OPENAI_BASE_URL: `${url}/v1`,
+      // OpenCode's @loreai/opencode plugin handles git remote header
+      // injection via chat.headers hook.
+    }),
   },
 ];
 

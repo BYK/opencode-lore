@@ -1,7 +1,10 @@
 /**
  * Gateway configuration — loaded from environment variables with sensible
- * defaults. No Zod, no file-based config, no @loreai/core dependency.
+ * defaults. No Zod, no file-based config — minimal @loreai/core dependency
+ * (only `normalizeRemoteUrl` for git URL canonicalization).
  */
+
+import { normalizeRemoteUrl } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Port defaults
@@ -41,6 +44,8 @@ export interface GatewayConfig {
   idleTimeoutSeconds: number;
   /** Whether to log requests. Default: false. Env: LORE_DEBUG */
   debug: boolean;
+  /** Remote gateway URL. When set, `lore run` delegates to this gateway instead of starting a local one. Env: LORE_REMOTE_URL */
+  remoteUrl?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,6 +67,9 @@ export function loadConfig(): GatewayConfig {
     ),
     idleTimeoutSeconds: parsePositiveInt(env.LORE_IDLE_TIMEOUT, 60),
     debug: isTruthy(env.LORE_DEBUG),
+    remoteUrl: env.LORE_REMOTE_URL
+      ? trimTrailingSlash(env.LORE_REMOTE_URL)
+      : undefined,
   };
 }
 
@@ -174,6 +182,8 @@ export type ProjectPathSource = "header" | "inferred" | "cwd";
 export type ProjectPathResult = {
   path: string;
   source: ProjectPathSource;
+  /** Normalized git remote URL from `X-Lore-Git-Remote` header, if provided. */
+  gitRemote?: string;
 };
 
 /**
@@ -194,16 +204,46 @@ export function getProjectPath(
   systemPrompt: string,
   headers: Record<string, string>,
 ): ProjectPathResult {
+  // Extract git remote from header (independent of path resolution).
+  const gitRemote = extractGitRemoteHeader(headers);
+
   // 1. Explicit header override
   const headerPath = headers["x-lore-project"];
-  if (headerPath) return { path: headerPath, source: "header" };
+  if (headerPath) return { path: headerPath, source: "header", gitRemote };
 
   // 2. Infer from system prompt content
   const inferred = inferProjectPath(systemPrompt);
-  if (inferred) return { path: inferred, source: "inferred" };
+  if (inferred) return { path: inferred, source: "inferred", gitRemote };
 
   // 3. Fall back to gateway's own cwd
-  return { path: process.cwd(), source: "cwd" };
+  return { path: process.cwd(), source: "cwd", gitRemote };
+}
+
+// ---------------------------------------------------------------------------
+// Git remote header extraction
+// ---------------------------------------------------------------------------
+
+/** Maximum allowed length for a git remote header value. */
+const MAX_GIT_REMOTE_LENGTH = 512;
+
+/**
+ * Extract and validate the `X-Lore-Git-Remote` header from a request.
+ * Normalizes SSH/HTTPS/git:// variants to a canonical form and strips
+ * any control characters (prevents header injection via crafted remote URLs).
+ * Returns `undefined` when the header is absent or invalid.
+ */
+export function extractGitRemoteHeader(
+  headers: Record<string, string>,
+): string | undefined {
+  const raw = headers["x-lore-git-remote"];
+  if (!raw) return undefined;
+
+  // Strip control characters (newlines, carriage returns, null bytes) to
+  // prevent header injection and DB corruption.
+  const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (!sanitized || sanitized.length > MAX_GIT_REMOTE_LENGTH) return undefined;
+
+  return normalizeRemoteUrl(sanitized);
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,9 @@ export interface StartOptions {
   debug?: boolean;
   /** Suppress verbose banner (env vars, export hints). Used in embedded mode. */
   quiet?: boolean;
+  /** Remote gateway URL. When set, `lore run` delegates to this gateway
+   *  instead of starting a local one. Overrides LORE_REMOTE_URL env var. */
+  remoteUrl?: string;
 }
 
 export interface GatewayHandle {
@@ -193,6 +196,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log(`  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`);
     console.log(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
     console.log(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
+    console.log(`  LORE_REMOTE_URL         Remote gateway URL for \`lore run\` (delegates instead of starting local)`);
   }
   // Block until signal
   let shuttingDown = false;

@@ -7,7 +7,8 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
-import { startGateway, type StartOptions } from "./start";
+import { startGateway, probeGateway, type StartOptions } from "./start";
+import { loadConfig } from "../config";
 import { detectAgents, AGENTS, type DetectedAgent } from "./agents";
 import { safeExit } from "./exit";
 import { maybeAutoImport } from "./import-auto";
@@ -60,9 +61,10 @@ async function resolveLaunchTarget(
 ): Promise<LaunchTarget | null> {
   // --- Explicit command given: inject all known env vars ---
   if (cmdArgs.length > 0) {
+    const cwd = process.cwd();
     const env: Record<string, string> = {};
     for (const agent of AGENTS) {
-      Object.assign(env, agent.envVars(gatewayUrl));
+      Object.assign(env, agent.envVars(gatewayUrl, cwd));
     }
     return { command: cmdArgs[0], args: [...cmdArgs.slice(1), ...extraArgs], env };
   }
@@ -97,7 +99,7 @@ async function resolveLaunchTarget(
   return {
     command: agent.def.binary,
     args: [...extraArgs],
-    env: agent.def.envVars(gatewayUrl),
+    env: agent.def.envVars(gatewayUrl, process.cwd()),
   };
 }
 
@@ -125,19 +127,46 @@ export async function commandRun(
   cmdArgs: string[],
   extraArgs: string[] = [],
 ): Promise<void> {
-  // 1. Start gateway (or reuse an existing one)
-  const { config, port, owned, shutdown } = await startGateway(opts);
-  const gatewayUrl = `http://${config.hosts[0]}:${port}`;
+  // 1. Start gateway (or delegate to a remote one)
+  const config = loadConfig();
+  let gatewayUrl: string;
+  let owned: boolean;
+  let shutdown: () => Promise<void>;
 
-  if (owned) {
-    console.log(`[lore] Gateway listening on ${gatewayUrl}`);
+  if (opts.remoteUrl || config.remoteUrl) {
+    // Remote mode: delegate to an existing remote gateway.
+    // The local CLI still runs on the developer's machine, so it can
+    // safely compute the git remote and inject it as a header.
+    const remoteUrl = opts.remoteUrl ?? config.remoteUrl!;
+    const alive = await probeGateway(remoteUrl);
+    if (!alive) {
+      console.error(`[lore] Remote gateway at ${remoteUrl} is not reachable.`);
+      console.error(`[lore] Check LORE_REMOTE_URL and ensure the gateway is running.`);
+      return safeExit(1);
+    }
+    gatewayUrl = remoteUrl;
+    owned = false;
+    shutdown = async () => {};
+    console.log(`[lore] Using remote gateway at ${gatewayUrl}`);
   } else {
-    console.log(`[lore] Reusing existing gateway at ${gatewayUrl}`);
+    // Local mode: start (or reuse) a local gateway.
+    const handle = await startGateway(opts);
+    gatewayUrl = `http://${handle.config.hosts[0]}:${handle.port}`;
+    owned = handle.owned;
+    shutdown = handle.shutdown;
+
+    if (owned) {
+      console.log(`[lore] Gateway listening on ${gatewayUrl}`);
+    } else {
+      console.log(`[lore] Reusing existing gateway at ${gatewayUrl}`);
+    }
   }
   console.log(`[lore] Dashboard: ${gatewayUrl}/ui`);
 
   // 2. Auto-detect prior conversations (first run only)
-  await maybeAutoImport(config);
+  if (owned) {
+    await maybeAutoImport(config);
+  }
 
   // 3. Resolve what to launch
   const target = await resolveLaunchTarget(gatewayUrl, cmdArgs, extraArgs);

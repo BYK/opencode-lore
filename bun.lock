@@ -59,6 +59,7 @@
       "name": "@loreai/pi",
       "version": "0.19.0",
       "dependencies": {
+        "@loreai/core": "workspace:*",
         "@loreai/gateway": "workspace:*",
       },
       "devDependencies": {
