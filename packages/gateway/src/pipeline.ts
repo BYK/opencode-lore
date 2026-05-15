@@ -48,6 +48,8 @@ import {
   saveSessionTracking,
   loadSessionTracking,
   loadHeaderSessionIndex,
+  isHostedMode,
+  enableHostedMode,
 } from "@loreai/core";
 
 import type {
@@ -466,6 +468,9 @@ function tryImportKnowledge(projectPath: string): boolean {
  * exports are recognized as no-ops.
  */
 function startKnowledgeFileWatcher(projectPath: string): () => void {
+  // In hosted mode, never watch client-controlled paths.
+  if (isHostedMode()) return () => {};
+
   const { join } = require("node:path") as typeof import("node:path");
   const { watch, existsSync } = require("node:fs") as typeof import("node:fs");
 
@@ -532,6 +537,12 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
  */
 async function initIfNeeded(projectPath: string, config?: GatewayConfig, gitRemote?: string): Promise<void> {
   if (initialized) return;
+
+  // Enable hosted mode before any FS operations — once set, all core
+  // functions that touch client-controlled paths become safe no-ops.
+  if (config?.hostedMode) {
+    enableHostedMode();
+  }
 
   await load(projectPath);
   ensureProject(projectPath, undefined, gitRemote);

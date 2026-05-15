@@ -197,6 +197,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
     console.log(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
     console.log(`  LORE_REMOTE_URL         Remote gateway URL for \`lore run\` (delegates instead of starting local)`);
+    console.log(`  LORE_HOSTED_MODE        Hosted mode — disable FS ops on client-controlled paths (current: ${config.hostedMode})`);
   }
   // Block until signal
   let shuttingDown = false;

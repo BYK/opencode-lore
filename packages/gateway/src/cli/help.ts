@@ -110,6 +110,8 @@ Environment variables:
   LORE_UPSTREAM_ANTHROPIC       Upstream Anthropic API URL
   LORE_UPSTREAM_OPENAI          Upstream OpenAI API URL
   LORE_REMOTE_URL               Remote gateway URL for \`lore run\` (overridden by --remote)
+  LORE_HOSTED_MODE              Hosted/remote mode — disables all filesystem operations
+                                that use client-controlled paths (set to 1)
   LORE_DEBUG                    Enable debug logging (1 or true)
   LORE_NO_UPDATE_CHECK          Disable background update checks (set to 1)
 `.trimStart();
