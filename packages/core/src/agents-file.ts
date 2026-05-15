@@ -13,6 +13,7 @@ import { dirname, join } from "path";
 import { db, ensureProject } from "./db";
 import * as ltm from "./ltm";
 import { serialize, inline, h, ul, liph, strong, t, root, unescapeMarkdown } from "./markdown";
+import { isHostedMode } from "./hosted";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -334,6 +335,8 @@ export function exportToFile(input: {
   projectPath: string;
   filePath: string;
 }): void {
+  if (isHostedMode()) return;
+
   // Write the actual entries to .lore.md first.
   exportLoreFile(input.projectPath);
 
@@ -378,6 +381,7 @@ export function shouldImport(input: {
   projectPath: string;
   filePath: string;
 }): boolean {
+  if (isHostedMode()) return false;
   if (!existsSync(input.filePath)) return false;
 
   const fileContent = readFileSync(input.filePath, "utf8");
@@ -483,6 +487,7 @@ export function importFromFile(input: {
   projectPath: string;
   filePath: string;
 }): void {
+  if (isHostedMode()) return;
   if (!existsSync(input.filePath)) return;
 
   const fileContent = readFileSync(input.filePath, "utf8");
@@ -507,6 +512,7 @@ export function importFromFile(input: {
  * Returns true if a `.lore.md` file exists in the project root.
  */
 export function loreFileExists(projectPath: string): boolean {
+  if (isHostedMode()) return false;
   return existsSync(join(projectPath, LORE_FILE));
 }
 
@@ -519,6 +525,8 @@ export function loreFileExists(projectPath: string): boolean {
  * and mtime bumps.
  */
 export function exportLoreFile(projectPath: string): void {
+  if (isHostedMode()) return;
+
   const sectionBody = buildSection(projectPath);
   const content = LORE_FILE_HEADER + "\n" + sectionBody;
   const contentHash = hashSection(content);
@@ -545,6 +553,8 @@ export function exportLoreFile(projectPath: string): void {
  * call when the file hasn't been touched since we last processed it.
  */
 export function shouldImportLoreFile(projectPath: string): boolean {
+  if (isHostedMode()) return false;
+
   const fp = join(projectPath, LORE_FILE);
   if (!existsSync(fp)) return false;
 
@@ -579,6 +589,8 @@ export function shouldImportLoreFile(projectPath: string): boolean {
  * content hasn't changed, only the DB was updated to match it.
  */
 export function importLoreFile(projectPath: string): void {
+  if (isHostedMode()) return;
+
   const fp = join(projectPath, LORE_FILE);
   if (!existsSync(fp)) return;
 

@@ -17,6 +17,7 @@ import { db, ensureProject } from "./db";
 import { sha256 } from "#db/driver";
 import { ftsQuery, extractTopTerms, EMPTY_QUERY, runRelaxedSearch } from "./search";
 import * as log from "./log";
+import { isHostedMode } from "./hosted";
 
 const processor = remark();
 
@@ -179,6 +180,7 @@ function contentHash(content: string): string {
 
 /** Check if a project has a lat.md/ directory. */
 export function hasLatDir(projectPath: string): boolean {
+  if (isHostedMode()) return false;
   const latDir = join(projectPath, "lat.md");
   return existsSync(latDir) && statSync(latDir).isDirectory();
 }
@@ -192,6 +194,8 @@ export function hasLatDir(projectPath: string): boolean {
  * @returns Number of sections updated/inserted
  */
 export function refresh(projectPath: string): number {
+  if (isHostedMode()) return 0;
+
   const latDir = join(projectPath, "lat.md");
   if (!existsSync(latDir) || !statSync(latDir).isDirectory()) return 0;
 

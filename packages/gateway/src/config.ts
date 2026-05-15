@@ -46,6 +46,12 @@ export interface GatewayConfig {
   debug: boolean;
   /** Remote gateway URL. When set, `lore run` delegates to this gateway instead of starting a local one. Env: LORE_REMOTE_URL */
   remoteUrl?: string;
+  /**
+   * Hosted/remote mode — disables all filesystem operations that use
+   * client-controlled paths (git subprocess, .lore.json/.lore.md read/write,
+   * lat.md/ directory scan, file watchers). Env: LORE_HOSTED_MODE.
+   */
+  hostedMode: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +76,7 @@ export function loadConfig(): GatewayConfig {
     remoteUrl: env.LORE_REMOTE_URL
       ? trimTrailingSlash(env.LORE_REMOTE_URL)
       : undefined,
+    hostedMode: isTruthy(env.LORE_HOSTED_MODE),
   };
 }
 

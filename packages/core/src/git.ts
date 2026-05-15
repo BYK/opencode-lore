@@ -13,6 +13,7 @@
  */
 
 import { execSync } from "child_process";
+import { isHostedMode } from "./hosted";
 
 // ---------------------------------------------------------------------------
 // URL normalization
@@ -95,6 +96,9 @@ export function clearGitRemoteCache(): void {
  * subprocess calls — `git remote -v` only runs once per unique path.
  */
 export function getGitRemote(path: string): string | null {
+  // In hosted mode, never run git subprocesses with client-controlled cwd.
+  if (isHostedMode()) return null;
+
   const cached = gitRemoteCache.get(path);
   if (cached !== undefined) return cached;
 

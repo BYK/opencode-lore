@@ -86,6 +86,7 @@ export {
   close,
 } from "./db";
 export { normalizeRemoteUrl, getGitRemote, clearGitRemoteCache } from "./git";
+export { enableHostedMode, isHostedMode } from "./hosted";
 export {
   transform,
   setModelLimits,

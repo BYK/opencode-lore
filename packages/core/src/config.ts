@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isHostedMode } from "./hosted";
 
 export const LoreConfig = z.object({
   model: z
@@ -251,11 +252,15 @@ export function config(): LoreConfig {
 }
 
 export async function load(directory: string): Promise<LoreConfig> {
-  const path = join(directory, ".lore.json");
-  if (existsSync(path)) {
-    const raw = JSON.parse(readFileSync(path, "utf8"));
-    current = LoreConfig.parse(raw);
-    return current;
+  // In hosted mode, never read config from client-controlled paths —
+  // a crafted .lore.json could alter gateway behavior (budget, model, thresholds).
+  if (!isHostedMode()) {
+    const path = join(directory, ".lore.json");
+    if (existsSync(path)) {
+      const raw = JSON.parse(readFileSync(path, "utf8"));
+      current = LoreConfig.parse(raw);
+      return current;
+    }
   }
   current = LoreConfig.parse({});
   return current;
