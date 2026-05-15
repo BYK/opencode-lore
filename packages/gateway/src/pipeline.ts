@@ -794,7 +794,7 @@ function getOrCreateSession(
  *
  * Uses a 3-tier strategy:
  *  1. **Known headers** — `x-claude-code-session-id`, `x-session-affinity`,
- *     `x-parent-session-id`. Immediate match, survives compaction & model changes.
+ *     `x-lore-session-id`. Immediate match, survives compaction & model changes.
  *  2. **Learned headers** — `x-` headers discovered via fingerprint-bootstrapped
  *     learning. Promoted after 3 stable turns + cross-session uniqueness.
  *  3. **Fingerprint fallback** — SHA-256 of first user message + auth suffix
@@ -1793,55 +1793,53 @@ function postResponse(
     const prevStopReason = sessionState.lastStopReason;
 
     // --- Temporal storage & session-state updates ---
-    {
-      // Store all messages (user + assistant) from this turn.
-      // Convert gateway messages to Lore format.
-      const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
-      resolveToolResults(loreMessages);
+    // Store all messages (user + assistant) from this turn.
+    // Convert gateway messages to Lore format.
+    const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
+    resolveToolResults(loreMessages);
 
-      // Store the latest user message (last user message in the array)
-      for (let i = loreMessages.length - 1; i >= 0; i--) {
-        if (loreMessages[i].info.role === "user") {
-          temporal.store({
-            projectPath,
-            info: loreMessages[i].info,
-            parts: loreMessages[i].parts,
-          });
-          break;
-        }
-      }
-
-      // Build and store the assistant response message.
-      // Strip recall marker text blocks — they contain the raw query string
-      // and pollute FTS results with self-referential noise.
-      const assistantContent = resp.content.filter(
-        (b) => !(b.type === "text" && isRecallMarker(b.text)),
-      );
-      if (assistantContent.length > 0) {
-        const assistantMsg = gatewayMessagesToLore(
-          [{ role: "assistant", content: assistantContent }],
-          sessionID,
-        )[0];
-        updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
+    // Store the latest user message (last user message in the array)
+    for (let i = loreMessages.length - 1; i >= 0; i--) {
+      if (loreMessages[i].info.role === "user") {
         temporal.store({
           projectPath,
-          info: assistantMsg.info,
-          parts: assistantMsg.parts,
+          info: loreMessages[i].info,
+          parts: loreMessages[i].parts,
         });
+        break;
       }
+    }
 
-      // Update session state (persisted in the batched save after messageCount update)
-      sessionState.turnsSinceCuration =
-        (sessionState.turnsSinceCuration ?? 0) + 1;
+    // Build and store the assistant response message.
+    // Strip recall marker text blocks — they contain the raw query string
+    // and pollute FTS results with self-referential noise.
+    const assistantContent = resp.content.filter(
+      (b) => !(b.type === "text" && isRecallMarker(b.text)),
+    );
+    if (assistantContent.length > 0) {
+      const assistantMsg = gatewayMessagesToLore(
+        [{ role: "assistant", content: assistantContent }],
+        sessionID,
+      )[0];
+      updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
+      temporal.store({
+        projectPath,
+        info: assistantMsg.info,
+        parts: assistantMsg.parts,
+      });
+    }
 
-      // --- Track consecutive text-only end_turn responses (session-end heuristic) ---
-      const hasToolUse = resp.content.some((b) => b.type === "tool_use");
-      if (resp.stopReason === "end_turn" && !hasToolUse) {
-        sessionState.consecutiveTextOnlyTurns =
-          (sessionState.consecutiveTextOnlyTurns ?? 0) + 1;
-      } else {
-        sessionState.consecutiveTextOnlyTurns = 0;
-      }
+    // Update session state (persisted in the batched save after messageCount update)
+    sessionState.turnsSinceCuration =
+      (sessionState.turnsSinceCuration ?? 0) + 1;
+
+    // --- Track consecutive text-only end_turn responses (session-end heuristic) ---
+    const hasToolUse = resp.content.some((b) => b.type === "tool_use");
+    if (resp.stopReason === "end_turn" && !hasToolUse) {
+      sessionState.consecutiveTextOnlyTurns =
+        (sessionState.consecutiveTextOnlyTurns ?? 0) + 1;
+    } else {
+      sessionState.consecutiveTextOnlyTurns = 0;
     }
 
     // --- Output tracking for dynamic max_tokens sizing ---
@@ -1883,7 +1881,7 @@ function postResponse(
 
     // (B) Track warmup hits and TTL savings — valid for ALL turn types.
     // A user returning after a warmup is a hit regardless of whether it's
-    // a subagent turn or tool-use continuation.
+    // a tool-use continuation.
     // NOTE: warmup hits and TTL savings are mutually exclusive — if a turn
     // is attributed to a warmup hit, skip TTL savings to avoid double-counting
     // the same cacheReadTokens in both buckets.

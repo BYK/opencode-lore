@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { computeMaxTokens } from "../src/pipeline";
-import { detectClientType, extractParentSessionId } from "../src/session";
+import { detectClientType } from "../src/session";
 import { hasBillingHeader } from "../src/cch";
 
 // ---------------------------------------------------------------------------
@@ -177,27 +177,4 @@ describe("hasBillingHeader", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// extractParentSessionId — sub-agent detection
-// ---------------------------------------------------------------------------
 
-describe("extractParentSessionId", () => {
-  test("returns parent session ID when x-parent-session-id is present", () => {
-    expect(
-      extractParentSessionId({ "x-parent-session-id": "parent-abc-123" }),
-    ).toBe("parent-abc-123");
-  });
-
-  test("returns null when no parent header is present", () => {
-    expect(extractParentSessionId({})).toBeNull();
-    expect(
-      extractParentSessionId({ "x-session-affinity": "my-session" }),
-    ).toBeNull();
-  });
-
-  test("returns null for empty parent header value", () => {
-    expect(
-      extractParentSessionId({ "x-parent-session-id": "" }),
-    ).toBeNull();
-  });
-});

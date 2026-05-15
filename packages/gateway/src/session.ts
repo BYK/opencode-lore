@@ -5,9 +5,9 @@
  *
  *  **Tier 1 — Known headers** (immediate match):
  *    `x-claude-code-session-id` (Claude Code), `x-session-affinity`
- *    (OpenCode). These persist for the entire client session and survive
- *    model changes, compaction, and context rewriting.
- *    `x-parent-session-id` links sub-agent requests to a parent session.
+ *    (OpenCode), `x-lore-session-id` (Pi plugin). These persist for the
+ *    entire client session and survive model changes, compaction, and
+ *    context rewriting.
  *
  *  **Tier 2 — Learned headers** (bootstrapped via fingerprint):
  *    During the first few fingerprinted turns, collect candidate `x-`
@@ -271,19 +271,9 @@ export const KNOWN_SESSION_HEADERS = [
 ] as const;
 
 /**
- * Headers that link a sub-agent request to its parent session.
- * When present, the request is attributed to the parent session
- * rather than creating a new one.
- */
-export const PARENT_SESSION_HEADERS = [
-  "x-parent-session-id", // OpenCode sub-sessions
-] as const;
-
-/**
  * Extract a session ID from known headers (Tier 1).
  *
- * Returns the session ID value and the header name that provided it,
- * plus an optional parent session ID for sub-agent merging.
+ * Returns the session ID value and the header name that provided it.
  * Returns `null` if no known session header is present.
  */
 export function extractKnownSessionHeader(
@@ -294,20 +284,6 @@ export function extractKnownSessionHeader(
     if (value && value.length > 0) {
       return { sessionId: value, headerName: name };
     }
-  }
-  return null;
-}
-
-/**
- * Extract a parent session ID from known parent headers.
- * Returns the parent session ID value, or `null` if not present.
- */
-export function extractParentSessionId(
-  rawHeaders: Record<string, string>,
-): string | null {
-  for (const name of PARENT_SESSION_HEADERS) {
-    const value = rawHeaders[name];
-    if (value && value.length > 0) return value;
   }
   return null;
 }
