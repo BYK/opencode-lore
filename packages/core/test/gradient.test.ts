@@ -20,6 +20,8 @@ import {
   consumeCameOutOfIdle,
   inspectSessionState,
   setLastTurnAtForTest,
+  updateBustRate,
+  setMaxContextTokens,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
 import { isToolPart } from "../src/types";
@@ -2360,5 +2362,109 @@ describe("gradient — sanitizeToolParts determinism", () => {
     const json1 = JSON.stringify(toolPart1!.state);
     const json2 = JSON.stringify(toolPart2!.state);
     expect(json2).toBe(json1);
+  });
+});
+
+describe("updateBustRate — Layer 4 handling", () => {
+  const SID = "bust-rate-layer4-sess";
+
+  beforeEach(() => {
+    resetCalibration(SID);
+    setMaxContextTokens(200_000);
+  });
+
+  test("skips EMA update and cap tightening at Layer 4", () => {
+    // Prime with high bust rate to ratchet cap below ceiling — ensures
+    // the cap assertion is meaningful (not just clamped at ceiling).
+    for (let i = 0; i < 10; i++) {
+      updateBustRate(100_000, 0, SID);
+    }
+    const stateAfterPrime = inspectSessionState(SID)!;
+    const emaBefore = stateAfterPrime.bustRateEMA;
+    const capBefore = stateAfterPrime.dynamicContextCap;
+    expect(capBefore).toBeLessThan(200_000); // verify cap was actually tightened
+
+    // Layer 4 turn: 100% writes — should NOT affect EMA or cap
+    updateBustRate(100_000, 0, SID, 4);
+    const stateAfter = inspectSessionState(SID)!;
+
+    // EMA should NOT have changed
+    expect(stateAfter.bustRateEMA).toBe(emaBefore);
+    // Cap should NOT have tightened further
+    expect(stateAfter.dynamicContextCap).toBe(capBefore);
+    // L4 counter should have been incremented
+    expect(stateAfter.consecutiveLayer4).toBe(1);
+  });
+
+  test("tracks consecutiveLayer4 and resets on non-Layer-4 turn", () => {
+    updateBustRate(100_000, 0, SID, 4);
+    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(1);
+
+    updateBustRate(100_000, 0, SID, 4);
+    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(2);
+
+    updateBustRate(100_000, 0, SID, 4);
+    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(3);
+
+    // Non-Layer-4 turn resets the counter
+    updateBustRate(50_000, 50_000, SID, 1);
+    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(0);
+  });
+
+  test("recovery hatch relaxes cap after 5 consecutive Layer 4 turns", () => {
+    // Prime with high bust rate to ratchet cap down
+    for (let i = 0; i < 20; i++) {
+      updateBustRate(100_000, 0, SID);
+    }
+    const cappedState = inspectSessionState(SID)!;
+    const cappedValue = cappedState.dynamicContextCap;
+    // Cap should have been tightened significantly
+    expect(cappedValue).toBeLessThan(200_000);
+
+    // First 4 Layer 4 turns: no recovery yet
+    for (let i = 0; i < 4; i++) {
+      updateBustRate(100_000, 0, SID, 4);
+    }
+    expect(inspectSessionState(SID)!.dynamicContextCap).toBe(cappedValue);
+
+    // 5th Layer 4 turn: recovery hatch kicks in
+    updateBustRate(100_000, 0, SID, 4);
+    const recoveredCap = inspectSessionState(SID)!.dynamicContextCap;
+    expect(recoveredCap).toBeGreaterThan(cappedValue);
+
+    // 6th Layer 4 turn: continues relaxing
+    updateBustRate(100_000, 0, SID, 4);
+    expect(inspectSessionState(SID)!.dynamicContextCap).toBeGreaterThan(recoveredCap);
+  });
+
+  test("Layer 4 without lastLayer param still updates EMA normally (backward compat)", () => {
+    // When lastLayer is not passed, existing behavior is preserved
+    updateBustRate(50_000, 50_000, SID);
+    const emaBefore = inspectSessionState(SID)!.bustRateEMA;
+
+    // Call without lastLayer — should update EMA
+    updateBustRate(100_000, 0, SID);
+    const emaAfter = inspectSessionState(SID)!.bustRateEMA;
+    expect(emaAfter).toBeGreaterThan(emaBefore);
+  });
+
+  test("zero-usage Layer 4 turn still increments consecutiveLayer4", () => {
+    // API response with no cache metrics (e.g. error, or model doesn't report them)
+    updateBustRate(0, 0, SID, 4);
+    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(1);
+
+    updateBustRate(0, 0, SID, 4);
+    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(2);
+  });
+
+  test("zero-usage non-Layer-4 turn resets consecutiveLayer4", () => {
+    // Build up a count
+    updateBustRate(100_000, 0, SID, 4);
+    updateBustRate(100_000, 0, SID, 4);
+    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(2);
+
+    // Zero-usage non-L4 turn — must reset, not leave stale count
+    updateBustRate(0, 0, SID, 1);
+    expect(inspectSessionState(SID)!.consecutiveLayer4).toBe(0);
   });
 });

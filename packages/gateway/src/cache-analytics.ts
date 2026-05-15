@@ -247,14 +247,17 @@ export function inferDivergenceReason(
   if (path === "<start>") return "request structure changed from start";
   if (path === "<root>") return "top-level structure changed";
 
-  // System prompt blocks:
+  // System prompt blocks (3-block architecture):
   //  system[0] = host system prompt (stable, cached with 1h TTL)
-  //  system[1] = LTM knowledge block (Lore's injection, changes on curation)
+  //  system[1] = stable LTM: preferences (pinned >=1h, cached with 1h TTL)
+  //  system[2] = context-bound LTM: non-preference entries (diff-pinned, rides conversation cache)
   //  bare "system" = plain string system prompt (no array structure)
   if (path === "system[0]" || path.startsWith("system[0]"))
     return "host system prompt changed";
   if (path === "system[1]" || path.startsWith("system[1]"))
-    return "LTM knowledge block updated (background curation/consolidation)";
+    return "stable LTM changed (preferences — should be rare, pinned >=1h)";
+  if (path === "system[2]" || path.startsWith("system[2]"))
+    return "context-bound LTM changed (non-preference entries re-ranked)";
   if (path === "system" || path.startsWith("system"))
     return "system prompt changed";
 

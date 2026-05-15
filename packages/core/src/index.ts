@@ -106,6 +106,7 @@ export {
   setForceMinLayer,
   getLastTransformedCount,
   getLastTransformEstimate,
+  getLastLayer,
   toolStripAnnotation,
   onIdleResume,
   getLastTurnAt,

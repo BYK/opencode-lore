@@ -208,9 +208,15 @@ describe("inferDivergenceReason", () => {
     );
   });
 
-  test("system prompt — LTM block", () => {
+  test("system prompt — stable LTM block", () => {
     expect(inferDivergenceReason("system[1].text", 100, 100)).toBe(
-      "LTM knowledge block updated (background curation/consolidation)",
+      "stable LTM changed (preferences — should be rare, pinned >=1h)",
+    );
+  });
+
+  test("system prompt — context-bound LTM block", () => {
+    expect(inferDivergenceReason("system[2].text", 100, 100)).toBe(
+      "context-bound LTM changed (non-preference entries re-ranked)",
     );
   });
 

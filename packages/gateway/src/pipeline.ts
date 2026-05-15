@@ -32,6 +32,7 @@ import {
   updateBustRate,
   calibrate,
   getLastTransformedCount,
+  getLastLayer,
   onIdleResume,
   consumeCameOutOfIdle,
   needsUrgentDistillation,
@@ -1786,6 +1787,7 @@ function postResponse(
       resp.usage.cacheCreationInputTokens ?? 0,
       resp.usage.cacheReadInputTokens ?? 0,
       sessionState.sessionID,
+      getLastLayer(sessionState.sessionID),
     );
 
     // Capture previous stop reason before it's overwritten below (line ~1667).
@@ -2747,19 +2749,43 @@ async function handleConversationTurn(
 
         if (formatted) {
           const tokenCount = Math.ceil(formatted.length / 3);
-          // Replace context-bound cache and pin — Layer 4 already busts the
-          // prompt cache, so there's no benefit to preserving the old pin.
+          // Always update the cache with freshly ranked entries.
           ltmSessionCache.delete(sessionID);
           ltmSessionCache.set(sessionID, { formatted, tokenCount });
-          ltmPinnedText.set(sessionID, { formatted, tokenCount });
-          ltmText = formatted;
-          setLtmTokens(stableTokens + tokenCount, sessionID);
-          saveSessionTracking(sessionID, {
-            ltmCacheText: formatted,
-            ltmCacheTokens: tokenCount,
-            ltmPinText: formatted,
-            ltmPinTokens: tokenCount,
-          });
+
+          // Apply diff-pinning: on consecutive Layer 4 turns, system[2]
+          // stability matters because system[0]+[1] ARE still cache reads
+          // at 1h TTL. Only update the pin if the new text differs
+          // substantially — same threshold as step 6 (lines 2639-2655).
+          const pinned = ltmPinnedText.get(sessionID);
+          const baseDiffThreshold = 0.05;
+          const effectiveDiffThreshold = (modelSpec.inputCostPerMillion ?? 3) >= 5
+            ? Math.min(baseDiffThreshold * 3, 0.20)  // opus: 15%
+            : (modelSpec.inputCostPerMillion ?? 3) >= 1
+              ? Math.min(baseDiffThreshold * 2, 0.15)  // sonnet: 10%
+              : baseDiffThreshold;                       // haiku: 5%
+
+          if (pinned && textDiffRatio(pinned.formatted, formatted) < effectiveDiffThreshold) {
+            // Near-identical — keep the pinned text to preserve cache prefix
+            ltmText = pinned.formatted;
+            setLtmTokens(stableTokens + pinned.tokenCount, sessionID);
+            saveSessionTracking(sessionID, {
+              ltmCacheText: formatted,
+              ltmCacheTokens: tokenCount,
+              // pin unchanged — don't write ltmPinText/ltmPinTokens
+            });
+          } else {
+            // Substantially different or first Layer 4 turn — pin the new text
+            ltmPinnedText.set(sessionID, { formatted, tokenCount });
+            ltmText = formatted;
+            setLtmTokens(stableTokens + tokenCount, sessionID);
+            saveSessionTracking(sessionID, {
+              ltmCacheText: formatted,
+              ltmCacheTokens: tokenCount,
+              ltmPinText: formatted,
+              ltmPinTokens: tokenCount,
+            });
+          }
           refreshed = true;
           log.info("Context-bound LTM refreshed on emergency layer (Layer 4) for session", sessionID);
         }
