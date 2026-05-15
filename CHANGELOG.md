@@ -1,4 +1,19 @@
 # Changelog
+## 0.20.2
+
+### Bug Fixes 🐛
+
+- Review follow-ups for unsustainable warning PR by @BYK in [#352](https://github.com/BYK/loreai/pull/352)
+- Surface unsustainable warning on all gradient return paths by @BYK in [#351](https://github.com/BYK/loreai/pull/351)
+
+### Internal Changes 🔧
+
+- Replace EMA-driven context cap with tier-based cost-aware decisions by @BYK in [#348](https://github.com/BYK/loreai/pull/348)
+
+### Other
+
+- release: 0.20.1 by @BYK in [abc0dc89](https://github.com/BYK/loreai/commit/abc0dc8980f82b8df300bb6dd41394da45c46d2c)
+
 ## 0.20.1
 
 ### Internal Changes 🔧
