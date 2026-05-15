@@ -900,6 +900,8 @@ export function computeWarmingSnapshot(
   if (!warmNow) {
     if (circuitBreakerTripped) {
       notWarmingReason = "Circuit breaker tripped";
+    } else if (state.isSubagent) {
+      notWarmingReason = "Sub-agent session (ephemeral)";
     } else if (!cfg.cache.warming.enabled) {
       notWarmingReason = "Warming disabled in config";
     } else if (!state.cacheAnalytics.lastRequestBody) {

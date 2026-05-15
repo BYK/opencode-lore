@@ -255,10 +255,10 @@ export type SessionState = {
 
   // --- Sub-agent detection ---
 
-  /** True when the session was created with an `x-parent-session-id` header,
-   *  indicating it belongs to an ephemeral sub-agent (e.g. OpenCode explore).
-   *  Sub-agent sessions are exempt from cache warming — they are too
-   *  short-lived (1-3 turns) for warming to be profitable. */
+  /** True when a request in this session carried an `x-parent-session-id`
+   *  header, indicating it belongs to an ephemeral sub-agent (e.g. OpenCode
+   *  explore). Sub-agent sessions are exempt from cache warming — they are
+   *  too short-lived (1-3 turns) for warming to be profitable. */
   isSubagent?: boolean;
 
   // --- Tier 1/2 session header identification ---
