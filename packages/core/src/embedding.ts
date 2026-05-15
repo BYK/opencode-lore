@@ -37,6 +37,18 @@ const EMBED_TIMEOUT_MS = 10_000;
  */
 const LOCAL_MAX_CHARS = 4096 * 4; // ~4096 tokens × ~4 chars/token
 
+/**
+ * Truncate a string to LOCAL_MAX_CHARS without splitting a UTF-16 surrogate pair.
+ * If the cut falls on a high surrogate (0xD800-0xDBFF), backs up one char.
+ */
+function safeLocalTruncate(text: string): string {
+  if (text.length <= LOCAL_MAX_CHARS) return text;
+  let end = LOCAL_MAX_CHARS;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xD800 && code <= 0xDBFF) end--; // don't split surrogate pair
+  return text.slice(0, end);
+}
+
 // ---------------------------------------------------------------------------
 // Provider interface
 // ---------------------------------------------------------------------------
@@ -413,9 +425,7 @@ class LocalProvider implements EmbeddingProvider {
 
     // Pre-truncate texts that exceed the safe ONNX inference limit.
     // This prevents OOM on single inputs near the model's 8192-token max.
-    const truncated = texts.map((t) =>
-      t.length > LOCAL_MAX_CHARS ? t.slice(0, LOCAL_MAX_CHARS) : t,
-    );
+    const truncated = texts.map(safeLocalTruncate);
 
     // Prepend Nomic task instruction prefix.
     const prefix = inputType === "document" ? "search_document: " : "search_query: ";
@@ -863,6 +873,7 @@ export function embedKnowledgeEntry(
   title: string,
   content: string,
 ): void {
+  if (!isAvailable()) return;
   const text = `${title}\n${content}`;
   embed([text], "document")
     .then(([vec]) => {
@@ -884,6 +895,7 @@ export function embedDistillation(
   id: string,
   observations: string,
 ): void {
+  if (!isAvailable()) return;
   embed([observations], "document")
     .then(([vec]) => {
       db()
@@ -905,6 +917,7 @@ export function embedTemporalMessage(
   id: string,
   content: string,
 ): void {
+  if (!isAvailable()) return;
   // Skip very short messages — they don't carry enough semantic signal
   // to be useful in vector search and would waste embedding capacity.
   if (content.length < 50) return;
@@ -1220,6 +1233,8 @@ export async function backfillEmbeddings(): Promise<number> {
     } catch (err) {
       // log.error sends to Sentry via captureException
       log.error(`embedding backfill batch failed (${batch.length} items):`, err);
+      // Provider is dead — no point retrying remaining batches.
+      if (err instanceof LocalProviderUnavailableError) break;
     }
     // No yieldToEventLoop() needed — embed() is truly async (worker thread).
   }
@@ -1280,6 +1295,8 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
     } catch (err) {
       // log.error sends to Sentry via captureException
       log.error(`distillation embedding backfill batch failed (${batch.length} items):`, err);
+      // Provider is dead — no point retrying remaining batches.
+      if (err instanceof LocalProviderUnavailableError) break;
     }
 
     if (embedded >= nextProgressAt) {
