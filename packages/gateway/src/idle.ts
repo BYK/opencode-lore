@@ -27,6 +27,7 @@ import {
   saveSessionTracking,
   saveGradientState,
   getConsecutiveBusts,
+  effectiveMetaThreshold,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
@@ -234,11 +235,9 @@ export function buildIdleWorkHandler(
       // to consolidate earlier — shrinks the distilled prefix before the
       // session becomes unsustainable.
       const busts = getConsecutiveBusts(sessionID);
-      const effectiveMetaThreshold = busts >= 3
-        ? Math.max(3, Math.floor(cfg.distillation.metaThreshold / 4))
-        : cfg.distillation.metaThreshold;
+      const metaThreshold = effectiveMetaThreshold(busts, cfg.distillation.metaThreshold);
       const g0 = distillation.gen0Count(projectPath, sessionID);
-      if (g0 >= effectiveMetaThreshold) {
+      if (g0 >= metaThreshold) {
         await distillation.metaDistill({ llm, projectPath, sessionID, model, callType });
       }
     } catch (e) {

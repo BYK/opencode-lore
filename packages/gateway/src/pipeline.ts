@@ -36,6 +36,7 @@ import {
   consumeCameOutOfIdle,
   needsUrgentDistillation,
   getConsecutiveBusts,
+  effectiveMetaThreshold as computeMetaThreshold,
   formatKnowledge,
   buildCompactPrompt,
   shouldImportLoreFile,
@@ -2000,9 +2001,8 @@ function scheduleBackgroundWork(
   // prefix before the session becomes unsustainable.
   if (needsUrgentDistillation(sessionState.sessionID)) {
     const busts = getConsecutiveBusts(sessionState.sessionID);
-    const metaThresholdOverride = busts >= 3
-      ? Math.max(3, Math.floor(cfg.distillation.metaThreshold / 4))
-      : undefined;
+    const lowered = computeMetaThreshold(busts, cfg.distillation.metaThreshold);
+    const metaThresholdOverride = lowered < cfg.distillation.metaThreshold ? lowered : undefined;
     distillation
       .run({
         llm,

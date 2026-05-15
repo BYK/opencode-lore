@@ -68,6 +68,9 @@ mock.module("@loreai/core", () => ({
   saveSessionTracking: () => {},
   saveGradientState: () => {},
   getConsecutiveBusts: () => 0,
+  BUST_PRESSURE_THRESHOLD: 3,
+  effectiveMetaThreshold: (busts: number, threshold: number) =>
+    busts >= 3 ? Math.max(3, Math.floor(threshold / 4)) : threshold,
   loadSessionTracking: () => null,
   getKV: () => null,
   setKV: () => {},

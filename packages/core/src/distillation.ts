@@ -714,7 +714,11 @@ async function runInner(input: {
     // Check if meta-distillation is needed (skip when cache is warm to avoid
     // prefix cache invalidation — row IDs change after meta-distill, busting
     // the prompt cache on the next turn).
-    const effectiveMetaThreshold = input.metaThresholdOverride ?? cfg.distillation.metaThreshold;
+    // Clamp override to min 2 — meta-distillation with < 2 gen-0 segments is pointless.
+    const effectiveMetaThreshold = Math.max(
+      2,
+      input.metaThresholdOverride ?? cfg.distillation.metaThreshold,
+    );
     if (
       !input.skipMeta &&
       gen0Count(input.projectPath, input.sessionID) >=
