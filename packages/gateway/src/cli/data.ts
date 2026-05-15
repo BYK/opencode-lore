@@ -1158,14 +1158,11 @@ async function cmdListRemote(
     }
 
     case "knowledge": {
-      // Find project ID first
-      const projects = await remoteGet<Array<{ id: string }>>(remote, "/api/v1/projects");
-      const pq = projectQueryParams(projectPath);
-      // Use first project matching, or list all if none match
-      let entries: Array<{ id: string; category: string; title: string; confidence: number; updated_at: number }>;
       const matchingProject = await resolveRemoteProject(remote, projectPath);
       if (!matchingProject) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
-      entries = await remoteGet(remote, `/api/v1/projects/${matchingProject}/knowledge`);
+      const entries = await remoteGet<Array<{ id: string; category: string; title: string; confidence: number; updated_at: number }>>(
+        remote, `/api/v1/projects/${matchingProject}/knowledge`,
+      );
       const limited = entries.slice(0, limit);
       if (asJson) { console.log(JSON.stringify(limited, null, 2)); return; }
       if (!limited.length) { console.log("No knowledge entries found for this project."); return; }
@@ -1482,10 +1479,6 @@ async function cmdDedupRemote(
 
   console.log("Scanning for duplicate knowledge entries (dry run, remote)...\n");
 
-  const endpoint = projectId
-    ? `/api/v1/projects/${projectId}/dedup`
-    : `/api/v1/projects/_/dedup`; // placeholder — we need a project ID
-  // For remote dedup, use a specific project or list projects and pick first
   if (!projectId) {
     const projects = await remoteGet<Array<{ id: string; name: string | null }>>(remote, "/api/v1/projects");
     if (!projects.length) { console.log("No projects found."); return; }
@@ -1508,14 +1501,10 @@ async function cmdReindexRemote(
   remote: string,
   flags: Record<string, unknown>,
 ): Promise<void> {
-  const projectPath = resolve((flags.project as string) ?? process.cwd());
-  const projectId = await resolveRemoteProject(remote, projectPath);
-  if (!projectId) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
-
   console.log("Re-indexing embeddings on remote gateway...");
   const result = await remotePost<{
     knowledge_embedded: number; distillations_embedded: number;
-  }>(remote, `/api/v1/projects/${projectId}/reindex`);
+  }>(remote, "/api/v1/reindex");
 
   const total = result.knowledge_embedded + result.distillations_embedded;
   console.log(`  ${result.knowledge_embedded} knowledge entries embedded`);

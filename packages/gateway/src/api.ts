@@ -21,6 +21,7 @@ import {
   config as loreConfig,
   resolveProjectByRemoteOrPath,
   projectPath as getProjectPathById,
+  isHostedMode,
   type RecallScope,
   type LLMClient,
 } from "@loreai/core";
@@ -253,7 +254,7 @@ async function handleClearProject(
 ): Promise<Response> {
   let body: { knowledge?: boolean; temporal?: boolean; distillations?: boolean } = {};
   try {
-    body = await parseBody(req);
+    body = (await parseBody(req)) ?? {};
   } catch {
     // Empty body = clear all
   }
@@ -273,11 +274,17 @@ async function handleClearProject(
 }
 
 function handleMergeProjects(): Response {
+  if (isHostedMode()) {
+    return errorResponse(
+      400, "invalid_request",
+      "Merge is not supported in hosted mode (requires local filesystem access to scan git remotes)",
+    );
+  }
   const result = data.backfillGitRemotes();
   return jsonResponse(result);
 }
 
-async function handleReindex(projectPath: string): Promise<Response> {
+async function handleReindex(): Promise<Response> {
   const knowledge = await embedding.backfillEmbeddings();
   const distillations = await embedding.backfillDistillationEmbeddings();
   return jsonResponse({ knowledge_embedded: knowledge, distillations_embedded: distillations });
@@ -308,7 +315,12 @@ async function handleRecall(
     return errorResponse(400, "invalid_request", "Recall requires ?git_remote or ?path to identify the project");
   }
 
-  const scope = (url.searchParams.get("scope") ?? "all") as RecallScope;
+  const VALID_SCOPES = new Set(["all", "session", "project", "knowledge"]);
+  const rawScope = url.searchParams.get("scope") ?? "all";
+  if (!VALID_SCOPES.has(rawScope)) {
+    return errorResponse(400, "invalid_request", `Invalid scope: "${rawScope}". Must be one of: all, session, project, knowledge`);
+  }
+  const scope = rawScope as RecallScope;
   const sessionID = url.searchParams.get("session") ?? undefined;
   const limit = getLimit(url, 10, 50);
 
@@ -523,33 +535,16 @@ export async function handleAPIRequest(
   }
 
   if (method === "POST") {
-    // POST /api/v1/projects/:id/clear
-    params = matchRoute(pathname, "/api/v1/projects/:id/clear");
-    if (params) {
-      const project = resolveProject(url, params.id);
-      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
-      return await handleClearProject(req, project.path);
-    }
+    // Literal routes first (before parameterized :id routes)
 
     // POST /api/v1/projects/merge
     if (pathname === "/api/v1/projects/merge") {
       return handleMergeProjects();
     }
 
-    // POST /api/v1/projects/:id/reindex
-    params = matchRoute(pathname, "/api/v1/projects/:id/reindex");
-    if (params) {
-      const project = resolveProject(url, params.id);
-      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
-      return await handleReindex(project.path);
-    }
-
-    // POST /api/v1/projects/:id/dedup
-    params = matchRoute(pathname, "/api/v1/projects/:id/dedup");
-    if (params) {
-      const project = resolveProject(url, params.id);
-      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
-      return await handleDedup(project.path);
+    // POST /api/v1/reindex — global, not project-scoped (backfill is DB-wide)
+    if (pathname === "/api/v1/reindex") {
+      return await handleReindex();
     }
 
     // POST /api/v1/import/extract
@@ -560,6 +555,24 @@ export async function handleAPIRequest(
     // POST /api/v1/import/record
     if (pathname === "/api/v1/import/record") {
       return await handleImportRecord(req);
+    }
+
+    // Parameterized routes
+
+    // POST /api/v1/projects/:id/clear
+    params = matchRoute(pathname, "/api/v1/projects/:id/clear");
+    if (params) {
+      const project = resolveProject(url, params.id);
+      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
+      return await handleClearProject(req, project.path);
+    }
+
+    // POST /api/v1/projects/:id/dedup
+    params = matchRoute(pathname, "/api/v1/projects/:id/dedup");
+    if (params) {
+      const project = resolveProject(url, params.id);
+      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
+      return await handleDedup(project.path);
     }
   }
 

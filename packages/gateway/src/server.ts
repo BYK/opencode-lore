@@ -42,7 +42,7 @@ try {
 
 const CORS_HEADERS: Record<string, string> = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
   "access-control-allow-headers": "*",
   "access-control-max-age": "86400",
 };

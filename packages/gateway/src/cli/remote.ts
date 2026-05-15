@@ -50,13 +50,28 @@ class RemoteAPIError extends Error {
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {
-  const body = await res.json();
+  let body: unknown;
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    body = await res.json();
+  } else {
+    const text = await res.text();
+    if (!res.ok) {
+      throw new RemoteAPIError(res.status, "gateway_error", `HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+    // Try JSON parse as fallback (some servers omit content-type)
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new RemoteAPIError(res.status, "gateway_error", `Unexpected non-JSON response: ${text.slice(0, 200)}`);
+    }
+  }
   if (!res.ok) {
-    const err = body?.error ?? {};
+    const err = (body as Record<string, unknown>)?.error as Record<string, string> | undefined;
     throw new RemoteAPIError(
       res.status,
-      err.type ?? "api_error",
-      err.message ?? `HTTP ${res.status}`,
+      err?.type ?? "api_error",
+      err?.message ?? `HTTP ${res.status}`,
     );
   }
   return body as T;

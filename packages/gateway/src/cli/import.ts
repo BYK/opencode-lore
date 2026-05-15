@@ -335,6 +335,17 @@ async function importRemote(
     totalFailed += extractResult.chunksFailed;
   }
 
+  // Record import timestamp locally (prevents auto-import re-prompting on `lore run`)
+  setLastImportAt(projectPath, Date.now());
+
+  // Export .lore.md locally so knowledge appears in the local file
+  try {
+    const { exportLoreFile } = await import("@loreai/core");
+    exportLoreFile(projectPath);
+  } catch {
+    // Non-fatal
+  }
+
   // Summary
   console.log(
     `\n[lore] Import complete: ${totalCreated} entries created, ${totalUpdated} updated` +

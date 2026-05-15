@@ -264,6 +264,29 @@ describe("POST /api/v1/projects/merge", () => {
   });
 });
 
+describe("POST /api/v1/reindex", () => {
+  it("succeeds (global reindex)", async () => {
+    const res = await api("/api/v1/reindex", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { knowledge_embedded: number; distillations_embedded: number };
+    expect(typeof body.knowledge_embedded).toBe("number");
+    expect(typeof body.distillations_embedded).toBe("number");
+  });
+});
+
+describe("POST /api/v1/projects/:id/clear — null body handling", () => {
+  it("handles JSON null body without crashing", async () => {
+    const { projectId } = await seedProject();
+    const res = await api(`/api/v1/projects/${projectId}/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "null",
+    });
+    // Should clear everything (null treated as empty = no flags)
+    expect(res.status).toBe(200);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Tests: Zstd compression
 // ---------------------------------------------------------------------------
@@ -292,12 +315,28 @@ describe("Zstd request body decompression", () => {
 
 describe("Project resolution", () => {
   it("resolves project by git_remote query param", async () => {
-    const { projectId } = await seedProject();
+    const { projectPath } = await seedProject();
     // The seedProject uses git_remote "git@github.com:test/repo.git"
-    const entries = await apiJSON<Array<{ id: string }>>(
-      `/api/v1/projects/${projectId}/knowledge`,
+    const gitRemote = encodeURIComponent("git@github.com:test/repo.git");
+    const data = await apiJSON<{ query: string; result: string }>(
+      `/api/v1/recall?q=REST&git_remote=${gitRemote}`,
     );
-    expect(entries.length).toBeGreaterThanOrEqual(1);
+    expect(data.query).toBe("REST");
+    expect(typeof data.result).toBe("string");
+  });
+
+  it("resolves project by path query param", async () => {
+    const { projectPath } = await seedProject();
+    const data = await apiJSON<{ query: string; result: string }>(
+      `/api/v1/recall?q=REST&path=${encodeURIComponent(projectPath)}`,
+    );
+    expect(data.query).toBe("REST");
+    expect(typeof data.result).toBe("string");
+  });
+
+  it("returns 400 when project cannot be resolved", async () => {
+    const res = await api("/api/v1/recall?q=test&git_remote=nonexistent");
+    expect(res.status).toBe(400);
   });
 });
 
@@ -332,6 +371,15 @@ describe("GET /api/v1/recall", () => {
   it("returns 400 when project is not identified", async () => {
     const res = await api("/api/v1/recall?q=test");
     expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for invalid scope", async () => {
+    const { projectPath } = await seedProject();
+    const pq = `path=${encodeURIComponent(projectPath)}`;
+    const res = await api(`/api/v1/recall?q=test&${pq}&scope=invalid`);
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: { message: string } };
+    expect(body.error.message).toContain("Invalid scope");
   });
 
   it("returns results for a valid query", async () => {
