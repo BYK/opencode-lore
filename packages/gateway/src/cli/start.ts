@@ -19,6 +19,11 @@ export interface StartOptions {
   /** Remote gateway URL. When set, `lore run` delegates to this gateway
    *  instead of starting a local one. Overrides LORE_REMOTE_URL env var. */
   remoteUrl?: string;
+  /**
+   * When true, disables hosted mode even for `lore start`.
+   * CLI: `--local` / `-l`. Env: `LORE_HOSTED_MODE=0`.
+   */
+  local?: boolean;
 }
 
 export interface GatewayHandle {
@@ -72,6 +77,19 @@ export async function startGateway(opts: StartOptions = {}): Promise<GatewayHand
   }
   if (opts.hosts?.length) config.hosts = opts.hosts;
   if (opts.debug !== undefined) config.debug = opts.debug;
+
+  // Hosted mode: `--local` CLI flag takes precedence, then env var,
+  // then the caller-provided default. `lore start` leaves `opts.local`
+  // undefined (→ hosted mode ON by default), while `lore run` and
+  // `lore import` set `opts.local = true` (→ hosted mode OFF).
+  if (opts.local !== undefined) {
+    config.hostedMode = !opts.local;
+  } else if (!process.env.LORE_HOSTED_MODE) {
+    // No explicit env var and no CLI flag — apply caller default.
+    // `lore start` (opts.local === undefined) defaults to hosted mode.
+    config.hostedMode = true;
+  }
+  // else: LORE_HOSTED_MODE env var was set — loadConfig() already handled it.
 
   // Build the list of ports to try.
   // Explicit port: single attempt, fail hard on conflict.
@@ -197,7 +215,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
     console.log(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
     console.log(`  LORE_REMOTE_URL         Remote gateway URL for \`lore run\` (delegates instead of starting local)`);
-    console.log(`  LORE_HOSTED_MODE        Hosted mode — disable FS ops on client-controlled paths (current: ${config.hostedMode})`);
+    console.log(`  LORE_HOSTED_MODE        Hosted mode — disable FS ops on client-controlled paths (current: ${config.hostedMode}, default for \`lore start\`: true)`);
   }
   // Block until signal
   let shuttingDown = false;

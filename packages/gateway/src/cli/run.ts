@@ -150,7 +150,8 @@ export async function commandRun(
     console.log(`[lore] Using remote gateway at ${gatewayUrl}`);
   } else {
     // Local mode: start (or reuse) a local gateway.
-    const handle = await startGateway(opts);
+    // `lore run` always runs locally — agent is on the same machine.
+    const handle = await startGateway({ ...opts, local: true });
     gatewayUrl = `http://${handle.config.hosts[0]}:${handle.port}`;
     owned = handle.owned;
     shutdown = handle.shutdown;

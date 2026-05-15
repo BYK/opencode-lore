@@ -100,6 +100,8 @@ const OPTIONS = {
   n: { type: "string" as const },
   lines: { type: "string" as const },
   path: { type: "boolean" as const },
+  // `lore start --local` — disable hosted mode (keep FS ops active)
+  local: { type: "boolean" as const, short: "l" },
   // Hidden diagnostic: prints the vendored-model registration set by
   // the binary build wrapper (or "none" in npm mode). Used by CI to verify
   // the embed-asset pipeline actually wired up. Not in help text.
@@ -132,6 +134,7 @@ function buildStartOptions(values: {
   host?: string[];
   debug?: boolean;
   remote?: string;
+  local?: boolean;
 }): StartOptions {
   // Flatten: each --host value may itself be comma-separated
   const hosts = values.host
@@ -141,6 +144,7 @@ function buildStartOptions(values: {
     hosts: hosts?.length ? hosts : undefined,
     debug: values.debug ?? undefined,
     remoteUrl: values.remote ?? undefined,
+    local: values.local ?? undefined,
   };
 }
 

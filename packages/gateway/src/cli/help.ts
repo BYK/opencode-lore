@@ -13,6 +13,7 @@ Commands:
   run [command] [args...]  Start gateway and launch an AI agent (default)
                            Extra arguments are forwarded to the launched agent
   start               Start the gateway server (without launching an agent)
+                      Hosted mode is ON by default; use --local to disable
   logs                Show lore activity log
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
@@ -27,6 +28,8 @@ Options:
                       (default: 127.0.0.1, env: LORE_LISTEN_HOST)
   -r, --remote <url>  Use a remote gateway instead of starting a local one
                       (env: LORE_REMOTE_URL)
+  -l, --local         Disable hosted mode for \`lore start\` (keep FS ops active)
+                      (env: LORE_HOSTED_MODE=0)
   -d, --debug         Enable debug logging (env: LORE_DEBUG=1)
   -v, --version       Print version and exit
   -h, --help          Show this help text
@@ -80,7 +83,8 @@ Examples:
   lore run claude --model gpt-4              # Forward --model gpt-4 to claude
   lore -- --verbose --debug                  # Use -- to forward lore-like flags
   lore run --remote http://remote:3207  # Use a remote gateway
-  lore start                    # Start gateway without launching an agent
+  lore start                    # Start gateway (hosted mode, FS ops disabled)
+  lore start --local            # Start gateway with FS ops enabled (local use)
   lore start -p 8080            # Start gateway on a custom port
   lore start -H 127.0.0.1 -H 100.69.65.125  # Bind to multiple interfaces
   lore start -H 127.0.0.1,100.69.65.125     # Same, comma-separated
@@ -110,8 +114,8 @@ Environment variables:
   LORE_UPSTREAM_ANTHROPIC       Upstream Anthropic API URL
   LORE_UPSTREAM_OPENAI          Upstream OpenAI API URL
   LORE_REMOTE_URL               Remote gateway URL for \`lore run\` (overridden by --remote)
-  LORE_HOSTED_MODE              Hosted/remote mode — disables all filesystem operations
-                                that use client-controlled paths (set to 1)
+  LORE_HOSTED_MODE              Hosted mode — disables FS ops on client-controlled paths
+                                ON by default for \`lore start\`; set to 0 to disable
   LORE_DEBUG                    Enable debug logging (1 or true)
   LORE_NO_UPDATE_CHECK          Disable background update checks (set to 1)
 `.trimStart();
