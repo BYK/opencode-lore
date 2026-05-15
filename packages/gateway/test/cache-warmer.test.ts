@@ -541,6 +541,49 @@ describe("shouldWarm", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
   });
 
+  test("returns false for sub-agent sessions", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      messageCount: 20, // enough turns to normally qualify
+      isSubagent: true,
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"test": true}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("returns false for sub-agent sessions even with /keep", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      messageCount: 20,
+      isSubagent: true,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        warmupHits: 0,
+        disabled: false,
+        forceKeepWarm: true,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"test": true}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
   test("returns false when no stored body", () => {
     const state = makeSessionState({
       lastRequestTime: Date.now() - 270_000,

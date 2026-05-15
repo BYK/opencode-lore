@@ -39,6 +39,7 @@ import {
   executeWarmup,
   loadGlobalHistograms,
   flushGlobalHistograms,
+  MIN_TURNS_FOR_WARMING,
 } from "./cache-warmer";
 import * as Sentry from "@sentry/bun";
 import { emitWarmupMetric, emitSessionCostMetrics, emitCurationMetrics } from "./sentry";
@@ -87,6 +88,15 @@ export function startIdleScheduler(
 
     for (const [sessionID, state] of sessions) {
       if (warmupInProgress.has(sessionID)) continue;
+
+      // Skip sub-agent sessions — ephemeral, warming is wasted work
+      if (state.isSubagent) continue;
+
+      // Skip sessions with too few turns — insufficient data for survival
+      // model and not worth the warmup cost ($0.30 per wasted warmup at
+      // 200K Opus tokens). Checked here to avoid expensive profile/histogram
+      // work before shouldWarm() rejects them anyway.
+      if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) continue;
 
       // Ensure global histograms are loaded from SQLite for this project
       loadGlobalHistograms(state.projectPath);

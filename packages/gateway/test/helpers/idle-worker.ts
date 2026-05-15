@@ -84,6 +84,7 @@ mock.module("../../src/cache-warmer", () => ({
   executeWarmup: async () => ({}),
   loadGlobalHistograms: () => {},
   flushGlobalHistograms: () => {},
+  MIN_TURNS_FOR_WARMING: 3,
 }));
 
 mock.module("../../src/worker-model", () => ({

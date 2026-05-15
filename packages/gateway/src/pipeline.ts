@@ -2367,8 +2367,14 @@ async function handleConversationTurn(
 
   // --- 3. Session identification ---
   const { sessionID, isNew, tier } = await identifySession(req, pathResult.path);
-  const sessionState = getOrCreateSession(sessionID, pathResult.path);
+   const sessionState = getOrCreateSession(sessionID, pathResult.path);
   const projectPath = resolveSessionProjectPath(pathResult, sessionState);
+
+  // Mark sub-agent sessions (x-parent-session-id present).
+  // These get their own session but are flagged for cache warming exemption.
+  if (!sessionState.isSubagent && req.rawHeaders["x-parent-session-id"]) {
+    sessionState.isSubagent = true;
+  }
 
   // Bind auth credential to this session for background workers
   if (cred) {

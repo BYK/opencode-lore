@@ -643,6 +643,10 @@ export function shouldWarm(
   // Global kill switch — always respected, even with /keep
   if (circuitBreakerTripped) return false;
 
+  // Sub-agent sessions are always exempt — they are too short-lived
+  // for warming to be profitable, even with /keep force.
+  if (state.isSubagent) return false;
+
   const cfg = loreConfig();
   if (!cfg.cache.warming.enabled) return false;
 
