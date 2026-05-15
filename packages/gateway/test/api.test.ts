@@ -13,7 +13,7 @@ import { unlinkSync, existsSync } from "node:fs";
 
 let baseURL: string;
 let dbPath: string;
-let server: ReturnType<typeof import("../src/server").startServer> extends Promise<infer T> ? T : never;
+let server: { stop: () => void; port: number; hosts: string[] };
 let closeDB: () => void;
 let resetPipelineState: () => Promise<void>;
 
