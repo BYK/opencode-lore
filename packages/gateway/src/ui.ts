@@ -13,7 +13,7 @@ import {
   recallById,
   config,
   projectName,
-  ensureProject,
+  projectId as lookupProjectId,
   renderMarkdown,
   type TaggedResult,
 } from "@loreai/core";
@@ -621,51 +621,59 @@ type LiveSessionRow = {
   projectId: string;
   projectLabel: string;
   turns: number;
-  idleMs: number;
-  conversationCost: number;
-  workerCost: number;
+  hasCosts: boolean;
   totalCost: number;
   savings: number;
-  ttl: string;
-  survivalPct: number;
+  cacheHitPct: number;
   pReturnsPct: number;
   warmingSnap: WarmingSnapshot | null;
+  idleMs: number;
   warmupCount: number;
   warmupHits: number;
 };
 
-/** Union-join cost tracker, active sessions, and warming snapshots into rows. */
-function buildLiveSessionRows(): LiveSessionRow[] {
-  const allCosts = getAllSessionCosts();
-  const activeSessions = getActiveSessions();
-
+/**
+ * Union-join cost tracker, active sessions, and warming snapshots into rows.
+ * Accepts pre-fetched maps so callers avoid redundant data fetching.
+ */
+function buildLiveSessionRows(
+  allCosts: ReadonlyMap<string, SessionCosts>,
+  activeSessions: ReadonlyMap<string, { projectPath?: string }>,
+  snapshots: ReadonlyMap<string, WarmingSnapshot>,
+): LiveSessionRow[] {
   // Universe of session IDs from both sources
   const allIds = new Set<string>([...allCosts.keys(), ...activeSessions.keys()]);
 
   const rows: LiveSessionRow[] = [];
   for (const sid of allIds) {
     const costs = allCosts.get(sid) ?? null;
-    const state = activeSessions.get(sid) ?? null;
-    const snap = state ? computeWarmingSnapshot(state) : null;
+    const snap = snapshots.get(sid) ?? null;
+    const sess = activeSessions.get(sid);
 
-    const projPath = state?.projectPath ?? "";
-    const projId = projPath ? ensureProject(projPath) : "";
+    const projPath = sess?.projectPath ?? "";
+    const projId = projPath ? lookupProjectId(projPath) : undefined;
     const projLabel = projId ? (projectName(projId) ?? "(unnamed)") : "-";
+
+    // Cache hit ratio: cacheReadTokens / total input tokens
+    let cacheHitPct = NaN;
+    if (costs) {
+      const c = costs.conversation;
+      const totalInput = c.inputTokens + c.cacheReadTokens + c.cacheWriteTokens;
+      cacheHitPct = totalInput > 0 ? (c.cacheReadTokens / totalInput) * 100 : 0;
+    }
 
     rows.push({
       sessionId: sid,
-      projectId: projId,
+      projectId: projId ?? "",
       projectLabel: projLabel,
       turns: costs?.conversation.turns ?? snap?.messageCount ?? 0,
-      idleMs: snap?.idleMs ?? NaN,
-      conversationCost: costs?.conversation.cost ?? 0,
-      workerCost: costs ? totalWorkerCost(costs) : 0,
+      hasCosts: costs !== null,
       totalCost: costs ? totalActualCost(costs) : 0,
       savings: costs ? totalSavings(costs) : 0,
-      ttl: snap?.ttl ?? "-",
-      survivalPct: snap ? snap.survivalAtIdle * 100 : 0,
+      cacheHitPct,
       pReturnsPct: snap ? snap.pReturns * 100 : 0,
       warmingSnap: snap,
+      idleMs: snap?.idleMs ?? NaN,
       warmupCount: snap?.warmupCount ?? 0,
       warmupHits: snap?.warmupHits ?? 0,
     });
@@ -677,29 +685,27 @@ function buildLiveSessionRows(): LiveSessionRow[] {
 /**
  * Render the unified live-sessions table (filter input + table).
  * Does NOT include headings — callers add their own <h2>/<h3>.
+ *
+ * 9 columns: Project | Session | Turns | Total | Savings | Cache Hit |
+ *            P(returns) | Status | Hits/Warmups
  */
-function renderLiveSessionsTable(rows: LiveSessionRow[]): string {
+function renderLiveSessionsTable(rows: LiveSessionRow[], emptyMessage?: string): string {
   if (rows.length === 0) {
-    return `<p class="empty">No active sessions.</p>`;
+    return `<p class="empty">${esc(emptyMessage ?? "No active sessions.")}</p>`;
   }
 
   let html = `<div class="table-filter"><input type="text" placeholder="Filter sessions\u2026"><span class="count"></span></div>
   <table>
     <tr>
       <th data-sort="text">Project</th>
-      <th>Session</th>
+      <th data-sort="text">Session</th>
       <th data-sort="num">Turns</th>
-      <th data-sort="num">Idle</th>
-      <th data-sort="num">Conversation</th>
-      <th data-sort="num">Worker</th>
       <th data-sort="num">Total</th>
       <th data-sort="num">Savings</th>
-      <th data-sort="text">TTL</th>
-      <th data-sort="num">S(t)</th>
+      <th data-sort="num">Cache&nbsp;Hit</th>
       <th data-sort="num">P(returns)</th>
       <th data-sort="text">Status</th>
-      <th data-sort="num">Warmups</th>
-      <th data-sort="num">Hits</th>
+      <th data-sort="num">Hits/Warmups</th>
     </tr>`;
 
   for (const r of rows) {
@@ -711,25 +717,33 @@ function renderLiveSessionsTable(rows: LiveSessionRow[]): string {
       ? `<a href="/ui/sessions/${esc(r.projectId)}/${esc(r.sessionId)}"><code>${esc(r.sessionId.slice(0, 16))}</code></a>`
       : `<code>${esc(r.sessionId.slice(0, 16))}</code>`;
 
-    const idleCell = Number.isNaN(r.idleMs) ? "-" : formatDuration(r.idleMs);
-    const statusCell = r.warmingSnap ? warmingStatusBadge(r.warmingSnap) : "-";
     const savingsColor = r.savings >= 0 ? "#10b981" : "#e06c75";
+
+    // Status cell: badge + idle duration (e.g., "warming 3m" or "dead 15m")
+    let statusCell: string;
+    if (r.warmingSnap) {
+      const badge = warmingStatusBadge(r.warmingSnap);
+      const idle = Number.isNaN(r.idleMs) ? "" : ` ${formatDuration(r.idleMs)}`;
+      statusCell = `${badge}${idle}`;
+    } else {
+      statusCell = "-";
+    }
+
+    // Hits/Warmups cell: "3/10" or "-"
+    const hitsCell = r.warmingSnap
+      ? `${r.warmupHits}/${r.warmupCount}`
+      : "-";
 
     html += `<tr>
       <td>${projCell}</td>
       <td>${sessCell}</td>
       <td>${r.turns}</td>
-      <td>${idleCell}</td>
-      <td>${formatUSD(r.conversationCost)}</td>
-      <td>${formatUSD(r.workerCost)}</td>
-      <td>${formatUSD(r.totalCost)}</td>
-      <td style="color:${savingsColor}">${formatUSD(r.savings)}</td>
-      <td>${esc(r.ttl)}</td>
-      <td>${r.warmingSnap ? r.survivalPct.toFixed(1) + "%" : "-"}</td>
+      <td>${r.hasCosts ? formatUSD(r.totalCost) : "-"}</td>
+      <td>${r.hasCosts ? `<span style="color:${savingsColor}">${formatUSD(r.savings)}</span>` : "-"}</td>
+      <td>${!Number.isNaN(r.cacheHitPct) ? r.cacheHitPct.toFixed(0) + "%" : "-"}</td>
       <td>${r.warmingSnap ? r.pReturnsPct.toFixed(1) + "%" : "-"}</td>
       <td>${statusCell}</td>
-      <td>${r.warmupCount}</td>
-      <td>${r.warmupHits}</td>
+      <td>${hitsCell}</td>
     </tr>`;
   }
 
@@ -1294,24 +1308,34 @@ function pageWarming(): string {
   ]);
   body += `<h1>Cache Warming</h1>`;
 
-  const sessions = getActiveSessions();
+  const activeSessions = getActiveSessions();
   const cbStatus = getCircuitBreakerStatus();
 
-  // Collect snapshots for all live sessions
-  const snapshots: WarmingSnapshot[] = [];
-  for (const [, state] of sessions) {
-    snapshots.push(computeWarmingSnapshot(state));
+  // Build warming snapshots once — used for both stat cards and table
+  const snapshotMap = new Map<string, WarmingSnapshot>();
+  for (const [sid, state] of activeSessions) {
+    snapshotMap.set(sid, computeWarmingSnapshot(state));
   }
 
-  // Aggregate stats
-  const totalWarmups = snapshots.reduce((s, x) => s + x.warmupCount, 0);
-  const totalHits = snapshots.reduce((s, x) => s + x.warmupHits, 0);
-  const warmingNow = snapshots.filter((x) => x.shouldWarmNow).length;
-  const deadCount = snapshots.filter((x) => x.disabled).length;
+  // Build unified rows (shared with Costs page)
+  const rows = buildLiveSessionRows(getAllSessionCosts(), activeSessions, snapshotMap);
+
+  // Aggregate stats from rows (consistent with table content)
+  let totalWarmups = 0;
+  let totalHits = 0;
+  let warmingNow = 0;
+  let deadCount = 0;
+  for (const r of rows) {
+    if (!r.warmingSnap) continue;
+    totalWarmups += r.warmupCount;
+    totalHits += r.warmupHits;
+    if (r.warmingSnap.shouldWarmNow) warmingNow++;
+    if (r.warmingSnap.disabled) deadCount++;
+  }
 
   // Summary stat cards
   body += `<div class="stats">
-    <div class="stat"><div class="label">Live Sessions</div><div class="value">${snapshots.length}</div></div>
+    <div class="stat"><div class="label">Live Sessions</div><div class="value">${rows.length}</div></div>
     <div class="stat"><div class="label">Warming Now</div><div class="value">${warmingNow}</div></div>
     <div class="stat"><div class="label">Dead</div><div class="value">${deadCount}</div></div>
     <div class="stat"><div class="label">Total Warmups</div><div class="value">${totalWarmups}</div></div>
@@ -1336,7 +1360,7 @@ function pageWarming(): string {
 
   // Live sessions table (unified: cost + warming columns)
   body += `<h2>Live Sessions</h2>`;
-  body += renderLiveSessionsTable(buildLiveSessionRows());
+  body += renderLiveSessionsTable(rows, "No active sessions. Cache warming data appears when sessions are processed through the gateway.");
 
   // Global histograms
   const globalHists = getGlobalHistogramsSnapshot();
@@ -1475,8 +1499,16 @@ function pageCosts(): string {
     body += `</table></div>`;
 
     // Per-session table (unified: cost + warming columns)
+    const activeSessions = getActiveSessions();
+    const snapshotMap = new Map<string, WarmingSnapshot>();
+    for (const [sid, state] of activeSessions) {
+      snapshotMap.set(sid, computeWarmingSnapshot(state));
+    }
     body += `<h3>Per Session</h3>`;
-    body += renderLiveSessionsTable(buildLiveSessionRows());
+    body += renderLiveSessionsTable(
+      buildLiveSessionRows(allCosts, activeSessions, snapshotMap),
+      "No active sessions yet. Cost tracking begins when the first conversation turn is processed.",
+    );
   }
 
   // =====================================================
