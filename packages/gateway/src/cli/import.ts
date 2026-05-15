@@ -77,11 +77,17 @@ export async function commandImport(
   const projectFlag = flags.project as string | undefined;
   const projectPath = projectFlag ? resolve(projectFlag) : process.cwd();
 
-  // Initialize core (loads config, opens DB, runs migrations)
-  load(projectPath);
-  ensureProject(projectPath);
+  const remote = getRemoteUrl();
 
-  // Detect conversation history
+  // Initialize core (loads config, opens DB, runs migrations).
+  // In remote mode we still need load() for detectAll / readChunks which use
+  // core's provider registry, but we DON'T create a local project record.
+  load(projectPath);
+  if (!remote) {
+    ensureProject(projectPath);
+  }
+
+  // Detect conversation history (local filesystem scan — always local)
   console.log("[lore] Scanning for conversation history...\n");
 
   let results = detectAll(projectPath);
@@ -99,7 +105,24 @@ export async function commandImport(
     return;
   }
 
-  // Filter out already-imported sessions
+  // Filter out already-imported sessions.
+  // In remote mode, fetch import history from the remote gateway.
+  let remoteImports: Array<{ agent_name: string; source_id: string; source_hash: string }> | undefined;
+  if (remote) {
+    try {
+      const { getGitRemote, normalizeRemoteUrl } = await import("@loreai/core");
+      const gitRemote = getGitRemote(projectPath);
+      const normalized = gitRemote ? normalizeRemoteUrl(gitRemote) : undefined;
+      const pq = normalized
+        ? `git_remote=${encodeURIComponent(normalized)}`
+        : `path=${encodeURIComponent(projectPath)}`;
+      remoteImports = await remoteGet<typeof remoteImports>(remote, `/api/v1/import/history?${pq}`);
+    } catch {
+      // If remote history fetch fails, proceed without dedup (safer than double-importing)
+      console.error("[lore] Warning: could not fetch remote import history — dedup check skipped.");
+    }
+  }
+
   for (const result of results) {
     const provider = getProvider(result.agentName);
     if (!provider) continue;
@@ -109,6 +132,13 @@ export async function commandImport(
         messageCount: sess.messageCount,
         lastTimestamp: sess.lastActivityAt,
       });
+      if (remote && remoteImports) {
+        // Check against remote import history
+        return !remoteImports.some(
+          (r) => r.agent_name === result.agentName && r.source_id === sess.id && r.source_hash === hash,
+        );
+      }
+      // Local mode: check local DB
       return !isImported(projectPath, result.agentName, sess.id, hash);
     });
 
@@ -158,8 +188,7 @@ export async function commandImport(
     }
   }
 
-  // Check for remote mode
-  const remote = getRemoteUrl();
+  // Remote mode: delegate extraction to the remote gateway
   if (remote) {
     await importRemote(remote, projectPath, results);
     return;
@@ -312,7 +341,9 @@ async function importRemote(
       })),
     }, { compress: true });
 
-    // Record imports remotely for each session
+    // Record imports on remote gateway + locally (belt-and-suspenders:
+    // remote is source of truth, local prevents re-detection if user
+    // later runs without LORE_REMOTE_URL)
     for (const sess of result.sessions) {
       const hash = computeHash({
         messageCount: sess.messageCount,
@@ -326,6 +357,15 @@ async function importRemote(
         source_hash: hash,
         stats: { created: extractResult.created, updated: extractResult.updated },
       });
+      // Also record locally
+      try {
+        recordImport(projectPath, result.agentName, sess.id, hash, {
+          created: extractResult.created,
+          updated: extractResult.updated,
+        });
+      } catch {
+        // Non-fatal — remote record is the source of truth
+      }
     }
 
     totalCreated += extractResult.created;
