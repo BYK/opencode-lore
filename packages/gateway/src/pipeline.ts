@@ -35,6 +35,7 @@ import {
   onIdleResume,
   consumeCameOutOfIdle,
   needsUrgentDistillation,
+  getConsecutiveBusts,
   formatKnowledge,
   buildCompactPrompt,
   shouldImportLoreFile,
@@ -1994,7 +1995,14 @@ function scheduleBackgroundWork(
   // Check if urgent distillation is needed (gradient flagged it).
   // Mark urgent: true so these bypass the batch queue — the gradient is
   // in overflow and needs the result before the next user turn.
+  // Under bust pressure (3+ consecutive busts), lower the meta-distillation
+  // threshold to consolidate gen-0 segments earlier — shrinks the distilled
+  // prefix before the session becomes unsustainable.
   if (needsUrgentDistillation(sessionState.sessionID)) {
+    const busts = getConsecutiveBusts(sessionState.sessionID);
+    const metaThresholdOverride = busts >= 3
+      ? Math.max(3, Math.floor(cfg.distillation.metaThreshold / 4))
+      : undefined;
     distillation
       .run({
         llm,
@@ -2004,6 +2012,7 @@ function scheduleBackgroundWork(
         force: true,
         urgent: true,
         callType: "direct",
+        metaThresholdOverride,
       })
       .catch((e) => log.error("background distillation failed:", e));
   } else {

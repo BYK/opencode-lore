@@ -67,6 +67,7 @@ mock.module("@loreai/core", () => ({
   saveSessionCosts: () => {},
   saveSessionTracking: () => {},
   saveGradientState: () => {},
+  getConsecutiveBusts: () => 0,
   loadSessionTracking: () => null,
   getKV: () => null,
   setKV: () => {},

@@ -117,6 +117,7 @@ export {
   // gaps without sleeping. Not part of the public API.
   setLastTurnAtForTest,
   inspectSessionState,
+  getConsecutiveBusts,
 } from "./gradient";
 export {
   formatKnowledge,

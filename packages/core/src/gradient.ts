@@ -604,6 +604,15 @@ export function inspectSessionState(sessionID: string): {
 }
 
 /**
+ * Return the consecutive-bust counter for a session.
+ * Used by the gateway idle handler and urgent-distillation scheduler to
+ * lower the meta-distillation threshold under bust pressure.
+ */
+export function getConsecutiveBusts(sessionID: string): number {
+  return getSessionState(sessionID).consecutiveBusts;
+}
+
+/**
  * For testing only — set the session's lastTurnAt field. Used to simulate
  * idle gaps without sleeping. Creates the session state if not present so
  * tests don't need to seed it via a transform() call.
@@ -1703,6 +1712,7 @@ function transformInner(input: {
       distilledBudget,
       rawBudget,
       refreshLtm: false,
+      unsustainable: sid ? getSessionState(sid).consecutiveBusts >= 5 : false,
     };
   }
 
@@ -1830,7 +1840,15 @@ function transformInner(input: {
       if (sid && (s > 0 || cached.tokens === 0)) {
         urgentDistillationMap.set(sid, true);
       }
-      return { ...result!, layer: stageLayer, usable, distilledBudget, rawBudget, refreshLtm: false };
+      return {
+        ...result!,
+        layer: stageLayer,
+        usable,
+        distilledBudget,
+        rawBudget,
+        refreshLtm: false,
+        unsustainable: sid ? getSessionState(sid).consecutiveBusts >= 5 : false,
+      };
     }
   }
 

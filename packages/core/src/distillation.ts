@@ -623,6 +623,10 @@ export async function run(input: {
   skipMeta?: boolean;
   urgent?: boolean;
   callType?: "batch" | "direct";
+  /** Override the meta-distillation gen-0 threshold. When set, meta-distillation
+   *  triggers at this count instead of `cfg.distillation.metaThreshold`.
+   *  Used by the urgent-distillation path to consolidate earlier under bust pressure. */
+  metaThresholdOverride?: number;
 }): Promise<{ rounds: number; distilled: number }> {
   return distillLimiter.get(input.sessionID)(() => runInner(input));
 }
@@ -648,6 +652,8 @@ async function runInner(input: {
   /** Whether the LLM call will use batch or direct pricing. Recorded on the
    *  distillation row for accurate historical cost estimates. */
   callType?: "batch" | "direct";
+  /** Override the meta-distillation gen-0 threshold (see run()). */
+  metaThresholdOverride?: number;
 }): Promise<{ rounds: number; distilled: number }> {
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
@@ -708,10 +714,11 @@ async function runInner(input: {
     // Check if meta-distillation is needed (skip when cache is warm to avoid
     // prefix cache invalidation — row IDs change after meta-distill, busting
     // the prompt cache on the next turn).
+    const effectiveMetaThreshold = input.metaThresholdOverride ?? cfg.distillation.metaThreshold;
     if (
       !input.skipMeta &&
       gen0Count(input.projectPath, input.sessionID) >=
-      cfg.distillation.metaThreshold
+      effectiveMetaThreshold
     ) {
       // Call inner directly — we're already under the per-session limiter.
       await metaDistillInner({

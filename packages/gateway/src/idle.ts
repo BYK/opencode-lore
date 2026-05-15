@@ -26,6 +26,7 @@ import {
   saveSessionCosts,
   saveSessionTracking,
   saveGradientState,
+  getConsecutiveBusts,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
@@ -229,8 +230,15 @@ export function buildIdleWorkHandler(
       // Meta consolidation: safe on idle because cache is already cold.
       // Run as a separate step so gen-0 segments from the force-distill
       // above are counted toward the threshold.
+      // Under bust pressure (3+ consecutive busts), lower the threshold
+      // to consolidate earlier — shrinks the distilled prefix before the
+      // session becomes unsustainable.
+      const busts = getConsecutiveBusts(sessionID);
+      const effectiveMetaThreshold = busts >= 3
+        ? Math.max(3, Math.floor(cfg.distillation.metaThreshold / 4))
+        : cfg.distillation.metaThreshold;
       const g0 = distillation.gen0Count(projectPath, sessionID);
-      if (g0 >= cfg.distillation.metaThreshold) {
+      if (g0 >= effectiveMetaThreshold) {
         await distillation.metaDistill({ llm, projectPath, sessionID, model, callType });
       }
     } catch (e) {
