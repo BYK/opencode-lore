@@ -1191,19 +1191,21 @@ describe("gap recording filtering", () => {
   /**
    * Helper to simulate the gap recording logic from pipeline.ts postResponse().
    * This mirrors the guarded block that decides whether to record a gap.
+   *
+   * Sub-agent turns now get their own sessions (not merged into the parent),
+   * so the isSubagentTurn guard has been removed from the pipeline.
    */
   function simulateGapRecording(
     sessionState: SessionState,
     opts: {
-      isSubagentTurn: boolean;
       prevStopReason: string | undefined;
       now: number;
     },
   ): void {
-    const { isSubagentTurn, prevStopReason, now } = opts;
+    const { prevStopReason, now } = opts;
     const isToolUseContinuation = prevStopReason === "tool_use";
 
-    if (!isSubagentTurn && !isToolUseContinuation) {
+    if (!isToolUseContinuation) {
       if (sessionState.lastUserTurnTime > 0) {
         const gap = now - sessionState.lastUserTurnTime;
         recordGap(getSessionHistogram(sessionState), gap);
@@ -1213,26 +1215,11 @@ describe("gap recording filtering", () => {
     }
   }
 
-  test("subagent turns do not record gaps", () => {
-    const state = makeSessionState({ lastUserTurnTime: Date.now() - 60_000 });
-    const hist = getSessionHistogram(state);
-    expect(hist.total).toBe(0);
-
-    simulateGapRecording(state, {
-      isSubagentTurn: true,
-      prevStopReason: "end_turn",
-      now: Date.now(),
-    });
-
-    expect(hist.total).toBe(0);
-  });
-
   test("tool-use continuation turns do not record gaps", () => {
     const state = makeSessionState({ lastUserTurnTime: Date.now() - 60_000 });
     const hist = getSessionHistogram(state);
 
     simulateGapRecording(state, {
-      isSubagentTurn: false,
       prevStopReason: "tool_use",
       now: Date.now(),
     });
@@ -1240,25 +1227,11 @@ describe("gap recording filtering", () => {
     expect(hist.total).toBe(0);
   });
 
-  test("lastUserTurnTime is not updated by subagent turns", () => {
-    const originalTime = Date.now() - 120_000;
-    const state = makeSessionState({ lastUserTurnTime: originalTime });
-
-    simulateGapRecording(state, {
-      isSubagentTurn: true,
-      prevStopReason: "end_turn",
-      now: Date.now(),
-    });
-
-    expect(state.lastUserTurnTime).toBe(originalTime);
-  });
-
   test("lastUserTurnTime is not updated by tool-use continuations", () => {
     const originalTime = Date.now() - 120_000;
     const state = makeSessionState({ lastUserTurnTime: originalTime });
 
     simulateGapRecording(state, {
-      isSubagentTurn: false,
       prevStopReason: "tool_use",
       now: Date.now(),
     });
@@ -1268,15 +1241,12 @@ describe("gap recording filtering", () => {
 
   test("gap is computed from lastUserTurnTime, not lastRequestTime", () => {
     const now = Date.now();
-    // lastRequestTime was updated 5s ago by a subagent, but the last
-    // actual user turn was 60s ago.
     const state = makeSessionState({
       lastRequestTime: now - 5_000,
       lastUserTurnTime: now - 60_000,
     });
 
     simulateGapRecording(state, {
-      isSubagentTurn: false,
       prevStopReason: "end_turn",
       now,
     });
@@ -1294,7 +1264,6 @@ describe("gap recording filtering", () => {
     const hist = getSessionHistogram(state);
 
     simulateGapRecording(state, {
-      isSubagentTurn: false,
       prevStopReason: undefined,
       now,
     });
@@ -1308,7 +1277,6 @@ describe("gap recording filtering", () => {
     const state = makeSessionState({ lastUserTurnTime: now - 180_000 }); // 3 min ago
 
     simulateGapRecording(state, {
-      isSubagentTurn: false,
       prevStopReason: "end_turn",
       now,
     });
@@ -1323,27 +1291,12 @@ describe("gap recording filtering", () => {
     const state = makeSessionState({ projectPath: GAP_TEST_PROJECT_PATH, lastUserTurnTime: now - 120_000 }); // 2 min ago
 
     simulateGapRecording(state, {
-      isSubagentTurn: false,
       prevStopReason: "end_turn",
       now,
     });
 
     const globalHist = getGlobalHistogram(GAP_TEST_PID);
     expect(globalHist.total).toBe(1);
-  });
-
-  test("global histogram is not polluted by subagent turns", () => {
-    const now = Date.now();
-    const state = makeSessionState({ projectPath: GAP_TEST_PROJECT_PATH, lastUserTurnTime: now - 120_000 });
-
-    simulateGapRecording(state, {
-      isSubagentTurn: true,
-      prevStopReason: "end_turn",
-      now,
-    });
-
-    const globalHist = getGlobalHistogram(GAP_TEST_PID);
-    expect(globalHist.total).toBe(0);
   });
 
   test("single histogram: no time-slot segmentation", () => {

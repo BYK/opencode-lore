@@ -227,9 +227,9 @@ export type SessionState = {
   fingerprint: string;
   /** Unix timestamp (ms) of the last request in this session. */
   lastRequestTime: number;
-  /** Unix timestamp (ms) of the last user-initiated turn — excludes subagent
-   *  turns and tool-use auto-continuations. Used exclusively for inter-turn
-   *  gap histogram recording (survival analysis). */
+  /** Unix timestamp (ms) of the last user-initiated turn — excludes tool-use
+   *  auto-continuations. Used exclusively for inter-turn gap histogram
+   *  recording (survival analysis). */
   lastUserTurnTime: number;
   /** Total user+assistant messages seen in this session. */
   messageCount: number;

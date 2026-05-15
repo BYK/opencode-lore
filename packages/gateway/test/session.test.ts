@@ -7,7 +7,7 @@ import {
   scanForMarker,
   fingerprintMessages,
   extractKnownSessionHeader,
-  extractParentSessionId,
+
   isSessionHeaderName,
   isIdLikeValue,
   collectCandidateHeaders,
@@ -406,29 +406,6 @@ describe("extractKnownSessionHeader", () => {
       sessionId: "valid-id",
       headerName: "x-session-affinity",
     });
-  });
-});
-
-describe("extractParentSessionId", () => {
-  test("extracts x-parent-session-id", () => {
-    const result = extractParentSessionId({
-      "x-parent-session-id": "parent-uuid-123",
-    });
-    expect(result).toBe("parent-uuid-123");
-  });
-
-  test("returns null when no parent header present", () => {
-    const result = extractParentSessionId({
-      "x-session-affinity": "not-parent",
-    });
-    expect(result).toBeNull();
-  });
-
-  test("ignores empty values", () => {
-    const result = extractParentSessionId({
-      "x-parent-session-id": "",
-    });
-    expect(result).toBeNull();
   });
 });
 
