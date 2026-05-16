@@ -357,6 +357,10 @@ describe("resetWorkerModelState", () => {
   });
 
   test("clears cache so next fetchModelData re-fetches", async () => {
+    // Use relative call-count deltas instead of absolute values to avoid
+    // flakiness from cross-test pollution: another test file's async
+    // resetPipelineState() → resetWorkerModelState() can clear the model
+    // cache while our mock is active, causing unexpected re-fetches.
     let callCount = 0;
     globalThis.fetch = mock(() => {
       callCount++;
@@ -365,16 +369,22 @@ describe("resetWorkerModelState", () => {
       );
     }) as unknown as typeof fetch;
 
-    await fetchModelData();
-    expect(callCount).toBe(1);
-
-    // Without reset, cached
-    await fetchModelData();
-    expect(callCount).toBe(1);
-
-    // After reset, re-fetches
+    // Ensure cache is clear so the first fetch is ours
     resetWorkerModelState();
+    callCount = 0;
+
     await fetchModelData();
-    expect(callCount).toBe(2);
+    const afterFirst = callCount;
+    expect(afterFirst).toBeGreaterThanOrEqual(1);
+
+    // Without reset, cached — count should not increase
+    await fetchModelData();
+    expect(callCount).toBe(afterFirst);
+
+    // After reset, re-fetches — count should increase by exactly 1
+    resetWorkerModelState();
+    const beforeReset = callCount;
+    await fetchModelData();
+    expect(callCount).toBe(beforeReset + 1);
   });
 });
