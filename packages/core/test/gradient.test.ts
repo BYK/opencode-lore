@@ -2444,34 +2444,34 @@ describe("tier-based context management", () => {
     });
 
     test("tracks consecutive busts (>50% writes of total input)", () => {
-      // 100K write, 0 read, 100K total input → 100% bust
-      recordCacheUsage(100_000, 0, 100_000, SID);
+      // 100K write, 0 read, 3 uncached → total=100_003, ratio≈100% → bust
+      // (inputTokens is the uncached portion from Anthropic API, typically small)
+      recordCacheUsage(100_000, 0, 3, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
 
-      // 80K write, 20K read, 120K total input → 66% bust
-      recordCacheUsage(80_000, 20_000, 120_000, SID);
+      // 80K write, 20K read, 5 uncached → total=100_005, ratio=80% → bust
+      recordCacheUsage(80_000, 20_000, 5, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
     });
 
-    test("uses total input tokens (not just cache tokens) for bust ratio", () => {
-      // 60K write, 0 read, but 160K total input (100K uncached)
-      // bustRatio = 60K/160K = 37.5% — NOT a bust
-      recordCacheUsage(60_000, 0, 160_000, SID);
+    test("uses sum of write + read + uncached for bust ratio", () => {
+      // 60K write, 100K read, 3 uncached → total=160_003, ratio=37.5% → NOT a bust
+      recordCacheUsage(60_000, 100_000, 3, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
     });
 
     test("resets consecutive busts on cache-hit turn (<50% writes)", () => {
-      recordCacheUsage(100_000, 0, 100_000, SID);
-      recordCacheUsage(100_000, 0, 100_000, SID);
+      recordCacheUsage(100_000, 0, 3, SID);
+      recordCacheUsage(100_000, 0, 3, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
 
       // Good cache hit — resets counter
-      recordCacheUsage(10_000, 90_000, 100_000, SID);
+      recordCacheUsage(1_000, 90_000, 3, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
     });
 
     test("zero-usage turn does not change consecutive bust count", () => {
-      recordCacheUsage(100_000, 0, 100_000, SID);
+      recordCacheUsage(100_000, 0, 3, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
 
       // Zero usage — no change

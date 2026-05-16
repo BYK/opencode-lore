@@ -323,6 +323,14 @@ export function analyzeCacheTurn(
   const totalInput = cacheRead + cacheCreation + inputTokens;
   const cacheHitRate = totalInput > 0 ? cacheRead / totalInput : 0;
 
+  // Capture previous turn's values BEFORE overwriting (lines below).
+  // Used to detect sudden cache drops for diagnostics.
+  // Note: prevTotal excludes uncached inputTokens (not stored in CacheAnalytics)
+  // which is typically ~3 tokens — negligible for this diagnostic comparison.
+  const prevCacheRead = analytics.lastCacheRead;
+  const prevTotal = analytics.lastCacheRead + analytics.lastCacheCreation;
+  const prevHitRate = prevTotal > 0 ? analytics.lastCacheRead / prevTotal : 0;
+
   // Track confirmed busts (API says no cache hit + new cache written)
   if (cacheRead === 0 && cacheCreation > 0 && analytics.turnCount > 1) {
     analytics.bustCount++;
@@ -424,6 +432,17 @@ export function analyzeCacheTurn(
         ` divergence="${divergencePoint}" reason="${divergenceReason}"` +
         bustStr,
     );
+
+    // Warn on dramatic cache hit rate drops (e.g. 99% → 23%) to help
+    // diagnose cache eviction or unexpected prefix divergence.
+    if (analytics.turnCount > 2 && prevHitRate > 0.5 && cacheHitRate < prevHitRate * 0.4) {
+      log.warn(
+        `cache-analytics:${sidStr} dramatic hit rate drop:` +
+          ` ${(prevHitRate * 100).toFixed(0)}% → ${(cacheHitRate * 100).toFixed(0)}%` +
+          ` (read ${prevCacheRead}→${cacheRead})` +
+          ` divergence="${divergencePoint}"`,
+      );
+    }
   }
 
   return result;
