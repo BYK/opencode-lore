@@ -564,6 +564,17 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_dedup_feedback_project
     ON dedup_feedback(project_id);
   `,
+  `
+  -- Version 26: Persist sub-agent parent–child session relationships.
+  -- parent_session_id: Lore internal session ID of the parent session
+  -- (resolved from the x-parent-session-id header at detection time).
+  -- NULL for root (non-sub-agent) sessions.
+  -- is_subagent: boolean flag (1 = sub-agent) so the flag survives
+  -- gateway restarts without requiring the header again.
+  ALTER TABLE session_state ADD COLUMN parent_session_id TEXT;
+  ALTER TABLE session_state ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0;
+  CREATE INDEX IF NOT EXISTS idx_session_state_parent ON session_state(parent_session_id);
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -1194,6 +1205,9 @@ export type SessionTrackingState = {
   lastKnownInput?: number;
   lastTurnAt?: number;
   lastBustAt?: number;
+  // v26: sub-agent parent–child relationships
+  parentSessionId?: string | null;
+  isSubagent?: boolean;
 };
 
 /**
@@ -1297,6 +1311,15 @@ export function saveSessionTracking(sessionID: string, state: SessionTrackingSta
     sets.push("last_bust_at = ?");
     vals.push(state.lastBustAt);
   }
+  // v26: sub-agent parent–child relationships
+  if (state.parentSessionId !== undefined) {
+    sets.push("parent_session_id = ?");
+    vals.push(state.parentSessionId);
+  }
+  if (state.isSubagent !== undefined) {
+    sets.push("is_subagent = ?");
+    vals.push(state.isSubagent ? 1 : 0);
+  }
 
   // Update only the specified columns
   db()
@@ -1331,6 +1354,9 @@ export type LoadedSessionTracking = {
   lastKnownInput: number;
   lastTurnAt: number;
   lastBustAt: number;
+  // v26: sub-agent parent–child relationships
+  parentSessionId: string | null;
+  isSubagent: boolean;
 };
 
 /**
@@ -1345,7 +1371,8 @@ export function loadSessionTracking(sessionID: string): LoadedSessionTracking | 
               fingerprint, header_session_id, header_name,
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
-              last_layer, last_known_input, last_turn_at, last_bust_at
+              last_layer, last_known_input, last_turn_at, last_bust_at,
+              parent_session_id, is_subagent
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
@@ -1369,6 +1396,8 @@ export function loadSessionTracking(sessionID: string): LoadedSessionTracking | 
       last_known_input: number;
       last_turn_at: number;
       last_bust_at: number;
+      parent_session_id: string | null;
+      is_subagent: number;
     } | null;
   if (!row) return null;
   return {
@@ -1392,6 +1421,8 @@ export function loadSessionTracking(sessionID: string): LoadedSessionTracking | 
     lastKnownInput: row.last_known_input,
     lastTurnAt: row.last_turn_at,
     lastBustAt: row.last_bust_at,
+    parentSessionId: row.parent_session_id,
+    isSubagent: row.is_subagent === 1,
   };
 }
 
@@ -1425,6 +1456,26 @@ export function loadHeaderSessionIndex(): Array<{
     headerSessionId: row.header_session_id,
     headerName: row.header_name,
   }));
+}
+
+/**
+ * Load parent→child session mappings from the DB.
+ * Returns a map: childSessionId → parentSessionId (Lore internal IDs).
+ * Used by the dashboard to build session trees.
+ */
+export function loadParentChildMap(): Map<string, string> {
+  const rows = db()
+    .query(
+      `SELECT session_id, parent_session_id
+       FROM session_state
+       WHERE parent_session_id IS NOT NULL`,
+    )
+    .all() as Array<{ session_id: string; parent_session_id: string }>;
+  const map = new Map<string, string>();
+  for (const row of rows) {
+    map.set(row.session_id, row.parent_session_id);
+  }
+  return map;
 }
 
 // ---------------------------------------------------------------------------

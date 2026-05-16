@@ -261,6 +261,11 @@ export type SessionState = {
    *  too short-lived (1-3 turns) for warming to be profitable. */
   isSubagent?: boolean;
 
+  /** Lore internal session ID of the parent session (resolved from the
+   *  `x-parent-session-id` header value via the headerSessionIndex).
+   *  NULL/undefined for root (non-sub-agent) sessions. */
+  parentSessionId?: string;
+
   // --- Tier 1/2 session header identification ---
 
   /** Header-based session ID value (Tier 1 known header or Tier 2 promoted learned header). */

@@ -15,6 +15,7 @@ import {
   projectName,
   projectId as lookupProjectId,
   renderMarkdown,
+  loadParentChildMap,
   type TaggedResult,
 } from "@loreai/core";
 import {
@@ -36,7 +37,7 @@ import {
   BLEND_PSEUDOCOUNT,
   type WarmingSnapshot,
 } from "./cache-warmer";
-import type { InterTurnHistogram } from "./translate/types";
+import type { InterTurnHistogram, SessionState } from "./translate/types";
 
 // ---------------------------------------------------------------------------
 // HTML template helpers
@@ -376,6 +377,13 @@ details.warming[open] summary { margin-bottom: 8px; }
   .badge-forced { background: #3b0764; color: #d8b4fe; }
   .badge-disabled { background: var(--bg3); color: var(--fg3); }
 }
+/* --- Subagent tree rows --- */
+.subagent-row { display: none; }
+.subagent-row.expanded { display: table-row; }
+.subagent-row td:nth-child(2) { padding-left: 1.8em; }
+.toggle-btn { cursor: pointer; user-select: none; font-size: 0.8em; margin-right: 4px; opacity: 0.6; }
+.toggle-btn:hover { opacity: 1; }
+.subagent-count { font-size: 0.75em; color: var(--fg3); margin-left: 4px; }
 `;
 
 function layout(title: string, body: string): string {
@@ -418,7 +426,7 @@ document.addEventListener("DOMContentLoaded",function(){
     var ts=Date.parse(s);
     return isNaN(ts)?Infinity:(Date.now()-ts)/60000;
   }
-  // Sorting
+  // Sorting — treats parent+child rows as a unit so tree adjacency is preserved.
   function sortTable(th,dir){
     var table=th.closest("table");
     var tbody=table.querySelector("tbody")||table;
@@ -426,8 +434,16 @@ document.addEventListener("DOMContentLoaded",function(){
     var type=th.dataset.sort;
     th.parentNode.querySelectorAll("th").forEach(function(h){h.classList.remove("asc","desc");});
     th.classList.add(dir);
-    var rows=Array.from(tbody.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
-    rows.sort(function(a,b){
+    var allRows=Array.from(tbody.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
+    // Separate root rows from child (subagent) rows
+    var roots=[];var childMap={};
+    allRows.forEach(function(r){
+      var p=r.dataset.parent;
+      if(p){if(!childMap[p])childMap[p]=[];childMap[p].push(r);}
+      else{roots.push(r);}
+    });
+    // Sort only root rows
+    roots.sort(function(a,b){
       var aT=(a.children[idx]||{textContent:""}).textContent.trim();
       var bT=(b.children[idx]||{textContent:""}).textContent.trim();
       var cmp=0;
@@ -436,7 +452,14 @@ document.addEventListener("DOMContentLoaded",function(){
       else{cmp=aT.localeCompare(bT,undefined,{sensitivity:"base"});}
       return dir==="asc"?cmp:-cmp;
     });
-    rows.forEach(function(r){tbody.appendChild(r);});
+    // Re-append: each root followed by its children (preserving tree adjacency)
+    roots.forEach(function(r){
+      tbody.appendChild(r);
+      // Find session ID from the toggle button or from children that reference this row
+      var btn=r.querySelector(".toggle-btn");
+      var sid=btn?btn.dataset.sessionId:null;
+      if(sid&&childMap[sid]){childMap[sid].forEach(function(c){tbody.appendChild(c);});}
+    });
     var tableId=table.dataset.tableId;
     if(tableId){
       try{localStorage.setItem("lore-sort:"+tableId,JSON.stringify({col:idx,dir:dir}));}
@@ -474,7 +497,19 @@ document.addEventListener("DOMContentLoaded",function(){
       sortTable(defaultTh,defaultTh.dataset.defaultSort);
     }
   });
-  // Filtering
+  // Subagent tree toggle
+  document.addEventListener("click",function(e){
+    var btn=e.target.closest(".toggle-btn");
+    if(!btn)return;
+    var sid=btn.dataset.sessionId;
+    if(!sid)return;
+    var rows=document.querySelectorAll('tr[data-parent="'+sid+'"]');
+    var expanding=rows.length>0&&!rows[0].classList.contains("expanded");
+    rows.forEach(function(r){r.classList.toggle("expanded",expanding);});
+    btn.textContent=expanding?"\u25BC":"\u25B6";
+  });
+  // Filtering — respects tree structure: matching a parent shows it (children stay
+  // collapsed), matching a child auto-shows the parent and expands the child.
   document.querySelectorAll(".table-filter input").forEach(function(input){
     var wrapper=input.closest(".table-filter");
     var table=wrapper.nextElementSibling;
@@ -483,13 +518,50 @@ document.addEventListener("DOMContentLoaded",function(){
     var allRows=Array.from(table.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
     input.addEventListener("input",function(){
       var q=input.value.toLowerCase();
+      if(!q){
+        // Reset: show all roots, hide all children (collapsed state)
+        allRows.forEach(function(r){
+          if(r.dataset.parent){r.style.display="";r.classList.remove("expanded");}
+          else{r.style.display="";}
+        });
+        // Reset toggle buttons
+        table.querySelectorAll(".toggle-btn").forEach(function(b){b.textContent="\u25B6";});
+        if(countEl)countEl.textContent="";
+        return;
+      }
+      // First pass: determine which rows match the query
+      var matchSet=new Set();
+      allRows.forEach(function(r){
+        if(r.textContent.toLowerCase().indexOf(q)!==-1)matchSet.add(r);
+      });
+      // Second pass: for matching children, also include their parent
+      var parentShowSet=new Set();
+      allRows.forEach(function(r){
+        if(r.dataset.parent&&matchSet.has(r)){parentShowSet.add(r.dataset.parent);}
+      });
+      // Third pass: apply visibility
       var shown=0;
       allRows.forEach(function(r){
-        var match=!q||r.textContent.toLowerCase().indexOf(q)!==-1;
-        r.style.display=match?"":"none";
-        if(match)shown++;
+        var isChild=!!r.dataset.parent;
+        if(isChild){
+          // Show child if it matches (and auto-expand)
+          var show=matchSet.has(r);
+          r.style.display=show?"":"none";
+          if(show){r.classList.add("expanded");shown++;}
+          else{r.classList.remove("expanded");}
+        }else{
+          // Show root if it matches OR if any of its children match
+          var btn=r.querySelector(".toggle-btn");
+          var sid=btn?btn.dataset.sessionId:null;
+          var show=matchSet.has(r)||(sid&&parentShowSet.has(sid));
+          r.style.display=show?"":"none";
+          if(show)shown++;
+          // Update toggle state if children were auto-expanded
+          if(btn&&sid&&parentShowSet.has(sid)){btn.textContent="\u25BC";}
+          else if(btn){btn.textContent="\u25B6";}
+        }
       });
-      if(countEl)countEl.textContent=q?shown+"/"+allRows.length:"";
+      if(countEl)countEl.textContent=shown+"/"+allRows.filter(function(r){return!r.dataset.parent;}).length;
     });
   });
 });
@@ -663,21 +735,36 @@ type LiveSessionRow = {
   idleMs: number;
   warmupCount: number;
   warmupHits: number;
+  // Sub-agent tree fields
+  parentSessionId: string | null;
+  isSubagent: boolean;
+  children: LiveSessionRow[];
+  /** Cost including children (populated during tree building). */
+  rolledUpCost: number;
+  /** Savings including children (populated during tree building). */
+  rolledUpSavings: number;
 };
 
 /**
  * Union-join cost tracker, active sessions, and warming snapshots into rows.
  * Accepts pre-fetched maps so callers avoid redundant data fetching.
+ *
+ * Returns a **tree**: root rows carry their children in `.children`.
+ * Subagent costs are rolled up into the parent row's `rolledUpCost`/`rolledUpSavings`.
  */
 function buildLiveSessionRows(
   allCosts: ReadonlyMap<string, SessionCosts>,
-  activeSessions: ReadonlyMap<string, { projectPath?: string }>,
+  activeSessions: ReadonlyMap<string, Pick<SessionState, "projectPath" | "isSubagent" | "parentSessionId">>,
   snapshots: ReadonlyMap<string, WarmingSnapshot>,
+  dbParentMap?: ReadonlyMap<string, string>,
 ): LiveSessionRow[] {
   // Universe of session IDs from both sources
   const allIds = new Set<string>([...allCosts.keys(), ...activeSessions.keys()]);
 
-  const rows: LiveSessionRow[] = [];
+  // Merge parent-child info from live sessions and persisted DB state
+  if (!dbParentMap) dbParentMap = loadParentChildMap();
+
+  const rowMap = new Map<string, LiveSessionRow>();
   for (const sid of allIds) {
     const costs = allCosts.get(sid) ?? null;
     const snap = snapshots.get(sid) ?? null;
@@ -695,24 +782,123 @@ function buildLiveSessionRows(
       cacheHitPct = totalInput > 0 ? (c.cacheReadTokens / totalInput) * 100 : 0;
     }
 
-    rows.push({
+    const ownCost = costs ? totalActualCost(costs) : 0;
+    const ownSavings = costs ? totalSavings(costs) : 0;
+
+    // Determine parent from live state first, fall back to persisted DB
+    const parentSid = sess?.parentSessionId ?? dbParentMap.get(sid) ?? null;
+    const isSub = sess?.isSubagent ?? (parentSid != null);
+
+    rowMap.set(sid, {
       sessionId: sid,
       projectId: projId ?? "",
       projectLabel: projLabel,
       turns: costs?.conversation.turns ?? snap?.messageCount ?? 0,
       hasCosts: costs !== null,
-      totalCost: costs ? totalActualCost(costs) : 0,
-      savings: costs ? totalSavings(costs) : 0,
+      totalCost: ownCost,
+      savings: ownSavings,
       cacheHitPct,
       pReturnsPct: snap ? snap.pReturns * 100 : 0,
       warmingSnap: snap,
       idleMs: snap?.idleMs ?? NaN,
       warmupCount: snap?.warmupCount ?? 0,
       warmupHits: snap?.warmupHits ?? 0,
+      parentSessionId: parentSid,
+      isSubagent: isSub,
+      children: [],
+      rolledUpCost: ownCost,
+      rolledUpSavings: ownSavings,
     });
   }
 
-  return rows;
+  // Build tree: attach children to parents
+  for (const row of rowMap.values()) {
+    if (row.parentSessionId) {
+      const parent = rowMap.get(row.parentSessionId);
+      if (parent) {
+        parent.children.push(row);
+      }
+    }
+  }
+
+  // Recursive roll-up: bottom-up so grandchildren costs propagate correctly
+  function rollUp(row: LiveSessionRow): void {
+    for (const child of row.children) {
+      rollUp(child);
+      row.rolledUpCost += child.rolledUpCost;
+      row.rolledUpSavings += child.rolledUpSavings;
+    }
+  }
+
+  // Identify roots and roll up
+  const roots = [...rowMap.values()].filter(
+    (r) => !r.parentSessionId || !rowMap.has(r.parentSessionId),
+  );
+  for (const root of roots) {
+    rollUp(root);
+  }
+
+  return roots;
+}
+
+/** Render a single session row (used for both root and child rows). */
+function renderSessionRow(r: LiveSessionRow, opts?: { isChild?: boolean; parentId?: string }): string {
+  const isChild = opts?.isChild ?? false;
+  const parentId = opts?.parentId;
+
+  const projCell = r.projectId
+    ? `<a href="/ui/projects/${esc(r.projectId)}">${esc(r.projectLabel)}</a>`
+    : esc(r.projectLabel);
+
+  // For parent rows with children: show toggle + rolled-up cost
+  const hasChildren = r.children.length > 0;
+  const toggle = hasChildren
+    ? `<span class="toggle-btn" data-session-id="${esc(r.sessionId)}">\u25B6</span>`
+    : "";
+  const childCount = hasChildren
+    ? `<span class="subagent-count">(+${r.children.length})</span>`
+    : "";
+  const prefix = isChild ? `<span style="opacity:0.4">\u21B3</span> ` : "";
+
+  const sessLink = r.projectId
+    ? `<a href="/ui/sessions/${esc(r.projectId)}/${esc(r.sessionId)}"><code>${esc(r.sessionId.slice(0, 16))}</code></a>`
+    : `<code>${esc(r.sessionId.slice(0, 16))}</code>`;
+  const sessCell = `${prefix}${sessLink}${childCount}`;
+
+  // Use rolled-up totals for parent rows with children
+  const displayCost = hasChildren ? r.rolledUpCost : r.totalCost;
+  const displaySavings = hasChildren ? r.rolledUpSavings : r.savings;
+  const savingsColor = displaySavings >= 0 ? "#10b981" : "#e06c75";
+
+  // Status cell: badge + idle duration
+  let statusCell: string;
+  if (r.warmingSnap) {
+    const bdg = warmingStatusBadge(r.warmingSnap);
+    const idle = Number.isNaN(r.idleMs) ? "" : ` ${formatDuration(r.idleMs)}`;
+    statusCell = `${bdg}${idle}`;
+  } else {
+    statusCell = "-";
+  }
+
+  const hitsCell = r.warmingSnap
+    ? `${r.warmupHits}/${r.warmupCount}`
+    : "-";
+
+  const trAttrs = isChild
+    ? ` class="subagent-row" data-parent="${esc(parentId ?? "")}"`
+    : "";
+
+  return `<tr${trAttrs}>
+    <td>${toggle}${projCell}</td>
+    <td>${sessCell}</td>
+    <td>${r.turns}</td>
+    <td>${r.hasCosts ? formatUSD(displayCost) : "-"}</td>
+    <td>${r.hasCosts ? `<span style="color:${savingsColor}">${formatUSD(displaySavings)}</span>` : "-"}</td>
+    <td>${!Number.isNaN(r.cacheHitPct) ? r.cacheHitPct.toFixed(0) + "%" : "-"}</td>
+    <td>${r.warmingSnap ? r.pReturnsPct.toFixed(1) + "%" : "-"}</td>
+    <td>${statusCell}</td>
+    <td>${hitsCell}</td>
+  </tr>`;
 }
 
 /**
@@ -721,6 +907,9 @@ function buildLiveSessionRows(
  *
  * 9 columns: Project | Session | Turns | Total | Savings | Cache Hit |
  *            P(returns) | Status | Hits/Warmups
+ *
+ * Root rows with sub-agent children show a collapsible toggle (▶/▼).
+ * Children are hidden by default and shown on click.
  */
 function renderLiveSessionsTable(rows: LiveSessionRow[], emptyMessage?: string, tableId?: string): string {
   if (rows.length === 0) {
@@ -741,43 +930,16 @@ function renderLiveSessionsTable(rows: LiveSessionRow[], emptyMessage?: string, 
       <th data-sort="num">Hits/Warmups</th>
     </tr>`;
 
-  for (const r of rows) {
-    const projCell = r.projectId
-      ? `<a href="/ui/projects/${esc(r.projectId)}">${esc(r.projectLabel)}</a>`
-      : esc(r.projectLabel);
-
-    const sessCell = r.projectId
-      ? `<a href="/ui/sessions/${esc(r.projectId)}/${esc(r.sessionId)}"><code>${esc(r.sessionId.slice(0, 16))}</code></a>`
-      : `<code>${esc(r.sessionId.slice(0, 16))}</code>`;
-
-    const savingsColor = r.savings >= 0 ? "#10b981" : "#e06c75";
-
-    // Status cell: badge + idle duration (e.g., "warming 3m" or "dead 15m")
-    let statusCell: string;
-    if (r.warmingSnap) {
-      const badge = warmingStatusBadge(r.warmingSnap);
-      const idle = Number.isNaN(r.idleMs) ? "" : ` ${formatDuration(r.idleMs)}`;
-      statusCell = `${badge}${idle}`;
-    } else {
-      statusCell = "-";
+  // Recursively render a row and all its descendants
+  function renderTree(row: LiveSessionRow, parentId?: string): void {
+    const isChild = parentId != null;
+    html += renderSessionRow(row, isChild ? { isChild: true, parentId } : undefined);
+    for (const child of row.children) {
+      renderTree(child, row.sessionId);
     }
-
-    // Hits/Warmups cell: "3/10" or "-"
-    const hitsCell = r.warmingSnap
-      ? `${r.warmupHits}/${r.warmupCount}`
-      : "-";
-
-    html += `<tr>
-      <td>${projCell}</td>
-      <td>${sessCell}</td>
-      <td>${r.turns}</td>
-      <td>${r.hasCosts ? formatUSD(r.totalCost) : "-"}</td>
-      <td>${r.hasCosts ? `<span style="color:${savingsColor}">${formatUSD(r.savings)}</span>` : "-"}</td>
-      <td>${!Number.isNaN(r.cacheHitPct) ? r.cacheHitPct.toFixed(0) + "%" : "-"}</td>
-      <td>${r.warmingSnap ? r.pReturnsPct.toFixed(1) + "%" : "-"}</td>
-      <td>${statusCell}</td>
-      <td>${hitsCell}</td>
-    </tr>`;
+  }
+  for (const r of rows) {
+    renderTree(r);
   }
 
   html += `</table>`;
@@ -878,20 +1040,59 @@ function pageProject(projectId: string): string | null {
     body += `<p class="empty">No knowledge entries.</p>`;
   }
 
-  // Sessions section
+  // Sessions section — with sub-agent tree grouping
   body += `<h2>Sessions (${sessions.length})</h2>`;
   if (sessions.length) {
+    const pMap = loadParentChildMap();
+
+    // Build tree from flat session list
+    type SessNode = (typeof sessions)[number] & {
+      children: SessNode[];
+    };
+    const sessNodeMap = new Map<string, SessNode>();
+    for (const s of sessions) {
+      sessNodeMap.set(s.session_id, { ...s, children: [] });
+    }
+    for (const [childId, parentId] of pMap) {
+      const child = sessNodeMap.get(childId);
+      const parent = sessNodeMap.get(parentId);
+      if (child && parent) {
+        parent.children.push(child);
+      }
+    }
+    const sessRoots = [...sessNodeMap.values()].filter(
+      (r) => !pMap.has(r.session_id) || !sessNodeMap.has(pMap.get(r.session_id)!),
+    );
+
     body += `<table data-table-id="project-sessions">
       <tr><th>Session</th><th data-sort="num">Messages</th><th data-sort="num">Distilled</th><th data-sort="num">Distillations</th><th data-sort="date" data-default-sort="desc">Last Activity</th></tr>`;
-    for (const s of sessions) {
-      body += `<tr>
-        <td><a href="/ui/sessions/${esc(projectId)}/${esc(s.session_id)}">${esc(s.session_id.slice(0, 12))}</a></td>
+
+    function renderProjSession(s: SessNode, parentSid?: string): void {
+      const isChild = parentSid != null;
+      const hasChildren = s.children.length > 0;
+      const toggle = hasChildren
+        ? `<span class="toggle-btn" data-session-id="${esc(s.session_id)}">\u25B6</span>`
+        : "";
+      const childCount = hasChildren
+        ? `<span class="subagent-count">(+${s.children.length})</span>`
+        : "";
+      const prefix = isChild ? `<span style="opacity:0.4">\u21B3</span> ` : "";
+      const trAttrs = isChild ? ` class="subagent-row" data-parent="${esc(parentSid!)}"` : "";
+      body += `<tr${trAttrs}>
+        <td>${toggle}${prefix}<a href="/ui/sessions/${esc(projectId)}/${esc(s.session_id)}">${esc(s.session_id.slice(0, 12))}</a>${childCount}</td>
         <td>${s.message_count}</td>
         <td>${s.distilled_count}</td>
         <td>${s.distillation_count}</td>
         <td>${timeAgo(s.last_message_at)}</td>
       </tr>`;
+      for (const child of s.children) {
+        renderProjSession(child, s.session_id);
+      }
     }
+    for (const s of sessRoots) {
+      renderProjSession(s);
+    }
+
     body += `</table>`;
   } else {
     body += `<p class="empty">No sessions.</p>`;
@@ -1353,22 +1554,28 @@ function pageWarming(): string {
   // Build unified rows (shared with Costs page)
   const rows = buildLiveSessionRows(getAllSessionCosts(), activeSessions, snapshotMap);
 
-  // Aggregate stats from rows (consistent with table content)
+  // Aggregate stats from rows (consistent with table content).
+  // Walk roots + children to count all sessions and warming stats.
   let totalWarmups = 0;
   let totalHits = 0;
   let warmingNow = 0;
   let deadCount = 0;
-  for (const r of rows) {
-    if (!r.warmingSnap) continue;
-    totalWarmups += r.warmupCount;
-    totalHits += r.warmupHits;
-    if (r.warmingSnap.shouldWarmNow) warmingNow++;
-    if (r.warmingSnap.disabled) deadCount++;
+  let totalSessionCount = 0;
+  function accumulateStats(r: LiveSessionRow): void {
+    totalSessionCount++;
+    if (r.warmingSnap) {
+      totalWarmups += r.warmupCount;
+      totalHits += r.warmupHits;
+      if (r.warmingSnap.shouldWarmNow) warmingNow++;
+      if (r.warmingSnap.disabled) deadCount++;
+    }
+    for (const child of r.children) accumulateStats(child);
   }
+  for (const r of rows) accumulateStats(r);
 
   // Summary stat cards
   body += `<div class="stats">
-    <div class="stat"><div class="label">Live Sessions</div><div class="value">${rows.length}</div></div>
+    <div class="stat"><div class="label">Live Sessions</div><div class="value">${totalSessionCount}</div></div>
     <div class="stat"><div class="label">Warming Now</div><div class="value">${warmingNow}</div></div>
     <div class="stat"><div class="label">Dead</div><div class="value">${deadCount}</div></div>
     <div class="stat"><div class="label">Total Warmups</div><div class="value">${totalWarmups}</div></div>
@@ -1429,6 +1636,9 @@ function pageCosts(): string {
   ]);
 
   body += `<h1>Cost Intelligence</h1>`;
+
+  // Pre-fetch parent-child map once for both live and historical sections
+  const parentMap = loadParentChildMap();
 
   // --- Live session costs ---
   const allCosts = getAllSessionCosts();
@@ -1539,7 +1749,7 @@ function pageCosts(): string {
     }
     body += `<h3>Per Session</h3>`;
     body += renderLiveSessionsTable(
-      buildLiveSessionRows(allCosts, activeSessions, snapshotMap),
+      buildLiveSessionRows(allCosts, activeSessions, snapshotMap, parentMap),
       "No active sessions yet. Cost tracking begins when the first conversation turn is processed.",
       "costs-live-sessions",
     );
@@ -1580,27 +1790,84 @@ function pageCosts(): string {
       </table>
     </div>`;
 
-    // Per-session historical table (top 50)
-    const displayed = historical.sessions.slice(0, 50);
+    // Per-session historical table (top 50) — with sub-agent tree grouping
+    // (parentMap already loaded above for the live table)
+
+    // Build tree: group children under parents, roll up worker costs
+    type HistRow = (typeof historical.sessions)[number] & {
+      children: HistRow[];
+      rolledUpWorkerCost: number;
+    };
+    const histRowMap = new Map<string, HistRow>();
+    for (const s of historical.sessions) {
+      histRowMap.set(s.sessionId, {
+        ...s,
+        children: [],
+        rolledUpWorkerCost: s.persisted?.workerCost ?? s.distillationCost,
+      });
+    }
+    for (const [childId, parentId] of parentMap) {
+      const child = histRowMap.get(childId);
+      const parent = histRowMap.get(parentId);
+      if (child && parent) {
+        parent.children.push(child);
+      }
+    }
+    // Recursive roll-up (bottom-up)
+    function histRollUp(row: HistRow): void {
+      for (const child of row.children) {
+        histRollUp(child);
+        row.rolledUpWorkerCost += child.rolledUpWorkerCost;
+      }
+    }
+    // Root rows: not a child of any known parent in the set
+    const histRoots = [...histRowMap.values()].filter(
+      (r) => !parentMap.has(r.sessionId) || !histRowMap.has(parentMap.get(r.sessionId)!),
+    );
+    for (const root of histRoots) histRollUp(root);
+
+    const displayed = histRoots.slice(0, 50);
     body += `<h3>Per Session (top ${displayed.length} by recency)</h3>
     <div class="table-filter"><input type="text" placeholder="Filter sessions\u2026"><span class="count"></span></div>
     <table data-table-id="costs-historical-sessions">
       <tr><th data-sort="text">Project</th><th>Session</th><th data-sort="num">Messages</th><th data-sort="text">Model</th><th data-sort="num">Worker Cost</th><th data-sort="num">Avoided Compactions</th><th data-sort="date" data-default-sort="desc">Last Active</th></tr>`;
-    for (const s of displayed) {
-      const sessionWorkerCost = s.persisted?.workerCost ?? s.distillationCost;
-      body += `<tr>
-        <td><a href="/ui/projects/${esc(s.projectId)}">${esc(s.projectName ?? "(unnamed)")}</a></td>
-        <td><a href="/ui/sessions/${esc(s.projectId)}/${esc(s.sessionId)}"><code>${esc(s.sessionId.slice(0, 12))}</code></a></td>
+
+    // Recursive rendering for historical rows
+    function renderHistRow(s: HistRow, parentSid?: string): void {
+      const isChild = parentSid != null;
+      const hasChildren = s.children.length > 0;
+      const toggle = hasChildren && !isChild
+        ? `<span class="toggle-btn" data-session-id="${esc(s.sessionId)}">\u25B6</span>`
+        : hasChildren
+        ? `<span class="toggle-btn" data-session-id="${esc(s.sessionId)}">\u25B6</span>`
+        : "";
+      const childCount = hasChildren
+        ? `<span class="subagent-count">(+${s.children.length})</span>`
+        : "";
+      const prefix = isChild ? `<span style="opacity:0.4">\u21B3</span> ` : "";
+      const trAttrs = isChild ? ` class="subagent-row" data-parent="${esc(parentSid!)}"` : "";
+      const displayCost = hasChildren ? s.rolledUpWorkerCost : (s.persisted?.workerCost ?? s.distillationCost);
+
+      body += `<tr${trAttrs}>
+        <td>${toggle}<a href="/ui/projects/${esc(s.projectId)}">${esc(s.projectName ?? "(unnamed)")}</a></td>
+        <td>${prefix}<a href="/ui/sessions/${esc(s.projectId)}/${esc(s.sessionId)}"><code>${esc(s.sessionId.slice(0, 12))}</code></a>${childCount}</td>
         <td>${s.messageCount}</td>
         <td style="font-size:0.85em">${esc(s.model.replace("claude-", "").slice(0, 20))}</td>
-        <td>${formatUSD(sessionWorkerCost)}</td>
+        <td>${formatUSD(displayCost)}</td>
         <td>${s.avoidedCompactions > 0 ? `${s.avoidedCompactions} (${formatUSD(s.avoidedCompactionCost)})` : "-"}</td>
         <td>${timeAgo(s.lastMessage)}</td>
       </tr>`;
+      for (const child of s.children) {
+        renderHistRow(child, s.sessionId);
+      }
     }
+    for (const s of displayed) {
+      renderHistRow(s);
+    }
+
     body += `</table>`;
-    if (historical.sessions.length > 50) {
-      body += `<p style="color:var(--fg3);font-size:0.85em">Showing 50 of ${historical.sessions.length} sessions.</p>`;
+    if (histRoots.length > 50) {
+      body += `<p style="color:var(--fg3);font-size:0.85em">Showing 50 of ${histRoots.length} sessions.</p>`;
     }
   }
 
