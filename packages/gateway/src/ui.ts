@@ -461,7 +461,7 @@ document.addEventListener("DOMContentLoaded",function(){
       var raw=localStorage.getItem("lore-sort:"+tableId);
       if(raw)saved=JSON.parse(raw);
     }catch(e){}
-    if(saved&&saved.col!=null&&saved.dir){
+    if(saved&&saved.col!=null&&(saved.dir==="asc"||saved.dir==="desc")){
       var allThs=Array.from(headerRow.children);
       var th=allThs[saved.col];
       if(th&&th.dataset&&th.dataset.sort){
