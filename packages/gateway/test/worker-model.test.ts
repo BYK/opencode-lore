@@ -349,6 +349,7 @@ describe("resetWorkerModelState", () => {
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
+    resetWorkerModelState();
   });
 
   afterEach(() => {
