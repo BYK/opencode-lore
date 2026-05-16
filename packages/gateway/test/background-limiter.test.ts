@@ -94,4 +94,42 @@ describe("background-limiter", () => {
     expect(isBackgroundPaused()).toBe(false);
     expect(backgroundLimiterStats().paused).toBe(false);
   });
+
+  test("propagates task errors", async () => {
+    const err = new Error("boom");
+    await expect(
+      runBackground(async () => {
+        throw err;
+      }),
+    ).rejects.toThrow("boom");
+  });
+
+  test("skips queued tasks when circuit breaker trips while waiting", async () => {
+    let resolve!: () => void;
+    const blocker = new Promise<void>((r) => {
+      resolve = r;
+    });
+
+    // Fill both concurrency slots
+    const task1 = runBackground(() => blocker);
+    const task2 = runBackground(() => blocker);
+
+    // Queue a third task — it will wait
+    let thirdCalled = false;
+    const task3 = runBackground(async () => {
+      thirdCalled = true;
+      return "done";
+    });
+
+    // Trip the circuit breaker while task3 is queued
+    await new Promise((r) => setTimeout(r, 10));
+    tripCircuitBreaker(10);
+
+    // Release the blockers — task3 should now execute but be skipped
+    resolve();
+    const results = await Promise.all([task1, task2, task3]);
+
+    expect(thirdCalled).toBe(false);
+    expect(results[2]).toBeUndefined();
+  });
 });

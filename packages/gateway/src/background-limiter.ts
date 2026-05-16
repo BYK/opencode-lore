@@ -1,10 +1,16 @@
 /**
  * Global concurrency limiter for background LLM work.
  *
- * Wraps all fire-and-forget background LLM calls (idle distillation,
- * curation, pipeline-triggered distillation, auto-import extraction)
- * through a single p-limit(2) so at most 2 background LLM operations
- * run concurrently across all sessions.
+ * Wraps fire-and-forget background LLM calls (idle distillation,
+ * curation, pipeline-triggered incremental distillation) through a
+ * single p-limit(2) so at most 2 background LLM operations run
+ * concurrently across all sessions.
+ *
+ * Note: auto-import extraction (`import-auto.ts`) is NOT wrapped here —
+ * it creates its own LLM client and runs sequentially per-process.
+ * The circuit breaker still provides protection for import because
+ * `tripCircuitBreaker` is called from `llm-adapter.ts` on any
+ * non-urgent 429, and import uses the same adapter.
  *
  * Also provides a circuit breaker that trips on upstream 429 responses,
  * pausing all background work for the Retry-After period. This prevents
@@ -81,6 +87,10 @@ export function remainingPauseSeconds(): number {
  * If the circuit breaker is tripped, the task is skipped (returns undefined).
  * Otherwise, the task is queued behind the p-limit(2) gate.
  *
+ * The circuit breaker is checked both at submission time (fast rejection)
+ * and again when the task reaches the front of the queue (in case the
+ * breaker tripped while the task was waiting).
+ *
  * @param fn Async function to execute
  * @param label Human-readable label for logging (e.g., "idle session=abc")
  * @returns The function's return value, or undefined if skipped
@@ -97,7 +107,19 @@ export async function runBackground<T>(
     }
     return undefined;
   }
-  return limiter(fn);
+  return limiter(async () => {
+    // Re-check after waiting in the queue — the breaker may have tripped
+    // while this task was pending behind other in-flight work.
+    if (isBackgroundPaused()) {
+      if (label) {
+        log.info(
+          `background work skipped at execution (circuit breaker, ${remainingPauseSeconds()}s remaining): ${label}`,
+        );
+      }
+      return undefined as T | undefined;
+    }
+    return fn();
+  });
 }
 
 /**
@@ -119,6 +141,10 @@ export function backgroundLimiterStats(): {
 
 /**
  * Reset all state (for tests).
+ *
+ * Note: `clearQueue()` only removes pending (queued) tasks — up to 2
+ * in-flight tasks will continue to completion. Pending tasks resolve
+ * as `undefined`, consistent with the circuit breaker skip behavior.
  */
 export function resetBackgroundLimiter(): void {
   limiter.clearQueue();
