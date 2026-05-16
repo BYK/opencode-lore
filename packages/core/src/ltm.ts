@@ -79,8 +79,15 @@ export function create(input: {
             .get(input.title)
     ) as { id: string } | null;
 
+    // Build the update payload — forward confidence when the caller provided one
+    // so the curator's scoring intent isn't silently dropped on dedup.
+    const dedupUpdate = {
+      content: input.content,
+      ...(input.confidence != null ? { confidence: input.confidence } : {}),
+    };
+
     if (existing) {
-      update(existing.id, { content: input.content });
+      update(existing.id, dedupUpdate);
       return existing.id;
     }
 
@@ -93,7 +100,7 @@ export function create(input: {
       .get(input.title) as { id: string } | null;
 
     if (crossExisting) {
-      update(crossExisting.id, { content: input.content });
+      update(crossExisting.id, dedupUpdate);
       return crossExisting.id;
     }
 
@@ -103,7 +110,7 @@ export function create(input: {
     // lock re-entry bug"). Placed after exact checks (cheaper checks first).
     const fuzzyMatch = findFuzzyDuplicate({ title: input.title, projectId: pid });
     if (fuzzyMatch) {
-      update(fuzzyMatch.id, { content: input.content });
+      update(fuzzyMatch.id, dedupUpdate);
       return fuzzyMatch.id;
     }
   }

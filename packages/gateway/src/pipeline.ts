@@ -2607,7 +2607,7 @@ async function handleConversationTurn(
               title: e.title,
               content: e.content,
             })),
-            ltmBudget,
+            prefBudget,
           );
           if (formatted) {
             const tokenCount = Math.ceil(formatted.length / 3);
