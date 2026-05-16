@@ -505,7 +505,7 @@ describe("shouldWarm", () => {
   test("returns false when session is marked dead", () => {
     const state = makeSessionState({
       lastRequestTime: Date.now() - 270_000,
-      warmup: { lastWarmupAt: 0, warmupCount: 0, warmupHits: 0, disabled: true },
+      warmup: { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: true },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
         lastRequestBody: compressBody('{"test": true}'),
@@ -525,6 +525,7 @@ describe("shouldWarm", () => {
       warmup: {
         lastWarmupAt: now - 30_000, // warmed 30s ago
         warmupCount: 1,
+        totalWarmups: 1,
         warmupHits: 0,
         disabled: false,
       },
@@ -584,6 +585,7 @@ describe("shouldWarm", () => {
       warmup: {
         lastWarmupAt: 0,
         warmupCount: 0,
+        totalWarmups: 0,
         warmupHits: 0,
         disabled: false,
         forceKeepWarm: true,
@@ -677,6 +679,7 @@ describe("shouldWarm", () => {
       warmup: {
         lastWarmupAt: 0,
         warmupCount: 0,
+        totalWarmups: 0,
         warmupHits: 0,
         disabled: false,
         forceKeepWarm: true,
@@ -699,6 +702,7 @@ describe("shouldWarm", () => {
       warmup: {
         lastWarmupAt: now - 310_000, // last warmup 5m10s ago — previous window
         warmupCount: 2,
+        totalWarmups: 2,
         warmupHits: 0,
         disabled: false,
         forceKeepWarm: true,
@@ -726,6 +730,7 @@ describe("shouldWarm", () => {
       warmup: {
         lastWarmupAt: now - 260_000, // 4m20s ago — past tighter cooldown (255s) but within full TTL (300s)
         warmupCount: 1,
+        totalWarmups: 1,
         warmupHits: 0,
         disabled: false,
         forceKeepWarm: true,
@@ -753,6 +758,7 @@ describe("shouldWarm", () => {
       warmup: {
         lastWarmupAt: now - 260_000, // 4m20s ago — within full TTL cooldown
         warmupCount: 1,
+        totalWarmups: 1,
         warmupHits: 0,
         disabled: false,
         // no forceKeepWarm
@@ -782,6 +788,7 @@ describe("shouldWarm", () => {
       warmup: {
         lastWarmupAt: 0,
         warmupCount: 0,
+        totalWarmups: 0,
         warmupHits: 0,
         disabled: false,
         forceKeepWarm: true,
@@ -790,6 +797,7 @@ describe("shouldWarm", () => {
         ...makeCacheAnalytics(),
         lastRequestBody: compressBody('{"test": true}'),
       },
+      messageCount: 20,
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const hist = createHistogram();
@@ -1092,6 +1100,7 @@ describe("shouldWarm continuation", () => {
       warmup: {
         lastWarmupAt: now - 310_000, // last warmup 5m10s ago — previous window
         warmupCount: 1,
+        totalWarmups: 1,
         warmupHits: 0,
         disabled: false,
       },
@@ -1121,6 +1130,7 @@ describe("shouldWarm continuation", () => {
       warmup: {
         lastWarmupAt: now - 310_000,
         warmupCount: maxCyc, // already at max
+        totalWarmups: maxCyc,
         warmupHits: 0,
         disabled: false,
       },
@@ -1144,6 +1154,7 @@ describe("shouldWarm continuation", () => {
       warmup: {
         lastWarmupAt: now - 310_000,
         warmupCount: 2,
+        totalWarmups: 2,
         warmupHits: 0,
         disabled: false,
       },
@@ -1182,6 +1193,7 @@ describe("shouldWarm /keep mode", () => {
       warmup: {
         lastWarmupAt: now - 270_000, // past cooldown
         warmupCount: maxCyc,
+        totalWarmups: maxCyc,
         warmupHits: 0,
         disabled: false,
         forceKeepWarm: true,
@@ -1206,6 +1218,7 @@ describe("shouldWarm /keep mode", () => {
       warmup: {
         lastWarmupAt: now - 270_000, // past cooldown
         warmupCount: 2,
+        totalWarmups: 2,
         warmupHits: 0,
         disabled: false,
         forceKeepWarm: true,

@@ -2061,10 +2061,13 @@ function postResponse(
     if (sessionState.lastRequestTime > 0) {
       let warmupHitThisTurn = false;
 
-      // Track warmup hit: user returned after we warmed the cache
+      // Track warmup hit: user returned after we warmed the cache.
+      // A warmup can only benefit the FIRST turn after it fires — clear
+      // lastWarmupAt unconditionally so subsequent turns are not attributed.
       if (sessionState.warmup?.lastWarmupAt) {
         const ttlMs = sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
         const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
+        sessionState.warmup.lastWarmupAt = 0;
         if (sinceWarmup < ttlMs) {
           warmupHitThisTurn = true;
           sessionState.warmup.warmupHits++;
@@ -3579,7 +3582,7 @@ function handleWarmupSlashCommand(
   // Update session warmup state
   if (state) {
     if (!state.warmup) {
-      state.warmup = { lastWarmupAt: 0, warmupCount: 0, warmupHits: 0, disabled: isDone };
+      state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: isDone };
     } else {
       state.warmup.disabled = isDone;
     }
