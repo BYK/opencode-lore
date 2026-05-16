@@ -1944,12 +1944,18 @@ function postResponse(
         }
       }
     }
-    // Track model/protocol for warmup profile resolution
+    // Track model/protocol/beta for warmup profile resolution
     sessionState.lastModel = req.model;
     sessionState.lastProtocol =
       req.protocol === "openai-responses"
         ? "openai-responses"
         : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic");
+    // Capture anthropic-beta so cache-warmer can forward it — beta-gated
+    // body fields (e.g. context_management) need the header to be accepted.
+    // Always update (including clearing) so a stale header isn't forwarded
+    // after the client stops sending it.
+    sessionState.lastAnthropicBeta =
+      req.rawHeaders["anthropic-beta"] || undefined;
 
     // Reset warming state if session was marked dead or had active warming.
     // Dead flag is cleared so the next break gets a fresh ROI analysis.

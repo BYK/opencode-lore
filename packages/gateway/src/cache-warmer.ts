@@ -1050,6 +1050,12 @@ export async function executeWarmup(
     ...authHeaders(cred),
   };
 
+  // Forward anthropic-beta from the last real request so beta-gated body
+  // fields (e.g. context_management) are accepted by the upstream API.
+  if (state.lastAnthropicBeta) {
+    headers["anthropic-beta"] = state.lastAnthropicBeta;
+  }
+
   // Re-sign the cch billing header. The cch hash covers the entire
   // serialized body, and we changed max_tokens/stream. The cch is
   // billing verification only — NOT part of the cache key.

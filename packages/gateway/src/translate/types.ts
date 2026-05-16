@@ -296,6 +296,10 @@ export type SessionState = {
   lastModel?: string;
   /** Protocol from the last real request (for warming profile resolution). */
   lastProtocol?: "anthropic" | "openai" | "openai-responses";
+  /** anthropic-beta header from the last real request — forwarded by
+   *  cache-warmer so beta-gated body fields (e.g. context_management)
+   *  are accepted upstream. */
+  lastAnthropicBeta?: string;
 
   // --- Periodic persistence ---
 
