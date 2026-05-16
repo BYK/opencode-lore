@@ -104,6 +104,7 @@ export {
   setLtmTokens,
   getLtmTokens,
   getLtmBudget,
+  getPreferenceLtmBudget,
   setForceMinLayer,
   getLastTransformedCount,
   getLastTransformEstimate,

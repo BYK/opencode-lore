@@ -662,6 +662,13 @@ async function cmdRecover(
     }
   }
   console.log(`\nTotal: ${totalImported} entries recovered across ${results.length} project(s).`);
+
+  // Re-rank recovered preference entries so they get proper confidence values
+  const { ltm } = await import("@loreai/core");
+  const reranked = ltm.rerankPreferences();
+  if (reranked > 0) {
+    console.log(`Re-ranked ${reranked} preference entries by directive strength.`);
+  }
 }
 
 async function cmdMerge(
@@ -1081,6 +1088,23 @@ async function cmdDedupInteractive(
       ltm.saveCalibratedThreshold(pid, newThreshold, count);
       console.log(`Threshold calibrated to ${newThreshold.toFixed(3)} (from ${count} feedback pairs).`);
     }
+  }
+}
+
+async function cmdRerank(): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) {
+    console.error("Error: rerank is not supported in remote mode (requires local DB access).");
+    process.exit(1);
+  }
+
+  const { ltm } = await import("@loreai/core");
+  console.log("Re-ranking preference entries by directive strength...");
+  const updated = ltm.rerankPreferences();
+  if (updated === 0) {
+    console.log("All preference entries are already ranked.");
+  } else {
+    console.log(`Done — ${updated} preference entries re-ranked.`);
   }
 }
 
@@ -1567,6 +1591,7 @@ Subcommands:
   recover               Re-import knowledge from .lore.md / AGENTS.md files
   dedup                 Find and remove duplicate knowledge entries (all projects)
   reindex               Rebuild embedding vectors (after model/config change)
+  rerank                Re-score preference confidence by directive strength
 
 Options:
   --project <path>      Target project directory (default: current directory)
@@ -1600,6 +1625,7 @@ Examples:
   lore data dedup --interactive            # accept/reject each cluster interactively
   lore data dedup --project /path/to/project
   lore data reindex                        # rebuild all embedding vectors
+  lore data rerank                         # re-score preference confidence
 `.trimStart();
 
 export async function commandData(
@@ -1633,6 +1659,9 @@ export async function commandData(
       break;
     case "reindex":
       await cmdReindex(values);
+      break;
+    case "rerank":
+      await cmdRerank();
       break;
     case "help":
     case undefined:

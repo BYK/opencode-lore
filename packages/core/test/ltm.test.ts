@@ -903,3 +903,321 @@ describe("ltm.pruneOversized", () => {
     expect(ltm.get(id)!.confidence).toBe(1.0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Preference-only fast path + confidence on create + rerankPreferences
+// ---------------------------------------------------------------------------
+
+describe("ltm.create confidence", () => {
+  test("accepts and stores explicit confidence", () => {
+    const id = ltm.create({
+      projectPath: "/test/ltm/confidence",
+      category: "preference",
+      title: "Explicit confidence test",
+      content: "I prefer dark mode",
+      scope: "project",
+      confidence: 0.9,
+    });
+    const entry = ltm.get(id);
+    expect(entry).not.toBeNull();
+    expect(entry!.confidence).toBe(0.9);
+  });
+
+  test("defaults confidence to 1.0 when omitted", () => {
+    const id = ltm.create({
+      projectPath: "/test/ltm/confidence",
+      category: "preference",
+      title: "Default confidence test",
+      content: "Some preference",
+      scope: "project",
+    });
+    const entry = ltm.get(id);
+    expect(entry).not.toBeNull();
+    expect(entry!.confidence).toBe(1.0);
+  });
+
+  test("clamps confidence to [0, 1]", () => {
+    const id1 = ltm.create({
+      projectPath: "/test/ltm/confidence",
+      category: "preference",
+      title: "Over confidence",
+      content: "Test over",
+      scope: "project",
+      confidence: 1.5,
+    });
+    expect(ltm.get(id1)!.confidence).toBe(1.0);
+
+    const id2 = ltm.create({
+      projectPath: "/test/ltm/confidence",
+      category: "preference",
+      title: "Under confidence",
+      content: "Test under",
+      scope: "project",
+      confidence: -0.5,
+    });
+    expect(ltm.get(id2)!.confidence).toBe(0);
+  });
+});
+
+describe("preference-only forSession fast path", () => {
+  const PROJ = "/test/ltm/pref-fastpath";
+  const SESSION = "pref-session";
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJ);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    // Clean up ALL global/cross-project preference entries to avoid leakage between tests
+    db()
+      .query("DELETE FROM knowledge WHERE category = 'preference' AND (project_id IS NULL OR cross_project = 1)")
+      .run();
+    db()
+      .query("DELETE FROM knowledge WHERE project_id IN (SELECT id FROM projects WHERE path LIKE '/test/%')")
+      .run();
+    db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("includes ALL cross-project preferences regardless of context", async () => {
+    // Create cross-project preferences with zero keyword overlap to session context
+    for (let i = 0; i < 5; i++) {
+      ltm.create({
+        category: "preference",
+        title: `pref-test global pref ${i}`,
+        content: `Unrelated preference content xyz ${i}`,
+        scope: "global",
+        crossProject: true,
+      });
+    }
+
+    // Seed session context about something completely unrelated
+    const pid = ensureProject(PROJ);
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(`tm-pref-${Date.now()}`, pid, SESSION, "user", "Let's build a React component for the dashboard", Date.now());
+
+    const result = await ltm.forSession(PROJ, SESSION, 10_000, {
+      categories: ["preference"],
+    });
+    expect(result.length).toBe(5);
+  });
+
+  test("has no count cap on first turn (no session context)", async () => {
+    // Create 15 cross-project preferences (more than NO_CONTEXT_FALLBACK_CAP=10)
+    for (let i = 0; i < 15; i++) {
+      ltm.create({
+        category: "preference",
+        title: `pref-test nocap pref ${i}`,
+        content: `Some preference content ${i}`,
+        scope: "global",
+        crossProject: true,
+      });
+    }
+
+    // No session context — brand new session
+    const result = await ltm.forSession(PROJ, "brand-new-pref-session", 10_000, {
+      categories: ["preference"],
+    });
+    // Should return all 15, not capped at 10
+    expect(result.length).toBe(15);
+  });
+
+  test("respects token budget", async () => {
+    // Create many large preferences
+    for (let i = 0; i < 20; i++) {
+      ltm.create({
+        category: "preference",
+        title: `pref-test budget pref ${i}`,
+        content: "A ".repeat(200), // ~50 tokens each
+        scope: "global",
+        crossProject: true,
+      });
+    }
+
+    // Very small budget — can only fit a few
+    const result = await ltm.forSession(PROJ, SESSION, 200, {
+      categories: ["preference"],
+    });
+    expect(result.length).toBeGreaterThan(0);
+    expect(result.length).toBeLessThan(20);
+  });
+
+  test("ranks by confidence DESC then recency", async () => {
+    // Create preferences with varying confidence
+    const id_low = ltm.create({
+      category: "preference",
+      title: "pref-test low conf",
+      content: "Low confidence preference",
+      scope: "global",
+      crossProject: true,
+      confidence: 0.6,
+    });
+    const id_mid = ltm.create({
+      category: "preference",
+      title: "pref-test mid conf",
+      content: "Mid confidence preference",
+      scope: "global",
+      crossProject: true,
+      confidence: 0.9,
+    });
+    const id_high = ltm.create({
+      category: "preference",
+      title: "pref-test high conf",
+      content: "High confidence preference",
+      scope: "global",
+      crossProject: true,
+      confidence: 1.0,
+    });
+
+    // All three should be returned with generous budget, ordered by confidence
+    const result = await ltm.forSession(PROJ, SESSION, 10_000, {
+      categories: ["preference"],
+    });
+
+    expect(result.length).toBe(3);
+    // Highest confidence should be first
+    expect(result[0].id).toBe(id_high);
+    expect(result[1].id).toBe(id_mid);
+    expect(result[2].id).toBe(id_low);
+  });
+
+  test("non-preference forSession still uses relevance scoring", async () => {
+    // Create a project-specific gotcha
+    ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "pref-test SQLite WAL gotcha",
+      content: "WAL mode requires shared memory access",
+      scope: "project",
+      crossProject: false,
+    });
+
+    // Create a cross-project gotcha with zero keyword overlap
+    ltm.create({
+      category: "gotcha",
+      title: "pref-test Unrelated gotcha",
+      content: "Completely unrelated knowledge about quantum computing",
+      scope: "global",
+      crossProject: true,
+    });
+
+    const result = await ltm.forSession(PROJ, SESSION, 10_000, {
+      excludeCategories: ["preference"],
+    });
+
+    // Project gotcha should be included (safety net)
+    const projectGotcha = result.find((e) => e.title === "pref-test SQLite WAL gotcha");
+    expect(projectGotcha).toBeDefined();
+    // The non-preference path should still be using relevance scoring,
+    // not the preference fast path
+  });
+});
+
+describe("curator applyOps confidence", () => {
+  test("passes confidence from create op to ltm.create", async () => {
+    const { applyOps } = await import("../src/curator");
+    const result = applyOps(
+      [
+        {
+          op: "create",
+          category: "preference",
+          title: "applyOps confidence test",
+          content: "I prefer concise commit messages",
+          scope: "global",
+          crossProject: true,
+          confidence: 0.9,
+        },
+      ],
+      { projectPath: "/test/ltm/applyops", sessionID: "test-sess" },
+    );
+    expect(result.created).toBe(1);
+
+    // Find the created entry
+    const entries = ltm.all();
+    const entry = entries.find((e) => e.title === "applyOps confidence test");
+    expect(entry).toBeDefined();
+    expect(entry!.confidence).toBe(0.9);
+  });
+});
+
+describe("ltm.rerankPreferences", () => {
+  beforeEach(() => {
+    // Clean up ALL preference entries to avoid cross-test interference
+    // (rerankPreferences operates on all preferences in the DB)
+    db()
+      .query("DELETE FROM knowledge WHERE category = 'preference'")
+      .run();
+  });
+
+  test("sets 1.0 for strong directives, 0.9 for explicit prefs, 0.8 for others", () => {
+    const id_strong = ltm.create({
+      category: "preference",
+      title: "rerank-test strong",
+      content: "NEVER push directly to main without explicit permission",
+      scope: "global",
+      crossProject: true,
+    });
+    const id_explicit = ltm.create({
+      category: "preference",
+      title: "rerank-test explicit",
+      content: "I prefer tabs over spaces for indentation",
+      scope: "global",
+      crossProject: true,
+    });
+    const id_mild = ltm.create({
+      category: "preference",
+      title: "rerank-test mild",
+      content: "Use dark theme in editor when possible",
+      scope: "global",
+      crossProject: true,
+    });
+
+    // All start at confidence 1.0
+    expect(ltm.get(id_strong)!.confidence).toBe(1.0);
+    expect(ltm.get(id_explicit)!.confidence).toBe(1.0);
+    expect(ltm.get(id_mild)!.confidence).toBe(1.0);
+
+    const updated = ltm.rerankPreferences();
+    expect(updated).toBe(2); // strong stays at 1.0, only explicit and mild change
+
+    expect(ltm.get(id_strong)!.confidence).toBe(1.0);
+    expect(ltm.get(id_explicit)!.confidence).toBe(0.9);
+    expect(ltm.get(id_mild)!.confidence).toBe(0.8);
+  });
+
+  test("skips entries already scored by curator (confidence < 1.0)", () => {
+    const id = ltm.create({
+      category: "preference",
+      title: "rerank-test already-scored",
+      content: "Some preference without directive language",
+      scope: "global",
+      crossProject: true,
+      confidence: 0.6,
+    });
+
+    const updated = ltm.rerankPreferences();
+    // Should not touch this entry — its confidence is already < 1.0
+    expect(ltm.get(id)!.confidence).toBe(0.6);
+  });
+
+  test("detects various directive patterns", () => {
+    const ids = [
+      ltm.create({ category: "preference", title: "rerank-test d1", content: "Always use TypeScript strict mode", scope: "global" }),
+      ltm.create({ category: "preference", title: "rerank-test d2", content: "You must not skip tests", scope: "global" }),
+      ltm.create({ category: "preference", title: "rerank-test d3", content: "Make sure to run linting before commits", scope: "global" }),
+      ltm.create({ category: "preference", title: "rerank-test d4", content: "Don't forget to update changelog", scope: "global" }),
+    ];
+
+    ltm.rerankPreferences();
+
+    // "Always" → strong directive → 1.0
+    expect(ltm.get(ids[0])!.confidence).toBe(1.0);
+    // "must not" → strong directive → 1.0
+    expect(ltm.get(ids[1])!.confidence).toBe(1.0);
+    // "Make sure to" → explicit pref → 0.9
+    expect(ltm.get(ids[2])!.confidence).toBe(0.9);
+    // "Don't forget" → explicit pref → 0.9
+    expect(ltm.get(ids[3])!.confidence).toBe(0.9);
+  });
+});

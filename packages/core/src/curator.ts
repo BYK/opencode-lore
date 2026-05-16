@@ -24,6 +24,8 @@ export type CuratorOp =
       content: string;
       scope: "project" | "global";
       crossProject?: boolean;
+      /** Initial confidence (0.0–1.0). Controls injection priority for preferences. */
+      confidence?: number;
     }
   | { op: "update"; id: string; content?: string; confidence?: number }
   | { op: "delete"; id: string; reason: string };
@@ -88,6 +90,7 @@ export function applyOps(
         session: input.sessionID,
         scope: op.scope,
         crossProject: op.crossProject ?? true,
+        confidence: op.confidence,
       });
       idsToSync.push(id);
       created++;
