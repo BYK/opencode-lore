@@ -328,6 +328,22 @@ describe("prepareAnthropicWarmupBody", () => {
     expect(result.output_config).toBeUndefined();
   });
 
+  test("preserves beta-gated fields like context_management (not stripped)", () => {
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 16384,
+      stream: true,
+      context_management: { type: "auto" },
+      messages: [{ role: "user", content: "hello" }],
+    });
+
+    const result = JSON.parse(prepareAnthropicWarmupBody(body));
+    // Beta-gated fields must NOT be stripped from the warmup body —
+    // executeWarmup() forwards the anthropic-beta header from
+    // state.lastAnthropicBeta so the API accepts them.
+    expect(result.context_management).toEqual({ type: "auto" });
+  });
+
   test("preserves all prompt content fields", () => {
     const body = JSON.stringify({
       model: "claude-sonnet-4-20250514",
