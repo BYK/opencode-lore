@@ -78,6 +78,7 @@ export {
   saveSessionTracking,
   loadSessionTracking,
   loadHeaderSessionIndex,
+  loadParentChildMap,
   type SessionTrackingState,
   type LoadedSessionTracking,
   getKV,

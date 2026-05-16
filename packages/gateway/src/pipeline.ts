@@ -126,7 +126,7 @@ import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySync } from "./worker-model";
 import * as Sentry from "@sentry/bun";
 import { captureBillingPrefix, hasBillingHeader, resignBody } from "./cch";
-import { detectClientType } from "./session";
+import { detectClientType, KNOWN_SESSION_HEADERS } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
   recordGap,
@@ -828,6 +828,14 @@ function getOrCreateSession(
         state.warmup = JSON.parse(persisted.warmupState);
       } catch {
         log.warn(`corrupt warmup state for session ${sessionID.slice(0, 16)}, starting fresh`);
+      }
+    }
+
+    // Restore sub-agent parent–child relationship (v26)
+    if (persisted?.isSubagent) {
+      state.isSubagent = true;
+      if (persisted.parentSessionId) {
+        state.parentSessionId = persisted.parentSessionId;
       }
     }
 
@@ -2526,8 +2534,25 @@ async function handleConversationTurn(
 
   // Mark sub-agent sessions (x-parent-session-id present).
   // These get their own session but are flagged for cache warming exemption.
+  // Resolve the client-side parent ID to a Lore internal session ID via the
+  // headerSessionIndex (tries all known session header prefixes).
   if (!sessionState.isSubagent && req.rawHeaders["x-parent-session-id"]) {
     sessionState.isSubagent = true;
+    const parentClientId = req.rawHeaders["x-parent-session-id"];
+    let resolvedParent: string | undefined;
+    for (const hdr of KNOWN_SESSION_HEADERS) {
+      const candidate = headerSessionIndex.get(`${hdr}:${parentClientId}`);
+      if (candidate) {
+        resolvedParent = candidate;
+        break;
+      }
+    }
+    sessionState.parentSessionId = resolvedParent;
+    // Persist immediately — rare mutation (session identity tier)
+    saveSessionTracking(sessionID, {
+      isSubagent: true,
+      parentSessionId: resolvedParent ?? null,
+    });
   }
 
   // Bind auth credential to this session for background workers
