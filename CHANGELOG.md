@@ -1,4 +1,21 @@
 # Changelog
+## 0.22.0
+
+### New Features ✨
+
+- (cch) Add seeds for Claude Code up to 2.1.143 by @github-actions in [#356](https://github.com/BYK/loreai/pull/356)
+- (website) Add unified architecture section — context + memory as one pipeline by @BYK in [0a6587a9](https://github.com/BYK/loreai/commit/0a6587a986bc26519e27f15825f920c5227de450)
+- Rewrite README to align with new website messaging by @BYK in [#366](https://github.com/BYK/loreai/pull/366)
+- Marketing rewrite + product improvements inspired by Stellman/Orosz articles by @BYK in [#362](https://github.com/BYK/loreai/pull/362)
+
+### Bug Fixes 🐛
+
+- Expand OpenCode plugin GATEWAY_PROVIDERS to route all proxiable providers through gateway by @BYK in [#365](https://github.com/BYK/loreai/pull/365)
+- Resolve high priority bugs from quality playbook phase 3 by @BYK in [#364](https://github.com/BYK/loreai/pull/364)
+- Stop attributing all turns after warmup as cache warming savings by @BYK in [#363](https://github.com/BYK/loreai/pull/363)
+- Add PNG/ICO favicon fallbacks for Firefox Android by @BYK in [9d31559e](https://github.com/BYK/loreai/commit/9d31559efc8cbc407eb7a1f773133cebaf668ee9)
+- Add favicon to website matching dashboard by @BYK in [8e34d32d](https://github.com/BYK/loreai/commit/8e34d32deb8db65b5800ef5dcd0eabacce99b993)
+
 ## 0.21.0
 
 ### New Features ✨
