@@ -733,7 +733,7 @@ type LiveSessionRow = {
   pReturnsPct: number;
   warmingSnap: WarmingSnapshot | null;
   idleMs: number;
-  warmupCount: number;
+  totalWarmups: number;
   warmupHits: number;
   // Sub-agent tree fields
   parentSessionId: string | null;
@@ -801,7 +801,7 @@ function buildLiveSessionRows(
       pReturnsPct: snap ? snap.pReturns * 100 : 0,
       warmingSnap: snap,
       idleMs: snap?.idleMs ?? NaN,
-      warmupCount: snap?.warmupCount ?? 0,
+      totalWarmups: snap?.totalWarmups ?? 0,
       warmupHits: snap?.warmupHits ?? 0,
       parentSessionId: parentSid,
       isSubagent: isSub,
@@ -881,7 +881,7 @@ function renderSessionRow(r: LiveSessionRow, opts?: { isChild?: boolean; parentI
   }
 
   const hitsCell = r.warmingSnap
-    ? `${r.warmupHits}/${r.warmupCount}`
+    ? `${r.warmupHits}/${r.totalWarmups}`
     : "-";
 
   const trAttrs = isChild
@@ -1220,8 +1220,8 @@ function renderWarmingSection(sessionId: string): string {
 
   const snap = computeWarmingSnapshot(state);
   const hitRate =
-    snap.warmupCount > 0
-      ? `${snap.warmupHits}/${snap.warmupCount} (${((snap.warmupHits / snap.warmupCount) * 100).toFixed(0)}%)`
+    snap.totalWarmups > 0
+      ? `${snap.warmupHits}/${snap.totalWarmups} (${((snap.warmupHits / snap.totalWarmups) * 100).toFixed(0)}%)`
       : "0";
 
   let html = `<h2>Cache Warming</h2>`;
@@ -1229,7 +1229,7 @@ function renderWarmingSection(sessionId: string): string {
   // Stat cards
   html += `<div class="stats">
     <div class="stat"><div class="label">Status</div><div class="value">${warmingStatusBadge(snap)}</div></div>
-    <div class="stat"><div class="label">Warmups</div><div class="value">${snap.warmupCount}</div></div>
+    <div class="stat"><div class="label">Warmups</div><div class="value">${snap.totalWarmups}</div></div>
     <div class="stat"><div class="label">Hits</div><div class="value">${hitRate}</div></div>
     <div class="stat"><div class="label">P(returns)</div><div class="value">${(snap.pReturns * 100).toFixed(1)}%</div></div>
     <div class="stat"><div class="label">P(finished)</div><div class="value">${(snap.pSessionFinished * 100).toFixed(1)}%</div></div>
@@ -1564,7 +1564,7 @@ function pageWarming(): string {
   function accumulateStats(r: LiveSessionRow): void {
     totalSessionCount++;
     if (r.warmingSnap) {
-      totalWarmups += r.warmupCount;
+      totalWarmups += r.totalWarmups;
       totalHits += r.warmupHits;
       if (r.warmingSnap.shouldWarmNow) warmingNow++;
       if (r.warmingSnap.disabled) deadCount++;

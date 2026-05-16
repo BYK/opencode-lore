@@ -327,10 +327,12 @@ export type InterTurnHistogram = {
 
 /** Per-session cache warming state. */
 export type WarmupState = {
-  /** Timestamp (ms) of the last warmup ping sent. */
+  /** Timestamp (ms) of the last warmup ping sent. Cleared when consumed (user returns). */
   lastWarmupAt: number;
-  /** Total warmup pings sent in this session. */
+  /** Warmup pings sent in the CURRENT break period (reset on user return). Used for break-even cap. */
   warmupCount: number;
+  /** Lifetime total warmup pings sent across all break periods in this session. */
+  totalWarmups: number;
   /** Warmups followed by a user return within TTL (confirmed saves). */
   warmupHits: number;
   /** Session marked as dead — survival dropped below threshold. Resets on real request. */

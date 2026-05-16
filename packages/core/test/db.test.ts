@@ -632,7 +632,7 @@ describe("db", () => {
 
   test("saveSessionTracking v24 cache warming round-trip", () => {
     const sid = `test-v24-warming-${crypto.randomUUID()}`;
-    const warmup = { lastWarmupAt: 1000, warmupCount: 3, warmupHits: 1, disabled: false, forceKeepWarm: true };
+    const warmup = { lastWarmupAt: 1000, warmupCount: 3, totalWarmups: 3, warmupHits: 1, disabled: false, forceKeepWarm: true };
     saveSessionTracking(sid, {
       resolvedConversationTTL: "1h",
       warmupState: JSON.stringify(warmup),
@@ -642,6 +642,7 @@ describe("db", () => {
     expect(loaded!.resolvedConversationTTL).toBe("1h");
     const parsed = JSON.parse(loaded!.warmupState!);
     expect(parsed.warmupCount).toBe(3);
+    expect(parsed.totalWarmups).toBe(3);
     expect(parsed.forceKeepWarm).toBe(true);
   });
 

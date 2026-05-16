@@ -766,7 +766,7 @@ export function shouldWarm(
 function markDeadIfSurvivalLow(state: SessionState, survivalAtIdle: number): void {
   if (survivalAtIdle < DEAD_SESSION_THRESHOLD) {
     if (!state.warmup) {
-      state.warmup = { lastWarmupAt: 0, warmupCount: 0, warmupHits: 0, disabled: true };
+      state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: true };
     } else {
       state.warmup.disabled = true;
     }
@@ -792,6 +792,7 @@ export type WarmingSnapshot = {
   ttl: "5m" | "1h" | undefined;
   // Warmup state
   warmupCount: number;
+  totalWarmups: number;
   warmupHits: number;
   lastWarmupAt: number;
   disabled: boolean;
@@ -947,6 +948,7 @@ export function computeWarmingSnapshot(
     consecutiveTextOnlyTurns: textOnlyRuns,
     ttl: state.resolvedConversationTTL,
     warmupCount: cyclesSpent,
+    totalWarmups: state.warmup?.totalWarmups ?? 0,
     warmupHits: state.warmup?.warmupHits ?? 0,
     lastWarmupAt: state.warmup?.lastWarmupAt ?? 0,
     disabled: state.warmup?.disabled ?? false,
@@ -1147,10 +1149,11 @@ export async function executeWarmup(
 
     // Update session warmup state
     if (!state.warmup) {
-      state.warmup = { lastWarmupAt: 0, warmupCount: 0, warmupHits: 0, disabled: false };
+      state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: false };
     }
     state.warmup.lastWarmupAt = Date.now();
     state.warmup.warmupCount++;
+    state.warmup.totalWarmups = (state.warmup.totalWarmups ?? 0) + 1;
 
     // Check circuit breaker
     checkCircuitBreaker(result);
