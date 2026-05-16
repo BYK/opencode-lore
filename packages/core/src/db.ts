@@ -1013,21 +1013,22 @@ export function loadForceMinLayer(sessionID: string): number {
 }
 
 /**
- * Persist forceMinLayer for a session. Deletes the row when layer is 0
- * (consumed) to avoid unbounded growth.
+ * Persist forceMinLayer for a session. Resets to 0 when consumed.
+ * Uses INSERT OR IGNORE + UPDATE to preserve sibling columns
+ * (cost, gradient, tracking) that other writers depend on.
  */
 export function saveForceMinLayer(sessionID: string, layer: number): void {
-  if (layer === 0) {
-    db()
-      .query("UPDATE session_state SET force_min_layer = 0 WHERE session_id = ?")
-      .run(sessionID);
-  } else {
-    db()
-      .query(
-        "INSERT OR REPLACE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, ?, ?)",
-      )
-      .run(sessionID, layer, Date.now());
-  }
+  const now = Date.now();
+  // Ensure row exists (no-op if it already does)
+  db()
+    .query(
+      "INSERT OR IGNORE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, 0, ?)",
+    )
+    .run(sessionID, now);
+  // Update only the force_min_layer column, preserving all others
+  db()
+    .query("UPDATE session_state SET force_min_layer = ?, updated_at = ? WHERE session_id = ?")
+    .run(layer, now, sessionID);
 }
 
 /** Persisted cost snapshot for a session. */

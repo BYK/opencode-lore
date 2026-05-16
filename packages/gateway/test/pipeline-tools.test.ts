@@ -577,8 +577,8 @@ describe("end-to-end: gradient eviction doesn't produce orphaned tool_result", (
 import { buildOpenAIUpstreamRequest } from "../src/translate/openai";
 import type { GatewayRequest } from "../src/translate/types";
 
-test("BUG-006: OpenAI translator preserves tool_result as role:tool message", () => {
-  const req: GatewayRequest = {
+function makeOpenAIReq(messages: GatewayRequest["messages"]): GatewayRequest {
+  return {
     protocol: "openai",
     model: "test-model",
     stream: false,
@@ -590,27 +590,67 @@ test("BUG-006: OpenAI translator preserves tool_result as role:tool message", ()
       gitRoot: "/test",
     },
     system: "system prompt",
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            toolUseId: "call_123",
-            content: "the result",
-          }
-        ]
-      }
-    ],
+    messages,
     tools: [],
     rawHeaders: {},
   };
-  
-  const result = buildOpenAIUpstreamRequest(req, "https://api.openai.com");
-  const body = result.body as { messages: any[] };
-  
+}
+
+test("BUG-006: OpenAI translator preserves tool_result as role:tool message", () => {
+  const req = makeOpenAIReq([
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", toolUseId: "call_123", content: "the result" },
+      ],
+    },
+  ]);
+
+  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com").body as { messages: any[] };
   const toolMsg = body.messages.find((m: any) => m.role === "tool");
   expect(toolMsg).toBeDefined();
   expect(toolMsg.tool_call_id).toBe("call_123");
   expect(toolMsg.content).toBe("the result");
+});
+
+test("BUG-006: mixed text + tool_result in same message emits both", () => {
+  const req = makeOpenAIReq([
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", toolUseId: "call_A", content: "result A" },
+        { type: "text", text: "Please continue" },
+      ],
+    },
+  ]);
+
+  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com").body as { messages: any[] };
+  // Should have system + tool + user messages
+  const toolMsg = body.messages.find((m: any) => m.role === "tool");
+  const userMsg = body.messages.find((m: any) => m.role === "user");
+  expect(toolMsg).toBeDefined();
+  expect(toolMsg.tool_call_id).toBe("call_A");
+  expect(userMsg).toBeDefined();
+  expect(userMsg.content).toBe("Please continue");
+});
+
+test("BUG-006: multiple tool_results in one message are all preserved", () => {
+  const req = makeOpenAIReq([
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", toolUseId: "call_1", content: "result 1" },
+        { type: "tool_result", toolUseId: "call_2", content: "result 2" },
+        { type: "tool_result", toolUseId: "call_3", content: "" },
+      ],
+    },
+  ]);
+
+  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com").body as { messages: any[] };
+  const toolMsgs = body.messages.filter((m: any) => m.role === "tool");
+  expect(toolMsgs).toHaveLength(3);
+  expect(toolMsgs[0].tool_call_id).toBe("call_1");
+  expect(toolMsgs[1].tool_call_id).toBe("call_2");
+  expect(toolMsgs[2].tool_call_id).toBe("call_3");
+  expect(toolMsgs[2].content).toBe(""); // empty content preserved
 });
