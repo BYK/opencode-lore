@@ -523,7 +523,7 @@ function buildOpenAIMessages(
       } else if (block.type === "tool_result") {
         result.push({
           role: "tool",
-          tool_call_id: block.tool_use_id,
+          tool_call_id: block.toolUseId,
           content: typeof block.content === "string" ? block.content : JSON.stringify(block.content),
         });
       }

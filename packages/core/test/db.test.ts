@@ -763,8 +763,6 @@ describe("db", () => {
     saveSessionTracking(sid, {
       lastLayer: 1,
       lastKnownInput: 50,
-      postIdleCompact: false,
-      consecutiveBusts: 0,
     });
 
     const trackingBefore = loadSessionTracking(sid);

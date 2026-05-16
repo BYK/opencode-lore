@@ -575,10 +575,20 @@ describe("end-to-end: gradient eviction doesn't produce orphaned tool_result", (
 });
 
 import { buildOpenAIUpstreamRequest } from "../src/translate/openai";
+import type { GatewayRequest } from "../src/translate/types";
 
 test("BUG-006: OpenAI translator preserves tool_result as role:tool message", () => {
-  const req = {
+  const req: GatewayRequest = {
+    protocol: "openai",
     model: "test-model",
+    stream: false,
+    maxTokens: 1000,
+    metadata: {
+      projectId: "test",
+      projectPath: "/test",
+      gitRemote: "test",
+      gitRoot: "/test",
+    },
     system: "system prompt",
     messages: [
       {
@@ -586,7 +596,7 @@ test("BUG-006: OpenAI translator preserves tool_result as role:tool message", ()
         content: [
           {
             type: "tool_result",
-            tool_use_id: "call_123",
+            toolUseId: "call_123",
             content: "the result",
           }
         ]
@@ -597,9 +607,9 @@ test("BUG-006: OpenAI translator preserves tool_result as role:tool message", ()
   };
   
   const result = buildOpenAIUpstreamRequest(req, "https://api.openai.com");
-  const body = result.body;
+  const body = result.body as { messages: any[] };
   
-  const toolMsg = body.messages.find(m => m.role === "tool");
+  const toolMsg = body.messages.find((m: any) => m.role === "tool");
   expect(toolMsg).toBeDefined();
   expect(toolMsg.tool_call_id).toBe("call_123");
   expect(toolMsg.content).toBe("the result");
