@@ -1,6 +1,6 @@
 {
   "name": "@loreai/pi",
-  "version": "0.20.2",
+  "version": "0.21.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "description": "Lore memory engine as a Pi (@mariozechner/pi-coding-agent) extension",

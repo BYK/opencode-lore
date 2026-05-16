@@ -1,4 +1,18 @@
 # Changelog
+## 0.21.0
+
+### New Features ✨
+
+- Display subagent sessions as collapsible tree with cost roll-up by @BYK in [#360](https://github.com/BYK/loreai/pull/360)
+- Persist table sort order to localStorage by @BYK in [#354](https://github.com/BYK/loreai/pull/354)
+
+### Bug Fixes 🐛
+
+- Correct cache bust detection causing false unsustainable warnings by @BYK in [#359](https://github.com/BYK/loreai/pull/359)
+- Improve LTM preference injection — skip relevance scoring, dedicated budget, meaningful confidence by @BYK in [#358](https://github.com/BYK/loreai/pull/358)
+- Forward anthropic-beta header in cache-warmer to support beta-gated body fields by @BYK in [#357](https://github.com/BYK/loreai/pull/357)
+- Prevent splitSegments infinite recursion and add global background work throttling by @BYK in [#355](https://github.com/BYK/loreai/pull/355)
+
 ## 0.20.2
 
 ### Bug Fixes 🐛
