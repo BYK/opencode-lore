@@ -111,6 +111,7 @@ import {
 } from "./temporal-adapter";
 import { createGatewayLLMClient } from "./llm-adapter";
 import { createBatchLLMClient } from "./batch-queue";
+import { runBackground, resetBackgroundLimiter } from "./background-limiter";
 import {
   extractAuth,
   authFingerprint,
@@ -220,6 +221,7 @@ export async function resetPipelineState(): Promise<void> {
   }
   lastSeenSessionModel = null;
   resetWorkerModelState();
+  resetBackgroundLimiter();
 }
 
 /** Per-session state tracked across requests. */
@@ -2025,9 +2027,10 @@ function scheduleBackgroundWork(
       log.info(
         `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
       );
-      distillation
-        .run({ llm, projectPath, sessionID, model, skipMeta: true, callType: batchQueueEnabled ? "batch" : "direct" })
-        .catch((e) => log.error("background distillation failed:", e));
+      runBackground(
+        () => distillation.run({ llm, projectPath, sessionID, model, skipMeta: true, callType: batchQueueEnabled ? "batch" : "direct" }),
+        `incremental-distill session=${sessionID.slice(0, 16)}`,
+      ).catch((e) => log.error("background distillation failed:", e));
     }
   }
 
@@ -2046,11 +2049,15 @@ function scheduleBackgroundWork(
     cfg.curator.onIdle &&
     sessionState.turnsSinceCuration >= effectiveAfterTurns
   ) {
-    Sentry.startSpan(
-      { name: "lore.curator", op: "lore.curation", attributes: { trigger: "in-flight" } },
-      () => curator.run({ llm, projectPath, sessionID, model }),
+    runBackground(
+      () => Sentry.startSpan(
+        { name: "lore.curator", op: "lore.curation", attributes: { trigger: "in-flight" } },
+        () => curator.run({ llm, projectPath, sessionID, model }),
+      ),
+      `in-flight-curation session=${sessionID.slice(0, 16)}`,
     )
       .then((result) => {
+        if (!result) return; // skipped by circuit breaker
         sessionState.turnsSinceCuration = 0;
         saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
         if (result.created > 0 || result.updated > 0 || result.deleted > 0) {

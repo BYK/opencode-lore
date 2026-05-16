@@ -953,6 +953,36 @@ describe("detectSegments", () => {
     expect(result[0]).toHaveLength(10);
     expect(result[1]).toHaveLength(10);
   });
+
+  test("single oversized message yields one segment without infinite recursion", () => {
+    // One message with 20000 tokens > maxTokens of 16384.
+    // Previously caused RangeError: Maximum call stack size exceeded.
+    const messages = msgs(1, 20000);
+    const result = detectSegments(messages, 16384);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toHaveLength(1);
+    expect(result[0][0].tokens).toBe(20000);
+  });
+
+  test("oversized message among normal messages splits without crashing", () => {
+    // 3 messages: 100 + 20000 + 100 = 20200 tokens, maxTokens = 16384
+    const normal1 = msgs(1, 100);
+    const oversized = msgs(1, 20000).map((m) => ({
+      ...m,
+      id: "seg-msg-oversized",
+      created_at: T + 5000,
+    }));
+    const normal2 = msgs(1, 100).map((m) => ({
+      ...m,
+      id: "seg-msg-trailing",
+      created_at: T + 10000,
+    }));
+    const messages = [...normal1, ...oversized, ...normal2];
+    const result = detectSegments(messages, 16384);
+    // Should not crash; all messages must be present in output
+    const flat = result.flat();
+    expect(flat).toHaveLength(3);
+  });
 });
 
 // ─── r_compression / c_norm DB columns ──────────────────────────────────────

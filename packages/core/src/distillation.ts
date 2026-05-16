@@ -147,6 +147,11 @@ function splitSegments(
   const totalTokens = messages.reduce((s, m) => s + m.tokens, 0);
   if (totalTokens <= maxTokens) return [messages];
 
+  // Cannot subdivide a single message — yield as-is (oversized but indivisible).
+  // Prevents infinite recursion when one message exceeds maxTokens (e.g., a 50KB+
+  // tool output where Math.ceil(content.length / 3) > 16384).
+  if (messages.length <= 1) return [messages];
+
   // Find the split point: prefer the largest time gap if it's significant
   const splitIdx = findSplitIndex(messages, maxTokens);
 

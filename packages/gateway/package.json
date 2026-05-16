@@ -25,7 +25,9 @@
     "build:binary": "bun run script/build.ts --binary",
     "start": "bun run src/index.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "p-limit": "7"
+  },
   "files": [
     "dist/bin.cjs",
     "dist/embedding-worker.cjs",

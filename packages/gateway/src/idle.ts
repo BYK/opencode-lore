@@ -44,6 +44,7 @@ import {
   MIN_TURNS_FOR_WARMING,
 } from "./cache-warmer";
 import * as Sentry from "@sentry/bun";
+import { runBackground } from "./background-limiter";
 import { emitWarmupMetric, emitSessionCostMetrics, emitCurationMetrics } from "./sentry";
 import { getSessionCosts, totalWorkerCost } from "./cost-tracker";
 
@@ -80,7 +81,10 @@ export function startIdleScheduler(
       if (now - state.lastRequestTime < timeoutMs) continue;
 
       inProgress.add(sessionID);
-      doIdleWork(sessionID, state)
+      runBackground(
+        () => doIdleWork(sessionID, state),
+        `idle session=${sessionID.slice(0, 16)}`,
+      )
         .catch((e) => log.error(`idle work failed for session ${sessionID}:`, e))
         .finally(() => inProgress.delete(sessionID));
     }

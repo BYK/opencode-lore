@@ -34,6 +34,9 @@
         "lore": "./dist/bin.cjs",
         "lore-gateway": "./dist/bin.cjs",
       },
+      "dependencies": {
+        "p-limit": "7",
+      },
       "devDependencies": {
         "@loreai/core": "workspace:*",
         "@sentry/bun": "^10.52.0",

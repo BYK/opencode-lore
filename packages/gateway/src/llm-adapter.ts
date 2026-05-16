@@ -17,6 +17,7 @@ import { log } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
 import { authHeaders } from "./auth";
+import { tripCircuitBreaker } from "./background-limiter";
 import { buildBillingBlock, signBody } from "./cch";
 import {
   setGenAiUsageAttributes,
@@ -446,6 +447,16 @@ export function createGatewayLLMClient(
               }
 
               // Transient error — retry if attempts remain
+              // Trip the global circuit breaker on non-urgent 429s so other
+              // background work pauses instead of piling on more requests.
+              if (response.status === 429 && !urgent) {
+                const cbRetryAfter = parseRetryAfter(response);
+                const pauseSec = cbRetryAfter
+                  ? Math.ceil(cbRetryAfter / 1000)
+                  : undefined;
+                tripCircuitBreaker(pauseSec);
+              }
+
               const maxRetries = maxRetriesFor(response.status, urgent);
               if (attempt < maxRetries) {
                 const retryAfter = parseRetryAfter(response);
