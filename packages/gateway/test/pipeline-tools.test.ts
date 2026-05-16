@@ -573,3 +573,34 @@ describe("end-to-end: gradient eviction doesn't produce orphaned tool_result", (
     expect(toolResult.content).toBe("file.ts");
   });
 });
+
+import { buildOpenAIUpstreamRequest } from "../src/translate/openai";
+
+test("BUG-006: OpenAI translator preserves tool_result as role:tool message", () => {
+  const req = {
+    model: "test-model",
+    system: "system prompt",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_123",
+            content: "the result",
+          }
+        ]
+      }
+    ],
+    tools: [],
+    rawHeaders: {},
+  };
+  
+  const result = buildOpenAIUpstreamRequest(req, "https://api.openai.com");
+  const body = result.body;
+  
+  const toolMsg = body.messages.find(m => m.role === "tool");
+  expect(toolMsg).toBeDefined();
+  expect(toolMsg.tool_call_id).toBe("call_123");
+  expect(toolMsg.content).toBe("the result");
+});

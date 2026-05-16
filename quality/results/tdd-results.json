@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-05-16T18:35:00Z",
+  "playbook_version": "1.5.6",
+  "project": "opencode-lore",
+  "bugs": [
+    {
+      "id": "BUG-001",
+      "cb_id": "CB-001",
+      "title": "saveForceMinLayer deletes entire session_state row",
+      "severity": "HIGH",
+      "test_file": "packages/core/test/db.test.ts",
+      "test_name": "BUG-001: saveForceMinLayer(sid, 0) preserves other session_state columns",
+      "red_log": "quality/results/BUG-001.red.log",
+      "red_exit_code": 1,
+      "red_passed": false,
+      "green_log": "quality/results/BUG-001.green.log",
+      "green_exit_code": 0,
+      "green_passed": true,
+      "fix_files": ["packages/core/src/db.ts"],
+      "fix_description": "Use UPDATE SET force_min_layer = 0 instead of DELETE",
+      "verdict": "TDD verified"
+    },
+    {
+      "id": "BUG-006",
+      "cb_id": "CB-006",
+      "title": "OpenAI translator drops tool_result blocks",
+      "severity": "HIGH",
+      "test_file": "packages/gateway/test/pipeline-tools.test.ts",
+      "test_name": "BUG-006: OpenAI translator preserves tool_result as role:tool message",
+      "red_log": "quality/results/BUG-006.red.log",
+      "red_exit_code": 1,
+      "red_passed": false,
+      "green_log": "quality/results/BUG-006.green.log",
+      "green_exit_code": 0,
+      "green_passed": true,
+      "fix_files": ["packages/gateway/src/translate/openai.ts"],
+      "fix_description": "Map tool_result blocks to {role: tool} messages",
+      "verdict": "TDD verified"
+    }
+  ],
+  "summary": {
+    "total": 12,
+    "tdd_verified": 2,
+    "red_failed": 0,
+    "green_failed": 0,
+    "confirmed_open": 10,
+    "deferred": 10
+  }
+}

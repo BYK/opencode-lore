@@ -1,0 +1,164 @@
+{
+  "schema_version": "1.0",
+  "skill_version": "1.5.6",
+  "generated_at": "2026-05-16T16:10:00Z",
+  "project": "opencode-lore",
+  "requirements": [
+    {
+      "id": "REQ-001",
+      "title": "Recoverable embedding provider fallback",
+      "tier": 3,
+      "functional_section": "Embedding and Search",
+      "specificity": "specific",
+      "use_cases": ["UC-02"],
+      "candidate_bugs": ["CB-010"],
+      "description": "Embedding auto-fallback from local to remote MUST be recoverable — either retry local on a configurable timer or fall back per-request rather than permanently replacing the provider.",
+      "references": ["packages/core/src/embedding.ts:700", "packages/core/src/embedding.ts:502"]
+    },
+    {
+      "id": "REQ-002",
+      "title": "FTS5 degradation signal",
+      "tier": 3,
+      "functional_section": "Embedding and Search",
+      "specificity": "specific",
+      "use_cases": ["UC-02"],
+      "candidate_bugs": [],
+      "description": "FTS5 fallback to LIKE search SHOULD propagate a degradation signal so callers can log the fallback and optionally adjust scoring behavior.",
+      "references": ["packages/core/src/search.ts:162", "packages/core/src/ltm.ts:272-274"]
+    },
+    {
+      "id": "REQ-003",
+      "title": "Multi-interface port conflict probe",
+      "tier": 3,
+      "functional_section": "Gateway Networking",
+      "specificity": "specific",
+      "use_cases": ["UC-01"],
+      "candidate_bugs": [],
+      "description": "Gateway port-conflict probe MUST check all configured host interfaces, not just the first one, to correctly detect existing gateways.",
+      "references": ["packages/gateway/src/cli/start.ts:131-138"]
+    },
+    {
+      "id": "REQ-004",
+      "title": "Serialized fingerprint-based session lookup",
+      "tier": 3,
+      "functional_section": "Session Management",
+      "specificity": "specific",
+      "use_cases": ["UC-01", "UC-02"],
+      "candidate_bugs": ["CB-002"],
+      "description": "Fingerprint-based session identification MUST serialize concurrent lookups to prevent session splits for the same conversation.",
+      "references": ["packages/gateway/src/pipeline.ts:880-975", "packages/gateway/src/session.ts:180"]
+    },
+    {
+      "id": "REQ-005",
+      "title": "Protocol-agnostic LTM cache optimization",
+      "tier": 3,
+      "functional_section": "LTM Injection",
+      "specificity": "specific",
+      "use_cases": ["UC-01", "UC-03"],
+      "candidate_bugs": [],
+      "description": "LTM injection SHOULD preserve the stable/context-bound distinction across all protocol paths to optimize cache behavior, not just for Anthropic.",
+      "references": ["packages/gateway/src/translate/anthropic.ts:369-423", "packages/gateway/src/pipeline.ts:1028-1040"]
+    },
+    {
+      "id": "REQ-006",
+      "title": "Cross-protocol tool_result preservation",
+      "tier": 3,
+      "functional_section": "Protocol Translation",
+      "specificity": "specific",
+      "pattern": "parity",
+      "use_cases": ["UC-03", "UC-TOOL-001.a", "UC-TOOL-001.b", "UC-TOOL-001.c"],
+      "candidate_bugs": ["CB-006", "CB-008"],
+      "description": "All protocol translators MUST preserve tool_result blocks when converting between gateway internal format and upstream wire format.",
+      "references": ["packages/gateway/src/translate/anthropic.ts:369-423", "packages/gateway/src/translate/openai.ts:523-527", "packages/gateway/src/translate/openai-responses.ts:126-131"]
+    },
+    {
+      "id": "REQ-007",
+      "title": "Cross-protocol streaming error propagation",
+      "tier": 3,
+      "functional_section": "Protocol Translation",
+      "specificity": "specific",
+      "pattern": "parity",
+      "use_cases": ["UC-STREAM-001.a", "UC-STREAM-001.b", "UC-STREAM-001.c"],
+      "candidate_bugs": ["CB-012"],
+      "description": "All streaming translators MUST propagate upstream error events to clients in the target protocol's error format.",
+      "references": ["packages/gateway/src/stream/openai.ts", "packages/gateway/src/stream/openai-responses.ts:687-711"]
+    },
+    {
+      "id": "REQ-008",
+      "title": "Shared gateway discovery module",
+      "tier": 3,
+      "functional_section": "Plugin Architecture",
+      "specificity": "specific",
+      "use_cases": ["UC-01"],
+      "candidate_bugs": [],
+      "description": "Gateway discovery logic SHOULD be extracted to a shared module consumed by both OpenCode and Pi plugins to prevent code divergence.",
+      "references": ["packages/opencode/src/index.ts:39-80", "packages/pi/src/index.ts:99-133"]
+    },
+    {
+      "id": "REQ-009",
+      "title": "Extensible upstream routing",
+      "tier": 3,
+      "functional_section": "Upstream Routing",
+      "specificity": "specific",
+      "use_cases": ["UC-01", "UC-03"],
+      "candidate_bugs": [],
+      "description": "The upstream routing table MUST be extensible via configuration to support new model providers without code changes.",
+      "references": ["packages/gateway/src/config.ts:99-121"]
+    },
+    {
+      "id": "REQ-010",
+      "title": "Complete agent detection registry",
+      "tier": 3,
+      "functional_section": "Agent Detection",
+      "specificity": "specific",
+      "use_cases": ["UC-01"],
+      "candidate_bugs": [],
+      "description": "The agent detection registry SHOULD include entries for all documented supported tools (including Cursor and Windsurf).",
+      "references": ["packages/gateway/src/cli/agents.ts:82-141"]
+    },
+    {
+      "id": "REQ-011",
+      "title": "Consistent session state persistence lifecycle",
+      "tier": 3,
+      "functional_section": "State Persistence",
+      "specificity": "specific",
+      "use_cases": ["UC-01", "UC-02"],
+      "candidate_bugs": ["CB-001"],
+      "description": "Session state persistence MUST either restore all persisted fields on load OR remove write-only persistence for transient fields. saveForceMinLayer MUST NOT delete the entire session_state row.",
+      "references": ["packages/core/src/db.ts:891-950", "packages/core/src/db.ts:1019-1031", "packages/core/src/gradient.ts:673-677"]
+    },
+    {
+      "id": "REQ-012",
+      "title": "LTM pool deduplication",
+      "tier": 3,
+      "functional_section": "LTM Scoring Pipeline",
+      "specificity": "specific",
+      "use_cases": ["UC-01", "UC-02"],
+      "candidate_bugs": ["CB-009"],
+      "description": "The LTM scoring pipeline SHOULD deduplicate entries after merging project and cross-project pools to prevent duplicate injection into the system prompt.",
+      "references": ["packages/core/src/ltm.ts:415-641"]
+    },
+    {
+      "id": "REQ-013",
+      "title": "CLI-core implementation delegation",
+      "tier": 3,
+      "functional_section": "API Surface Consistency",
+      "specificity": "specific",
+      "use_cases": ["UC-02"],
+      "candidate_bugs": [],
+      "description": "CLI data commands SHOULD delegate to core functions rather than reimplementing logic (e.g., pairKey) to prevent divergence.",
+      "references": ["packages/gateway/src/cli/data.ts:748", "packages/core/src/ltm.ts"]
+    },
+    {
+      "id": "REQ-014",
+      "title": "Recall gateway-CLI parity",
+      "tier": 3,
+      "functional_section": "API Surface Consistency",
+      "specificity": "specific",
+      "use_cases": ["UC-02"],
+      "candidate_bugs": ["CB-004", "CB-005"],
+      "description": "CLI recall SHOULD document query expansion limitations and offer parity with gateway recall where possible.",
+      "references": ["packages/gateway/src/recall.ts:343", "packages/gateway/src/cli/recall-cmd.ts:21"]
+    }
+  ]
+}

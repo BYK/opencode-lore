@@ -1,0 +1,1465 @@
+{
+  "schema_version": "1.0",
+  "timestamp_start": "2026-05-16T15:10:01Z",
+  "provenance": "git-ls-files",
+  "files": [
+    {
+      "path": ".DS_Store",
+      "role": "config",
+      "size_bytes": 8196,
+      "rationale": "Project configuration file"
+    },
+    {
+      "path": ".craft.yml",
+      "role": "config",
+      "size_bytes": 2133,
+      "rationale": "Project configuration file"
+    },
+    {
+      "path": ".github/workflows/cch-seed-check.yml",
+      "role": "config",
+      "size_bytes": 7385,
+      "rationale": "GitHub Actions CI/CD workflow"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "role": "config",
+      "size_bytes": 32410,
+      "rationale": "GitHub Actions CI/CD workflow"
+    },
+    {
+      "path": ".github/workflows/cleanup-nightlies.yml",
+      "role": "config",
+      "size_bytes": 2342,
+      "rationale": "GitHub Actions CI/CD workflow"
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "role": "config",
+      "size_bytes": 3060,
+      "rationale": "GitHub Actions CI/CD workflow"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "role": "config",
+      "size_bytes": 982,
+      "rationale": "GitHub Actions CI/CD workflow"
+    },
+    {
+      "path": ".gitignore",
+      "role": "config",
+      "size_bytes": 305,
+      "rationale": "Project configuration file"
+    },
+    {
+      "path": ".lore.md",
+      "role": "docs",
+      "size_bytes": 20980,
+      "rationale": "Long-term knowledge entries managed by lore"
+    },
+    {
+      "path": "AGENTS.md",
+      "role": "docs",
+      "size_bytes": 8188,
+      "rationale": "AI agent bootstrap context document"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "role": "docs",
+      "size_bytes": 56261,
+      "rationale": "Project changelog"
+    },
+    {
+      "path": "LICENSE",
+      "role": "docs",
+      "size_bytes": 3760,
+      "rationale": "License file"
+    },
+    {
+      "path": "README.md",
+      "role": "docs",
+      "size_bytes": 20105,
+      "rationale": "Project/package documentation"
+    },
+    {
+      "path": "bun.lock",
+      "role": "config",
+      "size_bytes": 126965,
+      "rationale": "Project configuration file"
+    },
+    {
+      "path": "bunfig.toml",
+      "role": "config",
+      "size_bytes": 81,
+      "rationale": "Project configuration file"
+    },
+    {
+      "path": "docs/CNAME",
+      "role": "docs",
+      "size_bytes": 11,
+      "rationale": "Project documentation or website assets"
+    },
+    {
+      "path": "docs/PROMPT_CHANGES.md",
+      "role": "docs",
+      "size_bytes": 6601,
+      "rationale": "Project documentation or website assets"
+    },
+    {
+      "path": "docs/index.html",
+      "role": "docs",
+      "size_bytes": 29924,
+      "rationale": "Project documentation or website assets"
+    },
+    {
+      "path": "docs/install",
+      "role": "docs",
+      "size_bytes": 8333,
+      "rationale": "Project documentation or website assets"
+    },
+    {
+      "path": "docs/logo.svg",
+      "role": "docs",
+      "size_bytes": 530,
+      "rationale": "Project documentation or website assets"
+    },
+    {
+      "path": "package.json",
+      "role": "config",
+      "size_bytes": 852,
+      "rationale": "Project configuration file"
+    },
+    {
+      "path": "packages/core/LICENSE",
+      "role": "docs",
+      "size_bytes": 1060,
+      "rationale": "License file"
+    },
+    {
+      "path": "packages/core/README.md",
+      "role": "docs",
+      "size_bytes": 2637,
+      "rationale": "Project/package documentation"
+    },
+    {
+      "path": "packages/core/bunfig.toml",
+      "role": "config",
+      "size_bytes": 67,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/core/package.json",
+      "role": "config",
+      "size_bytes": 1352,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/core/script/build.ts",
+      "role": "code",
+      "size_bytes": 4707,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/core/src/agents-file.ts",
+      "role": "code",
+      "size_bytes": 22768,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/config.ts",
+      "role": "code",
+      "size_bytes": 13215,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/curator.ts",
+      "role": "code",
+      "size_bytes": 10709,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/data-dir.ts",
+      "role": "code",
+      "size_bytes": 2507,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/data.ts",
+      "role": "code",
+      "size_bytes": 22555,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/db.ts",
+      "role": "code",
+      "size_bytes": 59964,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/db/driver.bun.ts",
+      "role": "code",
+      "size_bytes": 703,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/db/driver.node.ts",
+      "role": "code",
+      "size_bytes": 2100,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/distillation.ts",
+      "role": "code",
+      "size_bytes": 39836,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/embedding-vendor.ts",
+      "role": "code",
+      "size_bytes": 3522,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/embedding-worker-types.ts",
+      "role": "code",
+      "size_bytes": 3265,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/embedding-worker.ts",
+      "role": "code",
+      "size_bytes": 9073,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/embedding.ts",
+      "role": "code",
+      "size_bytes": 47521,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/git.ts",
+      "role": "code",
+      "size_bytes": 5093,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/gradient.ts",
+      "role": "code",
+      "size_bytes": 90086,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/hosted.ts",
+      "role": "code",
+      "size_bytes": 1521,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/detect.ts",
+      "role": "code",
+      "size_bytes": 1269,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/extract.ts",
+      "role": "code",
+      "size_bytes": 4194,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/history.ts",
+      "role": "code",
+      "size_bytes": 2695,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/index.ts",
+      "role": "code",
+      "size_bytes": 1048,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/providers/aider.ts",
+      "role": "code",
+      "size_bytes": 5256,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/providers/claude-code.ts",
+      "role": "code",
+      "size_bytes": 10128,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/providers/cline.ts",
+      "role": "code",
+      "size_bytes": 10071,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/providers/codex.ts",
+      "role": "code",
+      "size_bytes": 10432,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/providers/continue.ts",
+      "role": "code",
+      "size_bytes": 8965,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/providers/index.ts",
+      "role": "code",
+      "size_bytes": 1001,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/providers/opencode.ts",
+      "role": "code",
+      "size_bytes": 8305,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/providers/pi.ts",
+      "role": "code",
+      "size_bytes": 9359,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/import/types.ts",
+      "role": "code",
+      "size_bytes": 3004,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/index.ts",
+      "role": "code",
+      "size_bytes": 4169,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/instruction-detect.ts",
+      "role": "code",
+      "size_bytes": 9424,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/lat-reader.ts",
+      "role": "code",
+      "size_bytes": 11547,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/log.ts",
+      "role": "code",
+      "size_bytes": 5524,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/ltm.ts",
+      "role": "code",
+      "size_bytes": 59727,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/markdown.ts",
+      "role": "code",
+      "size_bytes": 4983,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/pattern-extract.ts",
+      "role": "code",
+      "size_bytes": 5229,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/prompt.ts",
+      "role": "code",
+      "size_bytes": 28230,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/recall.ts",
+      "role": "code",
+      "size_bytes": 33710,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/search.ts",
+      "role": "code",
+      "size_bytes": 12777,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/session-limiter.ts",
+      "role": "code",
+      "size_bytes": 1419,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/temporal.ts",
+      "role": "code",
+      "size_bytes": 16238,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/types.ts",
+      "role": "code",
+      "size_bytes": 8879,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/worker-model.ts",
+      "role": "code",
+      "size_bytes": 2098,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/src/worker.ts",
+      "role": "code",
+      "size_bytes": 1053,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/core/test/agents-file.test.ts",
+      "role": "test",
+      "size_bytes": 53259,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/config.test.ts",
+      "role": "test",
+      "size_bytes": 7307,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/context-health.test.ts",
+      "role": "test",
+      "size_bytes": 9618,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/data-dir.test.ts",
+      "role": "test",
+      "size_bytes": 3686,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/db-driver.test.ts",
+      "role": "test",
+      "size_bytes": 2447,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/db.test.ts",
+      "role": "test",
+      "size_bytes": 30855,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/dedup.test.ts",
+      "role": "test",
+      "size_bytes": 29494,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/distillation.test.ts",
+      "role": "test",
+      "size_bytes": 54168,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/embedding-vendor.test.ts",
+      "role": "test",
+      "size_bytes": 2584,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/embedding.test.ts",
+      "role": "test",
+      "size_bytes": 21234,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/fixtures/lat.md/architecture.md",
+      "role": "fixture",
+      "size_bytes": 753,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/core/test/fixtures/lat.md/auth.md",
+      "role": "fixture",
+      "size_bytes": 413,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/core/test/git.test.ts",
+      "role": "test",
+      "size_bytes": 2802,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/gradient-reasoning.test.ts",
+      "role": "test",
+      "size_bytes": 12453,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/gradient.test.ts",
+      "role": "test",
+      "size_bytes": 93729,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/hosted.test.ts",
+      "role": "test",
+      "size_bytes": 5922,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/aider.test.ts",
+      "role": "test",
+      "size_bytes": 3733,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/claude-code.test.ts",
+      "role": "test",
+      "size_bytes": 4094,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/cline.test.ts",
+      "role": "test",
+      "size_bytes": 3444,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/codex.test.ts",
+      "role": "test",
+      "size_bytes": 2748,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/continue.test.ts",
+      "role": "test",
+      "size_bytes": 5413,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/curator-ops.test.ts",
+      "role": "test",
+      "size_bytes": 4758,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/detect.test.ts",
+      "role": "test",
+      "size_bytes": 3146,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/extract.test.ts",
+      "role": "test",
+      "size_bytes": 4993,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/fixtures/aider-history.md",
+      "role": "fixture",
+      "size_bytes": 1149,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/core/test/import/fixtures/claude-code-session.jsonl",
+      "role": "fixture",
+      "size_bytes": 1789,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/core/test/import/fixtures/claude-code-small.jsonl",
+      "role": "fixture",
+      "size_bytes": 315,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/core/test/import/fixtures/cline-conversation.json",
+      "role": "fixture",
+      "size_bytes": 844,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/core/test/import/fixtures/codex-session.jsonl",
+      "role": "fixture",
+      "size_bytes": 1462,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/core/test/import/fixtures/continue-session.json",
+      "role": "fixture",
+      "size_bytes": 1375,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/core/test/import/fixtures/pi-session.jsonl",
+      "role": "fixture",
+      "size_bytes": 1819,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/core/test/import/history.test.ts",
+      "role": "test",
+      "size_bytes": 3274,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/import/pi.test.ts",
+      "role": "test",
+      "size_bytes": 3361,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/instruction-detect.test.ts",
+      "role": "test",
+      "size_bytes": 16749,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/integrity.test.ts",
+      "role": "test",
+      "size_bytes": 2949,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/lat-reader.test.ts",
+      "role": "test",
+      "size_bytes": 4832,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/ltm.test.ts",
+      "role": "test",
+      "size_bytes": 40683,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/markdown.test.ts",
+      "role": "test",
+      "size_bytes": 13097,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/pattern-extract.test.ts",
+      "role": "test",
+      "size_bytes": 17398,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/prompt.test.ts",
+      "role": "test",
+      "size_bytes": 8713,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/refs.test.ts",
+      "role": "test",
+      "size_bytes": 6847,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/search.test.ts",
+      "role": "test",
+      "size_bytes": 15759,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/session-limiter.test.ts",
+      "role": "test",
+      "size_bytes": 4380,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/setup.ts",
+      "role": "test",
+      "size_bytes": 526,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/temporal.test.ts",
+      "role": "test",
+      "size_bytes": 11320,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/worker-model.test.ts",
+      "role": "test",
+      "size_bytes": 5602,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/test/worker.test.ts",
+      "role": "test",
+      "size_bytes": 1794,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/core/tsconfig.build.json",
+      "role": "config",
+      "size_bytes": 250,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/core/tsconfig.json",
+      "role": "config",
+      "size_bytes": 131,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/gateway/instrument.ts",
+      "role": "code",
+      "size_bytes": 3745,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/package.json",
+      "role": "config",
+      "size_bytes": 1430,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/gateway/script/build.ts",
+      "role": "code",
+      "size_bytes": 24781,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/gateway/script/bundle.ts",
+      "role": "code",
+      "size_bytes": 11443,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/gateway/script/debug-id.ts",
+      "role": "code",
+      "size_bytes": 6453,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/gateway/script/node-polyfills.ts",
+      "role": "code",
+      "size_bytes": 5054,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/gateway/script/record-session.ts",
+      "role": "code",
+      "size_bytes": 4788,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/gateway/script/smoke-test.ts",
+      "role": "code",
+      "size_bytes": 16516,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/gateway/script/vendor-embeddings.ts",
+      "role": "code",
+      "size_bytes": 3475,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/gateway/script/vendor-paths.ts",
+      "role": "code",
+      "size_bytes": 2150,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/gateway/src/api.ts",
+      "role": "code",
+      "size_bytes": 19081,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/auth.ts",
+      "role": "code",
+      "size_bytes": 4441,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/background-limiter.ts",
+      "role": "code",
+      "size_bytes": 5004,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/batch-queue.ts",
+      "role": "code",
+      "size_bytes": 35816,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cache-analytics.ts",
+      "role": "code",
+      "size_bytes": 19967,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cache-warmer.ts",
+      "role": "code",
+      "size_bytes": 46665,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cch.ts",
+      "role": "code",
+      "size_bytes": 14554,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/agents.ts",
+      "role": "code",
+      "size_bytes": 4971,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/bin.ts",
+      "role": "code",
+      "size_bytes": 256,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/data.ts",
+      "role": "code",
+      "size_bytes": 59736,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/exit.ts",
+      "role": "code",
+      "size_bytes": 1743,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/help.ts",
+      "role": "code",
+      "size_bytes": 6579,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/import-auto.ts",
+      "role": "code",
+      "size_bytes": 5198,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/import.ts",
+      "role": "code",
+      "size_bytes": 14104,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/lib/binary.ts",
+      "role": "code",
+      "size_bytes": 9277,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/lib/bspatch.ts",
+      "role": "code",
+      "size_bytes": 8915,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/lib/delta-upgrade.ts",
+      "role": "code",
+      "size_bytes": 21060,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/lib/errors.ts",
+      "role": "code",
+      "size_bytes": 1397,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/lib/ghcr.ts",
+      "role": "code",
+      "size_bytes": 9906,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/lib/patch-cache.ts",
+      "role": "code",
+      "size_bytes": 9392,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/lib/upgrade.ts",
+      "role": "code",
+      "size_bytes": 13607,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/lib/version-check.ts",
+      "role": "code",
+      "size_bytes": 11687,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/logs.ts",
+      "role": "code",
+      "size_bytes": 2777,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/main.ts",
+      "role": "code",
+      "size_bytes": 13439,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/recall-cmd.ts",
+      "role": "code",
+      "size_bytes": 3251,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/remote.ts",
+      "role": "code",
+      "size_bytes": 3920,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/run.ts",
+      "role": "code",
+      "size_bytes": 7686,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/start.ts",
+      "role": "code",
+      "size_bytes": 9105,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/upgrade.ts",
+      "role": "code",
+      "size_bytes": 10394,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cli/version.ts",
+      "role": "code",
+      "size_bytes": 690,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/compaction.ts",
+      "role": "code",
+      "size_bytes": 13498,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/config.ts",
+      "role": "code",
+      "size_bytes": 11920,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/cost-tracker.ts",
+      "role": "code",
+      "size_bytes": 29097,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/idle.ts",
+      "role": "code",
+      "size_bytes": 14145,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/index.ts",
+      "role": "code",
+      "size_bytes": 1887,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/llm-adapter.ts",
+      "role": "code",
+      "size_bytes": 19409,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/pipeline.ts",
+      "role": "code",
+      "size_bytes": 139628,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/portfile.ts",
+      "role": "code",
+      "size_bytes": 1799,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/recall.ts",
+      "role": "code",
+      "size_bytes": 16156,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/recorder.ts",
+      "role": "code",
+      "size_bytes": 6712,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/sentry.ts",
+      "role": "code",
+      "size_bytes": 15741,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/server.ts",
+      "role": "code",
+      "size_bytes": 13054,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/session.ts",
+      "role": "code",
+      "size_bytes": 15416,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/stream/anthropic.ts",
+      "role": "code",
+      "size_bytes": 26336,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/stream/openai-responses.ts",
+      "role": "code",
+      "size_bytes": 25098,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/stream/openai.ts",
+      "role": "code",
+      "size_bytes": 11110,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/temporal-adapter.ts",
+      "role": "code",
+      "size_bytes": 9606,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/translate/anthropic.ts",
+      "role": "code",
+      "size_bytes": 17382,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/translate/openai-responses.ts",
+      "role": "code",
+      "size_bytes": 18905,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/translate/openai.ts",
+      "role": "code",
+      "size_bytes": 14756,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/translate/types.ts",
+      "role": "code",
+      "size_bytes": 13707,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/ui.ts",
+      "role": "code",
+      "size_bytes": 89039,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/src/worker-model.ts",
+      "role": "code",
+      "size_bytes": 12957,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/gateway/test/anthropic-caching.test.ts",
+      "role": "test",
+      "size_bytes": 22614,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/api.test.ts",
+      "role": "test",
+      "size_bytes": 16068,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/background-limiter.test.ts",
+      "role": "test",
+      "size_bytes": 3810,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/batch-queue.test.ts",
+      "role": "test",
+      "size_bytes": 20988,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/cache-analytics.test.ts",
+      "role": "test",
+      "size_bytes": 20713,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/cache-warmer.test.ts",
+      "role": "test",
+      "size_bytes": 54237,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/cch.test.ts",
+      "role": "test",
+      "size_bytes": 27353,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/compaction.test.ts",
+      "role": "test",
+      "size_bytes": 24965,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/helpers/fixtures.ts",
+      "role": "test",
+      "size_bytes": 5237,
+      "rationale": "Test helper/utility"
+    },
+    {
+      "path": "packages/gateway/test/helpers/harness.ts",
+      "role": "test",
+      "size_bytes": 5083,
+      "rationale": "Test helper/utility"
+    },
+    {
+      "path": "packages/gateway/test/helpers/idle-worker.ts",
+      "role": "test",
+      "size_bytes": 5900,
+      "rationale": "Test helper/utility"
+    },
+    {
+      "path": "packages/gateway/test/hosted-config.test.ts",
+      "role": "test",
+      "size_bytes": 4102,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/idle.test.ts",
+      "role": "test",
+      "size_bytes": 1405,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/llm-adapter.test.ts",
+      "role": "test",
+      "size_bytes": 8133,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/max-tokens.test.ts",
+      "role": "test",
+      "size_bytes": 6560,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/openai-responses-stream.test.ts",
+      "role": "test",
+      "size_bytes": 14022,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/openai-responses.test.ts",
+      "role": "test",
+      "size_bytes": 18283,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/pipeline-tools.test.ts",
+      "role": "test",
+      "size_bytes": 17757,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/portfile.test.ts",
+      "role": "test",
+      "size_bytes": 2056,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/project-path.test.ts",
+      "role": "test",
+      "size_bytes": 13029,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/recall-stream.test.ts",
+      "role": "test",
+      "size_bytes": 28809,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/recall.test.ts",
+      "role": "test",
+      "size_bytes": 28265,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/replay.test.ts",
+      "role": "test",
+      "size_bytes": 12808,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/session.test.ts",
+      "role": "test",
+      "size_bytes": 22016,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/temporal-adapter.test.ts",
+      "role": "test",
+      "size_bytes": 7349,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/test/worker-model.test.ts",
+      "role": "test",
+      "size_bytes": 12859,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/gateway/tsconfig.json",
+      "role": "config",
+      "size_bytes": 200,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/opencode/LICENSE",
+      "role": "docs",
+      "size_bytes": 1060,
+      "rationale": "License file"
+    },
+    {
+      "path": "packages/opencode/README.md",
+      "role": "docs",
+      "size_bytes": 2609,
+      "rationale": "Project/package documentation"
+    },
+    {
+      "path": "packages/opencode/eval/backfill.ts",
+      "role": "code",
+      "size_bytes": 9899,
+      "rationale": "Evaluation script"
+    },
+    {
+      "path": "packages/opencode/eval/coding_eval.ts",
+      "role": "code",
+      "size_bytes": 23165,
+      "rationale": "Evaluation script"
+    },
+    {
+      "path": "packages/opencode/eval/data/coding_memory_eval.json",
+      "role": "fixture",
+      "size_bytes": 7401,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/opencode/eval/data/coding_session_eval.json",
+      "role": "fixture",
+      "size_bytes": 10581,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/opencode/eval/data/sessions/cli-nightly.json",
+      "role": "fixture",
+      "size_bytes": 1584025,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/opencode/eval/data/sessions/cli-sentry-issue.json",
+      "role": "fixture",
+      "size_bytes": 509987,
+      "rationale": "Test fixture data"
+    },
+    {
+      "path": "packages/opencode/eval/extract_session.ts",
+      "role": "code",
+      "size_bytes": 4024,
+      "rationale": "Evaluation script"
+    },
+    {
+      "path": "packages/opencode/eval/results/.keep",
+      "role": "fixture",
+      "size_bytes": 0,
+      "rationale": "Evaluation results data"
+    },
+    {
+      "path": "packages/opencode/eval/results/coding_eval_v3.jsonl",
+      "role": "fixture",
+      "size_bytes": 27713,
+      "rationale": "Evaluation results data"
+    },
+    {
+      "path": "packages/opencode/eval/results/session_eval_v1.jsonl",
+      "role": "fixture",
+      "size_bytes": 44168,
+      "rationale": "Evaluation results data"
+    },
+    {
+      "path": "packages/opencode/eval/results/session_eval_v2.jsonl",
+      "role": "fixture",
+      "size_bytes": 41826,
+      "rationale": "Evaluation results data"
+    },
+    {
+      "path": "packages/opencode/eval/results/session_eval_v3.jsonl",
+      "role": "fixture",
+      "size_bytes": 46031,
+      "rationale": "Evaluation results data"
+    },
+    {
+      "path": "packages/opencode/eval/session_eval.ts",
+      "role": "code",
+      "size_bytes": 24414,
+      "rationale": "Evaluation script"
+    },
+    {
+      "path": "packages/opencode/package.json",
+      "role": "config",
+      "size_bytes": 1205,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/opencode/scripts/list-sessions.ts",
+      "role": "code",
+      "size_bytes": 2205,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/opencode/src/index.ts",
+      "role": "code",
+      "size_bytes": 8664,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/opencode/test/gateway-smoke.test.ts",
+      "role": "test",
+      "size_bytes": 3660,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/opencode/test/index.test.ts",
+      "role": "test",
+      "size_bytes": 3904,
+      "rationale": "Test file"
+    },
+    {
+      "path": "packages/opencode/tsconfig.json",
+      "role": "config",
+      "size_bytes": 219,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/pi/LICENSE",
+      "role": "docs",
+      "size_bytes": 1060,
+      "rationale": "License file"
+    },
+    {
+      "path": "packages/pi/README.md",
+      "role": "docs",
+      "size_bytes": 2838,
+      "rationale": "Project/package documentation"
+    },
+    {
+      "path": "packages/pi/package.json",
+      "role": "config",
+      "size_bytes": 1299,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/pi/script/build.ts",
+      "role": "code",
+      "size_bytes": 2284,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "packages/pi/src/index.ts",
+      "role": "code",
+      "size_bytes": 10994,
+      "rationale": "Source module"
+    },
+    {
+      "path": "packages/pi/tsconfig.build.json",
+      "role": "config",
+      "size_bytes": 250,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "packages/pi/tsconfig.json",
+      "role": "config",
+      "size_bytes": 200,
+      "rationale": "Package configuration file"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "role": "config",
+      "size_bytes": 18027,
+      "rationale": "Project configuration file"
+    },
+    {
+      "path": "scripts/bump-version.sh",
+      "role": "code",
+      "size_bytes": 3892,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "scripts/check-cc-version.ts",
+      "role": "code",
+      "size_bytes": 4632,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "scripts/extract-cch-seed.ts",
+      "role": "code",
+      "size_bytes": 17114,
+      "rationale": "Build/utility script"
+    },
+    {
+      "path": "tsconfig.base.json",
+      "role": "config",
+      "size_bytes": 235,
+      "rationale": "Project configuration file"
+    },
+    {
+      "path": "tsconfig.json",
+      "role": "config",
+      "size_bytes": 267,
+      "rationale": "Project configuration file"
+    }
+  ]
+}

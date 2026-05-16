@@ -757,6 +757,25 @@ describe("db", () => {
     expect(getKV("kv_upsert")).toBe("second");
   });
 
+
+  test("BUG-001: saveForceMinLayer(sid, 0) preserves other session_state columns", () => {
+    const sid = "test-bug-001";
+    saveSessionTracking(sid, {
+      lastLayer: 1,
+      lastKnownInput: 50,
+      postIdleCompact: false,
+      consecutiveBusts: 0,
+    });
+
+    const trackingBefore = loadSessionTracking(sid);
+    expect(trackingBefore).not.toBeNull();
+
+    saveForceMinLayer(sid, 0);
+
+    const trackingAfter = loadSessionTracking(sid);
+    expect(trackingAfter).not.toBeNull();
+  });
+
   describe("ensureProject test-path guard", () => {
     let savedLoreDbPath: string | undefined;
 

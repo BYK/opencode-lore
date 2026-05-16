@@ -521,22 +521,27 @@ function buildOpenAIMessages(
           },
         });
       } else if (block.type === "tool_result") {
-        // tool_result comes from previous assistant tool_use calls
-        // It's typically attached to the user message as a tool result
+        result.push({
+          role: "tool",
+          tool_call_id: block.tool_use_id,
+          content: typeof block.content === "string" ? block.content : JSON.stringify(block.content),
+        });
       }
     }
 
-    const msgRecord: Record<string, unknown> = { role };
+    if (textParts.length > 0 || toolUses.length > 0) {
+      const msgRecord: Record<string, unknown> = { role };
 
-    if (textParts.length > 0) {
-      msgRecord.content = textParts.join("");
+      if (textParts.length > 0) {
+        msgRecord.content = textParts.join("");
+      }
+
+      if (toolUses.length > 0) {
+        msgRecord.tool_calls = toolUses;
+      }
+
+      result.push(msgRecord);
     }
-
-    if (toolUses.length > 0) {
-      msgRecord.tool_calls = toolUses;
-    }
-
-    result.push(msgRecord);
   }
 
   return result;

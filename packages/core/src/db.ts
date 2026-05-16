@@ -1019,7 +1019,7 @@ export function loadForceMinLayer(sessionID: string): number {
 export function saveForceMinLayer(sessionID: string, layer: number): void {
   if (layer === 0) {
     db()
-      .query("DELETE FROM session_state WHERE session_id = ?")
+      .query("UPDATE session_state SET force_min_layer = 0 WHERE session_id = ?")
       .run(sessionID);
   } else {
     db()
