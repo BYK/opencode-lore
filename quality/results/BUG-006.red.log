@@ -1,0 +1,19 @@
+bun test v1.3.13 (bf2e2cec)
+
+packages/gateway/test/pipeline-tools.test.ts:
+598 | 
+599 |   const result = buildOpenAIUpstreamRequest(req, "https://api.openai.com");
+600 |   const body = result.body;
+601 | 
+602 |   const toolMsg = body.messages.find(m => m.role === "tool");
+603 |   expect(toolMsg).toBeDefined();
+                        ^
+error: expect(received).toBeDefined()
+
+Received: undefined
+
+      at <anonymous> (/home/byk/Code/opencode-lore/packages/gateway/test/pipeline-tools.test.ts:603:19)
+(fail) BUG-006: OpenAI translator preserves tool_result as role:tool message [1.00ms]
+Ran 1 test across 1 file. [388.00ms]
+Bailed out after 1 failure
+EXIT_CODE=1

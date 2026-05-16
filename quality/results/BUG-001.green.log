@@ -1,0 +1,8 @@
+bun test v1.3.13 (bf2e2cec)
+
+ 1 pass
+ 60 filtered out
+ 0 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [351.00ms]
+EXIT_CODE=0

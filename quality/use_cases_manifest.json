@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0",
+  "skill_version": "1.5.6",
+  "generated_at": "2026-05-16T16:10:00Z",
+  "project": "opencode-lore",
+  "use_cases": [
+    {
+      "id": "UC-01",
+      "title": "Multi-session gateway with different models",
+      "actors": ["AI agent A (Claude model)", "AI agent B (GPT model)", "Gateway process"],
+      "preconditions": ["Gateway running in hosted mode", "Multiple concurrent sessions active"],
+      "flow": "Agent A sends request with Claude model, setModelLimits() sets Opus context limits. Agent B sends request with GPT-4, setModelLimits() overwrites with GPT-4 limits. Agent A's next request should still use Opus limits.",
+      "postconditions": ["Each session uses its own model's context limits", "No cross-session contamination of module-level globals"]
+    },
+    {
+      "id": "UC-02",
+      "title": "Long-running gateway session lifecycle",
+      "actors": ["Gateway process", "Multiple AI agent sessions", "SQLite database"],
+      "preconditions": ["Gateway started", "Sessions connect and disconnect over 24+ hours"],
+      "flow": "Sessions connect and create sessionStates/limiters. Sessions disconnect but state remains in memory. New sessions add more state. Memory grows monotonically. Periodic 30s flush persists critical state. Process crash or restart recovers from DB.",
+      "postconditions": ["Memory usage stabilizes or old sessions are evicted", "State recovery within 30s of last checkpoint", "No data loss on saveForceMinLayer calls"]
+    },
+    {
+      "id": "UC-03",
+      "title": "Agentic workflow through OpenAI upstream",
+      "actors": ["AI agent", "Gateway proxy", "OpenAI upstream API", "External tool"],
+      "preconditions": ["Gateway proxying to OpenAI upstream", "Tool definitions registered", "Agent uses OpenAI Chat Completions protocol"],
+      "flow": "Agent calls tool via tool_use block. Gateway forwards to upstream. Model generates tool call. Tool executes and returns result. Gateway builds next upstream request with tool_result. Model sees tool results and continues.",
+      "postconditions": ["Tool results visible to model in subsequent turns", "tool_result blocks not silently dropped"]
+    },
+    {
+      "id": "UC-TOOL-001.a",
+      "title": "Tool result round-trip via Anthropic translator",
+      "actors": ["AI agent", "Anthropic upstream"],
+      "preconditions": ["Gateway proxying to Anthropic API", "Tool definitions in request"],
+      "flow": "buildAnthropicRequest at translate/anthropic.ts:333 converts gateway tool_result to Anthropic tool_result content block. Upstream processes it. Response flows back.",
+      "postconditions": ["tool_result block present and correct in upstream request"]
+    },
+    {
+      "id": "UC-TOOL-001.b",
+      "title": "Tool result round-trip via OpenAI translator",
+      "actors": ["AI agent", "OpenAI upstream"],
+      "preconditions": ["Gateway proxying to OpenAI Chat Completions API", "Tool results from prior turns in messages"],
+      "flow": "buildOpenAIUpstreamRequest at translate/openai.ts:423 should convert gateway tool_result to role:tool message with tool_call_id. Currently BROKEN: tool_result blocks silently dropped at line 523-527.",
+      "postconditions": ["tool_result present as role:tool message in upstream request (CURRENTLY VIOLATED — CB-006)"]
+    },
+    {
+      "id": "UC-TOOL-001.c",
+      "title": "Tool result round-trip via Responses API translator",
+      "actors": ["AI agent", "OpenAI Responses API upstream"],
+      "preconditions": ["Gateway proxying to OpenAI Responses API", "Tool results in conversation"],
+      "flow": "buildOpenAIResponsesUpstreamRequest at translate/openai-responses.ts:211 converts gateway messages including tool results to Responses API input format.",
+      "postconditions": ["tool_result present in upstream Responses API request"]
+    },
+    {
+      "id": "UC-STREAM-001.a",
+      "title": "Error propagation in native Anthropic streaming",
+      "actors": ["Client application", "Anthropic upstream"],
+      "preconditions": ["Streaming request to Anthropic upstream", "Upstream encounters error"],
+      "flow": "Upstream sends SSE error event. stream/anthropic.ts accumulator at line 209-229 processes all event types. Error event forwarded to client as-is.",
+      "postconditions": ["Client sees error details with type and message"]
+    },
+    {
+      "id": "UC-STREAM-001.b",
+      "title": "Error propagation in OpenAI Chat Completions streaming",
+      "actors": ["Client application", "Anthropic upstream via OpenAI translation"],
+      "preconditions": ["Streaming request translated from OpenAI to Anthropic", "Upstream encounters error"],
+      "flow": "Upstream sends SSE error event. stream/openai.ts translator has no explicit error handler. Event falls through silently. Stream terminates with [DONE] from catch block at lines 296-303. Currently BROKEN: client sees silent termination.",
+      "postconditions": ["Client should see error details (CURRENTLY VIOLATED — CB-012, client sees only [DONE])"]
+    },
+    {
+      "id": "UC-STREAM-001.c",
+      "title": "Error propagation in Responses API streaming",
+      "actors": ["Client application", "Anthropic upstream via Responses API translation"],
+      "preconditions": ["Streaming request translated from Responses API to Anthropic", "Upstream encounters error"],
+      "flow": "Upstream sends SSE error event. stream/openai-responses.ts translator emits response.failed event at lines 687-711 with error details.",
+      "postconditions": ["Client sees response.failed event with error message and type"]
+    }
+  ]
+}

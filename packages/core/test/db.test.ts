@@ -757,6 +757,63 @@ describe("db", () => {
     expect(getKV("kv_upsert")).toBe("second");
   });
 
+
+  test("BUG-001: saveForceMinLayer(sid, 0) preserves other session_state columns", () => {
+    const sid = "test-bug-001";
+    saveSessionTracking(sid, {
+      lastLayer: 1,
+      lastKnownInput: 50,
+    });
+
+    const trackingBefore = loadSessionTracking(sid);
+    expect(trackingBefore).not.toBeNull();
+
+    saveForceMinLayer(sid, 0);
+
+    const trackingAfter = loadSessionTracking(sid);
+    expect(trackingAfter).not.toBeNull();
+  });
+
+  test("BUG-001b: saveForceMinLayer(sid, N>0) preserves other session_state columns", () => {
+    const sid = "test-bug-001b";
+    // Populate tracking and cost data first
+    saveSessionTracking(sid, {
+      lastLayer: 1,
+      lastKnownInput: 100,
+    });
+    saveSessionCosts(sid, {
+      conversationCost: 0.05,
+      workerCost: 0.01,
+      conversationTurns: 5,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 2000,
+      warmupSavings: 0.02,
+      warmupHits: 1,
+      ttlSavings: 0.01,
+      ttlHits: 2,
+      batchSavings: 0.0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+    });
+
+    // Now set forceMinLayer to a non-zero value on the existing row
+    saveForceMinLayer(sid, 2);
+
+    // Both tracking and cost data must survive
+    const trackingAfter = loadSessionTracking(sid);
+    expect(trackingAfter).not.toBeNull();
+    expect(trackingAfter!.lastLayer).toBe(1);
+    expect(trackingAfter!.lastKnownInput).toBe(100);
+
+    const costsAfter = loadSessionCosts(sid);
+    expect(costsAfter).not.toBeNull();
+    expect(costsAfter!.conversationCost).toBe(0.05);
+    expect(costsAfter!.conversationTurns).toBe(5);
+
+    // And forceMinLayer should be 2
+    expect(loadForceMinLayer(sid)).toBe(2);
+  });
+
   describe("ensureProject test-path guard", () => {
     let savedLoreDbPath: string | undefined;
 

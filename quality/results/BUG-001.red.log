@@ -1,0 +1,19 @@
+bun test v1.3.13 (bf2e2cec)
+
+packages/core/test/db.test.ts:
+771 |     expect(trackingBefore).not.toBeNull();
+772 | 
+773 |     saveForceMinLayer(sid, 0);
+774 | 
+775 |     const trackingAfter = loadSessionTracking(sid);
+776 |     expect(trackingAfter).not.toBeNull();
+                                    ^
+error: expect(received).not.toBeNull()
+
+Received: null
+
+      at <anonymous> (/home/byk/Code/opencode-lore/packages/core/test/db.test.ts:776:31)
+(fail) db > BUG-001: saveForceMinLayer(sid, 0) preserves other session_state columns [272.00ms]
+Ran 1 test across 1 file. [317.00ms]
+Bailed out after 1 failure
+EXIT_CODE=1
