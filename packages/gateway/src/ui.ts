@@ -419,27 +419,60 @@ document.addEventListener("DOMContentLoaded",function(){
     return isNaN(ts)?Infinity:(Date.now()-ts)/60000;
   }
   // Sorting
+  function sortTable(th,dir){
+    var table=th.closest("table");
+    var tbody=table.querySelector("tbody")||table;
+    var idx=Array.from(th.parentNode.children).indexOf(th);
+    var type=th.dataset.sort;
+    th.parentNode.querySelectorAll("th").forEach(function(h){h.classList.remove("asc","desc");});
+    th.classList.add(dir);
+    var rows=Array.from(tbody.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
+    rows.sort(function(a,b){
+      var aT=(a.children[idx]||{textContent:""}).textContent.trim();
+      var bT=(b.children[idx]||{textContent:""}).textContent.trim();
+      var cmp=0;
+      if(type==="num"){cmp=parseNum(aT)-parseNum(bT);}
+      else if(type==="date"){cmp=parseDateVal(aT)-parseDateVal(bT);}
+      else{cmp=aT.localeCompare(bT,undefined,{sensitivity:"base"});}
+      return dir==="asc"?cmp:-cmp;
+    });
+    rows.forEach(function(r){tbody.appendChild(r);});
+    var tableId=table.dataset.tableId;
+    if(tableId){
+      try{localStorage.setItem("lore-sort:"+tableId,JSON.stringify({col:idx,dir:dir}));}
+      catch(e){}
+    }
+  }
   document.querySelectorAll("th[data-sort]").forEach(function(th){
     th.addEventListener("click",function(){
-      var table=th.closest("table");
-      var tbody=table.querySelector("tbody")||table;
-      var idx=Array.from(th.parentNode.children).indexOf(th);
-      var type=th.dataset.sort;
       var isAsc=th.classList.contains("asc");
-      th.parentNode.querySelectorAll("th").forEach(function(h){h.classList.remove("asc","desc");});
-      th.classList.add(isAsc?"desc":"asc");
-      var rows=Array.from(tbody.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
-      rows.sort(function(a,b){
-        var aT=(a.children[idx]||{textContent:""}).textContent.trim();
-        var bT=(b.children[idx]||{textContent:""}).textContent.trim();
-        var cmp=0;
-        if(type==="num"){cmp=parseNum(aT)-parseNum(bT);}
-        else if(type==="date"){cmp=parseDateVal(aT)-parseDateVal(bT);}
-        else{cmp=aT.localeCompare(bT,undefined,{sensitivity:"base"});}
-        return isAsc?-cmp:cmp;
-      });
-      rows.forEach(function(r){tbody.appendChild(r);});
+      sortTable(th,isAsc?"desc":"asc");
     });
+  });
+  // Restore saved sort or apply defaults
+  document.querySelectorAll("table[data-table-id]").forEach(function(table){
+    var tableId=table.dataset.tableId;
+    var headerRow=table.querySelector("tr");
+    if(!headerRow)return;
+    var ths=headerRow.querySelectorAll("th[data-sort]");
+    if(!ths.length)return;
+    var saved=null;
+    try{
+      var raw=localStorage.getItem("lore-sort:"+tableId);
+      if(raw)saved=JSON.parse(raw);
+    }catch(e){}
+    if(saved&&saved.col!=null&&saved.dir){
+      var allThs=Array.from(headerRow.children);
+      var th=allThs[saved.col];
+      if(th&&th.dataset&&th.dataset.sort){
+        sortTable(th,saved.dir);
+        return;
+      }
+    }
+    var defaultTh=headerRow.querySelector("th[data-default-sort]");
+    if(defaultTh){
+      sortTable(defaultTh,defaultTh.dataset.defaultSort);
+    }
   });
   // Filtering
   document.querySelectorAll(".table-filter input").forEach(function(input){
@@ -689,13 +722,13 @@ function buildLiveSessionRows(
  * 9 columns: Project | Session | Turns | Total | Savings | Cache Hit |
  *            P(returns) | Status | Hits/Warmups
  */
-function renderLiveSessionsTable(rows: LiveSessionRow[], emptyMessage?: string): string {
+function renderLiveSessionsTable(rows: LiveSessionRow[], emptyMessage?: string, tableId?: string): string {
   if (rows.length === 0) {
     return `<p class="empty">${esc(emptyMessage ?? "No active sessions.")}</p>`;
   }
 
   let html = `<div class="table-filter"><input type="text" placeholder="Filter sessions\u2026"><span class="count"></span></div>
-  <table>
+  <table${tableId ? ` data-table-id="${tableId}"` : ""}>
     <tr>
       <th data-sort="text">Project</th>
       <th data-sort="text">Session</th>
@@ -783,8 +816,8 @@ function pageDashboard(): string {
   } else {
     body += `<h2>Projects</h2>
     <div class="table-filter"><input type="text" placeholder="Filter projects\u2026"><span class="count"></span></div>
-    <table>
-      <tr><th data-sort="text">Name</th><th data-sort="text">Path</th><th data-sort="text">Git Remote</th><th data-sort="num">Knowledge</th><th data-sort="num">Sessions</th><th data-sort="num">Messages</th><th data-sort="date">Created</th></tr>`;
+    <table data-table-id="dashboard-projects">
+      <tr><th data-sort="text">Name</th><th data-sort="text">Path</th><th data-sort="text">Git Remote</th><th data-sort="num">Knowledge</th><th data-sort="num">Sessions</th><th data-sort="num">Messages</th><th data-sort="date" data-default-sort="desc">Created</th></tr>`;
     for (const p of projects) {
       body += `<tr>
         <td><a href="/ui/projects/${esc(p.id)}">${esc(p.name ?? "(unnamed)")}</a></td>
@@ -830,8 +863,8 @@ function pageProject(projectId: string): string | null {
   body += `<h2>Knowledge (${knowledge.length})</h2>`;
   if (knowledge.length) {
     body += `<div class="table-filter"><input type="text" placeholder="Filter knowledge\u2026"><span class="count"></span></div>
-    <table>
-      <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="num">Confidence</th><th data-sort="date">Updated</th></tr>`;
+    <table data-table-id="project-knowledge">
+      <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="num">Confidence</th><th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
     for (const e of knowledge) {
       body += `<tr>
         <td>${badge(e.category)}</td>
@@ -848,8 +881,8 @@ function pageProject(projectId: string): string | null {
   // Sessions section
   body += `<h2>Sessions (${sessions.length})</h2>`;
   if (sessions.length) {
-    body += `<table>
-      <tr><th>Session</th><th data-sort="num">Messages</th><th data-sort="num">Distilled</th><th data-sort="num">Distillations</th><th data-sort="date">Last Activity</th></tr>`;
+    body += `<table data-table-id="project-sessions">
+      <tr><th>Session</th><th data-sort="num">Messages</th><th data-sort="num">Distilled</th><th data-sort="num">Distillations</th><th data-sort="date" data-default-sort="desc">Last Activity</th></tr>`;
     for (const s of sessions) {
       body += `<tr>
         <td><a href="/ui/sessions/${esc(projectId)}/${esc(s.session_id)}">${esc(s.session_id.slice(0, 12))}</a></td>
@@ -867,8 +900,8 @@ function pageProject(projectId: string): string | null {
   // Distillations section
   body += `<h2>Distillations (${distillations.length})</h2>`;
   if (distillations.length) {
-    body += `<table>
-      <tr><th>Session</th><th data-sort="num">Gen</th><th data-sort="num">Tokens</th><th data-sort="num">R_comp</th><th data-sort="num">C_norm</th><th data-sort="date">Created</th></tr>`;
+    body += `<table data-table-id="project-distillations">
+      <tr><th>Session</th><th data-sort="num">Gen</th><th data-sort="num">Tokens</th><th data-sort="num">R_comp</th><th data-sort="num">C_norm</th><th data-sort="date" data-default-sort="desc">Created</th></tr>`;
     for (const d of distillations) {
       body += `<tr>
         <td><a href="/ui/distillations/${esc(d.id)}">${esc(d.session_id.slice(0, 12))}</a></td>
@@ -920,8 +953,8 @@ function pageUserKnowledge(): string {
   body += `</div>`;
 
   body += `<div class="table-filter"><input type="text" placeholder="Filter knowledge\u2026"><span class="count"></span></div>
-  <table>
-    <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="text">Source Project</th><th data-sort="num">Confidence</th><th data-sort="date">Updated</th></tr>`;
+  <table data-table-id="user-knowledge">
+    <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="text">Source Project</th><th data-sort="num">Confidence</th><th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
   for (const e of entries) {
     const projName = e.project_id ? projectName(e.project_id) : null;
     const projDisplay = e.project_id
@@ -1360,7 +1393,7 @@ function pageWarming(): string {
 
   // Live sessions table (unified: cost + warming columns)
   body += `<h2>Live Sessions</h2>`;
-  body += renderLiveSessionsTable(rows, "No active sessions. Cache warming data appears when sessions are processed through the gateway.");
+  body += renderLiveSessionsTable(rows, "No active sessions. Cache warming data appears when sessions are processed through the gateway.", "warming-live-sessions");
 
   // Global histograms
   const globalHists = getGlobalHistogramsSnapshot();
@@ -1508,6 +1541,7 @@ function pageCosts(): string {
     body += renderLiveSessionsTable(
       buildLiveSessionRows(allCosts, activeSessions, snapshotMap),
       "No active sessions yet. Cost tracking begins when the first conversation turn is processed.",
+      "costs-live-sessions",
     );
   }
 
@@ -1550,8 +1584,8 @@ function pageCosts(): string {
     const displayed = historical.sessions.slice(0, 50);
     body += `<h3>Per Session (top ${displayed.length} by recency)</h3>
     <div class="table-filter"><input type="text" placeholder="Filter sessions\u2026"><span class="count"></span></div>
-    <table>
-      <tr><th data-sort="text">Project</th><th>Session</th><th data-sort="num">Messages</th><th data-sort="text">Model</th><th data-sort="num">Worker Cost</th><th data-sort="num">Avoided Compactions</th><th data-sort="date">Last Active</th></tr>`;
+    <table data-table-id="costs-historical-sessions">
+      <tr><th data-sort="text">Project</th><th>Session</th><th data-sort="num">Messages</th><th data-sort="text">Model</th><th data-sort="num">Worker Cost</th><th data-sort="num">Avoided Compactions</th><th data-sort="date" data-default-sort="desc">Last Active</th></tr>`;
     for (const s of displayed) {
       const sessionWorkerCost = s.persisted?.workerCost ?? s.distillationCost;
       body += `<tr>
