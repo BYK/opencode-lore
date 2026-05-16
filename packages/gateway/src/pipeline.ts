@@ -126,7 +126,7 @@ import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySync } from "./worker-model";
 import * as Sentry from "@sentry/bun";
 import { captureBillingPrefix, hasBillingHeader, resignBody } from "./cch";
-import { detectClientType, KNOWN_SESSION_HEADERS } from "./session";
+import { detectClientType } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
   recordGap,
@@ -2535,24 +2535,40 @@ async function handleConversationTurn(
   // Mark sub-agent sessions (x-parent-session-id present).
   // These get their own session but are flagged for cache warming exemption.
   // Resolve the client-side parent ID to a Lore internal session ID via the
-  // headerSessionIndex (tries all known session header prefixes).
-  if (!sessionState.isSubagent && req.rawHeaders["x-parent-session-id"]) {
-    sessionState.isSubagent = true;
+  // headerSessionIndex (searches all indexed headers, including Tier 2 learned).
+  // Tier 3 (fingerprint-only) parents have no index entry — resolution will fail
+  // and a warning is logged.
+  {
     const parentClientId = req.rawHeaders["x-parent-session-id"];
-    let resolvedParent: string | undefined;
-    for (const hdr of KNOWN_SESSION_HEADERS) {
-      const candidate = headerSessionIndex.get(`${hdr}:${parentClientId}`);
-      if (candidate) {
-        resolvedParent = candidate;
-        break;
+    if (parentClientId && (!sessionState.isSubagent || !sessionState.parentSessionId)) {
+      if (!sessionState.isSubagent) {
+        sessionState.isSubagent = true;
+      }
+      // Search the full headerSessionIndex — covers Tier 1 (known) and Tier 2 (learned) headers.
+      let resolvedParent: string | undefined;
+      for (const [key, loreId] of headerSessionIndex) {
+        const colonIdx = key.indexOf(":");
+        if (colonIdx >= 0 && key.slice(colonIdx + 1) === parentClientId) {
+          resolvedParent = loreId;
+          break;
+        }
+      }
+      if (resolvedParent) {
+        sessionState.parentSessionId = resolvedParent;
+        saveSessionTracking(sessionID, {
+          isSubagent: true,
+          parentSessionId: resolvedParent,
+        });
+      } else if (!sessionState.parentSessionId) {
+        // Parent may use Tier 3 (fingerprint) identification, or hasn't made
+        // its first request yet. Persist isSubagent but leave parentSessionId
+        // null — subsequent requests will re-attempt resolution.
+        log.info(
+          `session ${sessionID.slice(0, 16)}: subagent parent resolution pending for client ID ${parentClientId.slice(0, 16)}`,
+        );
+        saveSessionTracking(sessionID, { isSubagent: true });
       }
     }
-    sessionState.parentSessionId = resolvedParent;
-    // Persist immediately — rare mutation (session identity tier)
-    saveSessionTracking(sessionID, {
-      isSubagent: true,
-      parentSessionId: resolvedParent ?? null,
-    });
   }
 
   // Bind auth credential to this session for background workers
