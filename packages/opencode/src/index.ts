@@ -1,12 +1,33 @@
 import type { Plugin, Hooks } from "@opencode-ai/plugin";
 import { log, getGitRemote } from "@loreai/core";
 
-/** Providers the plugin will redirect through the gateway. */
+/**
+ * Providers whose wire protocol the Lore gateway can proxy.
+ *
+ * - anthropic-messages API → gateway POST /v1/messages
+ * - openai-completions API → gateway POST /v1/chat/completions
+ * - openai-responses API   → gateway POST /v1/responses
+ *
+ * Providers using other protocols (Google SDK, AWS Bedrock SDK)
+ * are not redirected but still benefit from gateway model-prefix routing.
+ */
 const GATEWAY_PROVIDERS: string[] = [
+  // anthropic-messages API
   "anthropic",
-  "openai",
-  "nvidia",
+  "fireworks",
+  "github-copilot",
+  // openai-completions API
+  "deepseek",
   "xai",
+  "groq",
+  "cerebras",
+  "openrouter",
+  "huggingface",
+  "vercel-ai-gateway",
+  // openai-responses API
+  "openai",
+  // providers with native SDK support via gateway model-prefix routing
+  "nvidia",
   "mistral",
   "google",
 ];
