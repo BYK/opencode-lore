@@ -44,6 +44,8 @@ export function create(input: {
   crossProject?: boolean;
   /** Explicit ID to use — for cross-machine import via agents-file. Defaults to a new UUIDv7. */
   id?: string;
+  /** Initial confidence (0.0–1.0). Default 1.0. Controls injection priority for preferences. */
+  confidence?: number;
 }): string {
   const pid =
     input.scope === "project" && input.projectPath
@@ -77,8 +79,15 @@ export function create(input: {
             .get(input.title)
     ) as { id: string } | null;
 
+    // Build the update payload — forward confidence when the caller provided one
+    // so the curator's scoring intent isn't silently dropped on dedup.
+    const dedupUpdate = {
+      content: input.content,
+      ...(input.confidence != null ? { confidence: input.confidence } : {}),
+    };
+
     if (existing) {
-      update(existing.id, { content: input.content });
+      update(existing.id, dedupUpdate);
       return existing.id;
     }
 
@@ -91,7 +100,7 @@ export function create(input: {
       .get(input.title) as { id: string } | null;
 
     if (crossExisting) {
-      update(crossExisting.id, { content: input.content });
+      update(crossExisting.id, dedupUpdate);
       return crossExisting.id;
     }
 
@@ -101,17 +110,20 @@ export function create(input: {
     // lock re-entry bug"). Placed after exact checks (cheaper checks first).
     const fuzzyMatch = findFuzzyDuplicate({ title: input.title, projectId: pid });
     if (fuzzyMatch) {
-      update(fuzzyMatch.id, { content: input.content });
+      update(fuzzyMatch.id, dedupUpdate);
       return fuzzyMatch.id;
     }
   }
 
   const id = input.id ?? uuidv7();
   const now = Date.now();
+  const confidence = input.confidence != null
+    ? Math.max(0, Math.min(1, input.confidence))
+    : 1.0;
   db()
     .query(
       `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -121,6 +133,7 @@ export function create(input: {
       input.content,
       input.session ?? null,
       crossProject ? 1 : 0,
+      confidence,
       now,
       now,
     );
@@ -440,6 +453,31 @@ export async function forSession(
 
   if (!crossEntries.length && !projectEntries.length) return [];
 
+  // --- Preference-only fast path ---
+  // Preferences are unconditional user directives — relevance scoring harms them.
+  // Skip scoring; rank purely by confidence (set by curator or `lore data rerank`)
+  // then recency. Confidence carries real meaning now: 1.0 = unconditional
+  // directive, 0.9 = strong preference, 0.8 = moderate, 0.6 = mild.
+  const isPreferenceOnly = categoryFilter?.length === 1 && categoryFilter[0] === "preference";
+  if (isPreferenceOnly) {
+    const allPrefs = [...projectEntries, ...crossEntries];
+    allPrefs.sort((a, b) =>
+      a.confidence !== b.confidence ? b.confidence - a.confidence : b.updated_at - a.updated_at
+    );
+
+    const HEADER_OVERHEAD_TOKENS = 15;
+    let used = HEADER_OVERHEAD_TOKENS;
+    const result: KnowledgeEntry[] = [];
+    for (const entry of allPrefs) {
+      if (used >= maxTokens) break;
+      const cost = estimateTokens(entry.title + entry.content) + 10;
+      if (used + cost > maxTokens) continue;
+      result.push(entry);
+      used += cost;
+    }
+    return result;
+  }
+
   // --- 3. Build session context for relevance scoring ---
   let sessionContext = "";
   if (sessionID) {
@@ -649,6 +687,42 @@ export function crossProject(): KnowledgeEntry[] {
        ORDER BY confidence DESC, updated_at DESC`,
     )
     .all() as KnowledgeEntry[];
+}
+
+/**
+ * Re-score confidence on preference entries using directive-detection patterns.
+ * Only touches entries with confidence = 1.0 (legacy/unscored). Entries already
+ * scored by the curator (confidence < 1.0) are left untouched.
+ *
+ * @returns Count of entries updated.
+ */
+export function rerankPreferences(): number {
+  const prefs = db()
+    .query(`SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE category = 'preference' AND confidence = 1.0`)
+    .all() as KnowledgeEntry[];
+
+  // Strong unconditional directives
+  const STRONG_DIRECTIVE_RE = /\b(never|always|must not|must)\b/i;
+  // Explicit preference language
+  const EXPLICIT_PREF_RE = /\b(I (?:want|need|prefer|expect)|make sure to|don'?t forget)\b/i;
+
+  let updated = 0;
+  for (const entry of prefs) {
+    const text = entry.title + " " + entry.content;
+    let newConfidence: number;
+    if (STRONG_DIRECTIVE_RE.test(text)) {
+      newConfidence = 1.0; // Keep at max — unconditional directive
+    } else if (EXPLICIT_PREF_RE.test(text)) {
+      newConfidence = 0.9; // Strong but not absolute
+    } else {
+      newConfidence = 0.8; // No directive language detected — moderate
+    }
+    if (newConfidence !== entry.confidence) {
+      update(entry.id, { confidence: newConfidence });
+      updated++;
+    }
+  }
+  return updated;
 }
 
 // LIKE-based fallback for when FTS5 fails unexpectedly.

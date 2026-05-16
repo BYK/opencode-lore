@@ -24,8 +24,10 @@ export const LoreConfig = z.object({
       distilled: z.number().min(0.05).max(0.5).default(0.25),
       raw: z.number().min(0.1).max(0.7).default(0.4),
       output: z.number().min(0.1).max(0.5).default(0.25),
-      /** Max fraction of usable context reserved for LTM system-prompt injection. Default: 0.05 (5%). */
+      /** Max fraction of usable context reserved for context-bound LTM system-prompt injection. Default: 0.05 (5%). */
       ltm: z.number().min(0.02).max(0.3).default(0.05),
+      /** Fraction of usable context for stable LTM (preferences). Independent of `ltm`. Default: 0.02 (2%). */
+      preferenceLtm: z.number().min(0.01).max(0.1).default(0.02),
       /** Per-turn cache-read cost target in dollars. Controls when layer 0 (full
        *  passthrough) escalates to layer 1 (compressed). The cap is derived as:
        *  maxLayer0Tokens = max(target / model.cost.cache.read, 40K).
@@ -41,7 +43,7 @@ export const LoreConfig = z.object({
       /** @deprecated Ignored. Tier-based bust-vs-continue replaces static cap. */
       maxContextTokens: z.number().min(0).optional(),
     })
-    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.05, targetCacheReadCostPerTurn: 0.10 }),
+    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.05, preferenceLtm: 0.02, targetCacheReadCostPerTurn: 0.10 }),
   /**
    * Cold-cache idle-resume handling.
    *

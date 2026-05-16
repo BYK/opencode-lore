@@ -25,6 +25,7 @@ import {
   setModelLimits,
   setLtmTokens,
   getLtmBudget,
+  getPreferenceLtmBudget,
   setMaxLayer0Tokens,
   computeLayer0Cap,
   setCachePricing,
@@ -2597,6 +2598,7 @@ async function handleConversationTurn(
     try {
       const ltmFraction = cfg.budget.ltm;
       const ltmBudget = getLtmBudget(ltmFraction);
+      const prefBudget = getPreferenceLtmBudget(cfg.budget.preferenceLtm);
       const isFirstTurn = sessionID != null && !temporal.hasMessages(projectPath, sessionID);
       const contextHint = lastUserTextTrimmed(req);
 
@@ -2604,9 +2606,10 @@ async function handleConversationTurn(
       // Computed once per session and pinned for ≥1h. NOT invalidated by
       // curation — even if a preference changes, we keep the cached version
       // so the Anthropic 1h prompt cache prefix stays warm.
+      // Uses a dedicated budget independent of context-bound LTM.
       let stable = stableLtmCache.get(sessionID);
       if (!stable) {
-        const prefEntries = await ltm.forSession(projectPath, sessionID, ltmBudget, {
+        const prefEntries = await ltm.forSession(projectPath, sessionID, prefBudget, {
           categories: ["preference"],
           ...(contextHint ? { contextHint } : {}),
         });
@@ -2617,7 +2620,7 @@ async function handleConversationTurn(
               title: e.title,
               content: e.content,
             })),
-            ltmBudget,
+            prefBudget,
           );
           if (formatted) {
             const tokenCount = Math.ceil(formatted.length / 3);
@@ -2635,13 +2638,8 @@ async function handleConversationTurn(
         let cached = ltmSessionCache.get(sessionID);
 
         if (!cached) {
-          // Reserve budget for stable LTM already injected in system[1].
-          // Guarantee at least 50% of the total budget for context-bound
-          // entries — preferences are useful but gotchas/patterns are more
-          // critical for correctness during active work.
-          const stableTokens = stable?.tokenCount ?? 0;
-          const minContextBudget = Math.floor(ltmBudget * 0.5);
-          const contextBudget = Math.max(minContextBudget, ltmBudget - stableTokens);
+          // Full context-bound budget — preferences have their own dedicated budget.
+          const contextBudget = ltmBudget;
           // Exclude preferences — they're already in system[1]
           const contextEntries = await ltm.forSession(projectPath, sessionID, contextBudget, {
             excludeCategories: ["preference"],
@@ -2746,9 +2744,9 @@ async function handleConversationTurn(
     try {
       const ltmFraction = cfg.budget.ltm;
       const ltmBudget = getLtmBudget(ltmFraction);
+      // Full context-bound budget — preferences have their own dedicated budget.
+      const contextBudget = ltmBudget;
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
-      const minContextBudget = Math.floor(ltmBudget * 0.5);
-      const contextBudget = Math.max(minContextBudget, ltmBudget - stableTokens);
       const contextHint = lastUserTextTrimmed(req);
       const contextEntries = await ltm.forSession(projectPath, sessionID, contextBudget, {
         excludeCategories: ["preference"],

@@ -266,6 +266,20 @@ crossProject flag:
 - Default is true — most useful knowledge is worth sharing across projects
 - Set crossProject to false for things that are meaningless outside this specific repo (e.g. a config path, a project-local naming convention that conflicts with your usual style)
 
+Confidence values (0.0–1.0) — determines injection priority when budget is tight:
+- 1.0: Unconditional directive — user used "NEVER", "ALWAYS", "from now on", or similarly
+  absolute language. These must always be respected regardless of context.
+- 0.9: Strong preference — explicit user preference ("I prefer", "I want", "make sure to",
+  "don't forget to"). Clear intent but not absolute.
+- 0.8: Moderate preference — inferred from repeated user behavior or gentle correction across
+  sessions. Not explicitly stated as a rule.
+- 0.6: Mild/contextual preference — may not apply universally. Observed once or context-dependent.
+- For non-preference categories (gotcha, pattern, architecture, decision), confidence reflects
+  how well-established the knowledge is: 1.0 = verified/confirmed, 0.8 = high confidence,
+  0.6 = probable but unverified.
+- Default to 1.0 for preferences with strong directive language, 0.8 for other preferences.
+- Always set confidence on create ops — it determines injection priority.
+
 Produce a JSON array of operations:
 [
   {
@@ -274,7 +288,8 @@ Produce a JSON array of operations:
     "title": "Short descriptive title",
     "content": "Concise knowledge entry — under 150 words",
     "scope": "project" | "global",
-    "crossProject": true
+    "crossProject": true,
+    "confidence": 1.0
   },
   {
     "op": "update",
@@ -322,7 +337,8 @@ IMPORTANT:
 4. Only create a new entry for genuinely distinct knowledge with no existing home.
 5. Keep all entries under 150 words. If an existing entry is too long, use an update op to trim it.
 6. Pay special attention to user instructions ("always do X", "never do Y", "make sure to X").
-   These are strong signals for "preference" entries with high confidence.`;
+   These are strong signals for "preference" entries with high confidence (1.0 for absolute
+   directives like "never"/"always", 0.9 for explicit preferences like "I prefer").`;
 }
 
 /**

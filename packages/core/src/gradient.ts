@@ -475,6 +475,9 @@ export function getLtmBudget(ltmFraction: number): number {
   return Math.floor(usable * ltmFraction);
 }
 
+/** Returns the token budget for stable LTM (preferences). Independent of context-bound LTM budget. */
+export const getPreferenceLtmBudget = getLtmBudget;
+
 // Called after each assistant message completes with real token usage data.
 // actualInput    = tokens.input + tokens.cache.read + tokens.cache.write
 // sessionID      = session that produced this response (for exact-tracking validity)
