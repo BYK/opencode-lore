@@ -36,4 +36,4 @@ Full architecture, benchmarks, and rationale: **[github.com/BYK/loreai](https://
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+FSL-1.1-Apache-2.0 — see [LICENSE](./LICENSE).

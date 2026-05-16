@@ -48,4 +48,4 @@ Full architecture, benchmarks, configuration, and rationale: **[github.com/BYK/l
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+FSL-1.1-Apache-2.0 — see [LICENSE](./LICENSE).

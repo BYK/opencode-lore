@@ -47,6 +47,7 @@
       color: var(--ink);
       font-family: var(--sans);
       font-weight: 300;
+      font-size: 1.08rem;
       line-height: 1.75;
       overflow-x: hidden;
       cursor: none;
@@ -269,7 +270,7 @@
     }
 
     .hero-desc {
-      font-size: 1rem;
+      font-size: 1.1rem;
       color: var(--mid);
       max-width: 42ch;
       line-height: 1.9;
@@ -582,13 +583,13 @@
 
     .step-t {
       font-family: var(--serif);
-      font-size: 1.4rem;
+      font-size: 1.5rem;
       color: var(--g0);
       margin-bottom: .8rem;
     }
 
     .step-b {
-      font-size: .84rem;
+      font-size: .92rem;
       color: var(--mid);
       line-height: 1.9;
     }
@@ -655,7 +656,7 @@
     }
 
     .bc-b {
-      font-size: .84rem;
+      font-size: .92rem;
       color: var(--mid);
       line-height: 1.85;
     }
@@ -849,13 +850,14 @@
         </svg>
       </a>
       <ul class="nav-links">
+        <li><a href="#problem">The Problem</a></li>
         <li><a href="#how">How It Works</a></li>
         <li><a href="#features">Features</a></li>
         <li><a href="https://github.com/byk/loreai" target="_blank">GitHub</a></li>
       </ul>
     </div>
     <div class="nav-right">
-      <a href="#waitlist" class="nav-btn">Join Waitlist</a>
+      <a href="#waitlist" class="nav-btn">Lore Cloud Waitlist</a>
     </div>
   </nav>
 
@@ -871,17 +873,15 @@
     <div>
       <div class="hero-badge sr">
         <span class="badge-pill" id="version-badge">loading…</span>
-        Persistent Memory for AI Coding Agents
+        Your AI stops forgetting. Automatically.
       </div>
       <h1 class="sr">
-        Let your AI<br>
-        remember your<br>
-        <em>full project.</em>
+        Stop re-explaining<br>
+        your project to<br>
+        <em>your AI.</em>
       </h1>
-      <p class="hero-desc sr">Lore is a transparent LLM proxy that adds three-tier memory to any AI coding client. Point
-         Claude Code, Cursor, or any Anthropic/OpenAI-compatible tool at <code
-          style="font-size:.85em;background:var(--g6);padding:.15em .4em;border-radius:3px;">localhost:3207</code> and
-        your agent remembers everything — across sessions.</p>
+      <p class="hero-desc sr">Your AI forgets decisions, loses file paths, and undoes its own work.
+        Lore fixes this automatically — no context files to maintain, no workflow changes.</p>
       <div class="hero-install sr">
         <div class="install-block" onclick="navigator.clipboard.writeText('curl -fsSL https://withlore.ai/install | bash').then(()=>{this.querySelector('.install-copied').classList.add('show');setTimeout(()=>this.querySelector('.install-copied').classList.remove('show'),2000)})">
           <code><span class="install-prompt">$</span> curl -fsSL https://withlore.ai/install | bash</code>
@@ -915,9 +915,9 @@
           <circle cx="310" cy="100" r="15" fill="#c4ddc7" opacity=".8" />
           <circle cx="200" cy="330" r="15" fill="#dfd5bb" opacity=".8" />
         </svg>
-        <div class="g-chip gc1">@loreai/gateway</div>
-        <div class="g-chip gc2">Anthropic + OpenAI</div>
-        <div class="g-chip gc3">Local SQLite + FTS5</div>
+        <div class="g-chip gc1">Lore Distillation</div>
+        <div class="g-chip gc2">Any Provider*</div>
+        <div class="g-chip gc3">On-Device Vector Search</div>
         <div class="g-chip gc4">19× Compression</div>
       </div>
     </div>
@@ -938,33 +938,95 @@
     </div>
   </section>
 
+  <!-- TICKER -->
+  <div class="ticker">
+    <div class="ticker-track">
+      <span class="ti">Compaction destroys details <span class="td">&#9670;</span> Lore distills them</span>
+      <span class="ti">68 min/day re-explaining <span class="td">&#9670;</span> Lore remembers for you</span>
+      <span class="ti">49 manual learnings <span class="td">&#9670;</span> Lore curates automatically</span>
+      <span class="ti">Total amnesia on new sessions <span class="td">&#9670;</span> Lore persists across sessions</span>
+      <span class="ti">Context files by hand <span class="td">&#9670;</span> Lore exports .lore.md automatically</span>
+      <span class="ti">Compaction destroys details <span class="td">&#9670;</span> Lore distills them</span>
+      <span class="ti">68 min/day re-explaining <span class="td">&#9670;</span> Lore remembers for you</span>
+      <span class="ti">49 manual learnings <span class="td">&#9670;</span> Lore curates automatically</span>
+      <span class="ti">Total amnesia on new sessions <span class="td">&#9670;</span> Lore persists across sessions</span>
+      <span class="ti">Context files by hand <span class="td">&#9670;</span> Lore exports .lore.md automatically</span>
+    </div>
+  </div>
+
+  <!-- THE PROBLEM -->
+  <section class="how" id="problem">
+    <div class="sec-hd">
+      <div>
+        <p class="eyebrow sr">The Problem</p>
+        <h2 class="sec-title sr">Context loss is <em>invisible.</em></h2>
+      </div>
+      <p class="sec-sub sr">There's no error message when your AI forgets.
+        Just worse answers, undone decisions, and
+        <a href="https://devblogs.microsoft.com/all-things-azure/i-wasted-68-minutes-a-day-re-explaining-my-code-then-i-built-auto-memory/"
+          target="_blank" style="border-bottom:1px solid var(--g4);color:var(--g2)">hours spent re-explaining</a>.</p>
+    </div>
+    <div class="steps">
+      <div class="step sr">
+        <div class="step-n">01</div>
+        <h3 class="step-t">Compaction destroys details</h3>
+        <p class="step-b">When the context window fills up, your AI tool
+          <a href="https://www.oreilly.com/radar/why-doesnt-anyone-teach-developers-about-context-management/"
+            target="_blank" style="border-bottom:1px solid var(--g4)">compacts the conversation</a>.
+          After a few passes, it knows you "discussed authentication" but can't actually continue the work.
+          The file paths, the error messages, the reasons behind decisions — gone.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">02</div>
+        <h3 class="step-t">Starting fresh is starting from zero</h3>
+        <p class="step-b">Most developers see "Compacting conversation" and start a new session. That
+          <a href="https://newsletter.pragmaticengineer.com/p/microsoft-ai-dev-tools"
+            target="_blank" style="border-bottom:1px solid var(--g4)">trades compaction for total amnesia</a>.
+          The new session produces output that looks fine — but it's working
+          from incomplete information, and you can't tell.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">03</div>
+        <h3 class="step-t">Manual context files don't scale</h3>
+        <p class="step-b">The alternative is maintaining context files, key technical learnings, and decision
+          rationales — by hand. It works, but it's a second full-time job. One team
+          <a href="https://www.oreilly.com/radar/why-doesnt-anyone-teach-developers-about-context-management/"
+            target="_blank" style="border-bottom:1px solid var(--g4)">tracked 49 technical
+          learnings manually</a>. Every decision needs the "why" or the AI will refactor it away.</p>
+      </div>
+    </div>
+  </section>
+
   <!-- HOW -->
   <section class="how" id="how">
     <div class="sec-hd">
       <div>
-        <p class="eyebrow sr">The Workflow</p>
-        <h2 class="sec-title sr">How LoreAI <em>scales</em> knowledge</h2>
+        <p class="eyebrow sr">The Solution</p>
+        <h2 class="sec-title sr">How Lore <em>replaces</em> all of that</h2>
       </div>
     </div>
     <div class="steps">
       <div class="step sr">
         <div class="step-n">01</div>
         <h3 class="step-t">Intercept</h3>
-        <p class="step-b">The gateway proxy sits between your AI client and the upstream API. It captures every message
-          — no client changes needed, just change the base URL.</p>
+        <p class="step-b">Lore sits between your AI client and the upstream API. It captures every message — no
+          client changes needed, just change the base URL. Works with Claude Code, Cursor, Copilot, Windsurf,
+          and any Anthropic/OpenAI-compatible tool.</p>
       </div>
       <div class="step sr">
         <div class="step-n">02</div>
-        <h3 class="step-t">Context Management</h3>
-        <p class="step-b">No more compaction — a gradient context manager replaces it entirely. Distillations run as
-          batch background requests at 50% lower cost, and an embedded vector search lets your agent recall any detail
-          on demand.</p>
+        <h3 class="step-t">Remember</h3>
+        <p class="step-b">Lore replaces compaction entirely. Instead of lossy summaries that forget your file paths
+          and decisions, it distills conversations into timestamped observation logs — the operational details
+          your AI actually needs to keep working. Your manual "Key Technical Learnings"? Lore extracts and
+          maintains them automatically.</p>
       </div>
       <div class="step sr">
         <div class="step-n">03</div>
-        <h3 class="step-t">Distill</h3>
-        <p class="step-b">Messages are incrementally distilled into timestamped observation logs — preserving file
-          paths, error messages, exact decisions, and bug fixes instead of lossy summaries.</p>
+        <h3 class="step-t">Recall</h3>
+        <p class="step-b">Every detail from every session is searchable. When the distilled context isn't enough,
+          your agent's recall tool retrieves the exact file path, error message, or decision rationale it
+          needs — across sessions, without you re-explaining anything.</p>
       </div>
     </div>
   </section>
@@ -973,31 +1035,130 @@
   <section class="features" id="features">
     <div class="bento">
       <div class="bc bc-1 sr">
-        <p class="bc-tag">Core Tech</p>
-        <h3 class="bc-t">Operational Intelligence</h3>
-        <p class="bc-b">Lore preserves the operational details that summarization destroys: file paths, error messages,
-          exact commands, and why decisions were made. Distillation, not summarization.</p>
+        <p class="bc-tag">Persistence</p>
+        <h3 class="bc-t">Decisions stick</h3>
+        <p class="bc-b">Your AI won't refactor away deliberate decisions. Lore preserves the "why" behind every
+          choice — the exact thing that prevents a future session from "helpfully" replacing your workaround
+          with the broken approach it was working around.</p>
       </div>
       <div class="bc bc-2 sr">
-        <p class="bc-tag">Architecture</p>
-        <h3 class="bc-t">Three-Tier Memory</h3>
-        <p class="bc-b">Temporal storage (FTS5-indexed messages), distilled observation logs (timestamped,
-          priority-tagged), and long-term curated knowledge — following Nuum and Mastra's research.</p>
+        <p class="bc-tag">Learning</p>
+        <h3 class="bc-t">Your AI learns from experience</h3>
+        <p class="bc-b">Patterns, gotchas, and architectural decisions are automatically curated across sessions
+          and exported to <code style="font-size:.85em;background:var(--g6);padding:.15em .4em;border-radius:3px;">.lore.md</code> —
+          the project documentation you should have been writing all along, maintained for you.
+          Lore Cloud adds team-wide shared knowledge and management.</p>
       </div>
       <div class="bc bc-3 sr">
         <div>
-          <p class="bc-tag">Integration</p>
-          <h3 class="bc-t">Works with Any AI Client</h3>
-          <p class="bc-b">Transparent proxy on port 3207 — supports Anthropic and OpenAI protocols. Point Claude Code,
-            Cursor, Copilot, Windsurf, or any compatible client at the gateway. Zero client changes.</p>
+          <p class="bc-tag">Simplicity</p>
+          <h3 class="bc-t">Zero workflow changes</h3>
+          <p class="bc-b">No context files to write. No instructions to maintain. No sessions to carefully manage.
+            Install Lore, point your client at it, and keep working exactly as you do now. It extracts
+            decisions, gotchas, and patterns — and preserves the "why" behind every choice — so you
+            don't have to.</p>
         </div>
         <div class="code-block">
-          <code><span class="ck"># Start the gateway</span><br>
-<span class="cv">$</span> npx @loreai/gateway<br>
+          <code><span class="ck"># Start Lore + your AI agent</span><br>
+<span class="cv">$</span> lore run<br>
 <br>
-<span class="ck"># Point your client at it</span><br>
-<span class="cv">ANTHROPIC_BASE_URL</span>=<span class="ck">http://localhost:3207</span></code>
+<span class="ck"># That's it. Lore auto-detects your</span><br>
+<span class="ck"># agent and configures everything.</span></code>
         </div>
+      </div>
+    </div>
+
+    <!-- SECOND BENTO ROW -->
+    <div class="bento" style="margin-top:1rem">
+      <div class="bc bc-2 sr">
+        <p class="bc-tag">Cost</p>
+        <h3 class="bc-t">Infinite sessions, lower cost</h3>
+        <p class="bc-b">Sessions run forever without degradation or extra cost. Background distillation
+          and curation run at 50% off via batch APIs on cheaper models — A/B validated for quality parity.
+          Predictive cache warming and smart cache management avoid the expensive cache rebuilds that
+          compaction triggers on every turn.</p>
+      </div>
+      <div class="bc bc-1 sr">
+        <p class="bc-tag">Search</p>
+        <h3 class="bc-t">Free on-device vector search</h3>
+        <p class="bc-b">Nomic Embed v1.5 runs locally — zero API cost, zero latency. Hybrid architecture
+          fuses vector similarity with BM25 keyword search for best-of-both-worlds recall. LLM-powered
+          query expansion finds what you mean, not just what you typed.</p>
+      </div>
+      <div class="bc bc-2 sr">
+        <p class="bc-tag">Knowledge</p>
+        <h3 class="bc-t">Project-specific and global memory</h3>
+        <p class="bc-b">Lore maintains both project-level knowledge (architecture, gotchas, conventions)
+          and global preferences that follow you across all projects. Confidence-ranked entries are
+          injected into every session at the right priority — your AI always knows how you like to work.</p>
+      </div>
+      <div class="bc bc-1 sr">
+        <p class="bc-tag">Compatibility</p>
+        <h3 class="bc-t">Works with any provider*</h3>
+        <p class="bc-b">Claude Code, Cursor, Copilot, Windsurf, OpenCode, Pi, Codex — any tool that speaks
+          Anthropic or OpenAI protocols. Switch providers freely; your memory stays.
+          <span style="display:block;margin-top:.6rem;font-size:.78rem;opacity:.7">* Any provider accessible
+          via an OpenAI or Anthropic-compatible API.</span></p>
+      </div>
+      <div class="bc bc-3 sr">
+        <div>
+          <p class="bc-tag">Migration</p>
+          <h3 class="bc-t">Import your history, start smart</h3>
+          <p class="bc-b">Lore imports conversations from Claude Code, Codex, Aider, Cline, Continue,
+            OpenCode, and Pi — extracting knowledge from your existing sessions so your AI starts
+            with context from day one. No blank slate.</p>
+        </div>
+        <div class="code-block">
+          <code><span class="ck"># Import existing conversations</span><br>
+<span class="cv">$</span> lore import<br>
+<br>
+<span class="ck"># Auto-detects Claude Code, Codex,</span><br>
+<span class="ck"># Aider, Cline, Continue & more</span></code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- VOICES -->
+  <section class="how" id="voices">
+    <div class="sec-hd">
+      <div>
+        <p class="eyebrow sr">What the industry is discovering</p>
+        <h2 class="sec-title sr">The problem is <em>real.</em> The manual fix is <em>exhausting.</em></h2>
+      </div>
+    </div>
+    <div class="steps">
+      <div class="step sr">
+        <div class="step-n" style="font-size:.65rem;color:var(--g4)">O'Reilly Radar</div>
+        <h3 class="step-t" style="font-size:1.1rem;font-style:italic;line-height:1.6">
+          "Your context files end up being the project documentation you should
+          have been writing all along, except now there's something on the other
+          end that will actually go wrong if you skip it."
+        </h3>
+        <p class="step-b"><a href="https://www.oreilly.com/radar/why-doesnt-anyone-teach-developers-about-context-management/"
+          target="_blank" style="border-bottom:1px solid var(--g4)">Andrew Stellman</a> — on why context management
+          is the most important undiscussed skill in AI-driven development.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n" style="font-size:.65rem;color:var(--g4)">The Pragmatic Engineer</div>
+        <h3 class="step-t" style="font-size:1.1rem;font-style:italic;line-height:1.6">
+          "I keep making this error when I use agentic mode... even after solving
+          a problem with the tool, the tool 'forgets' all this detail. Unlike
+          humans who learn from previous actions, this is not currently true of
+          AI agents."
+        </h3>
+        <p class="step-b"><a href="https://newsletter.pragmaticengineer.com/p/microsoft-ai-dev-tools"
+          target="_blank" style="border-bottom:1px solid var(--g4)">Gergely Orosz</a> — on Microsoft's internal
+          experience with AI coding tools and the gap between demos and real codebases.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n" style="font-size:.65rem;color:var(--g4)">Lore</div>
+        <h3 class="step-t" style="font-size:1.1rem;line-height:1.6">
+          Lore automates what both articles describe doing by hand.
+        </h3>
+        <p class="step-b">No context files to maintain. No key learnings to track manually.
+          No copilot-instructions.md to write and keep current. Lore distills, curates, and recalls — so your
+          AI learns from experience the way these authors wish it would.</p>
       </div>
     </div>
   </section>
@@ -1005,8 +1166,8 @@
   <!-- CTA -->
   <section class="cta" id="waitlist">
     <div class="cta-inner">
-      <h2 class="sr">Get early access to <em>Lore.</em></h2>
-      <p class="cta-sub sr">Join the waitlist and be the first to know when new features ship. We'll never spam you.</p>
+      <h2 class="sr">Stop managing context. <em>Start building.</em></h2>
+      <p class="cta-sub sr">Self-hosted Lore is available now. Join the waitlist for Lore Cloud — hosted memory with zero setup.</p>
       <form class="cta-form sr" id="waitlist-form" action="https://formsubmit.co/build@withlore.ai" method="POST">
         <input type="hidden" name="_subject" value="New Lore Waitlist Signup">
         <input type="hidden" name="_captcha" value="false">
@@ -1022,7 +1183,7 @@
 
   <footer>
     <div class="foot-bottom">
-      <p>© 2026 Burak Yigit Kaya · FSL-1.1-Apache-2.0</p>
+      <p>© 2026 Lore.AI · FSL-1.1-Apache-2.0</p>
     </div>
   </footer>
 

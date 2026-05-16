@@ -589,16 +589,38 @@ export async function forSession(
       .map((entry) => ({ entry, score: entry.confidence }));
   }
 
-  // --- 5. Merge and pack into token budget by score descending ---
+  // --- 5. Merge and pack into token budget ---
+  // Architecture entries get a guaranteed minimum allocation (first 20% of
+  // budget) before the general score-ranked packing. These entries provide
+  // the structural "map" that makes specific gotchas/decisions interpretable
+  // — without them, a gotcha about a subsystem is harder to contextualize.
   const allScored = [...scoredProject, ...scoredCross];
   allScored.sort((a, b) => b.score - a.score);
 
   const HEADER_OVERHEAD_TOKENS = 15;
+  const ARCH_BUDGET_FRACTION = 0.2;
   let used = HEADER_OVERHEAD_TOKENS;
   const result: KnowledgeEntry[] = [];
+  const packedIds = new Set<string>();
 
+  // Phase 1: Pack architecture entries first (up to 20% of budget)
+  const archBudget = Math.floor(maxTokens * ARCH_BUDGET_FRACTION);
+  const archEntries = allScored.filter((s) => s.entry.category === "architecture");
+  // Sort architecture by score descending (already sorted, but filter may reorder)
+  archEntries.sort((a, b) => b.score - a.score);
+  for (const { entry } of archEntries) {
+    if (used >= archBudget + HEADER_OVERHEAD_TOKENS) break;
+    const cost = estimateTokens(entry.title + entry.content) + 10;
+    if (used + cost > maxTokens) continue; // hard cap: never exceed total budget
+    result.push(entry);
+    packedIds.add(entry.id);
+    used += cost;
+  }
+
+  // Phase 2: Pack remaining entries by score descending (skip already packed)
   for (const { entry } of allScored) {
     if (used >= maxTokens) break;
+    if (packedIds.has(entry.id)) continue;
     const cost = estimateTokens(entry.title + entry.content) + 10;
     if (used + cost > maxTokens) continue;
     result.push(entry);

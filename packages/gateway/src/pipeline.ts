@@ -223,6 +223,35 @@ function stripContextWarnings(messages: GatewayMessage[]): void {
   }
 }
 
+/**
+ * Detect whether a request contains a completed `git commit` tool invocation.
+ * Checks tool_use inputs (command string) on assistant messages and tool_result
+ * output on user messages for commit indicators. Used to trigger curation at
+ * commit boundaries — natural checkpoints where decisions crystallize.
+ */
+const GIT_COMMIT_RE = /\bgit\s+commit\b/i;
+function containsGitCommit(req: GatewayRequest): boolean {
+  for (const msg of req.messages) {
+    for (const block of msg.content) {
+      // Check assistant tool_use inputs for the command string
+      if (block.type === "tool_use") {
+        const input = block.input;
+        if (typeof input === "object" && input !== null) {
+          const cmd = (input as Record<string, unknown>).command ?? (input as Record<string, unknown>).content ?? "";
+          if (typeof cmd === "string" && GIT_COMMIT_RE.test(cmd)) return true;
+        }
+      }
+      // Check user tool_result content for git commit output patterns
+      if (block.type === "tool_result") {
+        const text = block.content;
+        // Match common git commit output (e.g., "[main abc1234] commit message")
+        if (text && /^\[[\w/.-]+ [0-9a-f]+\]/.test(text.trim())) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /** Active upstream interceptor — used for recording/replay. */
 let activeInterceptor: UpstreamInterceptor | undefined;
 
@@ -2107,6 +2136,22 @@ function postResponse(
     // The 30s idle tick will persist state only for dirty sessions.
     sessionState._dirty = true;
 
+    // --- Commit-triggered curation ---
+    // Git commits are natural task boundaries where decisions crystallize.
+    // When a commit is detected in tool outputs, force curation to trigger
+    // on this turn by bumping turnsSinceCuration to the threshold.
+    if (loreConfig().knowledge.enabled && loreConfig().curator.onIdle && containsGitCommit(req)) {
+      const modelInputCost = getModelEntrySync(
+        getWorkerModel()?.modelID ?? "unknown",
+      ).cost?.input ?? 3;
+      const curationMultiplier = modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+      const effectiveAfterTurns = loreConfig().curator.afterTurns * curationMultiplier;
+      if (sessionState.turnsSinceCuration < effectiveAfterTurns) {
+        log.info(`commit detected in session ${sessionID.slice(0, 16)} — triggering curation`);
+        sessionState.turnsSinceCuration = effectiveAfterTurns;
+      }
+    }
+
     // --- Schedule background work (fire-and-forget) ---
     scheduleBackgroundWork(sessionState, config);
   } catch (e) {
@@ -2987,7 +3032,28 @@ async function handleConversationTurn(
     }
   }
 
-  // --- 7c. Unsustainable conversation warning ---
+  // --- 7c. Context health note ---
+  // When the gradient compresses context (layer 1+), append a brief note to
+  // the context-bound LTM block (system[2]) so the AI knows its context is
+  // managed and can use the recall tool for details no longer visible.
+  // This rides system[2] which already changes per-turn — no cache impact on
+  // the stable prefix (system[0]+[1]).
+  if (result.layer >= 1 && ltmText) {
+    const layerDesc = result.layer === 1 ? "compressed"
+      : result.layer === 2 ? "aggressively compressed"
+      : result.layer >= 3 ? "emergency compressed" : "compressed";
+    ltmText += `\n\n[Context health: conversation history is ${layerDesc}. ` +
+      `Earlier details (file paths, error messages, decisions) are preserved in distilled ` +
+      `observations and searchable via the recall tool. Use recall proactively when referencing ` +
+      `details from earlier in the session.]`;
+  } else if (result.layer >= 1 && !ltmText) {
+    ltmText = `[Context health: conversation history is compressed. ` +
+      `Earlier details (file paths, error messages, decisions) are preserved in distilled ` +
+      `observations and searchable via the recall tool. Use recall proactively when referencing ` +
+      `details from earlier in the session.]`;
+  }
+
+  // --- 7d. Unsustainable conversation warning ---
   // When 5+ consecutive cache busts are detected, flag for response-side injection.
   // The warning is injected into the assistant response (not the user message) so:
   //  1. The user can actually see it (not hidden in <system-reminder> tags)

@@ -218,7 +218,9 @@ export const CURATOR_SYSTEM = `You are a long-term memory curator. Your job is t
 Focus ONLY on knowledge that helps a coding agent work effectively on THIS codebase:
 - Architectural decisions and their rationale (why something was built a certain way)
 - Non-obvious implementation patterns and conventions specific to the project
-- Recurring gotchas, constraints, or traps in the codebase
+- Recurring gotchas, constraints, or traps in the codebase — always include WHY the
+  wrong approach seems right, not just the trap and fix. Without this, a future session
+  will re-propose the broken approach because it looks like a reasonable improvement.
 - Environment/tooling setup details that affect development
 - Important relationships between components that aren't obvious from reading the code
 - User preferences and working style specific to how they use this project
@@ -237,10 +239,19 @@ Do NOT extract:
 - Knowledge about unrelated projects or repositories unless explicitly cross-project
 - Restatements of what the code obviously does (e.g. "the auth module handles authentication")
 
+INCLUDE THE "WHY" — decisions and gotchas without rationale get undone:
+- Every "decision" MUST include the rejected alternative and why it was rejected.
+  Format: "Chose X over Y because Z." Without the rejected option, a future session
+  will re-propose Y because it looks like a reasonable improvement.
+- Every "gotcha" MUST explain why the wrong approach seems correct, not just the trap
+  and its fix. Format: "Trap: X looks right because [reason]. Fix: Y, because [reason]."
+- Any standard or rule without its rationale is vulnerable to being optimized away by
+  a session that doesn't know what problem it was solving.
+
 BREVITY IS CRITICAL — each entry must be concise:
 - content MUST be under 150 words (~600 characters). Capture ONE specific actionable
   insight in 2-3 sentences. Prefer terse technical language.
-- Each "gotcha": one specific trap + its fix in 1-2 sentences
+- Each "gotcha": one specific trap + WHY it looks right + its fix in 2-3 sentences
 - Each "architecture": one design decision and its key constraint
 - Focus on the actionable insight, not the full story behind it
 - If a pattern requires more detail, split into multiple focused entries (each under 150 words)

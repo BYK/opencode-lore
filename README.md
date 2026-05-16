@@ -2,7 +2,9 @@
 
 > **Experimental** — Under active development. APIs, storage format, and behavior may change.
 
-An implementation of [Sanity's Nuum](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) memory architecture and [Mastra's Observational Memory](https://mastra.ai/research/observational-memory) system for coding agents. Both projects pioneered the idea that coding agents need **distillation, not summarization** — preserving operational intelligence (file paths, error messages, exact decisions) rather than narrative summaries that lose the details agents need to keep working.
+Automatic memory for AI coding agents. Your AI forgets your project between sessions. Lore fixes that — no context files to write, no learnings to track, no sessions to carefully manage.
+
+Built on [Sanity's Nuum](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) memory architecture and [Mastra's Observational Memory](https://mastra.ai/research/observational-memory) research. The core idea: coding agents need **distillation, not summarization** — preserving file paths, error messages, and exact decisions rather than narrative summaries that lose the details agents need to keep working.
 
 Lore is published as three packages, all sharing the same SQLite database at `~/.local/share/lore/lore.db`:
 
@@ -19,6 +21,26 @@ Because all three share the same database, switching between OpenCode and Pi on 
 ## Why
 
 Coding agents forget. Once a conversation exceeds the context window, earlier decisions, bug fixes, and architectural choices vanish. The default approach — summarize-and-compact — loses exactly the operational details agents need. After a few compaction passes, the agent knows you "discussed authentication" but can't actually continue the work.
+
+The manual alternative is writing context files by hand — DEVELOPMENT_CONTEXT.md, key technical learnings, decision rationales. It works ([O'Reilly Radar](https://www.oreilly.com/radar/why-doesnt-anyone-teach-developers-about-context-management/) has a thorough guide), but it's a second full-time job. One project tracked 49 technical learnings manually, each with "What, Why, When, Where" — and every one had to be maintained or the AI would refactor deliberate decisions away.
+
+Lore automates all of it: distillation, knowledge curation, cross-session recall, and AGENTS.md export. You keep coding. Lore keeps the context.
+
+## What you'd otherwise do by hand
+
+Context management is [emerging as the most important skill in AI-driven development](https://www.oreilly.com/radar/why-doesnt-anyone-teach-developers-about-context-management/). The recommended manual practices include:
+
+- **DEVELOPMENT_CONTEXT.md** — a bootstrap file the AI reads at session start, with loading sequences pointing to subsystem-level context files
+- **Key Technical Learnings** — numbered entries with "What, Why, When, Where" for every significant discovery
+- **Decision rationales** — every architectural choice needs the "why" recorded, or a future session will optimize it away
+- **Behavioral contracts** — observed invariants written to files before requirements work begins, so forgotten contracts are greppable gaps
+- **Session handoff files** — externalized intermediate state (EXPLORATION.md, CONTRACTS.md) so work survives across sessions
+
+Lore handles all five automatically:
+- Distillation replaces DEVELOPMENT_CONTEXT.md with an always-current observation log
+- The curator extracts and maintains key learnings, decisions, and gotchas
+- AGENTS.md export provides the bootstrap file in the [universal format](https://agenticaistandard.org/)
+- The recall tool searches across all sessions — no handoff files needed
 
 ## How it works
 
@@ -315,8 +337,9 @@ Lore re-scans the `lat.md/` directory periodically (on session idle), so changes
 - [Mastra Memory source](https://github.com/mastra-ai/mastra/tree/main/packages/memory) — reference implementation.
 - [Fast KV Compaction via Attention Matching](https://arxiv.org/abs/2602.16284) — Adam Zweiger, Xinghong Fu, Han Guo, Yoon Kim on preserving attention mass when compressing KV caches. Inspired the loss-annotated tool stripping approach: when content is removed during compression, preserving metadata about what was lost helps the model compensate — analogous to the per-token scalar bias β that preserves attention mass when token count is reduced.
 - [Cartridges: Compact Representations of Context for LLMs](https://arxiv.org/abs/2501.17390) — Simran Arora, Sabri Eyuboglu, Michael Zhang, Aman Timalsina, Silas Alberti, Dylan Judd, Christopher Ré on offline compressed context representations. Two key ideas adopted: (1) the context-distillation objective for meta-distillation — optimizing compressed context for downstream query-answering rather than faithful summarization, following the Self-Study finding that memorization objectives don't generalize; (2) composable multi-resolution distillations — archiving detailed observations instead of deleting them during consolidation, preserving a searchable detail layer beneath the compressed summary.
+- [Why Doesn't Anyone Teach Developers About Context Management?](https://www.oreilly.com/radar/why-doesnt-anyone-teach-developers-about-context-management/) — Andrew Stellman at O'Reilly Radar on why context management is the most important undiscussed skill in AI development. The manual practices described (DEVELOPMENT_CONTEXT.md, Key Technical Learnings, decision rationales) are what Lore automates.
 - [OpenCode](https://opencode.ai) — the coding agent this plugin extends.
 
 ## License
 
-MIT
+FSL-1.1-Apache-2.0
