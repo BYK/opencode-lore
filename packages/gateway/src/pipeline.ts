@@ -58,6 +58,7 @@ import {
 import type {
   GatewayRequest,
   GatewayResponse,
+  GatewayMessage,
   GatewayContentBlock,
   GatewayToolUseBlock,
   GatewayToolResultBlock,
@@ -174,6 +175,53 @@ import {
 
 /** One-time initialization flag. */
 let initialized = false;
+
+// --- Context warning marker for unsustainable conversations ---
+// Injected into the response (assistant message) so the user can see it.
+// Stripped from incoming requests on subsequent turns to preserve cache prefix.
+const CONTEXT_WARNING_MARKER = "[lore:context-warning]";
+const CONTEXT_WARNING_TEXT =
+  `${CONTEXT_WARNING_MARKER} This conversation is growing unsustainably \u2014 ` +
+  `it has exceeded the context limit 5+ times in a row and compression cannot keep up. ` +
+  `Consider running /compact or starting a new conversation.\n\n---\n\n`;
+
+/** Insert the context warning text block into a response, after any leading thinking blocks. */
+function injectContextWarning(resp: GatewayResponse): GatewayResponse {
+  // Insert after thinking blocks to preserve the expected block ordering
+  // (thinking first, then text). Clients may inspect the first block's type
+  // to determine if extended thinking is active.
+  let insertIdx = 0;
+  while (insertIdx < resp.content.length && resp.content[insertIdx].type === "thinking") {
+    insertIdx++;
+  }
+  const content = [...resp.content];
+  content.splice(insertIdx, 0, { type: "text" as const, text: CONTEXT_WARNING_TEXT });
+  return { ...resp, content };
+}
+
+/**
+ * Strip context warning markers from assistant messages in an incoming request.
+ * Restores the message content to what the API originally generated, preserving
+ * the prompt cache prefix.
+ *
+ * Only checks the first non-thinking content block of each assistant message —
+ * that's where injectContextWarning() inserts it. This avoids false positives
+ * if the model happens to echo the marker in its own output.
+ */
+function stripContextWarnings(messages: GatewayMessage[]): void {
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue;
+    // Find the first non-thinking block (mirrors injectContextWarning insertion point)
+    for (let i = 0; i < msg.content.length; i++) {
+      const block = msg.content[i];
+      if (block.type === "thinking") continue;
+      if (block.type === "text" && block.text.startsWith(CONTEXT_WARNING_MARKER)) {
+        msg.content.splice(i, 1);
+      }
+      break; // only check the first non-thinking block
+    }
+  }
+}
 
 /** Active upstream interceptor — used for recording/replay. */
 let activeInterceptor: UpstreamInterceptor | undefined;
@@ -1060,6 +1108,8 @@ function buildStreamingResponse(
     sessionState: SessionState;
     cacheOptions: AnthropicCacheOptions;
   },
+  /** When set, prepend a synthetic warning content block to the stream. */
+  warningText?: string,
 ): Response {
   const recallAccum = recallContext
     ? createRecallAwareAccumulator(RECALL_TOOL_NAME, { scaleClientUsage: true })
@@ -1098,10 +1148,76 @@ function buildStreamingResponse(
         // Parse and forward upstream SSE events
         const reader = upstreamResponse.body!.getReader();
         activeReader = reader;
+
+        // When a warning needs to be prepended to the response, we emit a
+        // synthetic text content block after any leading thinking blocks,
+        // then offset all subsequent real content block indices by 1.
+        // The accumulator sees the original (un-offset) data so postResponse()
+        // gets the clean response — only the client stream has the warning.
+        // Thinking blocks are forwarded at their original indices to preserve
+        // the expected ordering (clients may inspect the first block's type).
+        let warningEmitted = false;
+        let inThinking = false;
+        let warningBlockIndex = 0; // incremented past thinking blocks
+        const warningOffset = warningText ? 1 : 0;
+
         for await (const { event, data } of parseSSEStream(reader)) {
           const forwarded = accumulator.processEvent(event, data);
           if (forwarded) {
-            if (!safeEnqueue(encoder.encode(forwarded))) break;
+            // --- Warning injection: skip thinking blocks, inject before first text/tool block ---
+            if (warningText && !warningEmitted) {
+              if (event === "message_start" || event === "ping") {
+                // Forward as-is, no action needed
+                if (!safeEnqueue(encoder.encode(forwarded))) break;
+                continue;
+              }
+
+              // Track thinking blocks — forward at original indices, no offset
+              if (event === "content_block_start") {
+                try {
+                  const parsed = JSON.parse(data);
+                  if (parsed.content_block?.type === "thinking") {
+                    inThinking = true;
+                    warningBlockIndex++;
+                    if (!safeEnqueue(encoder.encode(forwarded))) break;
+                    continue;
+                  }
+                } catch { /* fall through to inject */ }
+              }
+              if (inThinking) {
+                if (event === "content_block_stop") inThinking = false;
+                if (!safeEnqueue(encoder.encode(forwarded))) break;
+                continue;
+              }
+
+              // First non-thinking content block — inject warning before it
+              const blockStart = JSON.stringify({ type: "content_block_start", index: warningBlockIndex, content_block: { type: "text", text: "" } });
+              const blockDelta = JSON.stringify({ type: "content_block_delta", index: warningBlockIndex, delta: { type: "text_delta", text: warningText } });
+              const blockStop = JSON.stringify({ type: "content_block_stop", index: warningBlockIndex });
+              const warningSSE =
+                `event: content_block_start\ndata: ${blockStart}\n\n` +
+                `event: content_block_delta\ndata: ${blockDelta}\n\n` +
+                `event: content_block_stop\ndata: ${blockStop}\n\n`;
+              if (!safeEnqueue(encoder.encode(warningSSE))) break;
+              warningEmitted = true;
+              // Fall through to offset and forward this event
+            }
+
+            // Offset content block indices to account for the injected warning block
+            let toSend = forwarded;
+            if (warningOffset > 0 && warningEmitted) {
+              toSend = forwarded.replace(/^(data: )(.+)$/m, (_, prefix, jsonStr) => {
+                try {
+                  const obj = JSON.parse(jsonStr);
+                  if (typeof obj.index === "number") {
+                    obj.index += warningOffset;
+                    return prefix + JSON.stringify(obj);
+                  }
+                } catch { /* not JSON — leave as-is */ }
+                return prefix + jsonStr;
+              });
+            }
+            if (!safeEnqueue(encoder.encode(toSend))) break;
           }
         }
 
@@ -1234,7 +1350,7 @@ function buildStreamingResponse(
             // Suppress message_start (client already has one) and re-index
             // content blocks to continue from where the client left off.
             // +1 accounts for the synthetic marker block.
-            const blockOffset = recallAccum.clientBlockCount() + 1;
+            const blockOffset = recallAccum.clientBlockCount() + 1 + warningOffset;
             const contReader = followUpResponse.body!.getReader();
             activeReader = contReader;
             let contEventCount = 0;
@@ -2505,6 +2621,13 @@ async function handleConversationTurn(
     cleanupRecallStore(req, sessionState.recallStore);
   }
 
+  // --- Strip context warning markers from previous turns ---
+  // The warning is injected into the response (assistant message) so the user
+  // can see it. On the next turn, the client sends it back as part of the
+  // assistant message. Strip it here so the API sees the original content,
+  // preserving the prompt cache prefix.
+  stripContextWarnings(req.messages);
+
   log.info(
     `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
       `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier}`,
@@ -2824,23 +2947,16 @@ async function handleConversationTurn(
   }
 
   // --- 7c. Unsustainable conversation warning ---
-  // When 5+ consecutive cache busts are detected, the conversation is growing
-  // faster than compression can keep up. Inject a warning into the last user
-  // message so the model can advise the user to compact or start fresh.
-  if (result.unsustainable) {
-    const warning = result.messages.findLast((m) => m.info.role === "user");
-    if (warning) {
-      warning.parts.push({
-        type: "text",
-        text: "\n\n<system-reminder>WARNING: This conversation is growing unsustainably — " +
-          "it has exceeded the context limit 5+ times in a row and compression cannot keep up. " +
-          "Consider running /compact to reset the context window or starting a new conversation " +
-          "to maintain response quality.</system-reminder>",
-      });
-    }
+  // When 5+ consecutive cache busts are detected, flag for response-side injection.
+  // The warning is injected into the assistant response (not the user message) so:
+  //  1. The user can actually see it (not hidden in <system-reminder> tags)
+  //  2. No modification to user messages → no cache prefix divergence
+  //  3. Stripped on the next turn to restore API-original content for cache
+  const unsustainable = result.unsustainable;
+  if (unsustainable) {
     log.warn(
       `session ${sessionID}: unsustainable conversation detected (5+ consecutive cache busts). ` +
-      `Warning injected.`,
+      `Warning will be prepended to response.`,
     );
   }
 
@@ -2991,8 +3107,10 @@ async function handleConversationTurn(
     // since the Anthropic SSE accumulator can't parse OpenAI SSE formats.
     if (effectiveProtocol === "openai-responses") {
       const resp = await accumulateResponsesSSEStream(upstreamResponse);
+      // postResponse sees the clean response (for calibration, cost tracking).
+      // Only the client-facing HTTP response gets the warning injected.
       postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(resp);
+      return nonStreamHttpResponse(unsustainable ? injectContextWarning(resp) : resp);
     }
 
     if (effectiveProtocol === "openai") {
@@ -3000,7 +3118,7 @@ async function handleConversationTurn(
       // non-streaming Anthropic format (same pattern as non-stream path).
       const resp = await accumulateNonStreamOpenAIStream(upstreamResponse);
       postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(resp);
+      return nonStreamHttpResponse(unsustainable ? injectContextWarning(resp) : resp);
     }
 
     // Anthropic streaming: forward events and accumulate in parallel.
@@ -3014,6 +3132,7 @@ async function handleConversationTurn(
       hasRecallTool
         ? { modifiedReq, config, sessionState, cacheOptions }
         : undefined,
+      unsustainable ? CONTEXT_WARNING_TEXT : undefined,
     );
   }
 
@@ -3049,7 +3168,7 @@ async function handleConversationTurn(
         `recall (non-stream, mixed): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
       );
       postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(markerResp);
+      return nonStreamHttpResponse(unsustainable ? injectContextWarning(markerResp) : markerResp);
     }
 
     // Recall-only — send follow-up request for seamless UX
@@ -3077,7 +3196,7 @@ async function handleConversationTurn(
       );
       // Fall back to response with marker (no continuation)
       postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(markerResp);
+      return nonStreamHttpResponse(unsustainable ? injectContextWarning(markerResp) : markerResp);
     }
 
     let continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
@@ -3105,11 +3224,11 @@ async function handleConversationTurn(
     }
 
     postResponse(req, continuationResp, sessionState, config, requestBody, genAiSpan);
-    return nonStreamHttpResponse(continuationResp);
+    return nonStreamHttpResponse(unsustainable ? injectContextWarning(continuationResp) : continuationResp);
   }
 
   postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
-  return nonStreamHttpResponse(resp);
+  return nonStreamHttpResponse(unsustainable ? injectContextWarning(resp) : resp);
 }
 
 // ---------------------------------------------------------------------------

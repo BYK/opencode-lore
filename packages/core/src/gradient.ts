@@ -135,10 +135,11 @@ export function getTier(tokens: number): number {
  *
  * A "bust" is when cache_write > 50% of total input tokens.
  *
- * @param cacheWrite - cache_creation_input_tokens from the API response
- * @param cacheRead  - cache_read_input_tokens from the API response
- * @param inputTokens - total input_tokens from the API response (includes uncached)
- * @param sessionID  - session that produced this response
+ * @param cacheWrite  - cache_creation_input_tokens from the API response
+ * @param cacheRead   - cache_read_input_tokens from the API response
+ * @param inputTokens - input_tokens from the API response (uncached portion only —
+ *                      Anthropic's input_tokens excludes both cache reads and writes)
+ * @param sessionID   - session that produced this response
  */
 export function recordCacheUsage(
   cacheWrite: number,
@@ -149,15 +150,24 @@ export function recordCacheUsage(
   if (!sessionID) return;
   const state = getSessionState(sessionID);
 
-  // Use total input tokens as denominator (includes uncached input),
-  // not just cacheWrite + cacheRead, to avoid inflated bust ratios
-  // when a large fraction of tokens is uncached.
-  const total = inputTokens > 0 ? inputTokens : cacheWrite + cacheRead;
+  // Total = cacheWrite + cacheRead + uncached input. Anthropic's input_tokens
+  // field is only the uncached portion, NOT the total — using it alone as the
+  // denominator makes every cached turn look like a bust (e.g. 1000/3 >> 0.5).
+  const total = cacheWrite + cacheRead + inputTokens;
   if (total > 0) {
-    if (cacheWrite / total > 0.5) {
+    const bustRatio = cacheWrite / total;
+    const prev = state.consecutiveBusts;
+    if (bustRatio > 0.5) {
       state.consecutiveBusts++;
     } else {
       state.consecutiveBusts = 0;
+    }
+    if (state.consecutiveBusts !== prev) {
+      log.info(
+        `bust-tracker: session=${sessionID.slice(0, 16)} ratio=${bustRatio.toFixed(3)}` +
+        ` (write=${cacheWrite} read=${cacheRead} uncached=${inputTokens})` +
+        ` busts=${prev}→${state.consecutiveBusts}`,
+      );
     }
   }
 }
@@ -316,9 +326,11 @@ function getSessionState(sessionID: string): SessionState {
       state.lastLayer = persisted.lastLayer as SafetyLayer;
       state.lastKnownInput = persisted.lastKnownInput;
       state.lastTurnAt = persisted.lastTurnAt;
-      // consecutiveBusts is persisted in the dynamicContextCap column
-      // (repurposed, see saveGradientState).
-      state.consecutiveBusts = persisted.dynamicContextCap;
+      // Don't restore consecutiveBusts from DB — it's a short-term rolling
+      // signal that must rebuild from live API responses in the current process.
+      // Stale values from a previous process (different cache state after restart)
+      // cause false unsustainable warnings. The dynamicContextCap column is still
+      // written for diagnostics but not consumed on restore.
     }
 
     sessionStates.set(sessionID, state);
