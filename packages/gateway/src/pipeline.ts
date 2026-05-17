@@ -2546,8 +2546,8 @@ function isCacheWarm(state: SessionState): boolean {
   );
   if (!profile) return false;
 
-  // /keep sessions: consider warm if the last warmup was within 2 TTL
-  // windows. The warmer fires once per TTL window, so 2× provides a
+  // /lore:warm:keep sessions: consider warm if the last warmup was within
+  // 2 TTL windows. The warmer fires once per TTL window, so 2× provides a
   // safety margin while still expiring if the warmer has stopped
   // (e.g. circuit breaker tripped, process-level failure).
   if (warmup.forceKeepWarm) {
@@ -3529,7 +3529,7 @@ export function removeOrphanedToolResults(
 }
 
 // ---------------------------------------------------------------------------
-// Slash command interception (/done, /keep)
+// Slash command interception (/lore:warm:*)
 // ---------------------------------------------------------------------------
 
 /**
@@ -3553,8 +3553,9 @@ function lastUserTextTrimmed(req: GatewayRequest): string {
 /**
  * Check if the last user message is a warmup slash command.
  *
- * `/done` — disables cache warming for this session (user is finished).
- * `/keep` — forces cache warming regardless of survival analysis.
+ * `/lore:warm:stop` — disables cache warming for this session.
+ * `/lore:warm:keep` — forces cache warming regardless of survival analysis.
+ * `/lore:warm:auto` — returns to normal survival-analysis-driven mode.
  *
  * Returns a synthetic Anthropic-format response if a command was matched,
  * or null to continue normal processing.
@@ -3566,9 +3567,10 @@ function handleWarmupSlashCommand(
   const text = lastUserTextTrimmed(req);
   const lower = text.toLowerCase();
 
-  const isDone = lower === "/done";
-  const isKeep = lower === "/keep" || lower === "/keep-warm";
-  if (!isDone && !isKeep) return null;
+  const isStop = lower === "/lore:warm:stop";
+  const isKeep = lower === "/lore:warm:keep";
+  const isAuto = lower === "/lore:warm:auto";
+  if (!isStop && !isKeep && !isAuto) return null;
 
   // Find the session for this request (use the same header-based lookup)
   const known = extractKnownSessionHeader(req.rawHeaders);
@@ -3582,18 +3584,31 @@ function handleWarmupSlashCommand(
   // Update session warmup state
   if (state) {
     if (!state.warmup) {
-      state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: isDone };
-    } else {
-      state.warmup.disabled = isDone;
+      state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: false };
     }
-    if (isKeep) state.warmup.forceKeepWarm = true;
+    if (isStop) {
+      state.warmup.disabled = true;
+      state.warmup.forceKeepWarm = false;
+    } else if (isKeep) {
+      state.warmup.forceKeepWarm = true;
+      state.warmup.disabled = false;
+    } else {
+      // isAuto — return to normal survival-analysis mode
+      state.warmup.disabled = false;
+      state.warmup.forceKeepWarm = false;
+    }
+    const modeLabel = isStop ? "stopped" : isKeep ? "forced" : "auto";
     log.info(
       `cache-warmer: ${lower} received for session=${state.sessionID.slice(0, 16)} — ` +
-        `warming ${isDone ? "disabled" : "forced"}`,
+        `warming mode: ${modeLabel}`,
     );
   }
 
-  const responseText = isDone ? "🧊 Freezing session." : "🔥 Keeping cache warm.";
+  const responseText = isStop
+    ? "🧊 Cache warming stopped."
+    : isKeep
+      ? "🔥 Keeping cache warm."
+      : "🔄 Cache warming set to auto.";
 
   const msgId = `msg_lore_${Date.now()}`;
 
@@ -3687,7 +3702,7 @@ export async function handleRequest(
       if (sid) priorState = sessions.get(sid);
     }
 
-    // --- Case 0: Slash command interception (/done, /keep) ---
+    // --- Case 0: Slash command interception (/lore:warm:*) ---
     const slashResult = handleWarmupSlashCommand(req, sessions);
     if (slashResult) return slashResult;
 

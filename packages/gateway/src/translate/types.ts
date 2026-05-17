@@ -337,7 +337,7 @@ export type WarmupState = {
   warmupHits: number;
   /** Session marked as dead — survival dropped below threshold. Resets on real request. */
   disabled: boolean;
-  /** User explicitly requested keep-warm via /keep command. Bypasses survival analysis. */
+  /** User explicitly requested keep-warm via /lore:warm:keep command. Bypasses survival analysis. */
   forceKeepWarm?: boolean;
 };
 

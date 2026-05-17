@@ -81,6 +81,10 @@ export const DEAD_SESSION_THRESHOLD = 0.02;
  *  sessions and ensures the survival model has ≥2 gap observations. */
 export const MIN_TURNS_FOR_WARMING = 3;
 
+/** Maximum duration (ms) to keep warming during a tool call before
+ *  falling back to normal survival analysis. 30 min ≈ 6 cycles at 5m TTL. */
+export const MAX_TOOL_CALL_WARMING_MS = 30 * 60 * 1000;
+
 /** Max uncached warmup responses before the global circuit breaker trips. */
 const CIRCUIT_BREAKER_MAX_FAILURES = 3;
 
@@ -396,6 +400,9 @@ export type SessionEndSignals = {
   breakFraction: number;
   /** Total completed turns (messageCount / 2). */
   totalTurns: number;
+  /** Last stop reason from the assistant response. "tool_use" means the
+   *  agent is actively executing a tool and will return with the result. */
+  lastStopReason?: string;
 };
 
 /**
@@ -438,6 +445,12 @@ export function pSessionFinished(signals: SessionEndSignals): number {
     logOdds += 1.0;
   } else if (signals.totalTurns <= 5) {
     logOdds += 0.3;
+  }
+
+  // Signal 5: Active tool call — strong evidence session is NOT finished.
+  // The agent is executing a tool and will return with the result.
+  if (signals.lastStopReason === "tool_use") {
+    logOdds -= 4.0;
   }
 
   // Sigmoid: p = 1 / (1 + exp(-logOdds))
@@ -628,7 +641,7 @@ export function resolveProfile(
  *  2. Computes expected warming cost across a potential break
  *  3. Compares P(returns) against the corrected cost threshold
  *
- * Gate checks (circuit breaker, config, body, /keep, cooldown) are unchanged.
+ * Gate checks (circuit breaker, config, body, /lore:warm:keep, cooldown) are unchanged.
  *
  * Two phases for the normal path:
  *  - Initial commitment (first TTL window): full ROI analysis
@@ -640,11 +653,11 @@ export function shouldWarm(
   blendedHist: InterTurnHistogram,
   now: number = Date.now(),
 ): boolean {
-  // Global kill switch — always respected, even with /keep
+  // Global kill switch — always respected, even with /lore:warm:keep
   if (circuitBreakerTripped) return false;
 
   // Sub-agent sessions are always exempt — they are too short-lived
-  // for warming to be profitable, even with /keep force.
+  // for warming to be profitable, even with /lore:warm:keep force.
   if (state.isSubagent) return false;
 
   const cfg = loreConfig();
@@ -658,19 +671,20 @@ export function shouldWarm(
   const forced = state.warmup?.forceKeepWarm === true;
 
   // Already warmed recently — prevent double-warming.
-  // For /keep mode, use a tighter cooldown (ttlMs - warmupMarginMs) so the
-  // next warmup fires before the current cache expires. Without this, the
-  // full-ttlMs guard combined with margin positioning produces a ~2x TTL
+  // For /lore:warm:keep mode, use a tighter cooldown (ttlMs - warmupMarginMs)
+  // so the next warmup fires before the current cache expires. Without this,
+  // the full-ttlMs guard combined with margin positioning produces a ~2x TTL
   // cadence (e.g. 10 min on a 5 min TTL), leaving a dead zone each cycle.
-  const cooldownMs = forced ? Math.max(ttlMs - warmupMarginMs, 0) : ttlMs;
+  const toolCallActive = state.lastStopReason === "tool_use";
+  const cooldownMs = (forced || toolCallActive) ? Math.max(ttlMs - warmupMarginMs, 0) : ttlMs;
   if (state.warmup?.lastWarmupAt && (now - state.warmup.lastWarmupAt) < cooldownMs) {
     return false;
   }
 
   if (forced) {
-    // /keep mode: skip survival/signal analysis but still respect the
-    // break-even cap — warming beyond maxCycles is always unprofitable,
-    // even when the user explicitly asked for /keep.
+    // /lore:warm:keep mode: skip survival/signal analysis but still respect
+    // the break-even cap — warming beyond maxCycles is always unprofitable,
+    // even when the user explicitly asked for /lore:warm:keep.
     const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
     if (cyclesSpent >= maxCycles) return false;
@@ -678,6 +692,29 @@ export function shouldWarm(
     // Check we're in the warmup margin of *some* TTL window.
     const intoWindow = elapsed % ttlMs;
     if (intoWindow < ttlMs - warmupMarginMs) return false;
+    return true;
+  }
+
+  // --- Tool-call fast path ---
+  // When lastStopReason is "tool_use", the agent is executing a tool and
+  // WILL return with the result. Bypass survival analysis (return probability
+  // is ~1.0) but respect break-even cap and a maximum duration to handle
+  // agent crashes gracefully.
+  if (toolCallActive && !state.warmup?.disabled) {
+    // Cap: don't warm indefinitely if the agent crashed mid-tool-call
+    if (elapsed > MAX_TOOL_CALL_WARMING_MS) return false;
+
+    const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
+    const cyclesSpent = state.warmup?.warmupCount ?? 0;
+    if (cyclesSpent >= maxCycles) return false;
+
+    // Still require some history to have a stored body worth warming
+    if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) return false;
+
+    // Only warm in the margin window of the current TTL cycle
+    const intoWindow = elapsed % ttlMs;
+    if (intoWindow < ttlMs - warmupMarginMs) return false;
+
     return true;
   }
 
@@ -702,6 +739,7 @@ export function shouldWarm(
     consecutiveTextOnlyTurns: textOnlyRuns,
     breakFraction: breakFrac,
     totalTurns,
+    lastStopReason: state.lastStopReason,
   });
   const pReturns = 1.0 - pFinished;
 
@@ -816,6 +854,8 @@ export type WarmingSnapshot = {
   pReturn: number;
   pReturnDampened: number;
   costThreshold: number;
+  // Tool-call state
+  toolCallActive: boolean;
   // Decision
   shouldWarmNow: boolean;
   notWarmingReason: string | null;
@@ -868,6 +908,7 @@ export function computeWarmingSnapshot(
     consecutiveTextOnlyTurns: textOnlyRuns,
     breakFraction: breakFrac,
     totalTurns,
+    lastStopReason: state.lastStopReason,
   });
   const pReturns = 1.0 - pFinished;
 
@@ -921,12 +962,30 @@ export function computeWarmingSnapshot(
           notWarmingReason = "Force-keep: cooldown active";
         }
       }
+    } else if (state.lastStopReason === "tool_use") {
+      if (state.warmup?.disabled) {
+        notWarmingReason = "Warming stopped (/lore:warm:stop)";
+      } else if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
+        notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
+      } else if (idleMs > MAX_TOOL_CALL_WARMING_MS) {
+        notWarmingReason = `Tool call exceeded max duration (${Math.round(idleMs / 60_000)}min > 30min)`;
+      } else {
+        const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+        if ((state.warmup?.warmupCount ?? 0) >= maxCyc) {
+          notWarmingReason = "Tool call: break-even exceeded";
+        } else {
+          const intoWindow = idleMs % ttlMs;
+          notWarmingReason = intoWindow < ttlMs - warmupMarginMs
+            ? "Tool call: not in warmup window yet"
+            : "Tool call: cooldown active";
+        }
+      }
     } else if (state.warmup?.lastWarmupAt && now - state.warmup.lastWarmupAt < cooldownFor(state, ttlMs, warmupMarginMs)) {
       notWarmingReason = "Already warmed in this TTL window";
     } else if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
       notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
     } else if (state.warmup?.disabled) {
-      notWarmingReason = "Session marked dead";
+      notWarmingReason = "Warming stopped (/lore:warm:stop)";
     } else if (isFirstWindow && idleMs < ttlMs - warmupMarginMs) {
       notWarmingReason = "Cache still fresh";
     } else if (pReturns <= thresholdVal) {
@@ -971,6 +1030,8 @@ export function computeWarmingSnapshot(
     pReturn,
     pReturnDampened,
     costThreshold: thresholdVal,
+    // Tool-call state
+    toolCallActive: state.lastStopReason === "tool_use" && idleMs <= MAX_TOOL_CALL_WARMING_MS && !state.warmup?.disabled,
     // Decision
     shouldWarmNow: warmNow,
     notWarmingReason,
@@ -978,9 +1039,9 @@ export function computeWarmingSnapshot(
   };
 }
 
-/** Compute cooldown based on forced/normal mode. */
+/** Compute cooldown based on forced/tool-call/normal mode. */
 function cooldownFor(state: SessionState, ttlMs: number, warmupMarginMs: number): number {
-  return state.warmup?.forceKeepWarm
+  return (state.warmup?.forceKeepWarm || state.lastStopReason === "tool_use")
     ? Math.max(ttlMs - warmupMarginMs, 0)
     : ttlMs;
 }

@@ -80,6 +80,11 @@ export function startIdleScheduler(
       if (inProgress.has(sessionID)) continue;
       if (now - state.lastRequestTime < timeoutMs) continue;
 
+      // Skip idle work when the agent is executing a tool — the session
+      // is still active, not genuinely idle. Distillation/curation should
+      // wait for the actual idle period after the tool-use turn completes.
+      if (state.lastStopReason === "tool_use") continue;
+
       inProgress.add(sessionID);
       runBackground(
         () => doIdleWork(sessionID, state),

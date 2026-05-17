@@ -15,6 +15,7 @@ import {
   expectedWarmupCycles,
   costThreshold,
   maxProfitableCycles,
+  MAX_TOOL_CALL_WARMING_MS,
   HISTOGRAM_BINS,
   BREAK_FLOOR_MS,
   _resetForTest,
@@ -576,7 +577,7 @@ describe("shouldWarm", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
   });
 
-  test("returns false for sub-agent sessions even with /keep", () => {
+  test("returns false for sub-agent sessions even with /lore:warm:keep", () => {
     const now = Date.now();
     const state = makeSessionState({
       lastRequestTime: now - 270_000,
@@ -1174,20 +1175,20 @@ describe("shouldWarm continuation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// /keep mode break-even cap
+// /lore:warm:keep mode break-even cap
 // ---------------------------------------------------------------------------
 
-describe("shouldWarm /keep mode", () => {
+describe("shouldWarm /lore:warm:keep mode", () => {
   beforeEach(() => {
     _resetForTest();
   });
 
-  test("/keep mode stops at break-even cap", () => {
+  test("/lore:warm:keep mode stops at break-even cap", () => {
     const now = Date.now();
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
 
-    // Session in /keep mode that has already spent maxCycles
+    // Session in /lore:warm:keep mode that has already spent maxCycles
     const state = makeSessionState({
       lastRequestTime: now - (maxCyc + 1) * 300_000 - 270_000,
       warmup: {
@@ -1208,11 +1209,11 @@ describe("shouldWarm /keep mode", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
   });
 
-  test("/keep mode warms when below break-even cap", () => {
+  test("/lore:warm:keep mode warms when below break-even cap", () => {
     const now = Date.now();
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
 
-    // Session in /keep mode with only 2 cycles spent, in warmup margin
+    // Session in /lore:warm:keep mode with only 2 cycles spent, in warmup margin
     const state = makeSessionState({
       lastRequestTime: now - 570_000, // 9.5min — in warmup margin of 2nd window
       warmup: {
@@ -1524,5 +1525,229 @@ describe("global histogram persistence", () => {
     expect(hist.total).toBe(10); // 7 + 3, no double-count
     expect(hist.counts[0]).toBe(7);
     expect(hist.counts[5]).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool-call-aware cache warming
+// ---------------------------------------------------------------------------
+
+describe("shouldWarm tool-call warming", () => {
+  beforeEach(() => {
+    _resetForTest();
+  });
+
+  /** Helper: session mid-tool-call (lastStopReason="tool_use") in warmup window. */
+  function makeToolCallState(overrides: Partial<SessionState> = {}): SessionState {
+    const now = Date.now();
+    return makeSessionState({
+      lastRequestTime: now - 270_000, // 4.5 min — in warmup margin of 5m TTL
+      lastStopReason: "tool_use",
+      messageCount: 10,
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+      ...overrides,
+    });
+  }
+
+  test("returns true during tool call in warmup window", () => {
+    const now = Date.now();
+    const state = makeToolCallState({ lastRequestTime: now - 270_000 });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("returns false during tool call when cache still fresh", () => {
+    const now = Date.now();
+    // 2 min — cache still fresh, not in warmup margin
+    const state = makeToolCallState({ lastRequestTime: now - 120_000 });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("returns false after MAX_TOOL_CALL_WARMING_MS exceeded", () => {
+    const now = Date.now();
+    // 35 min — past 30 min cap, in warmup margin of some TTL window
+    const elapsed = MAX_TOOL_CALL_WARMING_MS + 270_000;
+    const state = makeToolCallState({ lastRequestTime: now - elapsed });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("returns false when /lore:warm:stop was sent", () => {
+    const now = Date.now();
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 0,
+        warmupHits: 0,
+        disabled: true,
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("returns false when break-even exceeded", () => {
+    const now = Date.now();
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: maxCyc,
+        totalWarmups: maxCyc,
+        warmupHits: 0,
+        disabled: false,
+      },
+    });
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("returns false for sub-agent even with tool_use stop reason", () => {
+    const now = Date.now();
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      isSubagent: true,
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("respects circuit breaker", () => {
+    // Trip the circuit breaker
+    const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
+    checkCircuitBreaker(bad);
+    checkCircuitBreaker(bad);
+    checkCircuitBreaker(bad);
+
+    const now = Date.now();
+    const state = makeToolCallState({ lastRequestTime: now - 270_000 });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("works across multiple TTL windows", () => {
+    const now = Date.now();
+    // 14.5 min — in 3rd 5m window's warmup margin (14:15-15:00)
+    const state = makeToolCallState({
+      lastRequestTime: now - 870_000,
+      warmup: {
+        lastWarmupAt: now - 270_000, // past cooldown
+        warmupCount: 2,
+        totalWarmups: 2,
+        warmupHits: 0,
+        disabled: false,
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("requires minimum turns", () => {
+    const now = Date.now();
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      messageCount: 2, // too few turns
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("forceKeepWarm takes priority over tool-call path", () => {
+    const now = Date.now();
+    // Both forceKeepWarm=true AND lastStopReason=tool_use.
+    // The forced path should take priority (no MAX_TOOL_CALL_WARMING_MS cap).
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 0,
+        warmupHits: 0,
+        disabled: false,
+        forceKeepWarm: true,
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("works when warmup state is undefined", () => {
+    const now = Date.now();
+    // Fresh session — warmup is undefined, but tool call is active
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: undefined,
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    // warmup?.disabled is undefined, !undefined is true → enters fast path
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pSessionFinished — tool_use signal
+// ---------------------------------------------------------------------------
+
+describe("pSessionFinished tool_use signal", () => {
+  test("tool_use stop reason strongly decreases P(finished)", () => {
+    const baseSignals = {
+      survivalAtIdle: 0.1, // low survival — would normally push P(finished) high
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: 0.05,
+      totalTurns: 10,
+    };
+
+    const pWithout = pSessionFinished(baseSignals);
+    const pWith = pSessionFinished({ ...baseSignals, lastStopReason: "tool_use" });
+
+    // Without tool_use, P(finished) should be high (low survival)
+    expect(pWithout).toBeGreaterThan(0.5);
+    // With tool_use, P(finished) should be much lower
+    expect(pWith).toBeLessThan(pWithout);
+    expect(pWith).toBeLessThan(0.2);
+  });
+
+  test("tool_use overrides high consecutive text-only turns", () => {
+    const signals = {
+      survivalAtIdle: 0.5,
+      consecutiveTextOnlyTurns: 5, // strong signal task is wrapping up
+      breakFraction: 0.1,
+      totalTurns: 10,
+      lastStopReason: "tool_use",
+    };
+
+    // Despite high text-only runs, tool_use should keep P(finished) low
+    const p = pSessionFinished(signals);
+    expect(p).toBeLessThan(0.5);
   });
 });

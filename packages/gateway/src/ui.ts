@@ -368,15 +368,26 @@ details.warming[open] summary { margin-bottom: 8px; }
 .badge-warming { background: #dcfce7; color: #166534; }
 .badge-waiting { background: #dbeafe; color: #1e40af; }
 .badge-dead { background: #fef2f2; color: #991b1b; }
+.badge-stopped { background: #fef2f2; color: #991b1b; }
 .badge-forced { background: #f3e8ff; color: #6b21a8; }
 .badge-disabled { background: var(--bg3); color: var(--fg3); }
+.badge-toolcall { background: #dbeafe; color: #1e40af; }
 @media (prefers-color-scheme: dark) {
   .badge-warming { background: #14532d; color: #86efac; }
   .badge-waiting { background: #1e3a5f; color: #93c5fd; }
   .badge-dead { background: #450a0a; color: #fca5a5; }
+  .badge-stopped { background: #450a0a; color: #fca5a5; }
   .badge-forced { background: #3b0764; color: #d8b4fe; }
   .badge-disabled { background: var(--bg3); color: var(--fg3); }
+  .badge-toolcall { background: #1e3a5f; color: #93c5fd; }
 }
+/* --- Warming mode controls --- */
+.warming-controls { display: inline-flex; gap: 2px; margin-left: 6px; }
+.warming-controls form.inline { margin: 0; }
+.btn-sm { display: inline-block; padding: 2px 8px; border-radius: var(--radius); font-size: 0.75em;
+  background: var(--bg2); color: var(--fg2); border: 1px solid var(--border); cursor: pointer; }
+.btn-sm:hover { background: var(--bg3); }
+.btn-sm.btn-active { background: var(--accent); color: white; border-color: var(--accent); }
 /* --- Subagent tree rows --- */
 .subagent-row { display: none; }
 .subagent-row.expanded { display: table-row; }
@@ -708,12 +719,27 @@ function warmingStatusBadge(snap: WarmingSnapshot): string {
   if (snap.circuitBreaker.tripped)
     return `<span class="badge badge-dead">TRIPPED</span>`;
   if (snap.disabled)
-    return `<span class="badge badge-dead">dead</span>`;
+    return `<span class="badge badge-stopped">stopped</span>`;
+  if (snap.toolCallActive)
+    return `<span class="badge badge-toolcall">tool call</span>`;
   if (snap.forceKeepWarm)
     return `<span class="badge badge-forced">forced</span>`;
   if (snap.shouldWarmNow)
     return `<span class="badge badge-warming">warming</span>`;
   return `<span class="badge badge-waiting">waiting</span>`;
+}
+
+/** Render warming mode toggle buttons (auto/keep/stop) for a live session. */
+function warmingModeControls(sessionId: string, snap: WarmingSnapshot): string {
+  const modes: Array<{ mode: string; label: string; active: boolean }> = [
+    { mode: "auto", label: "Auto", active: !snap.disabled && !snap.forceKeepWarm },
+    { mode: "keep", label: "Keep", active: snap.forceKeepWarm && !snap.disabled },
+    { mode: "stop", label: "Stop", active: snap.disabled },
+  ];
+  return `<span class="warming-controls">${modes.map(m =>
+    `<form class="inline" method="POST" action="/ui/api/warming/${esc(sessionId)}/${m.mode}">` +
+    `<button type="submit" class="btn-sm${m.active ? " btn-active" : ""}">${m.label}</button></form>`,
+  ).join("")}</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -870,12 +896,13 @@ function renderSessionRow(r: LiveSessionRow, opts?: { isChild?: boolean; parentI
   const displaySavings = hasChildren ? r.rolledUpSavings : r.savings;
   const savingsColor = displaySavings >= 0 ? "#10b981" : "#e06c75";
 
-  // Status cell: badge + idle duration
+  // Status cell: badge + controls + idle duration
   let statusCell: string;
   if (r.warmingSnap) {
     const bdg = warmingStatusBadge(r.warmingSnap);
+    const controls = warmingModeControls(r.sessionId, r.warmingSnap);
     const idle = Number.isNaN(r.idleMs) ? "" : ` ${formatDuration(r.idleMs)}`;
-    statusCell = `${bdg}${idle}`;
+    statusCell = `${bdg}${controls}${idle}`;
   } else {
     statusCell = "-";
   }
@@ -1228,7 +1255,7 @@ function renderWarmingSection(sessionId: string): string {
 
   // Stat cards
   html += `<div class="stats">
-    <div class="stat"><div class="label">Status</div><div class="value">${warmingStatusBadge(snap)}</div></div>
+    <div class="stat"><div class="label">Status</div><div class="value">${warmingStatusBadge(snap)}${warmingModeControls(sessionId, snap)}</div></div>
     <div class="stat"><div class="label">Warmups</div><div class="value">${snap.totalWarmups}</div></div>
     <div class="stat"><div class="label">Hits</div><div class="value">${hitRate}</div></div>
     <div class="stat"><div class="label">P(returns)</div><div class="value">${(snap.pReturns * 100).toFixed(1)}%</div></div>
@@ -2044,6 +2071,35 @@ export async function handleUIRequest(
         data.renameProject(renameProjectMatch.id, newName);
       }
       return redirect(`/ui/projects/${renameProjectMatch.id}`);
+    }
+
+    // Set warming mode for a live session
+    const warmingMode = matchRoute(pathname, "/ui/api/warming/:sessionId/:mode");
+    if (warmingMode) {
+      const { sessionId, mode } = warmingMode;
+      if (mode !== "keep" && mode !== "stop" && mode !== "auto") {
+        return htmlResponse(layout("Bad Request", `<h1>Unknown warming mode: ${esc(mode)}</h1>`), 400);
+      }
+      const sessions = getActiveSessions();
+      const state = [...sessions.values()].find((s) => s.sessionID === sessionId);
+      if (state) {
+        if (!state.warmup) {
+          state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: false };
+        }
+        if (mode === "keep") {
+          state.warmup.forceKeepWarm = true;
+          state.warmup.disabled = false;
+        } else if (mode === "stop") {
+          state.warmup.disabled = true;
+          state.warmup.forceKeepWarm = false;
+        } else {
+          state.warmup.disabled = false;
+          state.warmup.forceKeepWarm = false;
+        }
+        state._dirty = true;
+      }
+      const referer = req.headers.get("referer");
+      return redirect(referer ?? "/ui/warming");
     }
   }
 
