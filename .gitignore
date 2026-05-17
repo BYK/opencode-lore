@@ -16,6 +16,9 @@ packages/*/src/**/*.d.ts
 packages/*/src/**/*.d.ts.map
 
 
+# Eval results (generated, potentially large)
+packages/core/eval/results/
+
 # Local plans and agent config
 .plans/
 .opencode/

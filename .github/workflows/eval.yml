@@ -1,0 +1,144 @@
+name: Lore Eval Suite
+
+on:
+  # Fixture mode on PRs that touch core/gateway code or eval suite
+  pull_request:
+    paths:
+      - 'packages/core/src/**'
+      - 'packages/gateway/src/**'
+      - 'packages/core/eval/**'
+
+  # Live mode on weekly schedule
+  schedule:
+    - cron: '0 6 * * 1' # Monday 6am UTC
+
+  # Manual trigger with mode selection
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Eval mode'
+        type: choice
+        options:
+          - fixture
+          - live
+        default: fixture
+      dimensions:
+        description: 'Comma-separated dimensions (or "all")'
+        default: 'all'
+      baselines:
+        description: 'Comma-separated baselines (or empty for defaults)'
+        default: ''
+
+jobs:
+  eval-fixture:
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'fixture')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - run: bun install
+      - run: bun packages/core/eval/run.ts --mode fixture
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: eval-fixture-results
+          path: packages/core/eval/results/
+          retention-days: 30
+
+  eval-live:
+    if: >
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'live')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      models: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - run: bun install
+
+      - name: Run live eval
+        run: >
+          bun packages/core/eval/run.ts
+          --mode live
+          --dimensions ${{ inputs.dimensions || 'all' }}
+          --concurrency 1
+          ${{ inputs.baselines && format('--baselines {0}', inputs.baselines) || '' }}
+        env:
+          # Use ANTHROPIC_API_KEY if available, fall back to GH Models PAT
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: eval-live-results
+          path: packages/core/eval/results/
+          retention-days: 90
+
+      - name: Post summary
+        if: always()
+        run: |
+          LATEST=$(ls -t packages/core/eval/results/*.jsonl 2>/dev/null | head -1)
+          if [ -n "$LATEST" ]; then
+            bun packages/core/eval/run.ts --summarize "$LATEST" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  eval-auto-memory:
+    if: >
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'live')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true
+    permissions:
+      models: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install auto-memory
+      - run: bun install
+
+      - name: Run auto-memory baseline eval
+        run: >
+          bun packages/core/eval/run.ts
+          --mode live
+          --baselines auto-mem0,lore
+          --dimensions recall,preferences,cross-project
+          --concurrency 1
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: eval-auto-memory-results
+          path: packages/core/eval/results/
+          retention-days: 90
