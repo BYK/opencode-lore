@@ -97,6 +97,12 @@ export function applyOps(
     } else if (op.op === "update") {
       const entry = ltm.get(op.id);
       if (entry) {
+        // Guard: don't mutate entries owned by a different project.
+        // Cross-project entries (project_id=NULL or same project) are safe.
+        if (entry.project_id !== null && input.projectPath) {
+          const pid = ensureProject(input.projectPath);
+          if (entry.project_id !== pid) continue;
+        }
         const content =
           op.content !== undefined && op.content.length > MAX_ENTRY_CONTENT_LENGTH
             ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
@@ -109,6 +115,11 @@ export function applyOps(
     } else if (op.op === "delete") {
       const entry = ltm.get(op.id);
       if (entry) {
+        // Guard: don't delete entries owned by a different project.
+        if (entry.project_id !== null && input.projectPath) {
+          const pid = ensureProject(input.projectPath);
+          if (entry.project_id !== pid) continue;
+        }
         ltm.remove(op.id);
         deleted++;
       }
@@ -180,7 +191,11 @@ async function runInner(input: {
   if (recent.length < 3) return { created: 0, updated: 0, deleted: 0 };
 
   const text = recent.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
-  const existing = ltm.forProject(input.projectPath, false);
+  // Include cross-project entries so the curator can see and update
+  // preferences created in earlier sessions (preferences default to
+  // crossProject: true, so excluding them makes them invisible).
+  // A project guard in applyOps prevents mutating entries from foreign projects.
+  const existing = ltm.forProject(input.projectPath, true);
   const existingForPrompt = existing.map((e) => ({
     id: e.id,
     category: e.category,
@@ -278,6 +293,9 @@ export async function consolidate(input: {
   const cfg = config();
   if (!cfg.curator.enabled) return { updated: 0, deleted: 0 };
 
+  // Intentionally excludes cross-project entries (includeCross=false).
+  // Consolidation should only merge/trim project-scoped entries — cross-project
+  // entries are shared and should not be deleted by a single project's consolidation.
   const entries = ltm.forProject(input.projectPath, false);
   if (entries.length <= cfg.curator.maxEntries) return { updated: 0, deleted: 0 };
 

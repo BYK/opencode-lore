@@ -358,6 +358,132 @@ describe("extractPatterns", () => {
     });
   });
 
+  // -----------------------------------------------------------------
+  // Declarative preference patterns (new)
+  // -----------------------------------------------------------------
+
+  describe("user uses/likes X for Y", () => {
+    test("user uses X for Y", () => {
+      const results = extractPatterns(
+        "User uses pnpm for package management.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].category).toBe("preference");
+      expect(results[0].title).toBe("Uses pnpm for package management");
+    });
+
+    test("team likes X for Y", () => {
+      const results = extractPatterns(
+        "Team likes Vitest for unit testing.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].title).toBe("Uses Vitest for unit testing");
+    });
+
+    test("we use X as Y", () => {
+      const results = extractPatterns(
+        "We use PostgreSQL as the primary database.",
+      );
+      expect(results).toHaveLength(1);
+      // titleFn always formats as "Uses X for Y" regardless of which connective matched
+      expect(results[0].title).toBe("Uses PostgreSQL for the primary database");
+    });
+
+    test("does not match without for/as/when/in", () => {
+      const results = extractPatterns("User uses React.");
+      expect(results).toHaveLength(0);
+    });
+
+    test("does not match without user/team/we prefix", () => {
+      const results = extractPatterns(
+        "The project uses ESLint for linting.",
+      );
+      expect(results).toHaveLength(0);
+    });
+  });
+
+  describe("user doesn't like/use/want X", () => {
+    test("user doesn't like X", () => {
+      const results = extractPatterns(
+        "User doesn't like ORMs.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].category).toBe("preference");
+      expect(results[0].title).toBe("Avoids ORMs");
+    });
+
+    test("team does not use X", () => {
+      const results = extractPatterns(
+        "Team does not use default exports.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].title).toBe("Avoids default exports");
+    });
+
+    test("we don't want X", () => {
+      const results = extractPatterns(
+        "We don't want class components.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].title).toBe("Avoids class components");
+    });
+
+    test("does not match without user/team/we prefix", () => {
+      const results = extractPatterns(
+        "Doesn't like the current architecture.",
+      );
+      expect(results).toHaveLength(0);
+    });
+  });
+
+  describe("convention is X", () => {
+    test("our convention is X", () => {
+      const results = extractPatterns(
+        "Our convention is kebab-case for file names.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].category).toBe("preference");
+      expect(results[0].title).toBe("Convention: kebab-case for file names");
+    });
+
+    test("the convention is X", () => {
+      const results = extractPatterns(
+        "The convention is to use named exports.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].title).toBe("Convention: to use named exports");
+    });
+
+    test("project convention is X", () => {
+      const results = extractPatterns(
+        "Project convention is camelCase for variables.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].title).toBe("Convention: camelCase for variables");
+    });
+
+    test("does not match bare 'convention' without prefix", () => {
+      const results = extractPatterns(
+        "Convention is key to readability.",
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("does not match 'standard of' idiom", () => {
+      const results = extractPatterns(
+        "The standard of living is high.",
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("does not match 'rule of thumb'", () => {
+      const results = extractPatterns(
+        "The rule of thumb is to keep functions small.",
+      );
+      expect(results).toHaveLength(0);
+    });
+  });
+
   describe("process instruction edge cases", () => {
     test("multiple instruction patterns in one text", () => {
       const results = extractPatterns(

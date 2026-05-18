@@ -391,7 +391,8 @@ function renderResultLine(tagged: TaggedResult, charBudget: number): string {
   switch (tagged.source) {
     case "knowledge": {
       const k = tagged.item;
-      const titlePart = `**${inline(k.title)}**: `;
+      const age = relativeAge(k.updated_at);
+      const titlePart = `**${inline(k.title)}** (${age}): `;
       const contentBudget = Math.max(40, charBudget - titlePart.length);
       const content = truncateAtSentence(inline(k.content), contentBudget);
       const wasTruncated = inline(k.content).length > contentBudget;
@@ -399,7 +400,8 @@ function renderResultLine(tagged: TaggedResult, charBudget: number): string {
     }
     case "cross-knowledge": {
       const k = tagged.item;
-      const titlePart = `**${inline(k.title)}** (from: ${tagged.projectLabel}): `;
+      const age = relativeAge(k.updated_at);
+      const titlePart = `**${inline(k.title)}** (${age}, from: ${tagged.projectLabel}): `;
       const contentBudget = Math.max(40, charBudget - titlePart.length);
       const content = truncateAtSentence(inline(k.content), contentBudget);
       const wasTruncated = inline(k.content).length > contentBudget;
