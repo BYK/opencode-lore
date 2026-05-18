@@ -322,17 +322,23 @@ export function recordWorkerCost(
 
 /**
  * Record a cache warmup cost (called from executeWarmup).
+ *
+ * @param ttl - Cache TTL for this session. Anthropic charges 2× cache_write
+ *   for 1h TTL; without this parameter the cost is undercounted by 50%.
  */
 export function recordWarmupCost(
   sessionID: string,
   model: string,
   cacheReadTokens: number,
   cacheCreationTokens: number,
+  ttl?: "5m" | "1h",
 ): void {
   const costs = getOrCreate(sessionID);
   const pricing = getPricingSync(model);
   const readCost = (cacheReadTokens / 1_000_000) * pricing.cache_read;
-  const writeCost = (cacheCreationTokens / 1_000_000) * pricing.cache_write;
+  // Anthropic doubles cache_write pricing for 1h TTL
+  const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
+  const writeCost = (cacheCreationTokens / 1_000_000) * cacheWriteRate;
   costs.workers.warmup.cost += readCost + writeCost;
   costs.workers.warmup.calls++;
 }
@@ -453,17 +459,22 @@ export function updateShadowContext(
  * the next request would pay full cache_write cost instead of cache_read.
  *
  * @param cacheReadTokens - Cache read tokens from the turn that confirmed the hit
+ * @param ttl - Cache TTL for this session. Anthropic charges 2× cache_write
+ *   for 1h TTL; without this parameter savings are undercounted.
  */
 export function recordWarmupHit(
   sessionID: string,
   model: string,
   cacheReadTokens: number,
+  ttl?: "5m" | "1h",
 ): void {
   const costs = getOrCreate(sessionID);
   const pricing = getPricingSync(model);
+  // Anthropic doubles cache_write pricing for 1h TTL
+  const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
   // Without warming, these reads would have been writes
   const savings =
-    (cacheReadTokens / 1_000_000) * (pricing.cache_write - pricing.cache_read);
+    (cacheReadTokens / 1_000_000) * (cacheWriteRate - pricing.cache_read);
   costs.counterfactual.warmupSavings += savings;
   costs.counterfactual.warmupHits++;
 }
@@ -474,6 +485,11 @@ export function recordWarmupHit(
  * Called when a turn has cache reads but the gap since the last request
  * exceeds 5 minutes — meaning the 5m TTL would have expired, but the
  * 1h TTL kept the cache alive.
+ *
+ * The counterfactual is against 5m TTL (base cache_write rate), NOT 1h —
+ * the saving comes from having 1h TTL instead of 5m, so the write cost
+ * avoided is the 5m rate. The 1h surcharge is the price we paid to get
+ * the longer TTL in the first place.
  */
 export function recordTTLSavings(
   sessionID: string,
@@ -482,6 +498,8 @@ export function recordTTLSavings(
 ): void {
   const costs = getOrCreate(sessionID);
   const pricing = getPricingSync(model);
+  // Counterfactual: without 1h TTL, the 5m cache would have expired and
+  // these reads would have been 5m-rate writes. Use base cache_write.
   const savings =
     (cacheReadTokens / 1_000_000) * (pricing.cache_write - pricing.cache_read);
   costs.counterfactual.ttlSavings += savings;

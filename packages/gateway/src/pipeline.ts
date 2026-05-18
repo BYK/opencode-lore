@@ -2079,7 +2079,12 @@ function postResponse(
           // reads would have been full cache writes.
           const cacheRead = resp.usage.cacheReadInputTokens ?? 0;
           if (cacheRead > 0) {
-            recordWarmupHit(sessionID, req.model, cacheRead);
+            recordWarmupHit(
+              sessionID,
+              req.model,
+              cacheRead,
+              sessionState.resolvedConversationTTL ?? "5m",
+            );
           }
           log.info(
             `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +

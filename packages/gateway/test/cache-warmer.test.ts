@@ -14,8 +14,11 @@ import {
   pSessionFinished,
   expectedWarmupCycles,
   costThreshold,
+  cumulativeCostThreshold,
   maxProfitableCycles,
   MAX_TOOL_CALL_WARMING_MS,
+  MIN_WARMUPS_FOR_ROI_CHECK,
+  MIN_SESSION_HIT_RATE,
   HISTOGRAM_BINS,
   BREAK_FLOOR_MS,
   _resetForTest,
@@ -750,17 +753,20 @@ describe("shouldWarm", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(true);
   });
 
-  test("non-forced mode still uses full ttlMs cooldown", () => {
+  test("non-forced mode uses ttlMs - margin cooldown (same as forced)", () => {
     const now = Date.now();
-    // Same timing as above but without forceKeepWarm — should be blocked
-    // by the full ttlMs cooldown since 260s < 300s.
+    // Cooldown is ttlMs - warmupMarginMs = 300s - 45s = 255s for 5m TTL.
+    // A warmup 260s ago is past the 255s cooldown, so it should be allowed.
+    // (The old code used full ttlMs=300s cooldown, which caused every
+    // continuation warmup to arrive after the cache expired — a cold write
+    // instead of a cheap refresh.)
     const state = makeSessionState({
       lastRequestTime: now - 270_000, // 4.5 min ago — in warmup margin
       warmup: {
-        lastWarmupAt: now - 260_000, // 4m20s ago — within full TTL cooldown
+        lastWarmupAt: now - 260_000, // 4m20s ago — past 255s cooldown
         warmupCount: 1,
         totalWarmups: 1,
-        warmupHits: 0,
+        warmupHits: 1, // need hit rate >= 20% for ROI check
         disabled: false,
         // no forceKeepWarm
       },
@@ -773,8 +779,25 @@ describe("shouldWarm", () => {
     const hist = createHistogram();
     for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
 
-    // 260s < 300s (full TTL cooldown) → blocked
-    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+    // 260s > 255s (ttlMs - margin cooldown) → allowed
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+
+    // But 250s ago is within the 255s cooldown → blocked
+    const stateRecent = makeSessionState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: now - 250_000, // 4m10s ago — within 255s cooldown
+        warmupCount: 1,
+        totalWarmups: 1,
+        warmupHits: 1,
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    expect(shouldWarm(stateRecent, profile, hist, now)).toBe(false);
   });
 
   test("forceKeepWarm still respects circuit breaker", () => {
@@ -1749,5 +1772,161 @@ describe("pSessionFinished tool_use signal", () => {
     // Despite high text-only runs, tool_use should keep P(finished) low
     const p = pSessionFinished(signals);
     expect(p).toBeLessThan(0.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cumulativeCostThreshold
+// ---------------------------------------------------------------------------
+
+describe("cumulativeCostThreshold", () => {
+  // Opus 5m TTL: read=$0.50, write=$6.25
+  const read = 0.50;
+  const write = 6.25;
+  const spread = write - read; // 5.75
+
+  test("at k=1 matches costThreshold()", () => {
+    const rising = cumulativeCostThreshold(1, read, write);
+    const flat = costThreshold(read, write);
+    expect(rising).toBeCloseTo(flat, 6);
+  });
+
+  test("rises linearly with k", () => {
+    const t1 = cumulativeCostThreshold(1, read, write);
+    const t3 = cumulativeCostThreshold(3, read, write);
+    const t5 = cumulativeCostThreshold(5, read, write);
+    const t6 = cumulativeCostThreshold(6, read, write);
+
+    // k × read / (write - read)
+    expect(t1).toBeCloseTo(1 * read / spread, 6); // ~8.7%
+    expect(t3).toBeCloseTo(3 * read / spread, 6); // ~26.1%
+    expect(t5).toBeCloseTo(5 * read / spread, 6); // ~43.5%
+    expect(t6).toBeCloseTo(6 * read / spread, 6); // ~52.2%
+
+    // Must be strictly increasing
+    expect(t3).toBeGreaterThan(t1);
+    expect(t5).toBeGreaterThan(t3);
+    expect(t6).toBeGreaterThan(t5);
+  });
+
+  test("clamps to 1.0 when k exceeds maxProfitableCycles", () => {
+    const maxCyc = maxProfitableCycles(read, write); // floor(5.75/0.50) = 11
+    const tMax = cumulativeCostThreshold(maxCyc, read, write);
+    const tOver = cumulativeCostThreshold(maxCyc + 1, read, write);
+
+    // At maxCycles: 11 * 0.50 / 5.75 = 95.7%
+    expect(tMax).toBeCloseTo(11 * read / spread, 6);
+    // Beyond maxCycles: clamped to 1.0
+    expect(tOver).toBe(1.0);
+  });
+
+  test("k=0 is treated as k=1", () => {
+    expect(cumulativeCostThreshold(0, read, write)).toBe(cumulativeCostThreshold(1, read, write));
+  });
+
+  test("degenerate case: write <= read returns 1.0", () => {
+    expect(cumulativeCostThreshold(1, 5.0, 5.0)).toBe(1.0);
+    expect(cumulativeCostThreshold(1, 5.0, 3.0)).toBe(1.0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session-level ROI guard
+// ---------------------------------------------------------------------------
+
+describe("shouldWarm session ROI guard", () => {
+  beforeEach(() => _resetForTest());
+
+  test("rejects warming when session hit rate is below threshold after enough warmups", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000, // in warmup margin
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 12,  // >= MIN_WARMUPS_FOR_ROI_CHECK (10)
+        warmupHits: 1,     // 8.3% < MIN_SESSION_HIT_RATE (20%)
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("allows warming when session hit rate is above threshold", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 10,
+        warmupHits: 3,     // 30% > MIN_SESSION_HIT_RATE (20%)
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("skips ROI check when fewer than MIN_WARMUPS_FOR_ROI_CHECK warmups", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 5,   // < MIN_WARMUPS_FOR_ROI_CHECK (10)
+        warmupHits: 0,     // 0% hit rate, but too few warmups to judge
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("ROI guard applies to tool-call path too", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      lastStopReason: "tool_use",
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 15,
+        warmupHits: 1,     // 6.7% < MIN_SESSION_HIT_RATE (20%)
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
   });
 });

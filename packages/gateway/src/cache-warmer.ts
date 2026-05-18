@@ -93,6 +93,14 @@ const CIRCUIT_BREAKER_MAX_FAILURES = 3;
  *  the 5m TTL warmup window (4:15–5:00). */
 export const BREAK_FLOOR_MS = 180_000;
 
+/** Minimum total warmups before session-level hit-rate ROI check kicks in. */
+export const MIN_WARMUPS_FOR_ROI_CHECK = 10;
+
+/** Minimum session-level hit rate to continue warming. Below this,
+ *  warming is empirically unprofitable and we stop. 20% means at least
+ *  1 in 5 warmups must result in a confirmed user return. */
+export const MIN_SESSION_HIT_RATE = 0.20;
+
 // ---------------------------------------------------------------------------
 // Global circuit breaker
 // ---------------------------------------------------------------------------
@@ -510,6 +518,32 @@ export function costThreshold(
 }
 
 /**
+ * Rising cost threshold that accounts for accumulated warmup costs.
+ *
+ * After k warmup cycles, the total cost is k × read. A hit saves
+ * (write - read). Break-even: P × (write - read) ≥ k × read, so:
+ *   P(returns) > k × read / (write - read)
+ *
+ * This rises linearly with k — the more cycles spent, the higher
+ * P(returns) must be to justify the next warmup. For Opus 5m TTL
+ * (read=$0.50, write=$6.25):
+ *   k=1: 8.7%,  k=3: 26%,  k=5: 43%,  k=6: 52%,  k=11: 96%
+ *
+ * At k=1 this matches costThreshold() exactly.
+ * Clamped to 1.0 so we never require > 100% probability.
+ */
+export function cumulativeCostThreshold(
+  cyclesSpent: number,
+  cacheReadCostPerMTok: number,
+  cacheMissCostPerMTok: number,
+): number {
+  const k = Math.max(cyclesSpent, 1);
+  const denominator = cacheMissCostPerMTok - cacheReadCostPerMTok;
+  if (denominator <= 0) return 1.0;
+  return Math.min((k * cacheReadCostPerMTok) / denominator, 1.0);
+}
+
+/**
  * Maximum profitable warmup cycles before total warming cost exceeds
  * the savings from avoiding a cache write on user return.
  *
@@ -669,14 +703,16 @@ export function shouldWarm(
   const elapsed = now - state.lastRequestTime;
   const { ttlMs, warmupMarginMs, cacheReadCostPerMTok, cacheMissCostPerMTok } = profile;
   const forced = state.warmup?.forceKeepWarm === true;
+  const toolCallActive = state.lastStopReason === "tool_use";
 
   // Already warmed recently — prevent double-warming.
-  // For /lore:warm:keep mode, use a tighter cooldown (ttlMs - warmupMarginMs)
-  // so the next warmup fires before the current cache expires. Without this,
-  // the full-ttlMs guard combined with margin positioning produces a ~2x TTL
-  // cadence (e.g. 10 min on a 5 min TTL), leaving a dead zone each cycle.
-  const toolCallActive = state.lastStopReason === "tool_use";
-  const cooldownMs = (forced || toolCallActive) ? Math.max(ttlMs - warmupMarginMs, 0) : ttlMs;
+  // Cooldown = ttlMs - warmupMarginMs so the next warmup fires while the
+  // previous cache is still alive. Using the full ttlMs as cooldown causes
+  // each continuation warmup to arrive right as the cache expires, turning
+  // every warmup into a cold write (~$1.25 for Opus 200K) instead of a
+  // cheap refresh (~$0.10). This was the dominant cost driver: 65 warmups
+  // at cold-write pricing = ~$65 vs ~$6.50 with correct timing.
+  const cooldownMs = Math.max(ttlMs - warmupMarginMs, 0);
   if (state.warmup?.lastWarmupAt && (now - state.warmup.lastWarmupAt) < cooldownMs) {
     return false;
   }
@@ -698,11 +734,18 @@ export function shouldWarm(
   // --- Tool-call fast path ---
   // When lastStopReason is "tool_use", the agent is executing a tool and
   // WILL return with the result. Bypass survival analysis (return probability
-  // is ~1.0) but respect break-even cap and a maximum duration to handle
-  // agent crashes gracefully.
+  // is ~1.0) but respect break-even cap, session ROI guard, and a maximum
+  // duration to handle agent crashes gracefully.
   if (toolCallActive && !state.warmup?.disabled) {
     // Cap: don't warm indefinitely if the agent crashed mid-tool-call
     if (elapsed > MAX_TOOL_CALL_WARMING_MS) return false;
+
+    // Session-level ROI guard applies even during tool calls
+    const lifetime = state.warmup?.totalWarmups ?? 0;
+    if (lifetime >= MIN_WARMUPS_FOR_ROI_CHECK) {
+      const hitRate = (state.warmup?.warmupHits ?? 0) / lifetime;
+      if (hitRate < MIN_SESSION_HIT_RATE) return false;
+    }
 
     const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
@@ -727,6 +770,16 @@ export function shouldWarm(
 
   // Session marked dead
   if (state.warmup?.disabled) return false;
+
+  // Session-level ROI guard: after enough warmups, if the observed hit
+  // rate is chronically low, stop warming. This prevents unlimited
+  // spending across many short breaks where each individual break passes
+  // the per-break checks but the aggregate ROI is deeply negative.
+  const lifetime = state.warmup?.totalWarmups ?? 0;
+  if (lifetime >= MIN_WARMUPS_FOR_ROI_CHECK) {
+    const hitRate = (state.warmup?.warmupHits ?? 0) / lifetime;
+    if (hitRate < MIN_SESSION_HIT_RATE) return false;
+  }
 
   // Compute commitment model signals
   const survivalAtIdle = survivalFunction(blendedHist, elapsed);
@@ -781,6 +834,19 @@ export function shouldWarm(
 
     // Session almost certainly finished — stop warming
     if (pFinished > 0.95) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
+    }
+
+    // Rising cost threshold: after k cycles, the accumulated warmup cost
+    // means we need a higher P(returns) to justify the next one.
+    // k=1: 8.7%, k=3: 26%, k=5: 43%, k=6: 52% for Opus 5m.
+    const risingThreshold = cumulativeCostThreshold(
+      cyclesSpent + 1, // +1 because we're deciding whether to do the NEXT cycle
+      cacheReadCostPerMTok,
+      cacheMissCostPerMTok,
+    );
+    if (pReturns <= risingThreshold) {
       markDeadIfSurvivalLow(state, survivalAtIdle);
       return false;
     }
@@ -969,6 +1035,10 @@ export function computeWarmingSnapshot(
         notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
       } else if (idleMs > MAX_TOOL_CALL_WARMING_MS) {
         notWarmingReason = `Tool call exceeded max duration (${Math.round(idleMs / 60_000)}min > 30min)`;
+      } else if ((state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
+                 (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) < MIN_SESSION_HIT_RATE) {
+        const hitRate = ((state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) * 100).toFixed(0);
+        notWarmingReason = `Tool call: session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}%)`;
       } else {
         const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
         if ((state.warmup?.warmupCount ?? 0) >= maxCyc) {
@@ -986,6 +1056,10 @@ export function computeWarmingSnapshot(
       notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
     } else if (state.warmup?.disabled) {
       notWarmingReason = "Warming stopped (/lore:warm:stop)";
+    } else if ((state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
+               (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) < MIN_SESSION_HIT_RATE) {
+      const hitRate = ((state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) * 100).toFixed(0);
+      notWarmingReason = `Session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}% after ${state.warmup?.totalWarmups} warmups)`;
     } else if (isFirstWindow && idleMs < ttlMs - warmupMarginMs) {
       notWarmingReason = "Cache still fresh";
     } else if (pReturns <= thresholdVal) {
@@ -994,6 +1068,13 @@ export function computeWarmingSnapshot(
       notWarmingReason = `Break-even exceeded (${cyclesSpent} >= ${maxCyclesVal} cycles)`;
     } else if (!isFirstWindow && pFinished > 0.95) {
       notWarmingReason = `Session finished (P=${(pFinished * 100).toFixed(0)}%)`;
+    } else if (!isFirstWindow) {
+      const risingThresh = cumulativeCostThreshold(cyclesSpent + 1, profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+      if (pReturns <= risingThresh) {
+        notWarmingReason = `Rising threshold: P(returns) ${(pReturns * 100).toFixed(1)}% <= ${(risingThresh * 100).toFixed(1)}% at cycle ${cyclesSpent + 1}`;
+      } else {
+        notWarmingReason = "Unknown";
+      }
     } else {
       notWarmingReason = "Unknown";
     }
@@ -1039,11 +1120,9 @@ export function computeWarmingSnapshot(
   };
 }
 
-/** Compute cooldown based on forced/tool-call/normal mode. */
-function cooldownFor(state: SessionState, ttlMs: number, warmupMarginMs: number): number {
-  return (state.warmup?.forceKeepWarm || state.lastStopReason === "tool_use")
-    ? Math.max(ttlMs - warmupMarginMs, 0)
-    : ttlMs;
+/** Cooldown between warmups — must match shouldWarm() logic. */
+function cooldownFor(_state: SessionState, ttlMs: number, warmupMarginMs: number): number {
+  return Math.max(ttlMs - warmupMarginMs, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,11 +1280,13 @@ export async function executeWarmup(
     }
 
     // Accumulate warmup cost for the session
+    const ttl: "5m" | "1h" = profile.ttlMs >= 3_600_000 ? "1h" : "5m";
     recordWarmupCost(
       state.sessionID,
       state.lastModel ?? "unknown",
       cacheReadTokens,
       cacheCreationTokens,
+      ttl,
     );
 
     // Update session warmup state
