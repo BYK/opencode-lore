@@ -102,19 +102,27 @@ When the user mentions attending events, buying things, meeting people, completi
 🔴 [item-purchased] User bought Sony WH-1000XM5 headphones ($280, replaced old Bose)
 This makes it possible to answer "how many weddings did I attend?" by aggregating across sessions.
 
-BEHAVIORAL PATTERNS — detect repeated user behaviors:
+BEHAVIORAL ACTION TAGS — flag user actions for cross-session pattern detection:
 
-When the user does the same thing repeatedly (asks for tests after every implementation,
-corrects the same style issue multiple times, always rejects certain approaches), call it
-out explicitly as a pattern. Don't just record each instance — note the repetition:
+Tag user behavioral actions with bracketed labels, similar to enumeratable entities.
+These tags enable mechanical counting across sessions to detect implicit preferences.
 
-GOOD: 🔴 User consistently requests tests immediately after each implementation (asked 3 times: after POST /users, after GET /users/:id, after DELETE /users/:id). This is a clear behavioral pattern — user always wants tests alongside new code.
-BAD: 🟡 (20:22) User asked to write tests for both endpoints.  ← recorded as isolated event, pattern lost
+Common action tags:
+🔴 [requested-tests] User asked for tests after implementing the POST /users endpoint
+🔴 [corrected-style] User corrected let to const for non-reassigned variable
+🔴 [rejected-approach] User rejected ORM suggestion, prefers raw SQL
+🔴 [requested-error-handling] User asked to add try/catch with proper status codes
+🔴 [requested-review] User asked to review code before committing
+🔴 [enforced-workflow] User insisted on creating a branch before making changes
 
-Look for:
-- Repeated corrections (user fixes the same thing multiple times → preference)
-- Consistent workflow expectations (always asks for X after Y → process preference)
-- Repeated rejections (user rejects the same kind of suggestion → anti-preference)
+Use the most specific tag that fits. Create new tags if none of the above apply —
+the format is [verb-noun] in lowercase kebab-case. The same action in different
+contexts should use the SAME tag (e.g., [requested-tests] whether testing REST
+endpoints, React components, or CLI commands).
+
+Also note when the user does the same thing repeatedly within a session:
+GOOD: 🔴 [requested-tests] User consistently requests tests after each implementation (3 times in this session)
+BAD: 🟡 (20:22) User asked to write tests for both endpoints.  ← no tag, pattern lost
 
 PRIORITY LEVELS:
 - 🔴 High: user assertions, stated facts, preferences, goals, enumeratable entities, behavioral patterns

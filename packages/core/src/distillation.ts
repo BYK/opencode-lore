@@ -5,7 +5,7 @@ import { CHUNK_TERMINATOR } from "./temporal";
 import * as embedding from "./embedding";
 import * as ltm from "./ltm";
 import * as log from "./log";
-import { extractPatterns } from "./pattern-extract";
+import { extractPatterns, extractActionTags, tagToTitle } from "./pattern-extract";
 import { detectPatternEchoes } from "./pattern-echo";
 import {
   DISTILLATION_SYSTEM,
@@ -888,6 +888,40 @@ async function distillSegment(input: {
     }
     if (patterns.length > 0) {
       log.info(`pattern extraction: ${patterns.length} entries from distillation`);
+    }
+
+    // Action tag counting: extract tags from this segment, then count
+    // how many distinct sessions contain the same tag across the project.
+    // When a tag appears in 3+ sessions, it's a strong behavioral signal.
+    const tags = extractActionTags(result.observations);
+    if (tags.length > 0) {
+      const pid = ensureProject(input.projectPath);
+      for (const tag of tags) {
+        try {
+          const tagPattern = `%[${tag}]%`;
+          const rows = db()
+            .query(
+              `SELECT COUNT(DISTINCT session_id) as cnt FROM distillations
+               WHERE project_id = ? AND observations LIKE ?`,
+            )
+            .get(pid, tagPattern) as { cnt: number } | null;
+          const sessionCount = rows?.cnt ?? 0;
+          if (sessionCount >= 3) {
+            ltm.create({
+              projectPath: input.projectPath,
+              category: "preference",
+              title: tagToTitle(tag),
+              content: `Behavioral pattern detected across ${sessionCount} sessions (action: ${tag}). The user consistently demonstrates this behavior.`,
+              session: input.sessionID,
+              scope: "project",
+              confidence: 0.8,
+            });
+            log.info(`action tag '${tag}' found in ${sessionCount} sessions — created preference`);
+          }
+        } catch {
+          // Dedup guard or DB error — swallow
+        }
+      }
     }
   }
 

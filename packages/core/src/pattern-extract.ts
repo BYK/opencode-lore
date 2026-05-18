@@ -170,3 +170,47 @@ export function extractPatterns(observations: string): ExtractedPattern[] {
 
   return results;
 }
+
+// ---------------------------------------------------------------------------
+// Action tag extraction and cross-session counting
+// ---------------------------------------------------------------------------
+
+/** Regex to match action tags like [requested-tests], [corrected-style], etc. */
+const ACTION_TAG_RE = /\[([a-z]+-[a-z-]+)\]/g;
+
+/**
+ * Extract action tags from distillation observation text.
+ * Returns deduplicated tag names (e.g., "requested-tests", "corrected-style").
+ */
+export function extractActionTags(observations: string): string[] {
+  const tags = new Set<string>();
+  ACTION_TAG_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = ACTION_TAG_RE.exec(observations)) !== null) {
+    tags.add(match[1]);
+  }
+  return [...tags];
+}
+
+/** Map from tag name to human-readable preference title. */
+const TAG_TITLE_MAP: Record<string, string> = {
+  "requested-tests": "Always write tests alongside implementation",
+  "corrected-style": "Follow consistent code style conventions",
+  "rejected-approach": "Respect explicitly rejected approaches",
+  "requested-error-handling": "Always add proper error handling with try/catch and status codes",
+  "requested-review": "Review code before committing",
+  "enforced-workflow": "Follow the established git workflow (branch, PR, review)",
+};
+
+/**
+ * Generate a preference title from a tag name.
+ * Uses the predefined map for common tags, falls back to title-casing.
+ */
+export function tagToTitle(tag: string): string {
+  if (TAG_TITLE_MAP[tag]) return TAG_TITLE_MAP[tag];
+  // Fallback: convert kebab-case to title case
+  return tag
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
