@@ -12,9 +12,10 @@
  *   - fixture: deterministic replay via UpstreamInterceptor, no real API calls
  *   - live: real API calls through the gateway, LLM-as-judge scoring
  */
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, join } from "node:path";
+import type { FixtureEntry } from "../../gateway/src/recorder";
 import type {
   EvalConfig,
   EvalResult,
@@ -549,8 +550,7 @@ async function askQuestionViaGateway(
   };
 }
 
-/** Delay between gateway QA calls to respect token-per-minute limits. */
-const GATEWAY_QA_DELAY_MS = 5_000;
+
 
 async function askQuestion(
   question: string,
@@ -595,6 +595,92 @@ async function writeResult(
 // Run a single scenario
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Session recording & replay
+// ---------------------------------------------------------------------------
+
+/**
+ * Replay a session, optionally recording or replaying upstream responses.
+ *
+ * - record mode: enables the gateway recorder during replay, saves NDJSON after
+ * - replay mode: loads NDJSON fixtures, wires replay interceptor during replay
+ * - normal mode: passthrough to replaySession()
+ *
+ * The interceptor is scoped to replaySession() only — /lore:curate and QA
+ * calls happen after the interceptor is cleared, so they use real upstream.
+ */
+async function replaySessionWithFixtures(
+  session: SessionTranscript,
+  scenario: ScenarioDefinition,
+  gateway: GatewayHandle,
+  config: EvalConfig,
+): Promise<ReplayResult> {
+  const { setUpstreamInterceptor } = await import(
+    "../../gateway/src/pipeline"
+  );
+
+  if (config.recordDir) {
+    // --- RECORD MODE ---
+    const { startRecording, stopRecording, getRecordedInterceptor } =
+      await import("../../gateway/src/recorder");
+
+    const dir = join(config.recordDir, scenario.id);
+    mkdirSync(dir, { recursive: true });
+    const fixturePath = join(dir, `${session.id}.ndjson`);
+
+    startRecording(fixturePath);
+    const interceptor = getRecordedInterceptor();
+    if (interceptor) setUpstreamInterceptor(interceptor);
+
+    try {
+      return await replaySession(session, gateway);
+    } finally {
+      stopRecording();
+      setUpstreamInterceptor(undefined);
+    }
+  }
+
+  if (config.replayDir) {
+    // --- REPLAY MODE ---
+    const { getReplayInterceptor } = await import(
+      "../../gateway/src/recorder"
+    );
+
+    const fixturePath = join(
+      config.replayDir,
+      scenario.id,
+      `${session.id}.ndjson`,
+    );
+    if (!existsSync(fixturePath)) {
+      throw new Error(
+        `Replay fixture not found: ${fixturePath}\n` +
+          `Run with --record ${config.replayDir} first to create fixtures.`,
+      );
+    }
+
+    const lines = readFileSync(fixturePath, "utf-8")
+      .trim()
+      .split("\n")
+      .filter((l) => l.trim());
+    const fixtures: FixtureEntry[] = lines.map((l) => JSON.parse(l));
+
+    setUpstreamInterceptor(getReplayInterceptor(fixtures));
+
+    try {
+      return await replaySession(session, gateway);
+    } finally {
+      setUpstreamInterceptor(undefined);
+    }
+  }
+
+  // --- NORMAL MODE ---
+  return replaySession(session, gateway);
+}
+
+// ---------------------------------------------------------------------------
+// Run a single scenario
+// ---------------------------------------------------------------------------
+
 export async function runScenario(
   scenario: ScenarioDefinition,
   config: EvalConfig,
@@ -620,7 +706,7 @@ export async function runScenario(
     if (gateway.isReal !== false) {
       for (const session of scenario.sessions) {
         try {
-          await replaySession(session, gateway);
+          await replaySessionWithFixtures(session, scenario, gateway, config);
 
           // Force synchronous curation via slash command.
           // This ensures knowledge entries are created/updated before
@@ -692,8 +778,6 @@ export async function runScenario(
         ) {
           // Gateway-based baselines: send the question through the gateway
           // so it gets Lore's LTM injection, recall, and distilled context.
-          // Add delay between calls to respect token-per-minute limits.
-          await new Promise((r) => setTimeout(r, GATEWAY_QA_DELAY_MS));
           const answer = await askQuestionViaGateway(
             q.question,
             gateway,
@@ -759,8 +843,13 @@ export async function runEval(config: EvalConfig): Promise<EvalResult[]> {
   const allResults: EvalResult[] = [];
 
   try {
-    // Import scenario modules for selected dimensions
-    const scenarioModules = await loadScenarios(config.dimensions);
+    // Import scenario modules for selected dimensions, filtered by --scenarios
+    let scenarioModules = await loadScenarios(config.dimensions);
+    if (config.scenarios?.length) {
+      scenarioModules = scenarioModules.filter((s) =>
+        config.scenarios!.includes(s.id),
+      );
+    }
 
     for (const scenario of scenarioModules) {
       console.log(

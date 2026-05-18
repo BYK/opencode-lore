@@ -32,6 +32,9 @@ const { values: args } = parseArgs({
     "judge-model": { type: "string", default: "" },
     concurrency: { type: "string", default: "3" },
     output: { type: "string", default: "" },
+    record: { type: "string", default: "" },
+    replay: { type: "string", default: "" },
+    scenarios: { type: "string", default: "" },
     summarize: { type: "string", default: "" },
     help: { type: "boolean", default: false },
   },
@@ -62,6 +65,9 @@ Options:
   --judge-model <name>        Model for LLM-as-judge (default: same as --model)
   --concurrency <n>           Parallel question limit (default: 3)
   --output <path>             Output JSONL path (default: auto-generated)
+  --record <dir>              Record session replay data to directory (first run)
+  --replay <dir>              Replay session data from directory (skip upstream API calls)
+  --scenarios <id,...>        Run only specific scenarios (e.g., pr-3-evolution)
   --summarize <path>          Print summary from existing JSONL file and exit
   --help                      Show this help
 `);
@@ -119,6 +125,11 @@ const outputPath =
     `eval-${new Date().toISOString().slice(0, 19).replace(/[:.]/g, "-")}.jsonl`,
   );
 
+if (args.record && args.replay) {
+  console.error("Cannot use --record and --replay together");
+  process.exit(1);
+}
+
 const config: EvalConfig = {
   mode: (args.mode as "fixture" | "live") || "fixture",
   gateway: parseGateway(args.gateway || ""),
@@ -128,6 +139,9 @@ const config: EvalConfig = {
   outputPath,
   dimensions: parseDimensions(args.dimensions || "all"),
   baselines: parseBaselines(args.baselines || ""),
+  recordDir: args.record ? resolve(args.record) : undefined,
+  replayDir: args.replay ? resolve(args.replay) : undefined,
+  scenarios: args.scenarios ? args.scenarios.split(",").map((s) => s.trim()) : undefined,
 };
 
 // ---------------------------------------------------------------------------
@@ -138,6 +152,9 @@ console.log(`Lore Eval Suite`);
 console.log(`  Mode:       ${config.mode}`);
 console.log(`  Dimensions: ${config.dimensions.join(", ")}`);
 console.log(`  Baselines:  ${config.baselines.join(", ")}`);
+if (config.recordDir) console.log(`  Recording:  ${config.recordDir}`);
+if (config.replayDir) console.log(`  Replaying:  ${config.replayDir}`);
+if (config.scenarios) console.log(`  Scenarios:  ${config.scenarios.join(", ")}`);
 console.log(`  Output:     ${config.outputPath}`);
 console.log(`  Model:      ${config.model}`);
 console.log("");

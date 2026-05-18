@@ -221,6 +221,12 @@ export interface EvalConfig {
   outputPath: string;
   dimensions: Dimension[];
   baselines: BaselineMode[];
+  /** Directory to write session recordings (first run). */
+  recordDir?: string;
+  /** Directory to read session recordings (subsequent runs). */
+  replayDir?: string;
+  /** Filter to specific scenario IDs. */
+  scenarios?: string[];
 }
 
 // ---------------------------------------------------------------------------
