@@ -3652,6 +3652,142 @@ function handleWarmupSlashCommand(
 }
 
 // ---------------------------------------------------------------------------
+// Slash command: /lore:curate — synchronous distillation + curation
+// ---------------------------------------------------------------------------
+
+/**
+ * `/lore:curate` — runs distillation + curation synchronously for the
+ * current session and returns the results. Useful for:
+ * - Eval harnesses that need curation to complete between session replays
+ * - Users who want to force knowledge extraction after a conversation
+ *
+ * Returns a synthetic response with the curation results.
+ */
+async function handleCurateSlashCommand(
+  req: GatewayRequest,
+  allSessions: Map<string, SessionState>,
+  config: GatewayConfig,
+): Promise<Response | null> {
+  const text = lastUserTextTrimmed(req);
+  if (text.toLowerCase() !== "/lore:curate") return null;
+
+  // Find the session
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  let state: SessionState | undefined;
+  let sessionID: string | undefined;
+  if (known) {
+    const indexKey = `${known.headerName}:${known.sessionId}`;
+    const sid = headerSessionIndex.get(indexKey);
+    if (sid) {
+      state = allSessions.get(sid);
+      sessionID = sid;
+    }
+  }
+
+  // Fall back to finding any recent session for this project
+  if (!sessionID) {
+    // Use the most recently active session
+    let latest: SessionState | undefined;
+    for (const s of allSessions.values()) {
+      if (!latest || s.lastRequestTime > latest.lastRequestTime) {
+        latest = s;
+      }
+    }
+    if (latest) {
+      state = latest;
+      sessionID = latest.sessionID;
+    }
+  }
+
+  if (!sessionID || !state) {
+    return slashResponse(req, "No active session found for curation.", "msg_lore_curate_none");
+  }
+
+  const projectPath = state.projectPath;
+  const { distillation, curator } = await import("@loreai/core");
+  const llm = getLLMClient(config);
+  const model = getWorkerModel();
+
+  log.info(`/lore:curate: running for session=${sessionID.slice(0, 16)}`);
+
+  // Force-distill all pending messages (urgent bypasses batch queue)
+  let distilled = 0;
+  try {
+    const dResult = await distillation.run({
+      llm,
+      projectPath,
+      sessionID,
+      model,
+      force: true,
+      skipMeta: true,
+      urgent: true,
+      callType: "direct",
+    });
+    distilled = dResult.distilled;
+  } catch (e) {
+    log.error("/lore:curate distillation error:", e);
+  }
+
+  // Run curation (uses urgent/direct call via the LLM client)
+  let created = 0;
+  let updated = 0;
+  let deleted = 0;
+  try {
+    const cResult = await curator.run({ llm, projectPath, sessionID, model });
+    created = cResult.created;
+    updated = cResult.updated;
+    deleted = cResult.deleted;
+  } catch (e) {
+    log.error("/lore:curate curation error:", e);
+  }
+
+  const responseText =
+    `Curation complete: ${distilled} segments distilled, ` +
+    `${created} entries created, ${updated} updated, ${deleted} deleted.`;
+
+  log.info(`/lore:curate: ${responseText}`);
+
+  return slashResponse(req, responseText, `msg_lore_curate_${Date.now()}`);
+}
+
+/** Build a synthetic slash-command response (streaming or JSON). */
+function slashResponse(req: GatewayRequest, text: string, msgId: string): Response {
+  if (req.stream) {
+    const sseBody = buildSSETextResponse(msgId, req.model, text, {
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+    return new Response(sseBody, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      },
+    });
+  }
+
+  return new Response(
+    JSON.stringify({
+      id: msgId,
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text }],
+      model: req.model,
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Error response builder
 // ---------------------------------------------------------------------------
 
@@ -3702,9 +3838,11 @@ export async function handleRequest(
       if (sid) priorState = sessions.get(sid);
     }
 
-    // --- Case 0: Slash command interception (/lore:warm:*) ---
+    // --- Case 0: Slash command interception ---
     const slashResult = handleWarmupSlashCommand(req, sessions);
     if (slashResult) return slashResult;
+    const curateResult = await handleCurateSlashCommand(req, sessions, config);
+    if (curateResult) return curateResult;
 
     // --- Case 1: Compaction request → intercept ---
     // Structural detection (session-aware) first, pattern matching as fallback.

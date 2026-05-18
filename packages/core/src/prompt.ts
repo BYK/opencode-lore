@@ -102,8 +102,22 @@ When the user mentions attending events, buying things, meeting people, completi
 🔴 [item-purchased] User bought Sony WH-1000XM5 headphones ($280, replaced old Bose)
 This makes it possible to answer "how many weddings did I attend?" by aggregating across sessions.
 
+BEHAVIORAL PATTERNS — detect repeated user behaviors:
+
+When the user does the same thing repeatedly (asks for tests after every implementation,
+corrects the same style issue multiple times, always rejects certain approaches), call it
+out explicitly as a pattern. Don't just record each instance — note the repetition:
+
+GOOD: 🔴 User consistently requests tests immediately after each implementation (asked 3 times: after POST /users, after GET /users/:id, after DELETE /users/:id). This is a clear behavioral pattern — user always wants tests alongside new code.
+BAD: 🟡 (20:22) User asked to write tests for both endpoints.  ← recorded as isolated event, pattern lost
+
+Look for:
+- Repeated corrections (user fixes the same thing multiple times → preference)
+- Consistent workflow expectations (always asks for X after Y → process preference)
+- Repeated rejections (user rejects the same kind of suggestion → anti-preference)
+
 PRIORITY LEVELS:
-- 🔴 High: user assertions, stated facts, preferences, goals, enumeratable entities
+- 🔴 High: user assertions, stated facts, preferences, goals, enumeratable entities, behavioral patterns
 - 🟡 Medium: questions asked, context, assistant-generated content with full detail
 - 🟢 Low: minor conversational context, greetings, acknowledgments
 
@@ -223,11 +237,18 @@ Focus ONLY on knowledge that helps a coding agent work effectively on THIS codeb
   will re-propose the broken approach because it looks like a reasonable improvement.
 - Environment/tooling setup details that affect development
 - Important relationships between components that aren't obvious from reading the code
-- User preferences and working style specific to how they use this project
-- Repeated user instructions — when the user says things like "always", "never",
-  "make sure to", "don't forget to", these are high-value preference candidates.
-  If you see instruction-like language, prioritize extracting it as a "preference" entry.
-  These instructions represent how the user wants to work and should persist across sessions.
+- User preferences and working style specific to how they use this project.
+  Preferences come in three forms — extract ALL:
+  (a) Directive: "always", "never", "make sure to", "don't forget to"
+  (b) Declarative: "I use X", "I prefer X", "we do X", "our convention is X",
+      "I like X", "I don't like X" — these state what the user does/wants without
+      imperative language but are equally important preference signals.
+  (c) Behavioral: the user repeatedly does the same thing (asks for tests after
+      every implementation, corrects the same style issue 3 times, always rejects
+      a certain approach). Look for multiple similar events in the observations —
+      repetition IS a preference signal even without explicit statements.
+  If you see any of these forms, prioritize extracting it as a "preference" entry.
+  These represent how the user wants to work and should persist across sessions.
 
 Do NOT extract:
 - Task-specific details (file currently being edited, current bug being fixed)
@@ -266,6 +287,16 @@ PREFER UPDATES OVER CREATES:
 - If multiple existing entries cover the same system from different angles (e.g. different
   bugs in the same module), consolidate them: update one with merged insights, delete the
   rest. Fewer, denser entries are better than many scattered ones.
+
+PREFERENCE EVOLUTION — users change their minds:
+- When the user indicates a changed preference ("I switched from X to Y", "I no longer
+  use X", "I moved to Y", "actually I prefer Y now"), find the existing preference entry
+  about X and UPDATE it to reflect Y. Include the reason for the switch if given.
+- Do NOT leave contradictory preference entries. If "Uses Mocha for testing" exists and
+  the user says "I switched to Vitest", update the Mocha entry to say "Uses Vitest for
+  testing (switched from Mocha because ...)" — do not create a second entry.
+- Look for evolution signals: "switched to/from", "moved to", "no longer use", "replaced
+  X with Y", "actually I prefer", "changed my mind", "used to use X but now".
 
 CROSS-REFERENCES between entries:
 - When an entry relates to another entry, reference it with [[entry-uuid]] using the entry's ID
@@ -347,9 +378,11 @@ IMPORTANT:
 3. If entries cover the same system from different angles, merge them: update one, delete the rest.
 4. Only create a new entry for genuinely distinct knowledge with no existing home.
 5. Keep all entries under 150 words. If an existing entry is too long, use an update op to trim it.
-6. Pay special attention to user instructions ("always do X", "never do Y", "make sure to X").
-   These are strong signals for "preference" entries with high confidence (1.0 for absolute
-   directives like "never"/"always", 0.9 for explicit preferences like "I prefer").`;
+6. Extract ALL user preferences — both directive ("always do X", "never do Y") AND declarative
+   ("I use X", "I prefer X", "our convention is X", "I don't like X"). Both forms are equally
+   important. Confidence: 1.0 for absolute directives, 0.9 for explicit preferences.
+7. If a user CHANGED a preference ("switched from X to Y", "no longer use X", "moved to Y"),
+   find the existing entry about X and UPDATE it — do not leave contradictory entries.`;
 }
 
 /**

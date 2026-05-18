@@ -193,6 +193,11 @@ async function startLiveGateway(): Promise<GatewayHandle> {
   const port = 20000 + Math.floor(Math.random() * 30000);
   process.env.LORE_LISTEN_PORT = String(port);
 
+  // Short idle timeout so curation/distillation fires quickly after replay.
+  process.env.LORE_IDLE_TIMEOUT = process.env.LORE_IDLE_TIMEOUT ?? "5";
+  // Disable batch queue — eval needs synchronous LLM calls for /lore:curate.
+  process.env.LORE_BATCH_DISABLED = "1";
+
   if (!process.env.LORE_DEBUG) {
     process.env.LORE_DEBUG = "false";
   }
@@ -610,10 +615,30 @@ export async function runScenario(
   try {
     // Replay sessions through the gateway to build up Lore state.
     // Only attempt replay if we have a real gateway (not a stub).
+    // After each session, send /lore:curate to force synchronous
+    // distillation + curation before the next session starts.
     if (gateway.isReal !== false) {
       for (const session of scenario.sessions) {
         try {
           await replaySession(session, gateway);
+
+          // Force synchronous curation via slash command.
+          // This ensures knowledge entries are created/updated before
+          // the next session starts — critical for preference evolution
+          // where Session 2's curation must see Session 1's entries.
+          const curateResp = await gateway.chat({
+            model: config.model,
+            system: "",
+            messages: [{ role: "user", content: "/lore:curate" }],
+            tools: [],
+            max_tokens: 256,
+            stream: false,
+          });
+          const curateData = (await curateResp.json()) as {
+            content?: Array<{ text?: string }>;
+          };
+          const curateText = curateData.content?.[0]?.text ?? "";
+          if (curateText) console.log(`  ${curateText}`);
         } catch (err) {
           console.warn(
             `  Warning: replay failed for session ${session.id}: ${err instanceof Error ? err.message : err}`,

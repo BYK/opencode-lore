@@ -84,6 +84,29 @@ const PATTERNS: PatternDef[] = [
     titleFn: (m) => `Typically uses ${m[1].trim()}`,
   },
 
+  // Declarative preference patterns — match distilled observations recording
+  // user practices/conventions stated as facts rather than directives.
+  // Uses "uses/likes" but NOT "prefers" to avoid overlap with the comparison
+  // pattern above ("prefers X over/to Y").
+  {
+    regex:
+      /(?:user |team |we )(?:uses?|likes?) (.+?) (?:for|as|when|in) (.+?)(?:\.|,|$)/gi,
+    category: "preference",
+    titleFn: (m) => `Uses ${m[1].trim()} for ${m[2].trim()}`,
+  },
+  {
+    regex:
+      /(?:user |team |we )(?:doesn't|does not|don't|do not) (?:like|use|want) (.+?)(?:\.|,|$)/gi,
+    category: "preference",
+    titleFn: (m) => `Avoids ${m[1].trim()}`,
+  },
+  {
+    regex:
+      /(?:the |our |project )convention is (.+?)(?:\.|,|$)/gi,
+    category: "preference",
+    titleFn: (m) => `Convention: ${m[1].trim()}`,
+  },
+
   // Process instruction patterns — match distilled observations recording
   // user assertions about workflow/process rules. The distillation observer
   // normalizes user instructions into "User stated always X" phrasing.
