@@ -26,25 +26,32 @@ import type { LLMClient } from "./types";
 // ---------------------------------------------------------------------------
 
 /**
- * Minimum cosine similarity to consider two distillation segments as
- * "echoes" — same behavioral shape, different instances.
- *
- * 0.78 is above the Nomic v1.5 same-domain spread ceiling (0.70 for
- * genuinely distinct entries) and below the near-duplicate zone (0.85+).
- * Distillation observations use normalized phrasing from the observer,
- * which pushes semantically similar behaviors into higher similarity.
+ * Minimum cosine similarity for initial candidate retrieval.
+ * Lower than the old 0.78 to cast a wider net — clustering handles
+ * the precision by requiring candidates to be similar to EACH OTHER,
+ * not just to the current segment.
  */
-const ECHO_THRESHOLD = 0.78;
+const CANDIDATE_THRESHOLD = 0.65;
 
 /**
- * Minimum number of prior echoing segments in DISTINCT sessions to
- * trigger pattern extraction. 2 means the behavior appeared in at least
- * 2 OTHER sessions before the current one — 3 total instances.
+ * Minimum cosine similarity between two candidates to be in the same
+ * cluster. Higher than CANDIDATE_THRESHOLD to ensure cluster members
+ * are genuinely related, not just vaguely topical.
  */
-const MIN_ECHO_COUNT = 2;
+const CLUSTER_SIMILARITY = 0.72;
+
+/**
+ * Minimum number of DISTINCT sessions in a cluster to trigger pattern
+ * extraction. 3 means the behavior appeared in at least 3 sessions
+ * (including the current one).
+ */
+const MIN_CLUSTER_SESSIONS = 3;
 
 /** Maximum similar segments to feed to the pattern extraction LLM. */
 const MAX_ECHO_SEGMENTS = 5;
+
+/** Maximum candidates to retrieve for clustering. */
+const MAX_CANDIDATES = 20;
 
 /** Rate limit: at most 1 pattern extraction per session per 10 minutes. */
 const PATTERN_COOLDOWN_MS = 10 * 60 * 1000;
@@ -106,39 +113,44 @@ async function _detect(input: {
     .query("UPDATE distillations SET embedding = ? WHERE id = ?")
     .run(embedding.toBlob(vec), input.distillId);
 
-  // Step 2: Search for similar distillations across the project
+  // Step 2: Search for similar distillations across the project (wide net)
   const pid = ensureProject(input.projectPath);
   const hits = embedding.vectorSearchAllDistillations(
     vec,
     pid,
-    MAX_ECHO_SEGMENTS + 10,
+    MAX_CANDIDATES,
   );
 
-  // Step 3: Filter to echoes — above threshold, exclude self and same session
-  const echoes = hits.filter(
+  // Step 3: Filter candidates — above lower threshold, exclude self
+  const candidates = hits.filter(
     (h) =>
       h.id !== input.distillId &&
-      h.session_id !== input.sessionID &&
-      h.similarity >= ECHO_THRESHOLD,
+      h.similarity >= CANDIDATE_THRESHOLD,
   );
 
-  // Count distinct sessions
-  const distinctSessions = new Set(echoes.map((e) => e.session_id));
-  if (distinctSessions.size < MIN_ECHO_COUNT) return;
+  if (candidates.length < 2) return;
+
+  // Step 4: Cluster candidates by mutual similarity.
+  // Load embeddings for candidates and group those that are similar
+  // to each other — not just to the current segment.
+  const cluster = clusterBySimilarity(candidates, input.sessionID);
+
+  // Find the best cluster spanning enough distinct sessions
+  if (!cluster || cluster.distinctSessions < MIN_CLUSTER_SESSIONS) return;
 
   log.info(
-    `pattern echo: segment ${input.distillId.slice(0, 8)} has ${echoes.length} echoes ` +
-      `across ${distinctSessions.size} sessions (threshold: ${ECHO_THRESHOLD})`,
+    `pattern echo: segment ${input.distillId.slice(0, 8)} cluster of ${cluster.members.length} ` +
+      `across ${cluster.distinctSessions} sessions`,
   );
 
-  // Step 4: Load the observation text of the echoing segments
-  const echoIds = echoes.slice(0, MAX_ECHO_SEGMENTS).map((e) => e.id);
-  const placeholders = echoIds.map(() => "?").join(",");
+  // Step 5: Load the observation text of the cluster members
+  const memberIds = cluster.members.slice(0, MAX_ECHO_SEGMENTS).map((e) => e.id);
+  const placeholders = memberIds.map(() => "?").join(",");
   const echoRows = db()
     .query(
       `SELECT id, observations FROM distillations WHERE id IN (${placeholders})`,
     )
-    .all(...echoIds) as Array<{ id: string; observations: string }>;
+    .all(...memberIds) as Array<{ id: string; observations: string }>;
 
   if (!echoRows.length) return;
 
@@ -146,7 +158,7 @@ async function _detect(input: {
   const userContent = patternEchoUser({
     currentObservations: input.observations,
     echoObservations: echoRows.map((r) => r.observations),
-    echoCount: distinctSessions.size,
+    echoCount: cluster.distinctSessions,
   });
 
   const model = input.model ?? config().model;
@@ -183,6 +195,107 @@ async function _detect(input: {
   } catch {
     // ltm.create() dedup guard handles duplicates — swallow
   }
+}
+
+// ---------------------------------------------------------------------------
+// Clustering
+// ---------------------------------------------------------------------------
+
+type CandidateHit = { id: string; session_id: string; similarity: number };
+
+interface Cluster {
+  members: CandidateHit[];
+  distinctSessions: number;
+}
+
+/**
+ * Cluster candidates by mutual embedding similarity.
+ *
+ * Loads embeddings for all candidates, then greedily builds a cluster
+ * starting from the most similar candidate. A candidate joins the cluster
+ * if it has cosine similarity >= CLUSTER_SIMILARITY with at least one
+ * existing cluster member.
+ *
+ * Returns the largest cluster that spans the most distinct sessions,
+ * or null if no viable cluster is found.
+ */
+function clusterBySimilarity(
+  candidates: CandidateHit[],
+  currentSessionID: string,
+): Cluster | null {
+  // Load embeddings for all candidates
+  const ids = candidates.map((c) => c.id);
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db()
+    .query(
+      `SELECT id, session_id, embedding FROM distillations WHERE id IN (${placeholders}) AND embedding IS NOT NULL`,
+    )
+    .all(...ids) as Array<{ id: string; session_id: string; embedding: Buffer }>;
+
+  if (rows.length < 2) return null;
+
+  // Build embedding map
+  const embeddings = new Map<string, Float32Array>();
+  const sessionMap = new Map<string, string>();
+  for (const row of rows) {
+    embeddings.set(row.id, embedding.fromBlob(row.embedding));
+    sessionMap.set(row.id, row.session_id);
+  }
+
+  // Greedy clustering: start with the highest-similarity candidate,
+  // then add candidates similar to any cluster member.
+  const sorted = [...candidates].sort((a, b) => b.similarity - a.similarity);
+  const used = new Set<string>();
+
+  let bestCluster: Cluster | null = null;
+
+  for (const seed of sorted) {
+    if (used.has(seed.id)) continue;
+    const seedVec = embeddings.get(seed.id);
+    if (!seedVec) continue;
+
+    const cluster: CandidateHit[] = [seed];
+    const clusterVecs: Float32Array[] = [seedVec];
+    used.add(seed.id);
+
+    // Try to add remaining candidates
+    for (const candidate of sorted) {
+      if (used.has(candidate.id) || candidate.id === seed.id) continue;
+      const cVec = embeddings.get(candidate.id);
+      if (!cVec) continue;
+
+      // Check similarity against any cluster member
+      const isRelated = clusterVecs.some(
+        (cv) => embedding.cosineSimilarity(cv, cVec) >= CLUSTER_SIMILARITY,
+      );
+
+      if (isRelated) {
+        cluster.push(candidate);
+        clusterVecs.push(cVec);
+        used.add(candidate.id);
+      }
+    }
+
+    // Count distinct sessions (including current session)
+    const sessions = new Set(cluster.map((c) => sessionMap.get(c.id) ?? c.session_id));
+    sessions.add(currentSessionID);
+
+    const clusterResult: Cluster = {
+      members: cluster,
+      distinctSessions: sessions.size,
+    };
+
+    if (
+      !bestCluster ||
+      clusterResult.distinctSessions > bestCluster.distinctSessions ||
+      (clusterResult.distinctSessions === bestCluster.distinctSessions &&
+        clusterResult.members.length > bestCluster.members.length)
+    ) {
+      bestCluster = clusterResult;
+    }
+  }
+
+  return bestCluster;
 }
 
 // ---------------------------------------------------------------------------
