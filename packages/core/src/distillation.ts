@@ -6,6 +6,7 @@ import * as embedding from "./embedding";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import { extractPatterns } from "./pattern-extract";
+import { detectPatternEchoes } from "./pattern-echo";
 import {
   DISTILLATION_SYSTEM,
   distillationUser,
@@ -849,8 +850,22 @@ async function distillSegment(input: {
     );
   }
 
-  // Fire-and-forget: embed the distillation for vector search
-  if (embedding.isAvailable()) {
+  // Embed the distillation for vector search. When knowledge extraction
+  // is enabled, also detect behavioral pattern echoes — similar segments
+  // across sessions indicate implicit user preferences.
+  // When urgent (e.g., /lore:curate), await so entries are created before
+  // the curate response is sent. Otherwise fire-and-forget.
+  if (embedding.isAvailable() && config().knowledge.enabled) {
+    const echoPromise = detectPatternEchoes({
+      distillId,
+      observations: result.observations,
+      projectPath: input.projectPath,
+      sessionID: input.sessionID,
+      llm: input.llm,
+      model: input.model,
+    });
+    if (input.urgent) await echoPromise;
+  } else if (embedding.isAvailable()) {
     embedding.embedDistillation(distillId, result.observations);
   }
 

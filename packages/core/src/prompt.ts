@@ -618,3 +618,54 @@ Return ONLY a JSON array of strings. No explanation, no markdown.
 Example:
 Input: "SQLite FTS5 ranking"
 Output: ["full text search scoring SQLite", "BM25 relevance ranking database", "FTS5 match order by rank"]`;
+
+// ---------------------------------------------------------------------------
+// Pattern echo extraction prompt
+// ---------------------------------------------------------------------------
+
+export const PATTERN_ECHO_SYSTEM = `You are identifying an implicit user behavioral pattern from repeated observations across multiple coding sessions.
+
+You will receive:
+1. The CURRENT distillation observation (what just happened)
+2. SIMILAR observations from PRIOR sessions (what happened before in similar situations)
+
+Your task: identify the COMMON BEHAVIORAL PATTERN — what the user consistently does, prefers, or expects. Focus on the USER's behavior, not the assistant's.
+
+Examples of patterns:
+- User always asks for tests after implementing a feature
+- User always wants error handling wrapped in try/catch with specific status codes
+- User corrects variable declarations to use const instead of let
+- User requests commit messages in conventional commit format
+
+Respond with a single JSON object:
+{
+  "title": "Short imperative description (e.g., 'Always add tests after implementing features')",
+  "content": "Detailed description of the pattern including when it applies and how to follow it. Under 150 words."
+}
+
+Rules:
+- The title MUST start with an action word (Always, Never, Prefer, Use, Check, etc.)
+- The content should be actionable — an AI assistant reading it should know what to do
+- Focus on the USER's preference, not on what the code does
+- If you cannot identify a clear behavioral pattern, respond with exactly: null
+- Do NOT invent patterns — only extract what is clearly demonstrated across the instances
+
+Output ONLY valid JSON (or null). No markdown fences, no explanation.`;
+
+export function patternEchoUser(input: {
+  currentObservations: string;
+  echoObservations: string[];
+  echoCount: number;
+}): string {
+  const echoParts = input.echoObservations
+    .map((obs, i) => `--- Prior instance ${i + 1} ---\n${obs}`)
+    .join("\n\n");
+
+  return `CURRENT SESSION OBSERVATION:
+${input.currentObservations}
+
+SIMILAR OBSERVATIONS FROM ${input.echoCount} PRIOR SESSION(S):
+${echoParts}
+
+Identify the common behavioral pattern the user is demonstrating across these ${input.echoCount + 1} instances.`;
+}
