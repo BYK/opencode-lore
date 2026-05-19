@@ -1,5 +1,5 @@
 import { config } from "./config";
-import { saveSessionTracking, loadSessionTracking, ensureProject } from "./db";
+import { db, saveSessionTracking, loadSessionTracking, ensureProject } from "./db";
 import * as temporal from "./temporal";
 import * as ltm from "./ltm";
 import * as log from "./log";
@@ -221,7 +221,18 @@ async function runInner(input: {
     log.warn("instruction-detect failed (non-fatal):", err);
   }
 
-  const userContent = baseUserContent + crossSessionContext;
+  // Lightweight cross-session context: count action tag occurrences
+  // from distillation observations across the project. This gives the
+  // curator a compact signal about repeated behaviors without the noise
+  // of full recall results.
+  let actionTagContext = "";
+  try {
+    actionTagContext = buildActionTagContext(input.projectPath, input.sessionID);
+  } catch (err) {
+    log.warn("action tag context failed (non-fatal):", err);
+  }
+
+  const userContent = baseUserContent + crossSessionContext + actionTagContext;
   const model = input.model ?? cfg.model;
   const responseText = await input.llm.prompt(
     CURATOR_SYSTEM,
@@ -267,6 +278,68 @@ async function runInner(input: {
   lastCuratedAt.set(input.sessionID, now);
   saveSessionTracking(input.sessionID, { lastCuratedAt: now });
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Lightweight cross-session context from action tags
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan distillation observations for action tags and count their occurrence
+ * across distinct sessions. Returns a compact summary like:
+ *
+ *   "Cross-session behavioral patterns detected:
+ *    - [requested-tests] appeared in 4 sessions
+ *    - [corrected-style] appeared in 3 sessions"
+ *
+ * This helps the curator recognize implicit preferences from repeated behavior
+ * without the noise of full recall results.
+ */
+function buildActionTagContext(
+  projectPath: string,
+  currentSessionID: string,
+): string {
+  const pid = ensureProject(projectPath);
+
+  // Get all distillation observations for this project
+  const rows = db()
+    .query(
+      "SELECT session_id, observations FROM distillations WHERE project_id = ?",
+    )
+    .all(pid) as Array<{ session_id: string; observations: string }>;
+
+  if (!rows.length) return "";
+
+  // Count action tags across distinct sessions (exclude current session)
+  const tagSessions = new Map<string, Set<string>>();
+  const tagRe = /\[([a-z]+-[a-z-]+)\]/g;
+
+  for (const row of rows) {
+    if (row.session_id === currentSessionID) continue;
+    tagRe.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = tagRe.exec(row.observations)) !== null) {
+      const tag = match[1];
+      if (!tagSessions.has(tag)) tagSessions.set(tag, new Set());
+      tagSessions.get(tag)!.add(row.session_id);
+    }
+  }
+
+  // Filter to tags that appeared in 2+ sessions (emerging patterns)
+  const significant = [...tagSessions.entries()]
+    .filter(([, sessions]) => sessions.size >= 2)
+    .sort((a, b) => b[1].size - a[1].size);
+
+  if (!significant.length) return "";
+
+  const lines = significant.map(
+    ([tag, sessions]) => `- [${tag}] appeared in ${sessions.size} prior sessions`,
+  );
+
+  return (
+    "\n\n---\nCross-session behavioral patterns detected (consider creating preference entries for these):\n" +
+    lines.join("\n")
+  );
 }
 
 export function resetCurationTracker(sessionID?: string) {
