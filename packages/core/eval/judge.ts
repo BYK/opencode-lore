@@ -306,6 +306,12 @@ Score each criterion on a 1-5 integer scale. Return ONLY valid JSON:
   "reasoning": "<brief explanation of the scores, 2-3 sentences>"
 }
 
+IMPORTANT: The reference answer is a MINIMUM — the hypothesis may include additional
+correct information beyond the reference. Extra correct details should NOT be penalized.
+Only penalize facts that directly CONTRADICT the reference or are clearly fabricated.
+A hypothesis that covers all reference points PLUS additional accurate context should
+score 5 on factual_accuracy and completeness.
+
 Do NOT include any text outside the JSON object.`;
 
 function buildJudgeUser(
