@@ -106,6 +106,8 @@ const UPSTREAM_ROUTES: Array<{ prefix: string; url: string; protocol: "anthropic
   { prefix: "google/",        url: "https://integrate.api.nvidia.com",   protocol: "openai" },
   { prefix: "qwen/",          url: "https://integrate.api.nvidia.com",   protocol: "openai" },
   { prefix: "deepseek/",      url: "https://integrate.api.nvidia.com",   protocol: "openai" },
+  // DeepSeek (direct API, dash-prefix)
+  { prefix: "deepseek-",      url: "https://api.deepseek.com",           protocol: "openai" },
   // OpenAI
   { prefix: "gpt-",           url: "https://api.openai.com",             protocol: "openai" },
   { prefix: "o1-",            url: "https://api.openai.com",             protocol: "openai" },
