@@ -966,7 +966,8 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
 
 /** Standard tool description reused verbatim by each host adapter. */
 export const RECALL_TOOL_DESCRIPTION =
-  'Search your persistent memory for this project. Two cases where you MUST use this tool: (1) Cross-session references — the user mentions past work, "last time", "before", "we discussed", "earlier", or "remember". Prior sessions are never in your context. (2) Missing details — file paths, past decisions, preferences, or approaches you don\'t see in your current window. Always prefer recall over assuming. Searches knowledge, distilled history, and message archives.';
+  'Search your persistent memory for this project. Two cases where you MUST use this tool: (1) Cross-session references — the user mentions past work, "last time", "before", "we discussed", "earlier", or "remember". Prior sessions are never in your context. (2) Missing details — file paths, past decisions, preferences, or approaches you don\'t see in your current window. Always prefer recall over assuming. Searches knowledge, distilled history, and message archives.' +
+  '\n\nNever write recall status text (like "📚 Searching…" or "📚 Fetching…") yourself — these are injected by the system automatically when you use this tool.';
 
 /** Standard parameter descriptions reused by each host adapter. */
 export const RECALL_PARAM_DESCRIPTIONS = {
