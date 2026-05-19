@@ -170,14 +170,20 @@ export function distillationUser(input: {
   priorObservations?: string;
   date: string;
   messages: string;
+  /** Pre-scanned user assertions to pin in the prompt so the observer
+   *  cannot accidentally drop them in large, code-dominated segments. */
+  pinnedAssertions?: string;
 }): string {
   const context = input.priorObservations
     ? `Previous observations (do NOT repeat these — your new observations will be appended):\n${input.priorObservations}\n\n---`
     : "This is the beginning of the session.";
+  const pinned = input.pinnedAssertions
+    ? `\n⚠️ HIGH-PRIORITY USER ASSERTIONS DETECTED IN THIS SEGMENT:\n${input.pinnedAssertions}\nThese statements MUST appear in your observations — they represent user preferences, decisions, or directives that override prior state.\n`
+    : "";
   return `${context}
 
 Session date: ${input.date}
-
+${pinned}
 Conversation to observe:
 
 ${input.messages}

@@ -9,9 +9,11 @@ import {
   workerTokenBudget,
   distillTokenBudget,
   maxAllowedExpansion,
+  detectAssertions,
   run,
   type Distillation,
 } from "../src/distillation";
+import { distillationUser } from "../src/prompt";
 import * as temporal from "../src/temporal";
 import { CHUNK_TERMINATOR, partsToText } from "../src/temporal";
 import { db, ensureProject } from "../src/db";
@@ -1405,5 +1407,207 @@ describe("distillTokenBudget", () => {
     // Old: workerTokenBudget(8192, 0.25, 1024, 8192) = 2048
     // New: distillTokenBudget(8192) = 724
     expect(distillTokenBudget(8192)).toBeLessThan(workerTokenBudget(8192, 0.25, 1024, 8192));
+  });
+});
+
+// ─── detectAssertions ─────────────────────────────────────────────────
+//
+// Pre-scans raw user messages for high-priority assertion-like content
+// (preferences, directives, preference changes) so they can be pinned
+// in the distillation prompt and not lost in large segments.
+
+describe("detectAssertions", () => {
+  test("returns empty for segments with no user assertions", () => {
+    const messages = [
+      msg("user", "Can you help me set up the auth module?"),
+      msg("assistant", "Sure, I'll create the auth middleware."),
+      msg("tool", "[tool:write] wrote src/auth/middleware.ts"),
+      msg("user", "Looks good, what about the tests?"),
+    ];
+    expect(detectAssertions(messages)).toEqual([]);
+  });
+
+  test("detects instruction patterns — always/never/prefer", () => {
+    const messages = [
+      msg("user", "I always want tests alongside implementation."),
+      msg("assistant", "Got it, I'll add tests."),
+      msg("user", "I prefer raw SQL over ORMs for this project."),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(2);
+    expect(assertions[0].text).toContain("always want tests alongside implementation");
+    expect(assertions[1].text).toContain("prefer raw SQL over ORMs");
+  });
+
+  test("detects preference-change patterns — switch/let's use", () => {
+    const messages = [
+      msg("user", "Actually, let's switch to Vitest -- it's faster because it uses Vite's transform pipeline instead of ts-node."),
+      msg("assistant", "Understood, I'll migrate the tests to Vitest."),
+      msg("user", "Let's use Vitest going forward."),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(2);
+    expect(assertions.some((a) => a.text.toLowerCase().includes("switch to vitest"))).toBe(true);
+    expect(assertions.some((a) => a.text.toLowerCase().includes("let's use vitest"))).toBe(true);
+  });
+
+  test("detects 'from now on' and 'going forward' directives", () => {
+    const messages = [
+      msg("user", "From now on, use kebab-case for all file names."),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+    expect(assertions[0].text.toLowerCase()).toContain("from now on");
+  });
+
+  test("detects 'I switched/moved/migrated' patterns", () => {
+    const messages = [
+      msg("user", "I switched to pnpm because npm was too slow."),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+    expect(assertions[0].text).toContain("switched to pnpm");
+  });
+
+  test("detects 'no longer use' pattern", () => {
+    const messages = [
+      msg("user", "I no longer use Mocha for testing, it's too slow."),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+    expect(assertions[0].text).toContain("no longer use Mocha");
+  });
+
+  test("detects 'replacing X with Y' pattern", () => {
+    const messages = [
+      msg("user", "I'm replacing Mocha with Vitest for all our test suites."),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+    expect(assertions[0].text).toContain("replacing Mocha with Vitest");
+  });
+
+  test("deduplicates identical assertions", () => {
+    const messages = [
+      msg("user", "I prefer Vitest over Mocha."),
+      msg("user", "I prefer Vitest over Mocha."),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+  });
+
+  test("caps at 5 assertions", () => {
+    const messages = [
+      msg("user", "I always want type safety."),
+      msg("user", "I never use any in TypeScript."),
+      msg("user", "I prefer functional over OOP."),
+      msg("user", "I expect you to write tests."),
+      msg("user", "I need you to use strict mode."),
+      msg("user", "I want you to avoid global state."),
+      msg("user", "Make sure to add error handling."),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(5);
+  });
+
+  test("only scans user messages — ignores assistant assertions", () => {
+    const messages = [
+      msg("assistant", "I prefer to use async/await for all promises."),
+      msg("assistant", "Let's switch to a better approach."),
+      msg("tool", "I always run tests before deploying."),
+    ];
+    expect(detectAssertions(messages)).toEqual([]);
+  });
+
+  test("includes timestamp from message created_at", () => {
+    const t = new Date("2026-04-24T14:30:00Z").getTime();
+    const messages = [
+      msg("user", "I prefer Vitest over Jest.", { created_at: t }),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+    // The exact format depends on timezone but should be HH:MM
+    expect(assertions[0].time).toMatch(/^\d{2}:\d{2}$/);
+  });
+
+  test("assertion text stays within regex-enforced length bounds", () => {
+    // The regex patterns enforce max match length (80 or 120 chars) so
+    // individual assertions can't be excessively long. Verify the longest
+    // possible match is still reasonable.
+    const longSuffix = "a".repeat(120);
+    const longPreference = `let's switch to ${longSuffix}`;
+    const messages = [msg("user", longPreference)];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+    // Regex [^\n.!,]{3,120} caps the match; total should be well under 200
+    expect(assertions[0].text.length).toBeLessThanOrEqual(200);
+  });
+
+  test("detects assertions in multiline user messages", () => {
+    // Assertions on a non-terminated line (no trailing punctuation) followed
+    // by a newline should still be detected. The [^\n.!,] body class stops
+    // at \n and the terminator group matches it.
+    const messages = [
+      msg("user", "Can you help with the migration?\nI always want tests alongside implementation\nAlso please check the config"),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+    expect(assertions[0].text).toContain("always want tests alongside implementation");
+  });
+
+  test("preference-change patterns stop at sentence boundary", () => {
+    // "I switched to pnpm." should be captured without the trailing sentence.
+    const messages = [
+      msg("user", "I switched to pnpm. The npm lockfile was causing issues with our CI pipeline."),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+    expect(assertions[0].text).toContain("switched to pnpm");
+    // Must NOT contain the trailing sentence
+    expect(assertions[0].text).not.toContain("lockfile");
+  });
+});
+
+// ─── distillationUser with pinned assertions ──────────────────────────
+
+describe("distillationUser — pinned assertions", () => {
+  test("no assertions — output unchanged from baseline", () => {
+    const withoutPin = distillationUser({
+      date: "April 24, 2026",
+      messages: "[user] (09:15) Hello",
+    });
+    const withUndefined = distillationUser({
+      date: "April 24, 2026",
+      messages: "[user] (09:15) Hello",
+      pinnedAssertions: undefined,
+    });
+    expect(withUndefined).toBe(withoutPin);
+    expect(withoutPin).not.toContain("HIGH-PRIORITY");
+  });
+
+  test("with assertions — pinned section injected between date and conversation", () => {
+    const result = distillationUser({
+      date: "April 24, 2026",
+      messages: "[user] (09:15) Let's switch to Vitest",
+      pinnedAssertions: '- "let\'s switch to Vitest" (09:15)',
+    });
+    expect(result).toContain("HIGH-PRIORITY USER ASSERTIONS");
+    expect(result).toContain("let's switch to Vitest");
+    expect(result).toContain("MUST appear in your observations");
+    // Pinned section should appear before the conversation
+    const pinnedIdx = result.indexOf("HIGH-PRIORITY");
+    const convIdx = result.indexOf("Conversation to observe:");
+    expect(pinnedIdx).toBeLessThan(convIdx);
+  });
+
+  test("pinned section appears after session date", () => {
+    const result = distillationUser({
+      date: "April 24, 2026",
+      messages: "[user] (09:15) test",
+      pinnedAssertions: '- "I prefer X" (09:15)',
+    });
+    const dateIdx = result.indexOf("Session date: April 24, 2026");
+    const pinnedIdx = result.indexOf("HIGH-PRIORITY");
+    expect(dateIdx).toBeLessThan(pinnedIdx);
   });
 });
