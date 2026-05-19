@@ -823,8 +823,8 @@
       .bc-1, .bc-2, .bc-3 { grid-column: span 1; }
       .bc-3 { grid-template-columns: 1fr; gap: 1.5rem; }
       
-      .code-block { padding: 1rem; width: 100%; box-sizing: border-box; word-break: break-all; white-space: pre-wrap; }
-      .code-block code { font-size: 0.75rem; white-space: pre-wrap; word-break: break-all; }
+      .code-block { padding: 1rem; width: 100%; box-sizing: border-box; overflow-x: auto; }
+      .code-block code { font-size: 0.75rem; white-space: pre; }
       
       .cta-form { display: flex; flex-direction: column; align-items: center; gap: 0.8rem; width: 100%; }
       .cta-input, .cta-submit { width: 100%; max-width: none; box-sizing: border-box; }
@@ -1101,11 +1101,7 @@
             don't have to.</p>
         </div>
         <div class="code-block">
-          <code><span class="ck"># Start Lore + your AI agent</span><br>
-<span class="cv">$</span> lore run<br>
-<br>
-<span class="ck"># That's it. Lore auto-detects your</span><br>
-<span class="ck"># agent and configures everything.</span></code>
+          <code><span class="ck"># Start Lore + your AI agent</span><br><span class="cv">$</span> lore run<br><br><span class="ck"># That's it. Lore auto-detects your</span><br><span class="ck"># agent and configures everything.</span></code>
         </div>
       </div>
     </div>
@@ -1151,11 +1147,7 @@
             with context from day one. No blank slate.</p>
         </div>
         <div class="code-block">
-          <code><span class="ck"># Import existing conversations</span><br>
-<span class="cv">$</span> lore import<br>
-<br>
-<span class="ck"># Auto-detects Claude Code, Codex,</span><br>
-<span class="ck"># Aider, Cline, Continue & more</span></code>
+          <code><span class="ck"># Import existing conversations</span><br><span class="cv">$</span> lore import<br><br><span class="ck"># Auto-detects Claude Code, Codex,</span><br><span class="ck"># Aider, Cline, Continue &amp; more</span></code>
         </div>
       </div>
     </div>
