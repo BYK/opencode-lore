@@ -94,6 +94,111 @@ function mdTruncated(markdown: string, maxChars = 500): string {
   return md(truncateText(markdown, maxChars));
 }
 
+// ---------------------------------------------------------------------------
+// Chat bubble helpers (session conversation view)
+// ---------------------------------------------------------------------------
+
+function safeParseJSON(jsonStr: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(jsonStr);
+  } catch {
+    return null;
+  }
+}
+
+type MessageChunk =
+  | { type: "text"; content: string }
+  | { type: "tool"; name: string; output: string }
+  | { type: "reasoning"; content: string };
+
+/**
+ * Split a temporal message's content into typed chunks.
+ * Content uses `"\n\x1f"` (CHUNK_TERMINATOR) between chunks, with tool
+ * outputs prefixed `[tool:name] ` and reasoning prefixed `[reasoning] `.
+ * Pre-F3b content (no \x1f) is treated as a single text chunk.
+ */
+function parseMessageChunks(content: string): MessageChunk[] {
+  const CHUNK_SEPARATOR = "\n\x1f";
+  const raw = content.includes("\x1f")
+    ? content.split(CHUNK_SEPARATOR)
+    : [content];
+
+  return raw.map((chunk): MessageChunk => {
+    if (chunk.startsWith("[tool:")) {
+      const closeBracket = chunk.indexOf("] ");
+      if (closeBracket >= 0) {
+        const name = chunk.slice(6, closeBracket);
+        const output = chunk.slice(closeBracket + 2);
+        return { type: "tool", name, output };
+      }
+    }
+    if (chunk.startsWith("[reasoning] ")) {
+      return { type: "reasoning", content: chunk.slice(12) };
+    }
+    return { type: "text", content: chunk };
+  });
+}
+
+/**
+ * Render a single temporal message as a chat bubble.
+ * User messages are right-aligned (blue), assistant messages left-aligned.
+ * Tool calls and reasoning blocks are collapsible within the bubble.
+ */
+function renderChatBubble(msg: { role: string; content: string; tokens: number; created_at: number; metadata: string }, index: number): string {
+  const isUser = msg.role === "user";
+  const chunks = parseMessageChunks(msg.content);
+  const meta = safeParseJSON(msg.metadata);
+
+  // Build inner content from chunks
+  let inner = "";
+  for (const chunk of chunks) {
+    switch (chunk.type) {
+      case "text": {
+        const text = truncateText(chunk.content, 2000);
+        if (text.trim()) inner += `<div class="bubble-text">${md(text)}</div>`;
+        break;
+      }
+      case "tool": {
+        const toolOutput = truncateText(chunk.output, 1000);
+        inner += `<details class="bubble-tool">
+          <summary><span class="badge badge-toolcall">${esc(chunk.name)}</span></summary>
+          <pre class="bubble-tool-output">${esc(toolOutput)}</pre>
+        </details>`;
+        break;
+      }
+      case "reasoning": {
+        const text = truncateText(chunk.content, 1000);
+        inner += `<details class="bubble-reasoning">
+          <summary><span class="badge badge-reasoning">reasoning</span></summary>
+          <div class="bubble-reasoning-content">${md(text)}</div>
+        </details>`;
+        break;
+      }
+    }
+  }
+
+  // Build metadata line
+  let metaLine = `<span class="bubble-time">${formatDate(msg.created_at)}</span>`;
+  if (isUser) {
+    const agent = meta?.agent;
+    if (agent && typeof agent === "string") metaLine = `<span class="bubble-agent">${esc(agent)}</span> &middot; ` + metaLine;
+  } else {
+    const modelID = meta?.modelID;
+    if (modelID && typeof modelID === "string") metaLine = `<span class="bubble-model">${esc(modelID)}</span> &middot; ` + metaLine;
+    if (msg.tokens) metaLine += ` &middot; <span class="bubble-tokens">~${formatTokens(msg.tokens)} tokens</span>`;
+  }
+
+  const align = isUser ? "bubble-right" : "bubble-left";
+  const color = isUser ? "bubble-user" : "bubble-assistant";
+
+  return `<div class="bubble-row ${align}" id="msg-${index}" data-role="${esc(msg.role)}">
+    <div class="bubble ${color}">
+      ${inner}
+      <div class="bubble-meta">${metaLine}</div>
+    </div>
+  </div>`;
+}
+
 function formatUSD(amount: number): string {
   if (amount === 0) return "$0.00";
   if (Math.abs(amount) < 0.01) return `$${amount.toFixed(4)}`;
@@ -267,9 +372,6 @@ form.inline { display: inline; }
   border-radius: var(--radius); font-size: 0.95em; background: var(--bg); color: var(--fg); }
 .search-form select { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--bg); color: var(--fg); font-size: 0.9em; }
-.msg { padding: 8px 12px; margin: 4px 0; border-radius: var(--radius); font-size: 0.85em; font-family: var(--mono); }
-.msg-user { background: var(--bg2); border-left: 3px solid var(--accent); }
-.msg-assistant { background: var(--bg2); border-left: 3px solid #10b981; }
 .result-list { list-style: none; padding: 0; margin: 0; }
 .result-item { padding: 8px 12px; margin: 4px 0; background: var(--bg2); border: 1px solid var(--border);
   border-radius: var(--radius); font-size: 0.9em; line-height: 1.5; }
@@ -395,6 +497,83 @@ details.warming[open] summary { margin-bottom: 8px; }
 .toggle-btn { cursor: pointer; user-select: none; font-size: 0.8em; margin-right: 4px; opacity: 0.6; }
 .toggle-btn:hover { opacity: 1; }
 .subagent-count { font-size: 0.75em; color: var(--fg3); margin-left: 4px; }
+/* --- Chat bubble conversation view --- */
+.chat-header {
+  display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 8px; margin: 16px 0 8px;
+}
+.chat-header h2 { margin: 0; border: none; padding: 0; }
+.chat-filter { display: flex; align-items: center; gap: 8px; }
+.chat-filter input {
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); color: var(--fg); font-size: 0.85em; width: 220px;
+}
+.chat-filter-count { font-size: 0.8em; color: var(--fg3); }
+.chat-container {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 12px 0; max-width: 100%;
+}
+.bubble-row { display: flex; max-width: 100%; }
+.bubble-right { justify-content: flex-end; }
+.bubble-left  { justify-content: flex-start; }
+.bubble {
+  max-width: 80%; padding: 10px 14px; border-radius: 12px;
+  font-size: 0.9em; line-height: 1.5; overflow-wrap: break-word; word-break: break-word;
+}
+.bubble-user {
+  background: var(--accent); color: white; border-bottom-right-radius: 4px;
+}
+.bubble-assistant {
+  background: var(--bg2); border: 1px solid var(--border); border-bottom-left-radius: 4px;
+}
+@media (prefers-color-scheme: dark) {
+  .bubble-user { background: #1e40af; }
+}
+.bubble-text .md { margin: 0; }
+.bubble-text .md p:first-child { margin-top: 0; }
+.bubble-text .md p:last-child  { margin-bottom: 0; }
+/* User bubble overrides for readability on blue background */
+.bubble-user .md code { background: rgba(255,255,255,0.15); color: inherit; }
+.bubble-user .md pre { background: rgba(0,0,0,0.2); border-color: rgba(255,255,255,0.15); color: inherit; }
+.bubble-user .md pre code { background: none; }
+.bubble-user .md a { color: #fff; text-decoration: underline; }
+.bubble-user .md blockquote { border-left-color: rgba(255,255,255,0.3); color: rgba(255,255,255,0.85); }
+/* Tool call blocks (collapsed by default) */
+.bubble-tool { margin: 6px 0; }
+.bubble-tool summary { cursor: pointer; font-size: 0.85em; list-style: none; }
+.bubble-tool summary::-webkit-details-marker { display: none; }
+.bubble-tool summary::before { content: "\\25B6 "; font-size: 0.75em; }
+.bubble-tool[open] summary::before { content: "\\25BC "; }
+.bubble-tool-output {
+  margin: 6px 0 0; padding: 8px 10px; font-size: 0.8em;
+  max-height: 300px; overflow-y: auto;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+}
+/* Reasoning blocks (collapsed by default) */
+.bubble-reasoning { margin: 6px 0; }
+.bubble-reasoning summary { cursor: pointer; font-size: 0.85em; list-style: none; }
+.bubble-reasoning summary::-webkit-details-marker { display: none; }
+.bubble-reasoning summary::before { content: "\\25B6 "; font-size: 0.75em; }
+.bubble-reasoning[open] summary::before { content: "\\25BC "; }
+.bubble-reasoning-content {
+  margin: 6px 0 0; padding: 8px 12px;
+  background: var(--bg3); border-left: 3px solid #a78bfa;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 0.85em; font-style: italic; color: var(--fg2);
+}
+.badge-reasoning { background: #f3e8ff; color: #6b21a8; }
+@media (prefers-color-scheme: dark) {
+  .badge-reasoning { background: #3b0764; color: #d8b4fe; }
+}
+/* Metadata line below bubble content */
+.bubble-meta {
+  margin-top: 6px; font-size: 0.75em; color: var(--fg3);
+  display: flex; gap: 4px; flex-wrap: wrap;
+}
+.bubble-user .bubble-meta { color: rgba(255,255,255,0.7); }
+/* Chat search filter states */
+.bubble-row.filtered-out { display: none; }
+.bubble-row.search-hit .bubble { box-shadow: 0 0 0 2px var(--accent); }
 `;
 
 function layout(title: string, body: string): string {
@@ -575,6 +754,38 @@ document.addEventListener("DOMContentLoaded",function(){
       if(countEl)countEl.textContent=shown+"/"+allRows.filter(function(r){return!r.dataset.parent;}).length;
     });
   });
+  // Chat message filter (session page only)
+  var chatSearch=document.getElementById("chat-search");
+  var chatContainer=document.getElementById("chat-container");
+  if(chatSearch&&chatContainer){
+    var chatCount=document.getElementById("chat-search-count");
+    var bubbleRows=Array.from(chatContainer.querySelectorAll(".bubble-row"));
+    var chatDebounce;
+    chatSearch.addEventListener("input",function(){
+      clearTimeout(chatDebounce);
+      chatDebounce=setTimeout(function(){
+        var q=chatSearch.value.toLowerCase().trim();
+        if(!q){
+          bubbleRows.forEach(function(r){r.classList.remove("filtered-out","search-hit");});
+          if(chatCount)chatCount.textContent="";
+          return;
+        }
+        var hits=0;
+        bubbleRows.forEach(function(r){
+          var text=r.textContent.toLowerCase();
+          if(text.indexOf(q)!==-1){
+            r.classList.remove("filtered-out");
+            r.classList.add("search-hit");
+            hits++;
+          }else{
+            r.classList.add("filtered-out");
+            r.classList.remove("search-hit");
+          }
+        });
+        if(chatCount)chatCount.textContent=hits+"/"+bubbleRows.length+" messages";
+      },150);
+    });
+  }
 });
 </script>
 </body>
@@ -1326,15 +1537,19 @@ function pageSession(pid: string, sessionId: string): string | null {
   // Cache warming heuristics (live sessions only)
   body += renderWarmingSection(sessionId);
 
-  // Messages
-  body += `<h2>Messages (${messages.length})</h2>`;
-  for (const msg of messages) {
-    const cls = msg.role === "user" ? "msg-user" : "msg-assistant";
-    body += `<div class="msg ${cls}">
-      <strong>${esc(msg.role)}</strong> <span style="color:var(--fg3);font-size:0.8em">${formatDate(msg.created_at)}</span>
-      <br>${esc(truncate(msg.content, 500))}
-    </div>`;
+  // Conversation (chat bubble view)
+  body += `<div class="chat-header">
+    <h2>Conversation (${messages.length} messages)</h2>
+    <div class="chat-filter">
+      <input type="text" id="chat-search" placeholder="Filter messages..." autocomplete="off">
+      <span class="chat-filter-count" id="chat-search-count"></span>
+    </div>
+  </div>`;
+  body += `<div class="chat-container" id="chat-container">`;
+  for (let i = 0; i < messages.length; i++) {
+    body += renderChatBubble(messages[i], i);
   }
+  body += `</div>`;
 
   // Distillations
   if (dists.length) {
