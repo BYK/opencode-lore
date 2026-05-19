@@ -119,6 +119,7 @@ function userText(text: string, timestamp?: number): ConversationTurn {
     content: [{ type: "text", text }],
     tokens: estimateTokensFromText(text),
     timestamp,
+    isFiller: true,
   };
 }
 
@@ -128,6 +129,7 @@ function assistantText(text: string, timestamp?: number): ConversationTurn {
     content: [{ type: "text", text }],
     tokens: estimateTokensFromText(text),
     timestamp,
+    isFiller: true,
   };
 }
 
@@ -150,6 +152,7 @@ function assistantToolUse(
       content: parts,
       tokens: Math.max(50, Math.ceil(chars / CHARS_PER_TOKEN)),
       timestamp,
+      isFiller: true,
     },
   };
 }
@@ -172,6 +175,7 @@ function userToolResult(
     ],
     tokens: estimateTokensFromText(content),
     timestamp,
+    isFiller: true,
   };
 }
 

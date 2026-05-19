@@ -122,7 +122,7 @@ async function startInProcess(): Promise<string | null> {
     // module at compile time (the .d.cts only exists after building).
     const gw = "@loreai/gateway";
     const { startGateway } = await import(/* webpackIgnore: true */ gw);
-    const handle = await startGateway({ quiet: true });
+    const handle = await startGateway({ quiet: true, local: true });
     const url = `http://127.0.0.1:${handle.port}`;
 
     if (!handle.owned) {

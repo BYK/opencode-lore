@@ -68,6 +68,9 @@ export interface ConversationTurn {
   tokens?: number;
   /** Unix ms timestamp for temporal realism. */
   timestamp?: number;
+  /** If true, this is inflator-generated filler — stored directly in the
+   *  temporal DB without an upstream API call. */
+  isFiller?: boolean;
 }
 
 export interface SessionTranscript {
