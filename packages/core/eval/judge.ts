@@ -177,6 +177,17 @@ export const CROSS_PROJECT_AVAILABILITY: ScoringCriterion = {
   },
 };
 
+export const RECALL_TRIGGER: ScoringCriterion = {
+  name: "recall_trigger",
+  description:
+    "Did the answer appropriately use recall for cross-session references?",
+  scale: {
+    1: "Did not attempt recall despite clear cross-session reference cues",
+    3: "Used recall but with poor query formulation or incomplete usage",
+    5: "Proactively used recall with appropriate queries to retrieve cross-session information",
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Pre-built rubrics
 // ---------------------------------------------------------------------------
@@ -281,6 +292,17 @@ export const RUBRICS = {
       cross_project_availability: 0.3,
     },
   } satisfies ScoringRubric,
+
+  /** MSR-1 cross-session cue questions */
+  crossSessionCueRecall: {
+    criteria: [FACTUAL_ACCURACY, COMPLETENESS, RECALL_TRIGGER, TEMPORAL_ATTRIBUTION],
+    weights: {
+      factual_accuracy: 0.25,
+      completeness: 0.25,
+      recall_trigger: 0.3,
+      temporal_attribution: 0.2,
+    },
+  } satisfies ScoringRubric,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -319,13 +341,25 @@ function buildJudgeUser(
   referenceAnswer: string,
   hypothesis: string,
   rubric: ScoringRubric,
+  metadata?: { recallInvoked?: boolean },
 ): string {
   const criteria = buildCriteriaDescription(rubric);
+
+  // Only include recall metadata when the rubric has a recall_trigger criterion
+  const hasRecallCriterion = rubric.criteria.some(
+    (c) => c.name === "recall_trigger",
+  );
+  const recallSection =
+    hasRecallCriterion && metadata?.recallInvoked !== undefined
+      ? `\n\n## Recall Tool Usage\nThe recall tool (cross-session memory search) was **${metadata.recallInvoked ? "invoked" : "not invoked"}** when answering this question. Factor this into the recall_trigger score.\n\n`
+      : "\n\n";
+
   return (
     `## Scoring Criteria\n\n${criteria}\n\n` +
     `## Question\n${question}\n\n` +
     `## Reference Answer\n${referenceAnswer}\n\n` +
-    `## Hypothesis (answer to evaluate)\n${hypothesis}\n\n` +
+    `## Hypothesis (answer to evaluate)\n${hypothesis}` +
+    recallSection +
     `Score each criterion on a 1-5 scale. Return JSON only.`
   );
 }
@@ -356,6 +390,7 @@ export async function judge(
   question: EvalQuestion,
   hypothesis: string,
   llm?: EvalLLMClient,
+  metadata?: { recallInvoked?: boolean },
 ): Promise<JudgeResult> {
   const { rubric } = question;
 
@@ -378,6 +413,7 @@ export async function judge(
     question.referenceAnswer,
     hypothesis,
     rubric,
+    metadata,
   );
 
   const result = await llm.prompt(JUDGE_SYSTEM, userPrompt, {

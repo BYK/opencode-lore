@@ -4,7 +4,7 @@
  * Three scenarios testing whether Lore can recall information from previous
  * sessions in a multi-session workflow:
  *
- *   MSR-1  Sequential Feature Development (3 sessions, 12 questions)
+ *   MSR-1  Sequential Feature Development (3 sessions, 20 questions)
  *   MSR-2  Deep History Recall            (5 sessions, 15 questions)
  *   MSR-3  Cross-Model Sessions           (2 sessions,  6 questions)
  */
@@ -437,6 +437,97 @@ const msr1Questions: EvalQuestion[] = [
       "The system supports two auth paths: (1) Email/password: POST /register creates a user with bcrypt-hashed password (12 rounds), POST /login validates credentials via bcrypt.compare, returns a signed JWT (24h expiry). Login is rate-limited by email (5 attempts per 15 min). (2) OAuth: GET /auth/:provider/authorize redirects to Google/GitHub with PKCE challenge, provider calls back to /auth/:provider/callback with auth code, server exchanges code+verifier for tokens, upserts user, returns JWT. Both paths share the JWT system (signToken/verifyToken from jwt.ts). Refresh tokens (7-day, single-use rotation) extend sessions. The requireAuth middleware validates Bearer tokens on protected routes. Rate limiting uses separate buckets for OAuth (oauth:IP prefix) and login (email key).",
     rubric: RUBRICS.multiSessionRecall,
     metadata: { difficulty: "hard", tags: ["synthesis", "architecture"] },
+  },
+  // Cross-session cue questions — test whether conversational references
+  // to prior sessions trigger recall tool usage. Same factual content as
+  // some existing questions but phrased with natural cross-session cues.
+  {
+    id: "msr1-q13",
+    dimension: "recall",
+    scenario: "msr-1-sequential",
+    sessionRef: "msr1-session-1,msr1-session-2,msr1-session-3",
+    question: "Remember that auth bug we had? What was the root cause?",
+    referenceAnswer:
+      "The auth regression was caused by the interaction between two changes across sessions. In session 1, the rate limiter was fixed from IP-based to email-based keying (req.body?.email ?? req.ip). In session 2, OAuth callback routes were added that don't have a request body. OAuth callbacks fell back to the IP key because req.body was undefined, causing OAuth provider callbacks to consume the IP-based rate limit counter, which then blocked legitimate login requests sharing that IP.",
+    rubric: RUBRICS.crossSessionCueRecall,
+    metadata: { difficulty: "medium", tags: ["cross-session-cue", "recall-trigger", "bug"] },
+  },
+  {
+    id: "msr1-q14",
+    dimension: "recall",
+    scenario: "msr-1-sequential",
+    sessionRef: "msr1-session-2",
+    question: "We set up something for token refresh last time, how does it work?",
+    referenceAnswer:
+      "Refresh tokens are stored in the database with a 7-day expiry. On each use, the old refresh token is revoked and a new one is created (single-use rotation). This is implemented in src/auth/token-refresh.ts.",
+    rubric: RUBRICS.crossSessionCueRecall,
+    metadata: { difficulty: "medium", tags: ["cross-session-cue", "recall-trigger", "token"] },
+  },
+  {
+    id: "msr1-q15",
+    dimension: "recall",
+    scenario: "msr-1-sequential",
+    sessionRef: "msr1-session-1",
+    question: "Earlier we discussed why we went with JWT — what was the reasoning?",
+    referenceAnswer:
+      "JWT was chosen over session cookies because the API is consumed by both a React web frontend and a React Native mobile app. Stateless tokens avoid server-side session storage and work well with the existing CDN setup.",
+    rubric: RUBRICS.crossSessionCueRecall,
+    metadata: { difficulty: "medium", tags: ["cross-session-cue", "recall-trigger", "decision-rationale"] },
+  },
+  {
+    id: "msr1-q16",
+    dimension: "recall",
+    scenario: "msr-1-sequential",
+    sessionRef: "msr1-session-1",
+    question: "What was that password hashing library we picked, and why did we rule out the other one?",
+    referenceAnswer:
+      "bcrypt with 12 salt rounds, implemented in src/auth/password.ts. Argon2 was considered but rejected because bcrypt has better library support in the current Node 20 setup.",
+    rubric: RUBRICS.crossSessionCueRecall,
+    metadata: { difficulty: "medium", tags: ["cross-session-cue", "recall-trigger", "decision-rationale"] },
+  },
+  {
+    id: "msr1-q17",
+    dimension: "recall",
+    scenario: "msr-1-sequential",
+    sessionRef: "msr1-session-2",
+    question: "In our OAuth work, we had a specific reason for using PKCE instead of the simpler flow — remind me why?",
+    referenceAnswer:
+      "PKCE was chosen for three reasons: (1) the mobile app is a public client where PKCE is mandatory, (2) implicit grant is deprecated in OAuth 2.1, and (3) using the same flow for both web and mobile simplifies the codebase.",
+    rubric: RUBRICS.crossSessionCueRecall,
+    metadata: { difficulty: "medium", tags: ["cross-session-cue", "recall-trigger", "oauth"] },
+  },
+  {
+    id: "msr1-q18",
+    dimension: "recall",
+    scenario: "msr-1-sequential",
+    sessionRef: "msr1-session-1,msr1-session-2,msr1-session-3",
+    question: "We changed the rate limiter key at some point and then it caused issues later — can you walk me through what happened?",
+    referenceAnswer:
+      "In session 1, the rate limiter was keyed by req.ip, which meant users behind the same NAT shared a counter. It was fixed to use req.body?.email ?? req.ip. In session 3, this caused a regression: OAuth callback requests (added in session 2) don't have a body, so they fell back to IP-based keying. OAuth provider servers sharing IPs consumed the rate limit counter, blocking legitimate login requests. The fix added a path check to use a separate 'oauth:' prefix key for OAuth routes.",
+    rubric: RUBRICS.crossSessionCueRecall,
+    metadata: { difficulty: "hard", tags: ["cross-session-cue", "recall-trigger", "synthesis"] },
+  },
+  {
+    id: "msr1-q19",
+    dimension: "recall",
+    scenario: "msr-1-sequential",
+    sessionRef: "msr1-session-1,msr1-session-2",
+    question: "We built up the auth module over a couple of sessions — how many files ended up in src/auth/ and what are they?",
+    referenceAnswer:
+      "9 files total in src/auth/. Original 5 from session 1: jwt.ts, password.ts, middleware.ts, rate-limiter.ts, routes.ts. Added 4 in session 2: oauth-config.ts, oauth-pkce.ts, oauth-routes.ts, token-refresh.ts.",
+    rubric: RUBRICS.crossSessionCueRecall,
+    metadata: { difficulty: "hard", tags: ["cross-session-cue", "recall-trigger", "enumeration"] },
+  },
+  {
+    id: "msr1-q20",
+    dimension: "recall",
+    scenario: "msr-1-sequential",
+    sessionRef: "msr1-session-2",
+    question: "What were those callback URLs we configured for the OAuth providers? I need to set them up in production.",
+    referenceAnswer:
+      "Google: http://localhost:3000/auth/google/callback (overridable via GOOGLE_CALLBACK_URL env var). GitHub: http://localhost:3000/auth/github/callback (overridable via GITHUB_CALLBACK_URL env var). In production, set them to https://api.ourapp.com/auth/{provider}/callback.",
+    rubric: RUBRICS.crossSessionCueRecall,
+    metadata: { difficulty: "medium", tags: ["cross-session-cue", "recall-trigger", "config-value"] },
   },
 ];
 

@@ -1820,7 +1820,10 @@ async function accumulateNonStreamOpenAIStream(
  * Convert a GatewayResponse to a non-streaming HTTP Response.
  * Scales usage fields to prevent client auto-compaction.
  */
-function nonStreamHttpResponse(resp: GatewayResponse): Response {
+function nonStreamHttpResponse(
+  resp: GatewayResponse,
+  extraHeaders?: Record<string, string>,
+): Response {
   // Scale usage so the client's token total stays below auto-compact threshold.
   // postResponse() has already consumed the real values for calibration/bustRate.
   const scaledUsage = scaleUsageForClient({
@@ -1841,7 +1844,7 @@ function nonStreamHttpResponse(resp: GatewayResponse): Response {
   const body = buildAnthropicNonStreamResponse(scaledResp);
   return new Response(JSON.stringify(body), {
     status: 200,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...extraHeaders },
   });
 }
 
@@ -3311,7 +3314,10 @@ async function handleConversationTurn(
         `recall (non-stream, mixed): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
       );
       postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(unsustainable ? injectContextWarning(markerResp) : markerResp);
+      return nonStreamHttpResponse(
+        unsustainable ? injectContextWarning(markerResp) : markerResp,
+        { "x-lore-recall-invoked": "true" },
+      );
     }
 
     // Recall-only — send follow-up request for seamless UX
@@ -3339,7 +3345,10 @@ async function handleConversationTurn(
       );
       // Fall back to response with marker (no continuation)
       postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(unsustainable ? injectContextWarning(markerResp) : markerResp);
+      return nonStreamHttpResponse(
+        unsustainable ? injectContextWarning(markerResp) : markerResp,
+        { "x-lore-recall-invoked": "true" },
+      );
     }
 
     let continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
@@ -3367,7 +3376,10 @@ async function handleConversationTurn(
     }
 
     postResponse(req, continuationResp, sessionState, config, requestBody, genAiSpan);
-    return nonStreamHttpResponse(unsustainable ? injectContextWarning(continuationResp) : continuationResp);
+    return nonStreamHttpResponse(
+      unsustainable ? injectContextWarning(continuationResp) : continuationResp,
+      { "x-lore-recall-invoked": "true" },
+    );
   }
 
   postResponse(req, resp, sessionState, config, requestBody, genAiSpan);

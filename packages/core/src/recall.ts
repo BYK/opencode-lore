@@ -966,7 +966,7 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
 
 /** Standard tool description reused verbatim by each host adapter. */
 export const RECALL_TOOL_DESCRIPTION =
-  "Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn't in your current context: file paths, past decisions, user preferences, prior approaches, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don't have the information. Searches long-term knowledge, distilled history, and raw message archives.";
+  'Search your persistent memory for this project. Two cases where you MUST use this tool: (1) Cross-session references — the user mentions past work, "last time", "before", "we discussed", "earlier", or "remember". Prior sessions are never in your context. (2) Missing details — file paths, past decisions, preferences, or approaches you don\'t see in your current window. Always prefer recall over assuming. Searches knowledge, distilled history, and message archives.';
 
 /** Standard parameter descriptions reused by each host adapter. */
 export const RECALL_PARAM_DESCRIPTIONS = {
