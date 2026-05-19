@@ -19,16 +19,25 @@ bun add @loreai/core
 
 You only need to install this directly if you're building a new adapter. End users install one of the host packages above.
 
-### Optional dependency: `fastembed`
+### Vector embeddings
 
-`fastembed` is declared as an `optionalDependencies` because its native `onnxruntime-node` bindings can fail to build on some hosts (e.g. CUDA 13 on Linux/x64 — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)). Install always succeeds, and `embed()` resolves a provider in this order:
+Recall uses [`@huggingface/transformers`](https://www.npmjs.com/package/@huggingface/transformers) with `nomic-embed-text-v1.5` (768-dim INT8 quantized, ~137 MB) for on-device vector search — no API key required.
 
-1. **Vendored** (standalone `lore` binary only) — fastembed and its native bindings are bundled directly into the binary at compile time via `bun build --compile`. The bge-small INT8 model files and the side-load `libonnxruntime` shared library ride along as Bun assets and are materialized to `~/.lore/embeddings-vendored/v{version}-{target}/` on first call. Supported targets: `darwin-arm64`, `linux-arm64`, `linux-x64`, `windows-x64`. (`darwin-x64` is unsupported — Apple Silicon-only.)
-2. **npm-installed** — `import("fastembed")` resolves to the user's `node_modules`, including the optional-dep install.
-3. **Remote auto-fallback** — when the local probe fails AND `VOYAGE_API_KEY` or `OPENAI_API_KEY` is set, `embed()` swaps to that provider for the rest of the process. Voyage wins ties.
-4. **FTS-only** — if none of the above resolve, `recall.runRecall()` and `vectorSearch()` return zero hits and callers continue with full-text search only.
+- **Binary mode** (standalone `lore` binary): Uses WASM backend (`onnxruntime-web`). Works on all platforms without native dependencies.
+- **npm mode** (`npm install @loreai/gateway`): Uses native backend (`onnxruntime-node`). May fail on some configurations (e.g. CUDA 13 on Linux/x64 — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)).
 
-To force the optional install on a CUDA-13 host, run with `ONNXRUNTIME_NODE_INSTALL_CUDA=skip` — the bundled CPU EP is sufficient for `bge-small-en-v1.5`.
+When local embeddings aren't available, recall has graceful fallbacks:
+
+1. **Remote auto-fallback** — set `VOYAGE_API_KEY` or `OPENAI_API_KEY` in your env. The first `embed()` call detects the missing local provider and swaps over for the rest of the process. Voyage wins ties.
+2. **FTS-only** — if no remote keys are set and local embeddings fail, recall uses SQLite FTS5 full-text search. Still functional, just without vector similarity ranking.
+
+To pin a specific provider, set `search.embeddings.provider` in `.lore.json`:
+
+```json
+{ "search": { "embeddings": { "provider": "voyage" } } }
+```
+
+(also supports `"openai"`; reads `VOYAGE_API_KEY` / `OPENAI_API_KEY` from env).
 
 ## Documentation
 

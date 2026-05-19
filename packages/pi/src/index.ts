@@ -49,6 +49,11 @@ type SessionBeforeCompactResult = {
  *
  * Providers using other protocols (Google SDK, AWS Bedrock SDK,
  * Mistral conversations) are not redirected.
+ *
+ * For local/self-hosted providers, set `LORE_UPSTREAM_<PROVIDER>=<url>`
+ * (e.g. `LORE_UPSTREAM_VLLM=http://localhost:8000`) so the gateway knows
+ * where to forward requests. Cloud providers are routed automatically by
+ * model name prefix.
  */
 const GATEWAY_PROVIDERS = [
   // anthropic-messages API
@@ -69,6 +74,16 @@ const GATEWAY_PROVIDERS = [
   "vercel-ai-gateway",
   // openai-responses API
   "openai",
+  // Local / self-hosted (OpenAI-compatible)
+  "vllm",
+  "llamacpp",
+  "ollama",
+  "lmstudio",
+  "jan",
+  "localai",
+  "tgi",
+  "tabbyml",
+  "litellm",
 ];
 
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
@@ -229,15 +244,24 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
    * once the real session ID is known.
    */
   function registerProviders(): void {
-    const headers: Record<string, string> = {
+    const baseHeaders: Record<string, string> = {
       "x-lore-session-id": currentSessionID,
     };
     // Inject git remote so the gateway can group worktrees/clones of the
     // same repo without filesystem access (important for remote gateways).
     const remote = getGitRemote(projectPath);
-    if (remote) headers["x-lore-git-remote"] = remote;
+    if (remote) baseHeaders["x-lore-git-remote"] = remote;
 
     for (const provider of GATEWAY_PROVIDERS) {
+      const headers = { ...baseHeaders };
+      // For local/custom providers, inject the original upstream URL so the
+      // gateway can forward requests to the correct endpoint. The user sets
+      // LORE_UPSTREAM_<PROVIDER>=<url> in their environment.
+      const envKey = `LORE_UPSTREAM_${provider.toUpperCase().replace(/-/g, "_")}`;
+      const upstream = process.env[envKey];
+      if (upstream) {
+        headers["x-lore-upstream-url"] = upstream;
+      }
       pi.registerProvider(provider, { baseUrl: gatewayBase, headers });
     }
   }

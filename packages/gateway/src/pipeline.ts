@@ -65,7 +65,7 @@ import type {
   SessionState,
 } from "./translate/types";
 import type { GatewayConfig } from "./config";
-import { getProjectPath, extractGitRemoteHeader, resolveUpstreamRoute, type ProjectPathResult } from "./config";
+import { getProjectPath, extractGitRemoteHeader, resolveUpstreamRoute, extractUpstreamUrlHeader, type ProjectPathResult } from "./config";
 import {
   generateSessionID,
   fingerprintMessages,
@@ -1044,8 +1044,12 @@ async function forwardToUpstream(
     req.protocol === "openai-responses"
       ? "openai-responses"
       : (route?.protocol ?? req.protocol);
+  // Priority chain: model prefix route (known cloud) > header-provided URL
+  // (local/custom providers like vllm, ollama) > env-var default (fallback).
+  const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
   const effectiveUpstreamBase =
     route?.url ??
+    headerUpstream ??
     (effectiveProtocol === "anthropic"
       ? config.upstreamAnthropic
       : config.upstreamOpenAI);
