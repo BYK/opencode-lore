@@ -41,7 +41,7 @@ export const activeWorkerCalls = new Set<string>();
 const TRANSIENT_CODES = new Set([429, 500, 502, 503, 529]);
 
 /** Max retries by error category for **background** (non-urgent) calls. */
-const MAX_RETRIES_RATE_LIMIT = 5; // 429s: ~2-3 min with server-guided backoff
+const MAX_RETRIES_RATE_LIMIT = 3; // 429s: ~6 min with wider spacing to reduce API pressure
 const MAX_RETRIES_SERVER = 3; // 5xx: fast retries
 
 /**
@@ -84,7 +84,8 @@ export function parseRetryAfter(response: Response): number | null {
  * - Always honor Retry-After when present, capped per-mode (urgent: 8s, bg: 120s)
  * - 429 without Retry-After:
  *    - urgent: 1s, 2s, 4s (capped 4s)
- *    - background: 30s, 45s, 60s, 60s, 60s
+ *    - background: 60s, 120s, 180s (wider spacing to reduce pressure on
+ *      tight-quota environments like Claude Max)
  * - 5xx: aggressive 1s, 2s, 4s (capped 8s) — same for urgent and background
  */
 export function backoffMs(
@@ -102,8 +103,8 @@ export function backoffMs(
   // Urgent path: aggressive exponential regardless of status
   if (urgent) return Math.min(1000 * 2 ** attempt, 4000);
 
-  // 429 without Retry-After: conservative delays
-  if (status === 429) return Math.min(15_000 + (attempt + 1) * 15_000, 60_000);
+  // 429 without Retry-After: wide spacing to give rate limits time to recover
+  if (status === 429) return Math.min(60_000 + attempt * 60_000, 180_000);
 
   // 5xx: aggressive exponential backoff
   return Math.min(1000 * 2 ** attempt, 8000);

@@ -543,6 +543,79 @@ describe("BatchLLMClient", () => {
     await client.shutdown();
   });
 
+  // -------------------------------------------------------------------------
+  // Rate-limit resilience (Claude Max / batch-disabled sessions)
+  // -------------------------------------------------------------------------
+
+  test("fallbackAll does not mark calls as urgent (enables circuit breaker)", async () => {
+    const inner = createMockLLMClient();
+
+    // Set up batch create to fail — triggers fallbackAll
+    pushFetchResponse(false, 500, { error: "internal server error" });
+
+    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
+      flushIntervalMs: 60_000,
+      maxQueueSize: 2,
+    });
+
+    const p1 = client.prompt("sys", "msg1", { workerID: "lore-distill" });
+    const p2 = client.prompt("sys", "msg2", { workerID: "lore-curator" });
+
+    // Wait for auto-flush + fallback
+    await new Promise((r) => setTimeout(r, 100));
+
+    await Promise.all([p1, p2]);
+
+    // Verify inner.prompt was called WITHOUT urgent: true
+    // (urgent bypasses the circuit breaker, which is the whole bug)
+    for (const call of inner.calls) {
+      const opts = call.opts as Record<string, unknown> | undefined;
+      expect(opts?.urgent).toBeUndefined();
+    }
+
+    await client.shutdown();
+  });
+
+  test("disabled sessions skip the queue and process immediately", async () => {
+    const inner = createMockLLMClient();
+
+    // First: submit a batch that returns 403 (auth error) to disable the session
+    pushFetchResponse(false, 403, { error: "OAuth token does not meet scope requirement" });
+
+    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
+      flushIntervalMs: 60_000,
+      maxQueueSize: 1,
+    });
+
+    // Queue one item with a session ID — triggers auto-flush → 403 → session disabled
+    const p1 = client.prompt("sys", "first-msg", {
+      workerID: "lore-distill",
+      sessionID: "session-no-batch",
+    });
+
+    // Wait for flush + fallback
+    await new Promise((r) => setTimeout(r, 100));
+    await p1;
+
+    // Now the session is disabled. The next call should skip the queue entirely.
+    const beforeCalls = inner.calls.length;
+    const p2 = client.prompt("sys", "fast-msg", {
+      workerID: "lore-distill",
+      sessionID: "session-no-batch",
+    });
+
+    // The promise should resolve very quickly (no 30s queue wait)
+    const result = await p2;
+    expect(result).toBe("sync-response-for: fast-msg");
+    expect(inner.calls.length).toBe(beforeCalls + 1);
+
+    // Should be counted as fallback, not queued
+    const s = client.stats();
+    expect(s.totalFallback).toBeGreaterThanOrEqual(2); // first (from 403 fallback) + second (fast-path)
+
+    await client.shutdown();
+  });
+
   test("OpenAI items use system as message role, not block array", async () => {
     const inner = createMockLLMClient();
 

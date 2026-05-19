@@ -841,8 +841,13 @@ export function createBatchLLMClient(
     totalFallback += items.length;
     log.info(`batch fallback: processing ${items.length} items synchronously`);
 
-    // Process in parallel with concurrency limit of 5
-    const CONCURRENCY = 5;
+    // Process in parallel with concurrency limit matching BACKGROUND_CONCURRENCY.
+    // IMPORTANT: Do NOT pass `urgent: true` — these are background calls that
+    // happen to be processed synchronously (because batch API is unavailable).
+    // Marking them urgent bypasses the circuit breaker (which only trips on
+    // non-urgent 429s), disabling the entire rate-limit safety net for
+    // environments without batch access (e.g. Claude Max OAuth tokens).
+    const CONCURRENCY = 2;
     for (let i = 0; i < items.length; i += CONCURRENCY) {
       const chunk = items.slice(i, i + CONCURRENCY);
       await Promise.all(
@@ -862,7 +867,6 @@ export function createBatchLLMClient(
             // return null for bearer tokens — causing Anthropic to reject
             // the request with 429.
             const result = await inner.prompt(system, user, {
-              urgent: true,
               sessionID: item.sessionID,
               workerID: item.workerID,
               maxTokens: item.params.max_tokens,
@@ -895,6 +899,15 @@ export function createBatchLLMClient(
       // Urgent calls bypass the queue entirely
       if (opts?.urgent || shuttingDown) {
         totalUrgent++;
+        return inner.prompt(system, user, opts);
+      }
+
+      // Fast-path: if this session's batch access is already disabled (e.g.
+      // Claude Max OAuth tokens that lack batch scope), skip the queue and
+      // process synchronously. Without this, calls wait up to 30s in the
+      // queue only to be routed through fallbackAll() at flush time.
+      if (opts?.sessionID && disabledBatchSessions.has(opts.sessionID)) {
+        totalFallback++;
         return inner.prompt(system, user, opts);
       }
 

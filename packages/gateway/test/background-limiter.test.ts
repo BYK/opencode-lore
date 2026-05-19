@@ -5,6 +5,9 @@ import {
   tripCircuitBreaker,
   resetBackgroundLimiter,
   backgroundLimiterStats,
+  getConsecutiveTrips,
+  BACKOFF_SCHEDULE,
+  _tripRaw,
 } from "../src/background-limiter";
 
 describe("background-limiter", () => {
@@ -48,7 +51,7 @@ describe("background-limiter", () => {
   });
 
   test("circuit breaker auto-resets after duration", async () => {
-    tripCircuitBreaker(0.1); // 100ms
+    _tripRaw(0.1); // 100ms — bypasses escalation schedule for test speed
     expect(isBackgroundPaused()).toBe(true);
 
     await new Promise((r) => setTimeout(r, 150));
@@ -56,13 +59,15 @@ describe("background-limiter", () => {
   });
 
   test("circuit breaker only extends, never shortens", () => {
-    tripCircuitBreaker(10); // 10 seconds
+    // First trip: max(600, schedule[0]=60) = 600s
+    tripCircuitBreaker(600);
     const stats1 = backgroundLimiterStats();
 
-    tripCircuitBreaker(2); // 2 seconds — shorter, should be ignored
+    // Second trip: max(2, schedule[1]=120) = 120s — shorter than 600s, should be ignored
+    tripCircuitBreaker(2);
     const stats2 = backgroundLimiterStats();
 
-    // Pause should still be ~10s, not shortened to ~2s
+    // Pause should still be ~600s, not shortened
     expect(stats2.pauseRemainingSeconds).toBeGreaterThanOrEqual(
       stats1.pauseRemainingSeconds - 1,
     );
@@ -131,5 +136,65 @@ describe("background-limiter", () => {
 
     expect(thirdCalled).toBe(false);
     expect(results[2]).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Escalating backoff
+  // ---------------------------------------------------------------------------
+
+  test("consecutive trips produce escalating durations", () => {
+    // Each trip should use the next entry in BACKOFF_SCHEDULE
+    for (let i = 0; i < BACKOFF_SCHEDULE.length; i++) {
+      tripCircuitBreaker();
+      expect(getConsecutiveTrips()).toBe(i + 1);
+      // The pause should be at least the scheduled duration
+      const remaining = backgroundLimiterStats().pauseRemainingSeconds;
+      expect(remaining).toBeGreaterThanOrEqual(BACKOFF_SCHEDULE[i] - 1);
+    }
+
+    // Beyond the schedule, stays at the last (max) value
+    tripCircuitBreaker();
+    expect(getConsecutiveTrips()).toBe(BACKOFF_SCHEDULE.length + 1);
+    const remaining = backgroundLimiterStats().pauseRemainingSeconds;
+    expect(remaining).toBeGreaterThanOrEqual(
+      BACKOFF_SCHEDULE[BACKOFF_SCHEDULE.length - 1] - 1,
+    );
+  });
+
+  test("consecutiveTrips resets after breaker naturally expires", async () => {
+    // Use tripCircuitBreaker to increment consecutiveTrips, then override
+    // the actual pause duration with _tripRaw for test speed.
+    tripCircuitBreaker(); // sets consecutiveTrips = 1
+    expect(getConsecutiveTrips()).toBe(1);
+    _tripRaw(0.1); // override to 100ms pause
+
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Checking isBackgroundPaused triggers the reset
+    expect(isBackgroundPaused()).toBe(false);
+    expect(getConsecutiveTrips()).toBe(0);
+  });
+
+  test("retryAfterSeconds respects escalation via max()", () => {
+    // First trip: schedule says 60s, but server says 10s → use 60s
+    tripCircuitBreaker(10);
+    const remaining1 = backgroundLimiterStats().pauseRemainingSeconds;
+    expect(remaining1).toBeGreaterThanOrEqual(59);
+
+    // Reset and trip again with server saying 300s (higher than schedule)
+    resetBackgroundLimiter();
+    tripCircuitBreaker(300);
+    const remaining2 = backgroundLimiterStats().pauseRemainingSeconds;
+    expect(remaining2).toBeGreaterThanOrEqual(299);
+  });
+
+  test("resetBackgroundLimiter clears consecutiveTrips", () => {
+    tripCircuitBreaker();
+    tripCircuitBreaker();
+    expect(getConsecutiveTrips()).toBe(2);
+
+    resetBackgroundLimiter();
+    expect(getConsecutiveTrips()).toBe(0);
+    expect(isBackgroundPaused()).toBe(false);
   });
 });

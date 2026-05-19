@@ -113,7 +113,7 @@ import {
 } from "./temporal-adapter";
 import { createGatewayLLMClient } from "./llm-adapter";
 import { createBatchLLMClient } from "./batch-queue";
-import { runBackground, resetBackgroundLimiter } from "./background-limiter";
+import { runBackground, resetBackgroundLimiter, isBackgroundPaused } from "./background-limiter";
 import {
   extractAuth,
   authFingerprint,
@@ -2192,6 +2192,11 @@ function scheduleBackgroundWork(
   // Under bust pressure (3+ consecutive busts), lower the meta-distillation
   // threshold to consolidate gen-0 segments earlier — shrinks the distilled
   // prefix before the session becomes unsustainable.
+  //
+  // Note: urgent distillation is NOT gated by isBackgroundPaused() — a
+  // degraded/overflowing context window for up to 10 minutes (max breaker
+  // duration) is worse than one API call with its own tight retry budget
+  // (MAX_RETRIES_URGENT = 2, 1-4s backoff).
   if (needsUrgentDistillation(sessionState.sessionID)) {
     const busts = getConsecutiveBusts(sessionState.sessionID);
     const lowered = computeMetaThreshold(busts, cfg.distillation.metaThreshold);
@@ -2208,11 +2213,13 @@ function scheduleBackgroundWork(
         metaThresholdOverride,
       })
       .catch((e) => log.error("background distillation failed:", e));
-  } else {
-    // Incremental distillation: only when urgent didn't fire (urgent with
-    // force:true already processes everything, making incremental redundant).
-    // With the core p-limit(1) guard they'd serialize anyway, but this avoids
-    // a wasted run() call.
+  } else if (!isBackgroundPaused()) {
+    // Incremental distillation and curation are non-urgent — skip when the
+    // circuit breaker is active to reduce API pressure. These are also gated
+    // by runBackground() which checks isBackgroundPaused(), but the early
+    // check here avoids unnecessary token counting and model lookups.
+    // Idle-time work in idle.ts also uses runBackground(), so under sustained
+    // rate pressure everything defers until the breaker naturally expires.
     const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
     if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
       log.info(
@@ -2229,6 +2236,9 @@ function scheduleBackgroundWork(
   // Cost-aware frequency: on expensive models, curate less often to reduce
   // the probability of LTM changes that bust the cache. Each LTM change
   // that exceeds the diff pinning threshold invalidates tools + messages.
+  // Also gated by circuit breaker — curation is never urgent.
+  if (isBackgroundPaused()) return;
+
   const modelInputCost = getModelEntrySync(
     getWorkerModel()?.modelID ?? "unknown",
   ).cost?.input ?? 3;
