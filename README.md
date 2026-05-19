@@ -324,21 +324,40 @@ lat.md sections also participate in LTM injection — the most relevant sections
 
 Lore re-scans the `lat.md/` directory periodically (on session idle), so changes made by the agent or by hand are picked up automatically.
 
+## Eval results
+
+At 400K tokens (realistic coding session length), Lore significantly outperforms the standard tail-window approach on preference recall:
+
+| What's tested | Lore | Tail-window | Delta |
+|---|---|---|---|
+| Explicit preferences ("always use const") | **4.96**/5 | 3.40/5 | +46% |
+| Implicit behavioral patterns | **4.83**/5 | 2.97/5 | +63% |
+| Preference evolution (user switches tools) | **5.00**/5 | 3.67/5 | +36% |
+| **Average across preferences** | **4.92**/5 | 3.34/5 | **+47%** |
+
+*Scored by LLM-as-judge on a 1–5 scale. Tail-window baseline: last 80K tokens of raw conversation (the default behavior without Lore). Evaluated at 400K tokens — the point where context management actually matters.*
+
+**What this means:** after 400K tokens of conversation, the standard approach loses a third of your stated preferences. The agent starts using `let` when you said `const`, reaches for an ORM when you mandated raw SQL, or skips tests you always require. Lore's distillation + knowledge curation preserves these preferences across sessions at near-perfect accuracy.
+
+The eval suite (8 scenarios, 130+ questions, 3 dimensions) is open source in `packages/core/eval/`. Run it yourself:
+
+```bash
+bun packages/core/eval/run.ts --mode live --dimensions preferences --inflate 400000
+```
+
+**Cost:** Lore's memory layer runs at minimal additional cost — background distillation and curation use batch APIs (50% off on supported providers) and cheaper models. Local on-device embeddings (Nomic Embed v1.5) mean zero API cost for vector search. Predictive cache warming reduces expensive cache rebuilds.
+
 ## How we got here
 
-This project was built in a few intense sessions. Some highlights:
+**v1 — structured distillation.** The initial version used Nuum's `{ narrative, facts }` JSON format. It worked well for single-session preference recall but *regressed* on multi-session and temporal reasoning — the structured format was too rigid and lost temporal context.
 
-**v1 — structured distillation.** The initial version used Nuum's `{ narrative, facts }` JSON format. It worked well for single-session preference recall (+40pp over baseline) but *regressed* on multi-session and temporal reasoning — the structured format was too rigid and lost temporal context.
+**v2 — observation logs.** Switching to Mastra's observer/reflector architecture with plain-text timestamped observation logs was the breakthrough. Dated event logs preserve temporal relationships that structured JSON destroys.
 
-**Markdown injection.** Property-based testing with fast-check revealed that user-generated content in facts (code fences, heading markers, thematic breaks) could break the markdown structure of the injected context, confusing the model.
+**v3 — gradient context + proper eval.** Per-session gradient state, current-turn protection, cache calibration, prefix caching, LTM relevance scoring, and a self-contained eval harness. The eval extracts full session transcripts into portable JSON, distills on the fly, and compares against tail-window and compaction baselines.
 
-**v2 — observation logs.** Switching to Mastra's observer/reflector architecture with plain-text timestamped observation logs was the breakthrough. The key insight: dated event logs preserve temporal relationships that structured JSON destroys.
+**v4 — research-informed compression.** Three changes from the KV cache compression literature ([Zweiger et al. 2025](https://arxiv.org/abs/2602.16284), [Eyuboglu et al. 2025](https://arxiv.org/abs/2501.17390)): (1) *Loss-annotated tool stripping* with metadata instead of static placeholders. (2) *Context-distillation meta-distillation* producing working context documents instead of flat event logs. (3) *Multi-resolution composable distillations* — archived gen-0 observations for recall alongside compressed gen-1 for in-context summary.
 
-**Prompt refinements.** The push from 80% to 93.3% on the initial coding recall eval came from two observer prompt additions: "EXACT NUMBERS — NEVER APPROXIMATE" (the observer was rounding counts) and "BUG FIXES — ALWAYS RECORD" (early-session fixes were being compressed away during reflection).
-
-**v3 — gradient fixes, caching, and proper eval.** A month of fixes (per-session gradient state, current-turn protection, cache.write calibration, prefix caching, LTM relevance scoring) shipped alongside a new self-contained eval harness. The old coding eval used DB-resident sessions that degraded over time as temporal pruning deleted messages. The new eval extracts full session transcripts into portable JSON files, distills on the fly with the current production prompt, seeds the DB for recall tool access, and compares against OpenCode's actual compaction behavior. This moved the coding eval from 15 questions on degraded data to 20 questions on clean 113K-353K token sessions — and confirmed the +35pp accuracy gap and 7x cost efficiency advantage.
-
-**v4 — research-informed compaction improvements.** Three changes informed by the KV cache compression literature ([Zweiger et al. 2025](https://arxiv.org/abs/2602.16284), [Eyuboglu et al. 2025](https://arxiv.org/abs/2501.17390)): (1) *Loss-annotated tool stripping* — when tool outputs are compressed away at higher gradient layers, the replacement now includes metadata (tool name, line count, error presence, file paths) instead of a static placeholder, helping the model decide whether to recall the full content. (2) *Context-distillation meta-distillation* — the reflector prompt was restructured to produce a working context document with sections for current state, key decisions, technical changes, and timeline, rather than a flat re-organized event log — an objective that generalizes better to diverse downstream queries. (3) *Multi-resolution composable distillations* — gen-0 observations are now archived instead of deleted during meta-distillation, preserving a searchable detail layer for the recall tool while the compressed gen-1 serves as the in-context summary.
+**v5 — behavioral pattern detection + 400K eval.** Vector similarity-based pattern echo detection, action tagging in distillation, cross-session pattern clustering, assertion pinning for long sessions, and a scenario inflator for realistic 400K-token evaluation. This is what closed the preference gap from +15% to +47% over tail-window.
 
 ## Development setup
 
