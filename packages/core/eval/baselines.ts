@@ -242,5 +242,10 @@ export function buildQAPrompt(
 }
 
 export const QA_SYSTEM =
-  "You are answering questions about a past coding session based on the provided context. " +
-  "Be specific and factual. If you don't have enough information, say so rather than guessing.";
+  "You are answering questions about past coding sessions. " +
+  "You have a recall tool available — USE IT to search your memory for specific details " +
+  "(file paths, branch names, error messages, version numbers, test counts, etc.). " +
+  "Always invoke recall before answering unless the answer is already in your system context. " +
+  "When recall returns results with source IDs (t:xxx), you can recall those IDs to get " +
+  "the full original message with exact details. " +
+  "Be specific and factual. If you don't have enough information even after recall, say so.";
