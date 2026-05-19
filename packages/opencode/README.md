@@ -33,6 +33,29 @@ When installed via npm, local embeddings use the native `onnxruntime-node` backe
 
 If none of the above are set and local embeddings aren't available, recall falls back to FTS-only search.
 
+## Local / self-hosted LLM providers
+
+If you use a local LLM server (vllm, llama.cpp, ollama, etc.), set an environment variable so Lore's gateway knows where to forward requests:
+
+```bash
+export LORE_UPSTREAM_VLLM=http://localhost:8000
+# or
+export LORE_UPSTREAM_OLLAMA=http://localhost:11434
+```
+
+The URL should be the **server root** — do not include `/v1` (the gateway appends API paths automatically). The naming convention is `LORE_UPSTREAM_<PROVIDER>` where `<PROVIDER>` is the uppercased provider name with hyphens replaced by underscores:
+
+| Provider | Env var |
+|----------|---------|
+| `vllm` | `LORE_UPSTREAM_VLLM` |
+| `llamacpp` | `LORE_UPSTREAM_LLAMACPP` |
+| `ollama` | `LORE_UPSTREAM_OLLAMA` |
+| `lmstudio` | `LORE_UPSTREAM_LMSTUDIO` |
+| `tgi` | `LORE_UPSTREAM_TGI` |
+| `litellm` | `LORE_UPSTREAM_LITELLM` |
+
+Cloud providers (Anthropic, OpenAI, etc.) are routed automatically by model name and don't need this.
+
 ## Companion packages
 
 Lore ships as three packages sharing the same SQLite database at `~/.local/share/lore/lore.db`:

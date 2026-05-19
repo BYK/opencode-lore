@@ -45,7 +45,18 @@ export LORE_UPSTREAM_VLLM=http://localhost:8000
 export LORE_UPSTREAM_OLLAMA=http://localhost:11434
 ```
 
-The naming convention is `LORE_UPSTREAM_<PROVIDER>` where `<PROVIDER>` is the uppercased Pi provider name with hyphens replaced by underscores. Cloud providers (Anthropic, OpenAI, etc.) are routed automatically by model name and don't need this.
+The URL should be the **server root** — do not include `/v1` (the gateway appends API paths automatically). The naming convention is `LORE_UPSTREAM_<PROVIDER>` where `<PROVIDER>` is the uppercased Pi provider name with hyphens replaced by underscores:
+
+| Provider | Env var |
+|----------|---------|
+| `vllm` | `LORE_UPSTREAM_VLLM` |
+| `llamacpp` | `LORE_UPSTREAM_LLAMACPP` |
+| `ollama` | `LORE_UPSTREAM_OLLAMA` |
+| `lmstudio` | `LORE_UPSTREAM_LMSTUDIO` |
+| `tgi` | `LORE_UPSTREAM_TGI` |
+| `litellm` | `LORE_UPSTREAM_LITELLM` |
+
+Cloud providers (Anthropic, OpenAI, etc.) are routed automatically by model name and don't need this.
 
 ## Companion packages
 

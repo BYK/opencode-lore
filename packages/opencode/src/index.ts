@@ -258,8 +258,8 @@ export const LorePlugin: Plugin = async (ctx) => {
         output.headers["x-lore-git-remote"] = cachedGitRemote;
       }
       // Inject upstream URL for local/custom providers (LORE_UPSTREAM_<PROVIDER>).
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const providerID = (input as any).provider as string | undefined;
+      // input.provider is a ProviderContext { source, info: Provider, options }.
+      const providerID = input.provider?.info?.id;
       if (providerID) {
         const envKey = `LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}`;
         const upstream = process.env[envKey];

@@ -162,11 +162,16 @@ export function extractUpstreamUrlHeader(
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!sanitized || sanitized.length > MAX_UPSTREAM_URL_LENGTH) return undefined;
 
-  // Must be a valid URL (http or https only).
+  // Must be a valid URL (http or https only, no embedded credentials).
   try {
     const url = new URL(sanitized);
     if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-    return url.origin + url.pathname.replace(/\/+$/, "");
+    if (url.username || url.password) return undefined;
+    // Strip trailing /v1 — users often copy the full endpoint URL from
+    // local LLM docs (e.g. http://localhost:8000/v1) but the gateway
+    // appends /v1/... itself when building the upstream request.
+    const pathname = url.pathname.replace(/\/+$/, "").replace(/\/v1$/, "");
+    return url.origin + pathname;
   } catch {
     return undefined;
   }

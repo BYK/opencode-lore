@@ -31,16 +31,31 @@ describe("extractUpstreamUrlHeader", () => {
     ).toBe("https://my-server.example.com:4000");
   });
 
-  test("preserves path component", () => {
+  test("preserves non-/v1 path component", () => {
+    expect(
+      extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://localhost:8000/api" }),
+    ).toBe("http://localhost:8000/api");
+  });
+
+  test("strips trailing /v1 (common user mistake from local LLM docs)", () => {
     expect(
       extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://localhost:8000/v1" }),
-    ).toBe("http://localhost:8000/v1");
+    ).toBe("http://localhost:8000");
+    expect(
+      extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://localhost:8000/v1/" }),
+    ).toBe("http://localhost:8000");
+  });
+
+  test("does not strip /v1 when it is part of a longer path", () => {
+    expect(
+      extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://localhost:8000/api/v1" }),
+    ).toBe("http://localhost:8000/api");
+    expect(
+      extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://localhost:8000/v1beta" }),
+    ).toBe("http://localhost:8000/v1beta");
   });
 
   test("strips trailing slashes from path", () => {
-    expect(
-      extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://localhost:8000/v1/" }),
-    ).toBe("http://localhost:8000/v1");
     expect(
       extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://localhost:8000/" }),
     ).toBe("http://localhost:8000");
@@ -92,14 +107,41 @@ describe("extractUpstreamUrlHeader", () => {
     const path = "a".repeat(2048 - "http://localhost:8000/".length);
     const url = `http://localhost:8000/${path}`;
     expect(url.length).toBe(2048);
-    expect(extractUpstreamUrlHeader({ "x-lore-upstream-url": url })).toBeDefined();
+    const result = extractUpstreamUrlHeader({ "x-lore-upstream-url": url });
+    expect(result).toBe(url);
   });
 
-  test("does not strip query parameters (origin + pathname only)", () => {
-    // URL constructor includes query/fragment in href but origin+pathname excludes them
+  test("strips query parameters (origin + pathname only)", () => {
     const result = extractUpstreamUrlHeader({
-      "x-lore-upstream-url": "http://localhost:8000/v1?key=val",
+      "x-lore-upstream-url": "http://localhost:8000/api?key=val",
     });
-    expect(result).toBe("http://localhost:8000/v1");
+    expect(result).toBe("http://localhost:8000/api");
+  });
+
+  test("strips fragment from URL", () => {
+    expect(
+      extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://localhost:8000/api#section" }),
+    ).toBe("http://localhost:8000/api");
+  });
+
+  test("rejects URL with embedded credentials", () => {
+    expect(
+      extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://user:pass@localhost:8000" }),
+    ).toBeUndefined();
+    expect(
+      extractUpstreamUrlHeader({ "x-lore-upstream-url": "http://user@localhost:8000" }),
+    ).toBeUndefined();
+  });
+
+  test("rejects javascript: protocol", () => {
+    expect(
+      extractUpstreamUrlHeader({ "x-lore-upstream-url": "javascript:alert(1)" }),
+    ).toBeUndefined();
+  });
+
+  test("rejects data: protocol", () => {
+    expect(
+      extractUpstreamUrlHeader({ "x-lore-upstream-url": "data:text/html,<h1>hi</h1>" }),
+    ).toBeUndefined();
   });
 });
