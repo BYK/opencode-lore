@@ -1,6 +1,7 @@
 import { config } from "./config";
 import { db, saveSessionTracking, loadSessionTracking, ensureProject } from "./db";
 import * as temporal from "./temporal";
+import * as distillation from "./distillation";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
@@ -184,13 +185,26 @@ async function runInner(input: {
 }): Promise<{ created: number; updated: number; deleted: number }> {
   const cfg = config();
 
-  // Get recent messages since last curation
-  const all = temporal.bySession(input.projectPath, input.sessionID);
+  // Get recent undistilled messages since last curation.
+  // After /lore:curate runs distillation, most messages are marked distilled=1.
+  // Using undistilled() avoids sending 100K+ tokens of already-processed
+  // messages to the curator. If all messages are distilled, fall back to
+  // distilled observations for the session instead.
   const sessionCuratedAt = getLastCuratedAt(input.sessionID);
-  const recent = all.filter((m) => m.created_at > sessionCuratedAt);
-  if (recent.length < 3) return { created: 0, updated: 0, deleted: 0 };
+  const undistilledAll = temporal.undistilled(input.projectPath, input.sessionID);
+  const recentUndistilled = undistilledAll.filter((m) => m.created_at > sessionCuratedAt);
 
-  const text = recent.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
+  let text: string;
+  if (recentUndistilled.length >= 3) {
+    text = recentUndistilled.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
+  } else {
+    // All messages distilled — use distillation observations as input.
+    // This is the common case after /lore:curate runs distillation first.
+    const distillations = distillation.loadForSession(input.projectPath, input.sessionID, true);
+    const recentDistillations = distillations.filter((d) => d.created_at > sessionCuratedAt);
+    if (recentDistillations.length === 0) return { created: 0, updated: 0, deleted: 0 };
+    text = recentDistillations.map((d) => d.observations).join("\n\n");
+  }
   // Include cross-project entries so the curator can see and update
   // preferences created in earlier sessions (preferences default to
   // crossProject: true, so excluding them makes them invisible).
