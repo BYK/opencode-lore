@@ -482,7 +482,7 @@ async function askQuestionViaGateway(
   question: string,
   gateway: GatewayHandle,
   model: string,
-): Promise<{ hypothesis: string; tokens: TokenUsage }> {
+): Promise<{ hypothesis: string; tokens: TokenUsage; recallInvoked: boolean }> {
   const requestBody = {
     model,
     system: QA_SYSTEM,
@@ -509,6 +509,8 @@ async function askQuestionViaGateway(
     }
 
     const resp = await gateway.chat(requestBody);
+    const recallInvoked =
+      resp.headers.get("x-lore-recall-invoked") === "true";
     const data = (await resp.json()) as {
       content?: Array<{ type: string; text?: string }>;
       usage?: {
@@ -538,6 +540,7 @@ async function askQuestionViaGateway(
 
     return {
       hypothesis: text || data.error?.message || "[No response from gateway]",
+      recallInvoked,
       tokens: {
         input: data.usage?.input_tokens ?? 0,
         output: data.usage?.output_tokens ?? 0,
@@ -550,6 +553,7 @@ async function askQuestionViaGateway(
 
   return {
     hypothesis: "[Gateway rate limit exceeded after retries]",
+    recallInvoked: false,
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalCost: 0 },
   };
 }
@@ -763,6 +767,7 @@ export async function runScenario(
       for (const q of scenario.questions) {
         let hypothesis: string;
         let tokens: TokenUsage;
+        let recallInvoked = false;
 
         if (config.mode === "fixture" || !llm) {
           // Fixture mode: produce a placeholder hypothesis
@@ -789,6 +794,7 @@ export async function runScenario(
           );
           hypothesis = answer.hypothesis;
           tokens = answer.tokens;
+          recallInvoked = answer.recallInvoked;
         } else {
           // Non-gateway baselines: ask via direct LLM with rendered context
           const answer = await askQuestion(q.question, context, mode, llm);
@@ -797,7 +803,7 @@ export async function runScenario(
         }
 
         // Score with the judge
-        const judgeResult = await judge(q, hypothesis, llm);
+        const judgeResult = await judge(q, hypothesis, llm, { recallInvoked });
 
         const result: EvalResult = {
           timestamp: new Date().toISOString(),
@@ -817,6 +823,7 @@ export async function runScenario(
             tags: q.metadata.tags,
             turnIndex: q.metadata.turnIndex,
             cumulativeTokens: q.metadata.cumulativeTokens,
+            recallInvoked,
           },
         };
 
