@@ -166,7 +166,7 @@ export function markDistilled(ids: string[]) {
   const placeholders = ids.map(() => "?").join(",");
   db()
     .query(
-      `UPDATE temporal_messages SET distilled = 1, embedding = NULL WHERE id IN (${placeholders})`,
+      `UPDATE temporal_messages SET distilled = 1 WHERE id IN (${placeholders})`,
     )
     .run(...ids);
 }

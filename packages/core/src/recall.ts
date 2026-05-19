@@ -385,6 +385,23 @@ function getFullContentLength(tagged: TaggedResult): number {
 }
 
 /** Render a single result as a markdown list item line. */
+/**
+ * Fetch source message IDs for a distillation segment.
+ * Returns a compact list of IDs that can be used with the recall tool
+ * to fetch full message details on demand.
+ */
+function getDistillationSourceIds(distillId: string): string[] {
+  try {
+    const row = db()
+      .query("SELECT source_ids FROM distillations WHERE id = ?")
+      .get(distillId) as { source_ids: string } | null;
+    if (!row?.source_ids) return [];
+    return JSON.parse(row.source_ids);
+  } catch {
+    return [];
+  }
+}
+
 function renderResultLine(tagged: TaggedResult, charBudget: number): string {
   const id = taggedResultKey(tagged);
 
@@ -412,7 +429,14 @@ function renderResultLine(tagged: TaggedResult, charBudget: number): string {
       const fullText = inline(d.observations);
       const content = truncateAtSentence(fullText, charBudget);
       const wasTruncated = fullText.length > charBudget;
-      return `- ${content}${wasTruncated ? ` (${id})` : ""}`;
+      // Include source message IDs so the LLM can fetch full details
+      // via the recall tool when the summary lacks specifics.
+      const sourceIds = getDistillationSourceIds(d.id);
+      const sourceRef =
+        sourceIds.length > 0
+          ? ` (sources: ${sourceIds.map((s) => `t:${s}`).join(", ")})`
+          : "";
+      return `- ${content}${wasTruncated ? ` (${id})` : ""}${sourceRef}`;
     }
     case "temporal": {
       const m = tagged.item;
