@@ -2345,6 +2345,7 @@ export async function generateCompactionSummary(opts: {
     workerID: "lore-compact",
     urgent: true,
     maxTokens: compactMaxTokens,
+    temperature: 0,
   });
 
   return summaryText ?? "(Compaction failed — no summary generated.)";

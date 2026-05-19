@@ -226,7 +226,7 @@ async function runInner(input: {
   const responseText = await input.llm.prompt(
     CURATOR_SYSTEM,
     userContent,
-    { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 2048 },
+    { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 2048, temperature: 0 },
   );
   if (!responseText) return { created: 0, updated: 0, deleted: 0 };
 
@@ -314,7 +314,7 @@ export async function consolidate(input: {
   const responseText = await input.llm.prompt(
     CONSOLIDATION_SYSTEM,
     userContent,
-    { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 4096 },
+    { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 4096, temperature: 0 },
   );
   if (!responseText) return { updated: 0, deleted: 0 };
 

@@ -106,6 +106,7 @@ export async function extractKnowledge(input: {
           thinking: false,
           maxTokens: 4096,
           sessionID: input.sessionID,
+          temperature: 0,
         },
       );
 

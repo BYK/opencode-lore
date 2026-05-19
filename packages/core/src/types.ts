@@ -260,6 +260,21 @@ export interface LLMClient {
        *   the field is silently ignored
        */
       maxTokens?: number;
+      /**
+       * Sampling temperature for this call. Lower values produce more
+       * deterministic output. When absent, the provider default is used
+       * (typically 1.0).
+       *
+       * Worker call sites should set `temperature: 0` for reproducible
+       * output — this eliminates eval variance across runs.
+       *
+       * Adapter behavior:
+       * - Gateway: uses as `temperature` in the API request body
+       * - Pi: delegates to gateway — temperature is honored by the gateway adapter
+       * - OpenCode: cannot honor — SDK has no temperature on session.prompt();
+       *   the field is silently ignored
+       */
+      temperature?: number;
     },
   ): Promise<string | null>;
 }

@@ -187,6 +187,7 @@ function buildAnthropicWorkerRequest(
   user: string,
   maxTokens: number,
   sessionID?: string,
+  temperature?: number,
 ): { url: string; headers: Record<string, string>; body: string } {
   // For bearer tokens (Claude Code OAuth), inject the billing header
   // as the first system block with a cch=00000 placeholder that gets
@@ -222,6 +223,7 @@ function buildAnthropicWorkerRequest(
   let body = JSON.stringify({
     model: model.modelID,
     max_tokens: maxTokens,
+    ...(temperature != null && { temperature }),
     system: systemPayload,
     messages: [{ role: "user", content: user }],
   });
@@ -253,6 +255,7 @@ function buildOpenAIWorkerRequest(
   system: string,
   user: string,
   maxTokens: number,
+  temperature?: number,
 ): { url: string; headers: Record<string, string>; body: string } {
   const messages: Array<{ role: string; content: string }> = [];
   if (system) messages.push({ role: "system", content: system });
@@ -267,6 +270,7 @@ function buildOpenAIWorkerRequest(
     body: JSON.stringify({
       model: model.modelID,
       max_completion_tokens: maxTokens,
+      ...(temperature != null && { temperature }),
       messages,
     }),
   };
@@ -336,9 +340,9 @@ export function createGatewayLLMClient(
 
       // Build provider-specific request
       const req = isOpenAI
-        ? buildOpenAIWorkerRequest(target, cred, model, system, user, maxTokens)
+        ? buildOpenAIWorkerRequest(target, cred, model, system, user, maxTokens, opts?.temperature)
         : buildAnthropicWorkerRequest(
-            target, cred, model, system, user, maxTokens, opts?.sessionID,
+            target, cred, model, system, user, maxTokens, opts?.sessionID, opts?.temperature,
           );
 
       // Track this call so temporal capture can skip it

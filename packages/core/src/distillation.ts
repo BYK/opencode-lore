@@ -783,7 +783,7 @@ async function distillSegment(input: {
   const responseText = await input.llm.prompt(
     DISTILLATION_SYSTEM,
     userContent,
-    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID, maxTokens },
+    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID, maxTokens, temperature: 0 },
   );
   if (!responseText) return null;
 
@@ -984,7 +984,7 @@ async function metaDistillInner(input: {
   const responseText = await input.llm.prompt(
     RECURSIVE_SYSTEM,
     userContent,
-    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID, maxTokens },
+    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID, maxTokens, temperature: 0 },
   );
   if (!responseText) return null;
 

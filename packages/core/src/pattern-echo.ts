@@ -171,6 +171,7 @@ async function _detect(input: {
       thinking: false,
       sessionID: input.sessionID,
       maxTokens: 512,
+      temperature: 0,
     },
   );
 

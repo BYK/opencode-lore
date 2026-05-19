@@ -94,6 +94,7 @@ interface PendingRequest {
   params: {
     model: string;
     max_tokens: number;
+    temperature?: number;
     system:
       | string
       | Array<{ type: string; text: string; cache_control?: { type: string; ttl?: string } }>;
@@ -466,6 +467,7 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
           body: {
             model: item.params.model,
             max_completion_tokens: item.params.max_tokens,
+            ...(item.params.temperature != null && { temperature: item.params.temperature }),
             messages,
           },
         });
@@ -862,6 +864,9 @@ export function createBatchLLMClient(
             const result = await inner.prompt(system, user, {
               urgent: true,
               sessionID: item.sessionID,
+              workerID: item.workerID,
+              maxTokens: item.params.max_tokens,
+              ...(item.params.temperature != null && { temperature: item.params.temperature }),
             });
             item.resolve(result);
           } catch (e) {
@@ -925,6 +930,7 @@ export function createBatchLLMClient(
           params: {
             model: model.modelID,
             max_tokens: opts?.maxTokens ?? 8192,
+            ...(opts?.temperature != null && { temperature: opts.temperature }),
             system: systemPayload ?? [],
             messages: [{ role: "user", content: user }],
           },
