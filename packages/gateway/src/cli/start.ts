@@ -80,8 +80,15 @@ export async function startGateway(opts: StartOptions = {}): Promise<GatewayHand
 
   // Hosted mode: `--local` CLI flag takes precedence, then env var,
   // then the caller-provided default. `lore start` leaves `opts.local`
-  // undefined (→ hosted mode ON by default), while `lore run` and
-  // `lore import` set `opts.local = true` (→ hosted mode OFF).
+  // undefined (→ hosted mode ON by default), while `lore run`,
+  // `lore import`, and in-process callers (OpenCode plugin, Pi extension)
+  // set `opts.local = true` (→ hosted mode OFF).
+  //
+  // IMPORTANT: In-process callers MUST pass `local: true` — hosted mode
+  // is a process-wide flag that disables filesystem operations in
+  // @loreai/core. When the gateway runs in the same process as the
+  // plugin/extension, enabling hosted mode breaks the plugin's own
+  // getGitRemote(), .lore.md import, config loading, and file watching.
   if (opts.local !== undefined) {
     config.hostedMode = !opts.local;
   } else if (!process.env.LORE_HOSTED_MODE) {
