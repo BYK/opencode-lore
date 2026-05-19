@@ -16,8 +16,9 @@ packages/*/src/**/*.d.ts
 packages/*/src/**/*.d.ts.map
 
 
-# Eval results (generated, potentially large)
+# Eval results and recorded fixtures (generated, potentially large)
 packages/core/eval/results/
+packages/core/eval/fixtures/recorded-responses*/
 
 # Local plans and agent config
 .plans/

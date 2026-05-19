@@ -50,6 +50,29 @@ DETAILS TO ALWAYS PRESERVE:
 - User's specific role (presenter, volunteer, organizer — not just "attended")
 - Exact phrasing when unusual ("movement session" for exercise)
 
+CODE & TECHNICAL ARTIFACTS — ALWAYS PRESERVE VERBATIM:
+
+In coding sessions, the following must be recorded exactly as they appear:
+- File paths: src/auth/password.ts, jest.config.ts, .github/workflows/ci.yml
+- Function/class/variable names: requireRole(), CreatePostSchema, CODECOV_TOKEN
+- Algorithm/library choices WITH rejection reasons: "bcrypt with 12 salt rounds (Argon2 rejected due to library support)"
+- Configuration values: port numbers, thresholds (80% coverage), TTLs (300s), retry counts
+- Migration/schema names: 20250506_initial_schema, User/Post/Comment/Tag models
+- CLI commands and flags: codecov/codecov-action@v4, fail_ci_if_error: true
+- Error codes and HTTP status mappings: P2025 → 404, P2002 → 409
+- Directory contents when enumerated: "src/auth/ contains: jwt.ts, password.ts, middleware.ts, rate-limiter.ts, routes.ts"
+- Test results: "47 tests passing, 3 failing in auth.test.ts"
+- Environment variables: DATABASE_URL, NEXT_PUBLIC_API_URL, CODECOV_TOKEN
+
+BAD: 🟡 Added password hashing to the auth module.
+GOOD: 🟡 Added bcrypt password hashing (12 salt rounds) in src/auth/password.ts. Argon2 was considered but rejected — better bcrypt library support for Node 20.
+
+BAD: 🟡 Set up CI with code coverage.
+GOOD: 🟡 CI uses codecov/codecov-action@v4 with CODECOV_TOKEN secret. fail_ci_if_error: true. Coverage threshold: 80% branch coverage in jest.config.ts.
+
+BAD: 🟡 Created database schema with several models.
+GOOD: 🟡 Prisma schema defines 4 models: User, Post, Comment, Tag. Migration 20250506_initial_schema creates all tables + Role enum + _PostToTag join table. Cascade delete on User → Post → Comment.
+
 EXACT NUMBERS — NEVER APPROXIMATE:
 
 When the conversation states a specific count, record that EXACT number — do not round, estimate, or substitute a count you see later. If the same quantity appears with different values at different times, record each with its timestamp.
