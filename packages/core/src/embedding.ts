@@ -934,16 +934,17 @@ export function embedTemporalMessage(
 }
 
 // ---------------------------------------------------------------------------
-// Vector search — temporal messages (undistilled only)
+// Vector search — temporal messages (all, including distilled)
 // ---------------------------------------------------------------------------
 
 /**
- * Search undistilled temporal messages with embeddings by cosine similarity.
+ * Search temporal messages with embeddings by cosine similarity.
  * Returns top-k entries sorted by similarity descending.
  *
- * Only scans undistilled messages (distilled=0) — once a message is
- * distilled, its semantic content is captured by the distillation
- * embedding and the temporal embedding is cleared.
+ * Includes distilled messages — their embeddings are preserved by
+ * markDistilled() specifically to keep this search path viable.
+ * Distilled messages contain specific details (algorithm names, config
+ * values, file paths) that the distillation summary may have dropped.
  *
  * Scoped to a single project. Optionally scoped to a single session.
  */
@@ -954,8 +955,8 @@ export function vectorSearchTemporal(
   sessionId?: string,
 ): VectorHit[] {
   const sql = sessionId
-    ? "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND distilled = 0 AND project_id = ? AND session_id = ?"
-    : "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND distilled = 0 AND project_id = ?";
+    ? "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ?"
+    : "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ?";
   const params = sessionId ? [projectId, sessionId] : [projectId];
 
   const rows = db()
