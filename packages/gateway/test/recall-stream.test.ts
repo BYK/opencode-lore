@@ -602,6 +602,249 @@ describe("RecallAwareAccumulator — edge cases", () => {
 //   6. Next request injects pending recall into conversation history
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Tests: blockOffset — continuation stream re-indexing
+// ---------------------------------------------------------------------------
+
+describe("RecallAwareAccumulator — blockOffset", () => {
+  test("applies blockOffset to all emitted block indices", () => {
+    const accum = createRecallAwareAccumulator("recall", { blockOffset: 5 });
+    const events = [
+      messageStart(),
+      textBlockStart(0),
+      textDelta(0, "Hello from continuation"),
+      contentBlockStop(0),
+      toolUseBlockStart(1, "Read", "toolu_read"),
+      inputJsonDelta(1, '{"path":"/a"}'),
+      contentBlockStop(1),
+      messageDelta("tool_use"),
+      messageStop(),
+    ];
+
+    const output = processAll(accum, events);
+    const parsed = parseForwardedEvents(output);
+
+    // Text block should be at index 0 + 5 = 5
+    const textStart = parsed.find(
+      (e) =>
+        e.event === "content_block_start" &&
+        (e.data.content_block as Record<string, unknown>)?.type === "text",
+    );
+    expect(textStart).toBeDefined();
+    expect(textStart!.data.index).toBe(5);
+
+    // Read block should be at index 1 + 5 = 6
+    const readStart = parsed.find(
+      (e) =>
+        e.event === "content_block_start" &&
+        (e.data.content_block as Record<string, unknown>)?.name === "Read",
+    );
+    expect(readStart).toBeDefined();
+    expect(readStart!.data.index).toBe(6);
+
+    // Deltas and stops should also be offset
+    const textDeltas = parsed.filter(
+      (e) => e.event === "content_block_delta" && e.data.index === 5,
+    );
+    expect(textDeltas.length).toBeGreaterThan(0);
+
+    const readStop = parsed.find(
+      (e) => e.event === "content_block_stop" && e.data.index === 6,
+    );
+    expect(readStop).toBeDefined();
+
+    expect(accum.clientBlockCount()).toBe(2); // relative count, not offset
+  });
+
+  test("blockOffset + recall suppression re-indexes correctly", () => {
+    const accum = createRecallAwareAccumulator("recall", { blockOffset: 3 });
+    const events = [
+      messageStart(),
+      textBlockStart(0),
+      textDelta(0, "Searching..."),
+      contentBlockStop(0),
+      // recall at 1 — suppressed
+      toolUseBlockStart(1, "recall", "toolu_recall"),
+      inputJsonDelta(1, '{"query":"test"}'),
+      contentBlockStop(1),
+      // Read at 2 — re-indexed past suppression + offset
+      toolUseBlockStart(2, "Read", "toolu_read"),
+      inputJsonDelta(2, '{"path":"/b"}'),
+      contentBlockStop(2),
+      messageDelta("tool_use"),
+      messageStop(),
+    ];
+
+    const output = processAll(accum, events);
+    const parsed = parseForwardedEvents(output);
+
+    expect(accum.hasRecall()).toBe(true);
+
+    // text: upstream 0 - 0 suppressed + 3 offset = 3
+    const textStart = parsed.find(
+      (e) =>
+        e.event === "content_block_start" &&
+        (e.data.content_block as Record<string, unknown>)?.type === "text",
+    );
+    expect(textStart!.data.index).toBe(3);
+
+    // Read: upstream 2 - 1 suppressed + 3 offset = 4
+    const readStart = parsed.find(
+      (e) =>
+        e.event === "content_block_start" &&
+        (e.data.content_block as Record<string, unknown>)?.name === "Read",
+    );
+    expect(readStart!.data.index).toBe(4);
+
+    // No recall events leaked
+    const recallEvents = parsed.filter(
+      (e) =>
+        e.event === "content_block_start" &&
+        (e.data.content_block as Record<string, unknown>)?.name === "recall",
+    );
+    expect(recallEvents).toHaveLength(0);
+
+    expect(accum.clientBlockCount()).toBe(2);
+  });
+
+  test("blockOffset 0 behaves same as no offset", () => {
+    const accum = createRecallAwareAccumulator("recall", { blockOffset: 0 });
+    const events = [
+      messageStart(),
+      textBlockStart(0),
+      textDelta(0, "hello"),
+      contentBlockStop(0),
+      messageDelta(),
+      messageStop(),
+    ];
+
+    const output = processAll(accum, events);
+    const parsed = parseForwardedEvents(output);
+
+    const textStart = parsed.find((e) => e.event === "content_block_start");
+    expect(textStart!.data.index).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: suppressMessageStart — continuation streams
+// ---------------------------------------------------------------------------
+
+describe("RecallAwareAccumulator — suppressMessageStart", () => {
+  test("suppresses message_start when flag is set", () => {
+    const accum = createRecallAwareAccumulator("recall", {
+      suppressMessageStart: true,
+    });
+    const events = [
+      messageStart(),
+      textBlockStart(0),
+      textDelta(0, "hello"),
+      contentBlockStop(0),
+      messageDelta(),
+      messageStop(),
+    ];
+
+    const output = processAll(accum, events);
+    const parsed = parseForwardedEvents(output);
+
+    // No message_start in output
+    const msgStarts = parsed.filter((e) => e.event === "message_start");
+    expect(msgStarts).toHaveLength(0);
+
+    // But other events are present
+    const blockStarts = parsed.filter((e) => e.event === "content_block_start");
+    expect(blockStarts).toHaveLength(1);
+  });
+
+  test("forwards message_start by default", () => {
+    const accum = createRecallAwareAccumulator("recall");
+    const events = [
+      messageStart(),
+      textBlockStart(0),
+      contentBlockStop(0),
+      messageDelta(),
+      messageStop(),
+    ];
+
+    const output = processAll(accum, events);
+    const parsed = parseForwardedEvents(output);
+
+    const msgStarts = parsed.filter((e) => e.event === "message_start");
+    expect(msgStarts).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: combined blockOffset + suppressMessageStart (continuation scenario)
+// ---------------------------------------------------------------------------
+
+describe("RecallAwareAccumulator — continuation stream scenario", () => {
+  test("simulates two chained recall follow-ups with correct indexing", () => {
+    // Simulate: original stream had 2 client blocks (text + thinking) + 1 marker = 3
+    // First continuation should use blockOffset=3
+    const cont1 = createRecallAwareAccumulator("recall", {
+      blockOffset: 3,
+      suppressMessageStart: true,
+    });
+    const cont1Events = [
+      messageStart(), // suppressed
+      textBlockStart(0),
+      textDelta(0, "Based on the results..."),
+      contentBlockStop(0),
+      // Model calls recall again
+      toolUseBlockStart(1, "recall", "toolu_recall_2"),
+      inputJsonDelta(1, '{"id":"t:abc123"}'),
+      contentBlockStop(1),
+      messageDelta("tool_use"),
+      messageStop(),
+    ];
+
+    const output1 = processAll(cont1, cont1Events);
+    const parsed1 = parseForwardedEvents(output1);
+
+    expect(cont1.hasRecall()).toBe(true);
+    expect(cont1.clientBlockCount()).toBe(1); // only the text block
+
+    // Text block at index 0 - 0 suppressed + 3 offset = 3
+    const textStart = parsed1.find((e) => e.event === "content_block_start");
+    expect(textStart!.data.index).toBe(3);
+
+    // No message_start forwarded
+    expect(parsed1.filter((e) => e.event === "message_start")).toHaveLength(0);
+
+    // Terminal events held back (recall detected)
+    expect(cont1.heldBackEvents()).toContain("message_delta");
+
+    // Second continuation: blockOffset = 3 (prev) + 1 (cont1 client blocks) + 1 (marker) = 5
+    const cont2 = createRecallAwareAccumulator("recall", {
+      blockOffset: 5,
+      suppressMessageStart: true,
+    });
+    const cont2Events = [
+      messageStart(), // suppressed
+      textBlockStart(0),
+      textDelta(0, "The specific error was..."),
+      contentBlockStop(0),
+      messageDelta(),
+      messageStop(),
+    ];
+
+    const output2 = processAll(cont2, cont2Events);
+    const parsed2 = parseForwardedEvents(output2);
+
+    expect(cont2.hasRecall()).toBe(false);
+    expect(cont2.clientBlockCount()).toBe(1);
+
+    // Text block at 0 + 5 = 5
+    const text2Start = parsed2.find((e) => e.event === "content_block_start");
+    expect(text2Start!.data.index).toBe(5);
+
+    // Terminal events forwarded (no recall)
+    expect(parsed2.filter((e) => e.event === "message_delta")).toHaveLength(1);
+    expect(parsed2.filter((e) => e.event === "message_stop")).toHaveLength(1);
+  });
+});
+
 describe("Case 2 integration — mixed tools end-to-end", () => {
   test("full flow: suppress → extract → store → inject on next request", () => {
     // --- Step 1: Stream with text + recall + Read ---

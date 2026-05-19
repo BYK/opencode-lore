@@ -105,6 +105,7 @@ import {
   buildSSETextResponse,
   formatSSEEvent,
   type StreamAccumulator,
+  type RecallAwareAccumulator,
 } from "./stream/anthropic";
 import {
   gatewayMessagesToLore,
@@ -155,6 +156,7 @@ import {
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
+  MAX_RECALL_DEPTH,
   executeRecall,
   findRecallToolUse,
   hasRecallToolUse,
@@ -1268,11 +1270,22 @@ function buildStreamingResponse(
         }
 
         // --- Recall interception (streaming) ---
-        if (recallAccum?.hasRecall()) {
-          const resp = recallAccum.getResponse();
-          const recallBlock = findRecallToolUse(resp);
+        // Loop allows the model to call recall multiple times (e.g. drill
+        // down into t:<id> source citations). Uses RecallAwareAccumulator
+        // for each continuation stream to detect further recall calls.
+        if (recallAccum?.hasRecall() && recallContext) {
+          let currentAccum: RecallAwareAccumulator = recallAccum;
+          let currentResp = recallAccum.getResponse();
+          let currentBlockOffset = warningOffset; // accumulates across iterations
+          let currentModifiedReq = recallContext.modifiedReq;
+          let recallDepth = 0;
 
-          if (recallBlock && recallContext) {
+          // eslint-disable-next-line no-constant-condition
+          while (true) {
+            const recallBlock = findRecallToolUse(currentResp);
+            if (!recallBlock) break;
+
+            recallDepth++;
             const { result, input } = await executeRecall(
               recallBlock,
               recallContext.sessionState.projectPath,
@@ -1284,7 +1297,7 @@ function buildStreamingResponse(
 
             // Store recall result for marker round-trip expansion
             const storeKey = recallStoreKey(input.query, scope, input.id);
-            const position = resp.content.indexOf(recallBlock);
+            const position = currentResp.content.indexOf(recallBlock);
             recallContext.sessionState.recallStore.set(storeKey, {
               toolUseId: recallBlock.id,
               input,
@@ -1294,7 +1307,7 @@ function buildStreamingResponse(
 
             // Emit marker text block in place of the suppressed recall block
             const markerText = buildRecallMarker(input.query, scope, input.id);
-            const markerIdx = recallAccum.clientBlockCount();
+            const markerIdx = currentAccum.clientBlockCount() + currentBlockOffset;
             const syntheticMarker = [
               formatSSEEvent("content_block_start", JSON.stringify({
                 type: "content_block_start",
@@ -1313,20 +1326,19 @@ function buildStreamingResponse(
             ].join("");
             if (!safeEnqueue(encoder.encode(syntheticMarker))) return;
 
-            if (recallAccum.hasOtherTools()) {
-              // Forward held-back events, close stream
+            if (currentAccum.hasOtherTools()) {
+              // Mixed tools — forward held-back events, close stream
               log.info(
-                `recall (stream, mixed): stored result for session ` +
+                `recall (stream, mixed, depth=${recallDepth}): stored result for session ` +
                   `${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
 
-              const heldBack = recallAccum.heldBackEvents();
+              const heldBack = currentAccum.heldBackEvents();
               if (heldBack) {
                 safeEnqueue(encoder.encode(heldBack));
               }
 
-              // Post-stream: store response with marker text (not raw tool_use)
-              const markerResp = replaceRecallWithMarker(resp);
+              const markerResp = replaceRecallWithMarker(currentResp);
               onComplete(markerResp);
               safeClose();
               return;
@@ -1334,44 +1346,44 @@ function buildStreamingResponse(
 
             // Recall-only — send follow-up, pipe continuation
             log.info(
-              `recall (stream, only): executing follow-up for session ` +
+              `recall (stream, depth=${recallDepth}): executing follow-up for session ` +
                 `${recallContext.sessionState.sessionID.slice(0, 16)}`,
             );
 
             const followUp = buildRecallFollowUp(
-              recallContext.modifiedReq,
-              resp,
+              currentModifiedReq,
+              currentResp,
               result,
               recallBlock,
             );
-             let followUpResponse: Response;
+            let followUpResponse: Response;
             try {
               ({ response: followUpResponse } = await forwardToUpstream(
                 followUp,
                 recallContext.config,
                 undefined,
                 // Disable conversation caching on follow-up: the appended
-                // tool_result makes the prefix diverge from the next real turn,
-                // so the cache write would be wasted money.
+                // recall result makes the prefix diverge from the next real
+                // turn, so the cache write would be wasted money.
                 { ...recallContext.cacheOptions, cacheConversation: false },
               ));
             } catch (fetchErr) {
               log.error(
-                `recall follow-up fetch error for session ${recallContext.sessionState.sessionID.slice(0, 16)}:`,
+                `recall follow-up fetch error (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}:`,
                 fetchErr,
               );
-              const heldBack = recallAccum.heldBackEvents();
+              const heldBack = currentAccum.heldBackEvents();
               if (heldBack) {
                 safeEnqueue(encoder.encode(heldBack));
               }
-              const markerResp = replaceRecallWithMarker(resp);
+              const markerResp = replaceRecallWithMarker(currentResp);
               onComplete(markerResp);
               safeClose();
               return;
             }
 
             log.info(
-              `recall follow-up response: status=${followUpResponse.status} ` +
+              `recall follow-up response (depth=${recallDepth}): status=${followUpResponse.status} ` +
                 `hasBody=${!!followUpResponse.body} session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
             );
 
@@ -1381,111 +1393,64 @@ function buildStreamingResponse(
                 `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
                 new Error(`recall follow-up upstream ${followUpResponse.status}`),
               );
-              // Forward the held-back events to close the stream gracefully
-              const heldBack = recallAccum.heldBackEvents();
+              const heldBack = currentAccum.heldBackEvents();
               if (heldBack) {
                 safeEnqueue(encoder.encode(heldBack));
               }
-              const markerResp = replaceRecallWithMarker(resp);
+              const markerResp = replaceRecallWithMarker(currentResp);
               onComplete(markerResp);
               safeClose();
               return;
             }
 
-            // Pipe the continuation stream into the same HTTP response.
-            // Suppress message_start (client already has one) and re-index
-            // content blocks to continue from where the client left off.
-            // +1 accounts for the synthetic marker block.
-            const blockOffset = recallAccum.clientBlockCount() + 1 + warningOffset;
+            // Pipe the continuation stream through a recall-aware accumulator.
+            // +1 accounts for the synthetic marker block just emitted.
+            const contBlockOffset = currentAccum.clientBlockCount() + currentBlockOffset + 1;
+            const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+              blockOffset: contBlockOffset,
+              suppressMessageStart: true,
+            });
             const contReader = followUpResponse.body!.getReader();
             activeReader = contReader;
-            let contEventCount = 0;
-            // Defense-in-depth: suppress any recall tool_use blocks that
-            // leak through in the follow-up (shouldn't happen since recall
-            // is stripped from the tools list, but guards against edge cases).
-            const contSuppressedIndices = new Set<number>();
-            let contSuppressedCount = 0;
 
             for await (const { event: contEvent, data: contData } of parseSSEStream(contReader)) {
-              contEventCount++;
-              if (contEvent === "message_start") {
-                // Suppress — client already received one
-                continue;
+              const forwarded = contAccum.processEvent(contEvent, contData);
+              if (forwarded) {
+                // Forward non-recall, non-held-back events to client.
+                // message_delta usage scaling is handled by a separate pass
+                // below only for the final continuation's terminal events.
+                if (!safeEnqueue(encoder.encode(forwarded))) break;
               }
-
-              // Re-index content block events
-              if (
-                contEvent === "content_block_start" ||
-                contEvent === "content_block_delta" ||
-                contEvent === "content_block_stop"
-              ) {
-                try {
-                  const parsed = JSON.parse(contData) as Record<string, unknown>;
-                  const idx = parsed.index as number;
-                  if (typeof idx !== "number") break;
-
-                  // Suppress recall tool_use blocks in continuation
-                  if (contEvent === "content_block_start") {
-                    const block = parsed.content_block as Record<string, unknown> | undefined;
-                    if (block?.type === "tool_use" && block.name === RECALL_TOOL_NAME) {
-                      log.warn("recall follow-up stream contained recall tool_use — suppressing");
-                      contSuppressedIndices.add(idx);
-                      contSuppressedCount++;
-                      continue;
-                    }
-                  }
-                  if (contSuppressedIndices.has(idx)) {
-                    continue; // Skip delta/stop for suppressed blocks
-                  }
-
-                  parsed.index = idx - contSuppressedCount + blockOffset;
-                  const adjusted = formatSSEEvent(
-                    contEvent,
-                    JSON.stringify(parsed),
-                  );
-                  if (!safeEnqueue(encoder.encode(adjusted))) break;
-                  continue;
-                } catch {
-                  // Fall through to forward as-is
-                }
-              }
-
-              // Forward message_delta, message_stop, and other events.
-              // Scale usage in message_delta to prevent client auto-compaction.
-              if (contEvent === "message_delta") {
-                try {
-                  const parsed = JSON.parse(contData) as Record<string, unknown>;
-                  const deltaUsage = parsed.usage as Record<string, number> | undefined;
-                  if (deltaUsage && typeof deltaUsage.output_tokens === "number") {
-                    const innerResp = accumulator.getResponse();
-                    const scaled = scaleUsageForClient({
-                      input_tokens: innerResp.usage.inputTokens,
-                      output_tokens: deltaUsage.output_tokens,
-                      cache_read_input_tokens: innerResp.usage.cacheReadInputTokens,
-                      cache_creation_input_tokens: innerResp.usage.cacheCreationInputTokens,
-                    });
-                    parsed.usage = { ...deltaUsage, output_tokens: scaled.output_tokens };
-                    const adjusted = formatSSEEvent(contEvent, JSON.stringify(parsed));
-                    if (!safeEnqueue(encoder.encode(adjusted))) break;
-                    continue;
-                  }
-                } catch {
-                  // Fall through to forward as-is
-                }
-              }
-              const forwarded = formatSSEEvent(contEvent, contData);
-              if (!safeEnqueue(encoder.encode(forwarded))) break;
             }
 
             log.info(
-              `recall follow-up stream complete: ${contEventCount} events piped, ` +
+              `recall follow-up stream complete (depth=${recallDepth}): ` +
                 `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
             );
 
-            // Post-stream: store response with marker text for temporal storage.
-            // The marker replaces the raw tool_use, so future turns can
-            // round-trip the marker ↔ tool_use/tool_result correctly.
-            const markerResp = replaceRecallWithMarker(resp);
+            // Check if continuation contained recall — if so, loop
+            if (contAccum.hasRecall() && recallDepth < MAX_RECALL_DEPTH) {
+              currentAccum = contAccum;
+              currentResp = contAccum.getResponse();
+              currentBlockOffset = contBlockOffset;
+              currentModifiedReq = followUp;
+              continue; // Loop: execute the new recall, emit marker, follow up
+            }
+
+            // No more recall (or depth exhausted) — forward terminal events, close
+            if (contAccum.hasRecall()) {
+              log.warn(`recall depth exhausted (${MAX_RECALL_DEPTH}) in streaming path`);
+            }
+
+            const heldBack = contAccum.heldBackEvents();
+            if (heldBack) {
+              // Scale usage in held-back message_delta for anti-compaction
+              safeEnqueue(encoder.encode(heldBack));
+            }
+
+            const markerResp = replaceRecallWithMarker(
+              contAccum.hasRecall() ? contAccum.getResponse() : currentResp,
+            );
             onComplete(markerResp);
             safeClose();
             return;
@@ -3301,8 +3266,16 @@ async function handleConversationTurn(
   const resp = await accumulateNonStreamResponse(upstreamResponse, effectiveProtocol);
 
   // --- Recall interception (non-streaming) ---
-  if (hasRecallToolUse(resp)) {
-    const recallBlock = findRecallToolUse(resp)!;
+  // Loop allows the model to call recall multiple times (e.g. drill down
+  // into t:<id> source citations). MAX_RECALL_DEPTH is a safety net only.
+  let currentResp = resp;
+  let recallDepth = 0;
+  let currentModifiedReq = modifiedReq;
+  const cumulativeUsage = { ...resp.usage };
+
+  while (hasRecallToolUse(currentResp) && recallDepth < MAX_RECALL_DEPTH) {
+    recallDepth++;
+    const recallBlock = findRecallToolUse(currentResp)!;
     const { result, input } = await executeRecall(
       recallBlock,
       sessionState.projectPath,
@@ -3312,7 +3285,7 @@ async function handleConversationTurn(
 
     // Store recall result for marker round-trip expansion
     const storeKey = recallStoreKey(input.query, input.scope ?? "all", input.id);
-    const position = resp.content.indexOf(recallBlock);
+    const position = currentResp.content.indexOf(recallBlock);
     sessionState.recallStore.set(storeKey, {
       toolUseId: recallBlock.id,
       input,
@@ -3320,14 +3293,14 @@ async function handleConversationTurn(
       result,
     });
 
-    // Replace recall tool_use with marker text in the response
-    const markerResp = replaceRecallWithMarker(resp);
+    const markerResp = replaceRecallWithMarker(currentResp);
 
-    if (hasOtherToolUse(resp)) {
-      // Mixed tools — return response with marker replacing recall tool_use
+    if (hasOtherToolUse(currentResp)) {
+      // Mixed tools — return response with marker, client handles the rest
       log.info(
-        `recall (non-stream, mixed): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
+        `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
       );
+      markerResp.usage = cumulativeUsage;
       postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
       return nonStreamHttpResponse(
         unsustainable ? injectContextWarning(markerResp) : markerResp,
@@ -3337,9 +3310,9 @@ async function handleConversationTurn(
 
     // Recall-only — send follow-up request for seamless UX
     log.info(
-      `recall (non-stream, only): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
+      `recall (non-stream, depth=${recallDepth}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
     );
-    const followUp = buildRecallFollowUp(modifiedReq, resp, result, recallBlock);
+    const followUp = buildRecallFollowUp(currentModifiedReq, currentResp, result, recallBlock);
     let followUpResponse: Response;
     let followUpProtocol: "anthropic" | "openai" | "openai-responses";
     ({ response: followUpResponse, effectiveProtocol: followUpProtocol } = await forwardToUpstream(
@@ -3347,7 +3320,7 @@ async function handleConversationTurn(
       config,
       undefined,
       // Disable conversation caching on follow-up: the appended
-      // tool_result makes the prefix diverge from the next real turn,
+      // recall result makes the prefix diverge from the next real turn,
       // so the cache write would be wasted money.
       { ...cacheOptions, cacheConversation: false },
     ));
@@ -3359,6 +3332,7 @@ async function handleConversationTurn(
         new Error(`recall follow-up upstream ${followUpResponse.status}`),
       );
       // Fall back to response with marker (no continuation)
+      markerResp.usage = cumulativeUsage;
       postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
       return nonStreamHttpResponse(
         unsustainable ? injectContextWarning(markerResp) : markerResp,
@@ -3366,39 +3340,40 @@ async function handleConversationTurn(
       );
     }
 
-    let continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
+    const continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
 
-    // Defense-in-depth: if the model called recall again in the follow-up
-    // (shouldn't happen since recall is stripped from tools), replace it
-    // with marker text so the client never sees a raw recall tool_use.
-    if (hasRecallToolUse(continuationResp)) {
-      log.warn("recall follow-up contained another recall tool_use — stripping");
-      continuationResp = replaceRecallWithMarker(continuationResp);
+    // Accumulate usage from this iteration
+    cumulativeUsage.inputTokens += continuationResp.usage.inputTokens;
+    cumulativeUsage.outputTokens += continuationResp.usage.outputTokens;
+    if (continuationResp.usage.cacheReadInputTokens) {
+      cumulativeUsage.cacheReadInputTokens =
+        (cumulativeUsage.cacheReadInputTokens ?? 0) +
+        continuationResp.usage.cacheReadInputTokens;
+    }
+    if (continuationResp.usage.cacheCreationInputTokens) {
+      cumulativeUsage.cacheCreationInputTokens =
+        (cumulativeUsage.cacheCreationInputTokens ?? 0) +
+        continuationResp.usage.cacheCreationInputTokens;
     }
 
-    // Merge usage from both requests
-    continuationResp.usage.inputTokens += resp.usage.inputTokens;
-    continuationResp.usage.outputTokens += resp.usage.outputTokens;
-    if (resp.usage.cacheReadInputTokens) {
-      continuationResp.usage.cacheReadInputTokens =
-        (continuationResp.usage.cacheReadInputTokens ?? 0) +
-        resp.usage.cacheReadInputTokens;
-    }
-    if (resp.usage.cacheCreationInputTokens) {
-      continuationResp.usage.cacheCreationInputTokens =
-        (continuationResp.usage.cacheCreationInputTokens ?? 0) +
-        resp.usage.cacheCreationInputTokens;
-    }
-
-    postResponse(req, continuationResp, sessionState, config, requestBody, genAiSpan);
-    return nonStreamHttpResponse(
-      unsustainable ? injectContextWarning(continuationResp) : continuationResp,
-      { "x-lore-recall-invoked": "true" },
-    );
+    // Update for next iteration
+    currentModifiedReq = followUp;
+    currentResp = continuationResp;
+    // Loop continues — hasRecallToolUse checked at top
   }
 
-  postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
-  return nonStreamHttpResponse(unsustainable ? injectContextWarning(resp) : resp);
+  // Depth exhausted or no more recall — finalize
+  if (hasRecallToolUse(currentResp)) {
+    log.warn(`recall depth exhausted (${MAX_RECALL_DEPTH}) — stripping remaining recall`);
+    currentResp = replaceRecallWithMarker(currentResp);
+  }
+  currentResp.usage = cumulativeUsage;
+  postResponse(req, currentResp, sessionState, config, requestBody, genAiSpan);
+  const recallHeaders = recallDepth > 0 ? { "x-lore-recall-invoked": "true" } : undefined;
+  return nonStreamHttpResponse(
+    unsustainable ? injectContextWarning(currentResp) : currentResp,
+    recallHeaders,
+  );
 }
 
 // ---------------------------------------------------------------------------

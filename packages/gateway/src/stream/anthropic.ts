@@ -627,12 +627,19 @@ export interface RecallAwareAccumulator extends StreamAccumulator {
  * Create a recall-aware stream accumulator.
  *
  * @param recallToolName - The name of the recall tool to intercept (default: "recall")
+ * @param options.scaleClientUsage - Scale usage numbers for the client (anti-compaction)
+ * @param options.blockOffset - Added to all emitted block indices (for continuation streams
+ *   that must continue the client's block numbering from where a previous stream left off)
+ * @param options.suppressMessageStart - Suppress message_start events (continuation streams
+ *   where the client already received one from the original stream)
  */
 export function createRecallAwareAccumulator(
   recallToolName = "recall",
-  options?: { scaleClientUsage?: boolean },
+  options?: { scaleClientUsage?: boolean; blockOffset?: number; suppressMessageStart?: boolean },
 ): RecallAwareAccumulator {
   const shouldScale = options?.scaleClientUsage ?? false;
+  const baseOffset = options?.blockOffset ?? 0;
+  const suppressMsgStart = options?.suppressMessageStart ?? false;
   // Delegate to the standard accumulator for actual accumulation (never scales — internal only)
   const inner = createStreamAccumulator();
 
@@ -737,9 +744,9 @@ export function createRecallAwareAccumulator(
         }
 
         clientBlocks++;
-        // Re-index if needed
-        if (suppressedCount > 0) {
-          const adjusted = { ...parsed, index: index - suppressedCount };
+        // Re-index: apply suppression offset + base offset
+        if (suppressedCount > 0 || baseOffset > 0) {
+          const adjusted = { ...parsed, index: index - suppressedCount + baseOffset };
           return formatSSEEvent(eventType, JSON.stringify(adjusted));
         }
         break;
@@ -751,11 +758,11 @@ export function createRecallAwareAccumulator(
         if (typeof index === "number" && suppressedIndices.has(index)) {
           return ""; // Don't forward recall block events
         }
-        // Re-index if needed
-        if (suppressedCount > 0 && typeof (parsed.index) === "number") {
+        // Re-index: apply suppression offset + base offset
+        if ((suppressedCount > 0 || baseOffset > 0) && typeof (parsed.index) === "number") {
           const adjusted = {
             ...parsed,
-            index: (parsed.index as number) - suppressedCount,
+            index: (parsed.index as number) - suppressedCount + baseOffset,
           };
           return formatSSEEvent(eventType, JSON.stringify(adjusted));
         }
@@ -773,7 +780,13 @@ export function createRecallAwareAccumulator(
         break;
       }
 
-      // message_start, ping, etc. — forward with possible usage scaling
+      // message_start — suppress for continuation streams (client already has one)
+      case "message_start": {
+        if (suppressMsgStart) return "";
+        break;
+      }
+
+      // ping, etc. — forward with possible usage scaling
     }
 
     return forwardEvent(eventType, data, parsed);

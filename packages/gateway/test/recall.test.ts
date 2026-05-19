@@ -12,6 +12,7 @@ import { describe, test, expect } from "bun:test";
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
+  MAX_RECALL_DEPTH,
   findRecallToolUse,
   hasRecallToolUse,
   hasOtherToolUse,
@@ -108,6 +109,13 @@ describe("RECALL_GATEWAY_TOOL", () => {
     expect(props).toHaveProperty("query");
     expect(props).toHaveProperty("scope");
     expect(schema.required).toEqual(["query"]);
+  });
+});
+
+describe("MAX_RECALL_DEPTH", () => {
+  test("is a positive integer safety-net cap", () => {
+    expect(MAX_RECALL_DEPTH).toBeGreaterThan(0);
+    expect(Number.isInteger(MAX_RECALL_DEPTH)).toBe(true);
   });
 });
 
@@ -349,10 +357,10 @@ describe("buildRecallFollowUp", () => {
       "## Recall Results\n* config is in /root",
     );
 
-    // Tools list should NOT include recall — prevents model from calling
-    // it again in the follow-up (which is piped without recall interception).
-    expect(followUp.tools).toHaveLength(1);
-    expect(followUp.tools[0].name).toBe("Read");
+    // Tools list keeps recall — the continuation is recall-aware and
+    // can handle further recall calls (multi-turn recall).
+    expect(followUp.tools).toHaveLength(2);
+    expect(followUp.tools.map((t) => t.name).sort()).toEqual(["Read", "recall"]);
   });
 
   test("preserves other request properties", () => {

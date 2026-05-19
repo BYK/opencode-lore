@@ -67,6 +67,9 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
 
 export const RECALL_TOOL_NAME = "recall";
 
+/** Safety-net cap on recall follow-ups per client request (like any agentic loop). */
+export const MAX_RECALL_DEPTH = 10;
+
 // ---------------------------------------------------------------------------
 // Marker utilities — human-readable text ↔ recall tool round-trip
 // ---------------------------------------------------------------------------
@@ -380,12 +383,12 @@ export async function executeRecall(
  *
  * The follow-up includes:
  *  - All original messages
- *  - The assistant's full response (including the recall tool_use)
- *  - A user message with the recall tool_result
- *  - Tools list WITHOUT recall (so the model won't call it again)
+ *  - The assistant's full response (with recall tool_use replaced by marker text)
+ *  - A user message with the recall results as plain text
+ *  - Full tools list (including recall — the continuation is recall-aware)
  *
  * The model continues from where it left off, now with recall results
- * in context. Its new response streams directly to the client.
+ * in context. If it needs more detail it can call recall again.
  */
 export function buildRecallFollowUp(
   originalReq: GatewayRequest,
@@ -395,12 +398,10 @@ export function buildRecallFollowUp(
 ): GatewayRequest {
   // Build the follow-up using plain text blocks instead of tool_use/tool_result.
   //
-  // Why: recall is stripped from the tools list to prevent the model from
-  // calling it again in the follow-up (the follow-up response is piped raw
-  // without recall interception). But the Anthropic API validates that every
-  // tool_use block in messages references a tool in the tools list. Using
-  // text blocks avoids this constraint entirely while still providing the
-  // model with the recall context it needs to continue.
+  // Why: marker text is what the client sees in its conversation history.
+  // Using text blocks keeps the follow-up consistent with the marker-based
+  // round-trip strategy (expandRecallMarkers reconstructs proper tool_use +
+  // tool_result pairs on the next client turn).
   //
   // Thinking blocks MUST be preserved: the Anthropic API requires thinking
   // blocks (with their cryptographic signatures) to precede content blocks
@@ -435,13 +436,6 @@ export function buildRecallFollowUp(
     ],
   };
 
-  // Strip recall from tools — the model must not call it again in the
-  // follow-up because the continuation response is piped without recall
-  // interception.
-  const toolsWithoutRecall = originalReq.tools.filter(
-    (t) => t.name !== RECALL_TOOL_NAME,
-  );
-
   return {
     ...originalReq,
     messages: [
@@ -449,7 +443,6 @@ export function buildRecallFollowUp(
       assistantMessage,
       resultMessage,
     ],
-    tools: toolsWithoutRecall,
   };
 }
 
