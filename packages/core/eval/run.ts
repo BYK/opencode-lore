@@ -35,6 +35,7 @@ const { values: args } = parseArgs({
     record: { type: "string", default: "" },
     replay: { type: "string", default: "" },
     scenarios: { type: "string", default: "" },
+    inflate: { type: "string", default: "" },
     summarize: { type: "string", default: "" },
     help: { type: "boolean", default: false },
   },
@@ -68,6 +69,7 @@ Options:
   --record <dir>              Record session replay data to directory (first run)
   --replay <dir>              Replay session data from directory (skip upstream API calls)
   --scenarios <id,...>        Run only specific scenarios (e.g., pr-3-evolution)
+  --inflate <tokens>          Inflate scenarios to target token count (e.g., 400000)
   --summarize <path>          Print summary from existing JSONL file and exit
   --help                      Show this help
 `);
@@ -142,6 +144,7 @@ const config: EvalConfig = {
   recordDir: args.record ? resolve(args.record) : undefined,
   replayDir: args.replay ? resolve(args.replay) : undefined,
   scenarios: args.scenarios ? args.scenarios.split(",").map((s) => s.trim()) : undefined,
+  inflateTokens: args.inflate ? parseInt(args.inflate, 10) : undefined,
 };
 
 // ---------------------------------------------------------------------------
@@ -155,6 +158,7 @@ console.log(`  Baselines:  ${config.baselines.join(", ")}`);
 if (config.recordDir) console.log(`  Recording:  ${config.recordDir}`);
 if (config.replayDir) console.log(`  Replaying:  ${config.replayDir}`);
 if (config.scenarios) console.log(`  Scenarios:  ${config.scenarios.join(", ")}`);
+if (config.inflateTokens) console.log(`  Inflate:    ${config.inflateTokens.toLocaleString()} tokens`);
 console.log(`  Output:     ${config.outputPath}`);
 console.log(`  Model:      ${config.model}`);
 console.log("");

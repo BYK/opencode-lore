@@ -851,6 +851,17 @@ export async function runEval(config: EvalConfig): Promise<EvalResult[]> {
       );
     }
 
+    // Inflate scenarios to target token count if requested
+    if (config.inflateTokens) {
+      const { inflateScenario } = await import("./inflate");
+      scenarioModules = scenarioModules.map((s) =>
+        inflateScenario(s, config.inflateTokens!, 42),
+      );
+      console.log(
+        `Inflated ${scenarioModules.length} scenarios to ~${config.inflateTokens.toLocaleString()} tokens`,
+      );
+    }
+
     for (const scenario of scenarioModules) {
       console.log(
         `Running scenario: ${scenario.id} (${scenario.dimension})`,

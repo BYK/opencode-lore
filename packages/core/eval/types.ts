@@ -227,6 +227,8 @@ export interface EvalConfig {
   replayDir?: string;
   /** Filter to specific scenario IDs. */
   scenarios?: string[];
+  /** Inflate scenarios to this token count with filler content. */
+  inflateTokens?: number;
 }
 
 // ---------------------------------------------------------------------------
