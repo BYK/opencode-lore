@@ -6,8 +6,8 @@ import { backoffMs, maxRetriesFor, normalizeOpenAIUsage } from "../src/llm-adapt
 // ---------------------------------------------------------------------------
 
 describe("maxRetriesFor (background)", () => {
-  test("returns 5 for 429 (rate limit)", () => {
-    expect(maxRetriesFor(429)).toBe(5);
+  test("returns 3 for 429 (rate limit)", () => {
+    expect(maxRetriesFor(429)).toBe(3);
   });
 
   test("returns 3 for 5xx", () => {
@@ -71,12 +71,11 @@ describe("backoffMs — with Retry-After", () => {
 // ---------------------------------------------------------------------------
 
 describe("backoffMs — 429 without Retry-After", () => {
-  test("background uses conservative delays: 30s, 45s, 60s, 60s, 60s", () => {
-    expect(backoffMs(0, null, 429)).toBe(30_000);
-    expect(backoffMs(1, null, 429)).toBe(45_000);
-    expect(backoffMs(2, null, 429)).toBe(60_000);
-    expect(backoffMs(3, null, 429)).toBe(60_000);
-    expect(backoffMs(4, null, 429)).toBe(60_000);
+  test("background uses wide spacing: 60s, 120s, 180s (capped 180s)", () => {
+    expect(backoffMs(0, null, 429)).toBe(60_000);
+    expect(backoffMs(1, null, 429)).toBe(120_000);
+    expect(backoffMs(2, null, 429)).toBe(180_000);
+    expect(backoffMs(3, null, 429)).toBe(180_000);
   });
 
   test("urgent uses aggressive exponential: 1s, 2s, 4s (capped 4s)", () => {
@@ -144,14 +143,24 @@ describe("worst-case urgent budget", () => {
     expect(total).toBeLessThanOrEqual(16_000);
   });
 
-  test("background 429 with Retry-After: 60 budgets up to ~5min", () => {
-    // Confirms the *background* budget is intentionally generous so that
-    // distillation/curation can ride out a real rate-limit window.
+  test("background 429 with Retry-After: 60 budgets up to ~3min", () => {
+    // 3 retries × 60s (Retry-After honored, under 120s cap) = 180s.
+    // Reduced from 5×60s to lower API pressure on tight-quota environments.
     let total = 0;
     for (let attempt = 0; attempt < maxRetriesFor(429); attempt++) {
       total += backoffMs(attempt, 60_000, 429);
     }
-    expect(total).toBe(300_000); // 5 retries × 60s
+    expect(total).toBe(180_000); // 3 retries × 60s
+  });
+
+  test("background 429 without Retry-After: total up to ~6min", () => {
+    // Without server-guided Retry-After, backoff is wider: 60+120+180 = 360s.
+    // Intentionally generous to ride out rate-limit windows without hammering.
+    let total = 0;
+    for (let attempt = 0; attempt < maxRetriesFor(429); attempt++) {
+      total += backoffMs(attempt, null, 429);
+    }
+    expect(total).toBe(360_000); // 60s + 120s + 180s
   });
 });
 

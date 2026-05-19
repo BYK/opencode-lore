@@ -33,8 +33,15 @@ const limiter = pLimit(BACKGROUND_CONCURRENCY);
 /** Timestamp (ms) when the circuit breaker expires. 0 = not tripped. */
 let circuitOpenUntil = 0;
 
-/** Default pause duration when Retry-After header is absent (seconds). */
-const DEFAULT_PAUSE_SECONDS = 60;
+/**
+ * Escalating backoff schedule (seconds) for consecutive circuit breaker trips.
+ * Prevents the trip→60s→retry→trip cycle that hammers rate-limited APIs.
+ * Exported for testing.
+ */
+export const BACKOFF_SCHEDULE = [60, 120, 240, 480, 600] as const;
+
+/** Number of consecutive trips without a full recovery in between. */
+let consecutiveTrips = 0;
 
 /**
  * Check if the circuit breaker is currently tripped.
@@ -43,7 +50,9 @@ const DEFAULT_PAUSE_SECONDS = 60;
 export function isBackgroundPaused(): boolean {
   if (circuitOpenUntil === 0) return false;
   if (Date.now() >= circuitOpenUntil) {
-    circuitOpenUntil = 0; // auto-reset
+    // Breaker expired naturally — full recovery, reset escalation
+    circuitOpenUntil = 0;
+    consecutiveTrips = 0;
     return false;
   }
   return true;
@@ -51,19 +60,32 @@ export function isBackgroundPaused(): boolean {
 
 /**
  * Trip the circuit breaker. Called when any background LLM call
- * receives a 429. Pauses all background work for `pauseSeconds`.
+ * receives a 429. Pauses all background work with escalating backoff.
  *
- * @param pauseSeconds Duration to pause. If 0 or omitted, uses default (60s).
+ * When `retryAfterSeconds` is provided (from Retry-After header), the
+ * pause duration is the greater of the server-guided value and the
+ * escalation schedule — server guidance is respected but escalation
+ * still applies.
+ *
+ * @param retryAfterSeconds Server-guided pause duration, if available.
  */
-export function tripCircuitBreaker(pauseSeconds?: number): void {
-  const duration =
-    pauseSeconds && pauseSeconds > 0 ? pauseSeconds : DEFAULT_PAUSE_SECONDS;
+export function tripCircuitBreaker(retryAfterSeconds?: number): void {
+  const scheduled = BACKOFF_SCHEDULE[
+    Math.min(consecutiveTrips, BACKOFF_SCHEDULE.length - 1)
+  ];
+  const duration = retryAfterSeconds && retryAfterSeconds > 0
+    ? Math.max(retryAfterSeconds, scheduled)
+    : scheduled;
+  consecutiveTrips++;
+
   const until = Date.now() + duration * 1000;
   // Only extend, never shorten an active pause
   if (until > circuitOpenUntil) {
     circuitOpenUntil = until;
     log.warn(
-      `background circuit breaker tripped: pausing all background work for ${duration}s`,
+      `background circuit breaker tripped (trip #${consecutiveTrips}): ` +
+        `pausing all background work for ${duration}s ` +
+        `[active=${limiter.activeCount} pending=${limiter.pendingCount}]`,
     );
   }
 }
@@ -75,6 +97,11 @@ export function tripCircuitBreaker(pauseSeconds?: number): void {
 export function remainingPauseSeconds(): number {
   if (!isBackgroundPaused()) return 0;
   return Math.ceil((circuitOpenUntil - Date.now()) / 1000);
+}
+
+/** Number of consecutive trips (for diagnostics/testing). */
+export function getConsecutiveTrips(): number {
+  return consecutiveTrips;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,4 +176,18 @@ export function backgroundLimiterStats(): {
 export function resetBackgroundLimiter(): void {
   limiter.clearQueue();
   circuitOpenUntil = 0;
+  consecutiveTrips = 0;
+}
+
+/**
+ * Trip the circuit breaker with an exact duration, bypassing the
+ * escalation schedule. For tests only — production code should use
+ * `tripCircuitBreaker()`.
+ *
+ * Unlike `tripCircuitBreaker`, this unconditionally sets the deadline
+ * (can shorten an active pause) — useful for overriding to short
+ * durations in tests.
+ */
+export function _tripRaw(durationSeconds: number): void {
+  circuitOpenUntil = Date.now() + durationSeconds * 1000;
 }
