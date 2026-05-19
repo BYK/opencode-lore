@@ -2280,7 +2280,7 @@ export async function generateCompactionSummary(opts: {
   sessionID: string;
   config: GatewayConfig;
   previousSummary?: string;
-}): Promise<string> {
+}): Promise<string | null> {
   const { projectPath, sessionID, config, previousSummary } = opts;
   const llm = getLLMClient(config);
 
@@ -2352,7 +2352,7 @@ export async function generateCompactionSummary(opts: {
     temperature: 0,
   });
 
-  return summaryText ?? "(Compaction failed — no summary generated.)";
+  return summaryText ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2379,6 +2379,19 @@ async function handleCompaction(
     config,
     previousSummary: extractPreviousSummary(req),
   });
+
+  // If Lore's own summary generation failed (rate limits, auth issues, etc.),
+  // fall back to forwarding the original compaction request to the upstream API
+  // so the client still gets a proper compaction response.
+  if (summary == null) {
+    log.warn(
+      `compaction summary generation failed for session ${sessionID.slice(0, 16)} — falling back to upstream`,
+    );
+    // Compaction still happens (upstream), so post-compaction messages will
+    // differ — clear the stale warmup body to avoid false cache bust signals.
+    sessionState.cacheAnalytics.lastRequestBody = null;
+    return await handlePassthrough(req, config);
+  }
 
   const resp = buildCompactionResponse(sessionID, summary, req.model);
 
@@ -2478,6 +2491,16 @@ export async function handleCompactEndpoint(
         ? body.previous_summary
         : undefined,
     });
+
+    if (summary == null) {
+      log.warn(
+        `compact endpoint: summary generation failed for session ${sessionID.slice(0, 16)} — returning 502`,
+      );
+      return new Response(
+        JSON.stringify({ error: "compaction_failed", message: "Summary generation failed (worker model unavailable)" }),
+        { status: 502, headers: { "content-type": "application/json" } },
+      );
+    }
 
     // Clear the cached warmup body — post-compaction the client will send
     // entirely different messages, so the pre-compaction body is stale.

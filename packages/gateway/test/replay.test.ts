@@ -330,31 +330,47 @@ describe("Compaction interception", () => {
 
   afterEach(() => harness?.teardown());
 
-  it("compaction request is intercepted locally — no upstream call", async () => {
-    // EMPTY fixtures — compaction is handled locally, never forwarded upstream.
-    // If the gateway somehow calls the interceptor, it throws "Replay exhausted"
-    // which will cause the test to fail with a clear error.
-    harness = await createHarness({ fixtures: [] });
+  it("compaction request falls back to upstream when worker model is unavailable", async () => {
+    // In test, the worker model has no auth credentials, so llm.prompt()
+    // returns null. The gateway should fall back to forwarding the original
+    // compaction request to the upstream API (like handlePassthrough).
+    // Provide one fixture for the upstream fallback response.
+    const compactionSystem =
+      "You are an anchored context summarization assistant for coding sessions. " +
+      "Your job is to produce a structured summary of the conversation history.";
+    const compactionUserMessage =
+      "Please create an anchored summary from the conversation history above.";
+
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          system: compactionSystem,
+          requestMessages: [
+            { role: "user", content: compactionUserMessage },
+          ],
+          responseText: "## Summary\n\nThis is a compaction summary from upstream.",
+        }),
+      ],
+    });
 
     // Build a request that matches isCompactionRequest() via the system prompt pattern
     const resp = await harness.chat({
       model: DEFAULT_MODEL,
       max_tokens: 4096,
       stream: false,
-      system:
-        "You are an anchored context summarization assistant for coding sessions. " +
-        "Your job is to produce a structured summary of the conversation history.",
+      system: compactionSystem,
       messages: [
         {
           role: "user",
-          content:
-            "Please create an anchored summary from the conversation history above.",
+          content: compactionUserMessage,
         },
       ],
       // No tools — compaction agents typically have no tools
     });
 
-    // The gateway must return a 200 (synthetic summary, never erroring out)
+    // The gateway must return a 200 — either from Lore's own summary or
+    // from the upstream fallback when the worker model is unavailable.
     expect(resp.status).toBe(200);
 
     const body = (await resp.json()) as Record<string, unknown>;
