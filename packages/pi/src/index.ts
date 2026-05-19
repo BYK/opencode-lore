@@ -246,6 +246,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   function registerProviders(): void {
     const baseHeaders: Record<string, string> = {
       "x-lore-session-id": currentSessionID,
+      "x-lore-project": projectPath,
     };
     // Inject git remote so the gateway can group worktrees/clones of the
     // same repo without filesystem access (important for remote gateways).

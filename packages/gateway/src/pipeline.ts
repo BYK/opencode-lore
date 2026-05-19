@@ -279,6 +279,7 @@ export function setUpstreamInterceptor(
 export async function resetPipelineState(): Promise<void> {
   initialized = false;
   sessions.clear();
+  cwdWarned.clear();
   headerSessionIndex.clear();
   ltmSessionCache.clear();
   ltmPinnedText.clear();
@@ -304,6 +305,9 @@ export async function resetPipelineState(): Promise<void> {
 
 /** Per-session state tracked across requests. */
 const sessions = new Map<string, SessionState>();
+
+/** Sessions that have already logged the cwd-fallback warning (dedup). */
+const cwdWarned = new Set<string>();
 
 /** Read-only access to live session states (for dashboard rendering). */
 export function getActiveSessions(): ReadonlyMap<string, SessionState> {
@@ -795,11 +799,12 @@ export function resolveSessionProjectPath(
 
   // Log warning only when the cwd fallback truly sticks (no session cache
   // was available to upgrade from).
-  if (source === "cwd") {
+  if (source === "cwd" && !cwdWarned.has(sessionState.sessionID)) {
+    cwdWarned.add(sessionState.sessionID);
     console.error(
       `[lore] warning: project path falling back to process.cwd() (${projectPath}). ` +
-      `Data may be misattributed. Set X-Lore-Project header or include a working ` +
-      `directory in the system prompt to fix this.`,
+      `Data may be misattributed. Fix: use \`lore run\` to launch your agent, ` +
+      `or set ANTHROPIC_CUSTOM_HEADERS="X-Lore-Project: /path/to/project".`,
     );
   }
 

@@ -74,7 +74,7 @@ function appendCustomHeader(
   name: string,
   value: string,
 ): void {
-  const existing = process.env[envKey] ?? "";
+  const existing = env[envKey] ?? process.env[envKey] ?? "";
   const header = `${name}: ${value}`;
   env[envKey] = existing ? `${existing}\n${header}` : header;
 }
@@ -90,6 +90,9 @@ export const AGENTS: AgentDef[] = [
         ANTHROPIC_BASE_URL: url,
         DISABLE_AUTO_COMPACT: "1",
       };
+      // Inject project path so the gateway knows which project this session
+      // belongs to, regardless of system prompt format.
+      appendCustomHeader(env, "ANTHROPIC_CUSTOM_HEADERS", "X-Lore-Project", cwd);
       // Inject git remote via ANTHROPIC_CUSTOM_HEADERS so the remote gateway
       // can identify the project by git remote without filesystem access.
       const remote = safeRemote(cwd);
@@ -107,9 +110,11 @@ export const AGENTS: AgentDef[] = [
     envVars: (url, cwd) => {
       const env: Record<string, string> = { OPENAI_BASE_URL: `${url}/v1` };
       // Codex supports custom headers via env_http_headers config (since 0.3.0).
-      // Set LORE_GIT_REMOTE so users can map it in their config.toml:
+      // Set LORE_PROJECT / LORE_GIT_REMOTE so users can map them in config.toml:
       //   [model_provider.custom.env_http_headers]
+      //   X-Lore-Project = "LORE_PROJECT"
       //   X-Lore-Git-Remote = "LORE_GIT_REMOTE"
+      env.LORE_PROJECT = cwd;
       const remote = safeRemote(cwd);
       if (remote) env.LORE_GIT_REMOTE = remote;
       return env;
