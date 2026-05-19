@@ -361,6 +361,10 @@ export async function replaySession(
     const turn = turns[i];
     history.push(turn);
 
+    // Skip filler turns — they exist for tail-window baseline volume
+    // but shouldn't go through the gateway (no upstream API call needed).
+    if (turn.isFiller) continue;
+
     // Only send a request on user turns (the gateway returns the assistant response)
     if (turn.role !== "user") continue;
 
