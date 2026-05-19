@@ -193,14 +193,18 @@ export function extractUpstreamUrlHeader(
  * possible). Ordered from most-specific to most-general.
  */
 const PROJECT_PATH_PATTERNS: RegExp[] = [
-  // "cwd": "/home/…/project" or "cwd":"/Users/…/project" (JSON-style)
-  /["']?cwd["']?\s*[:=]\s*["']?(\/(?:home|Users)\/[^\s"',}]+)/,
-  // Working directory: /home/user/project
-  /[Ww]orking\s+directory[:=]\s*(\/(?:home|Users)\/[^\s"',]+)/,
-  // CLAUDE.md / AGENTS.md / .lore.md file path → take the directory
-  /(\/(?:home|Users)\/[^\s"',]+)\/(?:CLAUDE|AGENTS|\.lore)\.md/,
-  // Generic absolute path starting with /home/ or /Users/ — first occurrence
-  // Captures until whitespace, quote, comma, or bracket.
+  // "cwd": "/path/to/project" (JSON-style in tool definitions).
+  // Accepts any absolute path — the surrounding structure (key + quotes)
+  // provides enough specificity to avoid false positives.
+  /["']?cwd["']?\s*[:=]\s*["']?(\/[^\s"',}]+)/,
+  // Working directory: /path/to/project
+  // Accepts any absolute path — the "Working directory" prefix is unambiguous.
+  /[Ww]orking\s+directory[:=]\s*(\/[^\s"',]+)/,
+  // CLAUDE.md / AGENTS.md / .lore.md file path → take the directory.
+  // Accepts any absolute path — the known filename suffix is unambiguous.
+  /(\/[^\s"',]+)\/(?:CLAUDE|AGENTS|\.lore)\.md/,
+  // Generic absolute path starting with /home/ or /Users/ — first occurrence.
+  // Kept narrow intentionally to avoid matching system paths (/usr/lib, /etc, …).
   /(\/(?:home|Users)\/[\w./-]+)/,
 ];
 
@@ -256,8 +260,8 @@ export function getProjectPath(
   // Extract git remote from header (independent of path resolution).
   const gitRemote = extractGitRemoteHeader(headers);
 
-  // 1. Explicit header override
-  const headerPath = headers["x-lore-project"];
+  // 1. Explicit header override (sanitized)
+  const headerPath = extractProjectHeader(headers);
   if (headerPath) return { path: headerPath, source: "header", gitRemote };
 
   // 2. Infer from system prompt content
@@ -293,6 +297,36 @@ export function extractGitRemoteHeader(
   if (!sanitized || sanitized.length > MAX_GIT_REMOTE_LENGTH) return undefined;
 
   return normalizeRemoteUrl(sanitized);
+}
+
+// ---------------------------------------------------------------------------
+// Project path header extraction
+// ---------------------------------------------------------------------------
+
+/** Maximum allowed length for a project path header value. */
+const MAX_PROJECT_PATH_LENGTH = 1024;
+
+/**
+ * Extract and validate the `X-Lore-Project` header from a request.
+ * Strips control characters, trims whitespace, and rejects non-absolute paths.
+ * Returns `undefined` when the header is absent or invalid.
+ */
+export function extractProjectHeader(
+  headers: Record<string, string>,
+): string | undefined {
+  const raw = headers["x-lore-project"];
+  if (!raw) return undefined;
+
+  // Strip control characters (newlines, carriage returns, null bytes) to
+  // prevent header injection and DB corruption.
+  const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (!sanitized || sanitized.length > MAX_PROJECT_PATH_LENGTH) return undefined;
+
+  // Must be an absolute path
+  if (!sanitized.startsWith("/")) return undefined;
+
+  // Strip trailing slashes for consistency
+  return sanitized.replace(/\/+$/, "") || undefined;
 }
 
 // ---------------------------------------------------------------------------

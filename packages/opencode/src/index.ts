@@ -250,6 +250,8 @@ export const LorePlugin: Plugin = async (ctx) => {
     // gateway can forward requests to the correct endpoint.
     "chat.headers": async (input, output) => {
       output.headers["x-lore-agent"] = input.agent;
+      // Inject project path so the gateway can attribute data correctly.
+      output.headers["x-lore-project"] = ctx.worktree || ctx.directory;
       if (cachedGitRemote === undefined) {
         const projectPath = ctx.worktree || ctx.directory;
         cachedGitRemote = getGitRemote(projectPath) ?? "";
