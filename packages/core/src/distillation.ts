@@ -337,6 +337,112 @@ export function messagesToText(
     .join("\n\n");
 }
 
+// ---------------------------------------------------------------------------
+// Pre-scan: detect high-priority user assertions in a segment
+// ---------------------------------------------------------------------------
+
+/**
+ * A user assertion detected by regex pre-scan. These are injected into the
+ * distillation prompt as "pinned assertions" so the observer LLM cannot
+ * accidentally drop them when the surrounding segment is dominated by
+ * routine code or tool output.
+ */
+export type PinnedAssertion = {
+  /** The raw sentence containing the assertion (up to ~200 chars). */
+  text: string;
+  /** HH:MM timestamp from the message's `created_at`. */
+  time: string;
+};
+
+/**
+ * Patterns that identify assertion-like language in raw user messages.
+ *
+ * Two groups:
+ * 1. Instruction patterns (from instruction-detect.ts — proven in production)
+ * 2. Preference-change patterns (the gap that causes PR-3 eval failure)
+ *
+ * These operate on the raw user text, not the observer's normalized output.
+ */
+const ASSERTION_PATTERNS: RegExp[] = [
+  // Body char class `[^\n.!,]` ensures the match stops at sentence-ending
+  // punctuation or newlines instead of consuming them. Without this, the
+  // lazy `.{…}?` would swallow periods/commas as regular chars and the
+  // terminator group would never fire until much later in the string.
+  //
+  // ── Instruction patterns ───────────────────────────────────────────
+  /\balways\b [^\n.!,]{10,80}(?:[.!,]|\n|$)/gi,
+  /\bnever\b [^\n.!,]{10,80}(?:[.!,]|\n|$)/gi,
+  /\bmake sure to [^\n.!,]{10,80}(?:[.!,]|\n|$)/gi,
+  /\bdon'?t forget (?:to )?[^\n.!,]{10,80}(?:[.!,]|\n|$)/gi,
+  /\bI (?:want|need|prefer|expect) (?:you to )?[^\n.!,]{10,80}(?:[.!,]|\n|$)/gi,
+
+  // ── Preference-change patterns ─────────────────────────────────────
+  // Lower minimum (3) because the target name can be short (e.g., "pnpm").
+  /\bswitch(?:ed|ing)? (?:to|from) [^\n.!,]{3,120}(?:[.!,]|\n|$)/gi,
+  /\blet'?s (?:use|go with|switch to|move to|migrate to) [^\n.!,]{3,120}(?:[.!,]|\n|$)/gi,
+  /\b(?:from now on|going forward),?\s+[^\n.!,]{3,120}(?:[.!,]|\n|$)/gi,
+  /\bactually,?\s+(?:let'?s|I(?:'d| would) (?:rather|prefer)) [^\n.!,]{3,120}(?:[.!,]|\n|$)/gi,
+  /\bI(?:'ve| have) decided to [^\n.!,]{3,120}(?:[.!,]|\n|$)/gi,
+  /\bno longer (?:use|want|need|using) [^\n.!,]{3,80}(?:[.!,]|\n|$)/gi,
+  /\breplac(?:e|ed|ing) [^\n.!,]{3,40} with [^\n.!,]{3,80}(?:[.!,]|\n|$)/gi,
+  /\bI (?:switched|moved|migrated|changed) (?:to|from) [^\n.!,]{3,120}(?:[.!,]|\n|$)/gi,
+];
+
+/** Max pinned assertions per segment to prevent prompt bloat. */
+const MAX_PINNED_ASSERTIONS = 5;
+
+/**
+ * Scan user messages in a segment for high-priority assertions (preferences,
+ * directives, preference changes). Returns up to {@link MAX_PINNED_ASSERTIONS}
+ * deduplicated assertion snippets with timestamps.
+ *
+ * Only scans `role === "user"` messages — assertions come from the user.
+ */
+export function detectAssertions(messages: TemporalMessage[]): PinnedAssertion[] {
+  const results: PinnedAssertion[] = [];
+  // Track lowercased texts for dedup — both exact and substring overlap.
+  const seenTexts: string[] = [];
+
+  for (const m of messages) {
+    if (m.role !== "user") continue;
+
+    for (const pattern of ASSERTION_PATTERNS) {
+      pattern.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(m.content)) !== null) {
+        // Use the full match as the assertion text (not just capture group)
+        let text = match[0].trim();
+        // Cap length to avoid injecting huge blocks
+        if (text.length > 200) text = text.slice(0, 200) + "…";
+
+        const key = text.toLowerCase();
+
+        // Skip if this text is a substring of an existing match, or if an
+        // existing match is a substring of this text (overlapping patterns).
+        let isOverlap = false;
+        for (let i = 0; i < seenTexts.length; i++) {
+          if (key.includes(seenTexts[i]) || seenTexts[i].includes(key)) {
+            // If the new match is longer, replace the shorter one
+            if (key.length > seenTexts[i].length) {
+              seenTexts[i] = key;
+              results[i] = { text, time: formatTime(m.created_at) };
+            }
+            isOverlap = true;
+            break;
+          }
+        }
+        if (isOverlap) continue;
+
+        seenTexts.push(key);
+        results.push({ text, time: formatTime(m.created_at) });
+        if (results.length >= MAX_PINNED_ASSERTIONS) return results;
+      }
+    }
+  }
+
+  return results;
+}
+
 type DistillationResult = {
   observations: string;
 };
@@ -762,6 +868,17 @@ async function distillSegment(input: {
 }): Promise<DistillationResult | null> {
   const prior = latestObservations(input.projectPath, input.sessionID);
   const text = messagesToText(input.messages);
+  // Pre-scan for high-priority user assertions that might be lost in a
+  // large segment dominated by routine code or tool output.
+  const assertions = detectAssertions(input.messages);
+  const pinnedAssertions = assertions.length > 0
+    ? assertions.map((a) => `- "${a.text}" (${a.time})`).join("\n")
+    : undefined;
+  if (assertions.length > 0) {
+    log.info(
+      `pinned ${assertions.length} user assertion(s) in segment of ${input.messages.length} msgs`,
+    );
+  }
   // Derive session date from first message timestamp
   const first = input.messages[0];
   const date = first
@@ -775,6 +892,7 @@ async function distillSegment(input: {
     priorObservations: prior,
     date,
     messages: text,
+    pinnedAssertions,
   });
 
   const model = input.model ?? config().model;
