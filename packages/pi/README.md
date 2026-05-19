@@ -20,18 +20,12 @@ Then run `pi install` once. The extension auto-loads on every Pi session.
 
 ## Local embeddings (optional)
 
-By default, recall uses `fastembed` (bge-small-en-v1.5, ~33MB) for on-device vector search — no API key required. `fastembed` ships native bindings via `onnxruntime-node`, which has known install issues on some configurations (e.g. CUDA 13 on Linux/x64 — see [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)). It's declared as an `optionalDependencies` of `@loreai/core`, so install will succeed regardless.
+By default, recall uses [`@huggingface/transformers`](https://www.npmjs.com/package/@huggingface/transformers) with `nomic-embed-text-v1.5` (768-dim INT8 quantized, ~137 MB) for on-device vector search — no API key required. The model is downloaded on first use and cached locally.
 
-When fastembed isn't usable, recall has graceful fallbacks (cheapest first):
+When installed via npm, local embeddings use the native `onnxruntime-node` backend, which may fail on some configurations (e.g. CUDA 13 on Linux/x64 — see [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)). When local embeddings aren't available, recall has graceful fallbacks:
 
 1. **Auto-fallback to a hosted provider** — set `VOYAGE_API_KEY` or `OPENAI_API_KEY` in your env. The first `embed()` call detects the missing local provider and swaps over for the rest of the process. No config changes needed.
-2. **Force the local install** — skip the CUDA EP download (the CPU EP is sufficient for `bge-small-en-v1.5`):
-
-   ```bash
-   ONNXRUNTIME_NODE_INSTALL_CUDA=skip pi install
-   ```
-
-3. **Pin a hosted provider explicitly** in `.lore.json`:
+2. **Pin a hosted provider explicitly** in `.lore.json`:
 
    ```json
    { "search": { "embeddings": { "provider": "voyage" } } }
@@ -41,7 +35,28 @@ When fastembed isn't usable, recall has graceful fallbacks (cheapest first):
 
 If none apply, recall transparently falls back to FTS-only search.
 
-> Note: `@anush008/tokenizers` (a fastembed dep) has no native package for `linux-arm64`, so local embeddings are unsupported on that platform regardless of the install path. Use the auto-fallback or pin a hosted provider.
+## Local / self-hosted LLM providers
+
+If you use a local LLM server (vllm, llama.cpp, ollama, etc.), set an environment variable so Lore's gateway knows where to forward requests:
+
+```bash
+export LORE_UPSTREAM_VLLM=http://localhost:8000
+# or
+export LORE_UPSTREAM_OLLAMA=http://localhost:11434
+```
+
+The URL should be the **server root** — do not include `/v1` (the gateway appends API paths automatically). The naming convention is `LORE_UPSTREAM_<PROVIDER>` where `<PROVIDER>` is the uppercased Pi provider name with hyphens replaced by underscores:
+
+| Provider | Env var |
+|----------|---------|
+| `vllm` | `LORE_UPSTREAM_VLLM` |
+| `llamacpp` | `LORE_UPSTREAM_LLAMACPP` |
+| `ollama` | `LORE_UPSTREAM_OLLAMA` |
+| `lmstudio` | `LORE_UPSTREAM_LMSTUDIO` |
+| `tgi` | `LORE_UPSTREAM_TGI` |
+| `litellm` | `LORE_UPSTREAM_LITELLM` |
+
+Cloud providers (Anthropic, OpenAI, etc.) are routed automatically by model name and don't need this.
 
 ## Companion packages
 

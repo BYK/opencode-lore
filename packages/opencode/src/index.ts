@@ -10,6 +10,11 @@ import { log, getGitRemote } from "@loreai/core";
  *
  * Providers using other protocols (Google SDK, AWS Bedrock SDK)
  * are not redirected but still benefit from gateway model-prefix routing.
+ *
+ * For local/self-hosted providers, set `LORE_UPSTREAM_<PROVIDER>=<url>`
+ * (e.g. `LORE_UPSTREAM_VLLM=http://localhost:8000`) so the gateway knows
+ * where to forward requests. Cloud providers are routed automatically by
+ * model name prefix.
  */
 const GATEWAY_PROVIDERS: string[] = [
   // anthropic-messages API
@@ -30,6 +35,16 @@ const GATEWAY_PROVIDERS: string[] = [
   "nvidia",
   "mistral",
   "google",
+  // Local / self-hosted (OpenAI-compatible)
+  "vllm",
+  "llamacpp",
+  "ollama",
+  "lmstudio",
+  "jan",
+  "localai",
+  "tgi",
+  "tabbyml",
+  "litellm",
 ];
 
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
@@ -231,6 +246,8 @@ export const LorePlugin: Plugin = async (ctx) => {
     // (title generation, summary agents, etc.) from real conversation turns.
     // Also inject the git remote URL so the remote gateway can group
     // worktrees/clones of the same repo without filesystem access.
+    // For local/custom providers, inject the original upstream URL so the
+    // gateway can forward requests to the correct endpoint.
     "chat.headers": async (input, output) => {
       output.headers["x-lore-agent"] = input.agent;
       if (cachedGitRemote === undefined) {
@@ -239,6 +256,16 @@ export const LorePlugin: Plugin = async (ctx) => {
       }
       if (cachedGitRemote) {
         output.headers["x-lore-git-remote"] = cachedGitRemote;
+      }
+      // Inject upstream URL for local/custom providers (LORE_UPSTREAM_<PROVIDER>).
+      // input.provider is a ProviderContext { source, info: Provider, options }.
+      const providerID = input.provider?.info?.id;
+      if (providerID) {
+        const envKey = `LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}`;
+        const upstream = process.env[envKey];
+        if (upstream) {
+          output.headers["x-lore-upstream-url"] = upstream;
+        }
       }
     },
   };

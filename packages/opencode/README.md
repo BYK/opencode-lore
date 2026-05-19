@@ -24,13 +24,37 @@ Restart OpenCode and the plugin will be installed automatically.
 
 ## Local embeddings (optional)
 
-Recall uses `fastembed` for on-device vector search by default. It's an `optionalDependencies` of `@loreai/core`: if its native `onnxruntime-node` postinstall fails (e.g. CUDA 13 on Linux/x64 — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)), install still succeeds. Recovery options, in order of effort:
+Recall uses [`@huggingface/transformers`](https://www.npmjs.com/package/@huggingface/transformers) with `nomic-embed-text-v1.5` (768-dim INT8 quantized, ~137 MB) for on-device vector search by default — no API key required. The model is downloaded on first use and cached locally.
 
-1. **Set `VOYAGE_API_KEY` or `OPENAI_API_KEY`** — when fastembed can't load, recall transparently switches to that provider on the first call. Zero config.
+When installed via npm, local embeddings use the native `onnxruntime-node` backend, which may fail on some configurations (e.g. CUDA 13 on Linux/x64 — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)). When local embeddings aren't available, recall has graceful fallbacks:
+
+1. **Set `VOYAGE_API_KEY` or `OPENAI_API_KEY`** — recall transparently switches to that provider on the first call. Zero config.
 2. **Configure `search.embeddings.provider`** to `"voyage"` / `"openai"` in `.lore.json` to skip the local probe entirely.
-3. **Force the optional install** with `ONNXRUNTIME_NODE_INSTALL_CUDA=skip` set before `npm install` — the bundled CPU EP is sufficient for `bge-small-en-v1.5`.
 
-If none of the above are set and fastembed isn't available, recall falls back to FTS-only.
+If none of the above are set and local embeddings aren't available, recall falls back to FTS-only search.
+
+## Local / self-hosted LLM providers
+
+If you use a local LLM server (vllm, llama.cpp, ollama, etc.), set an environment variable so Lore's gateway knows where to forward requests:
+
+```bash
+export LORE_UPSTREAM_VLLM=http://localhost:8000
+# or
+export LORE_UPSTREAM_OLLAMA=http://localhost:11434
+```
+
+The URL should be the **server root** — do not include `/v1` (the gateway appends API paths automatically). The naming convention is `LORE_UPSTREAM_<PROVIDER>` where `<PROVIDER>` is the uppercased provider name with hyphens replaced by underscores:
+
+| Provider | Env var |
+|----------|---------|
+| `vllm` | `LORE_UPSTREAM_VLLM` |
+| `llamacpp` | `LORE_UPSTREAM_LLAMACPP` |
+| `ollama` | `LORE_UPSTREAM_OLLAMA` |
+| `lmstudio` | `LORE_UPSTREAM_LMSTUDIO` |
+| `tgi` | `LORE_UPSTREAM_TGI` |
+| `litellm` | `LORE_UPSTREAM_LITELLM` |
+
+Cloud providers (Anthropic, OpenAI, etc.) are routed automatically by model name and don't need this.
 
 ## Companion packages
 

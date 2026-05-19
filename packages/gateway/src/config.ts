@@ -136,6 +136,48 @@ export function resolveUpstreamRoute(model: string): UpstreamRoute | null {
 }
 
 // ---------------------------------------------------------------------------
+// Upstream URL header — local/custom provider support
+// ---------------------------------------------------------------------------
+
+/** Maximum allowed length for an upstream URL header value. */
+const MAX_UPSTREAM_URL_LENGTH = 2048;
+
+/**
+ * Extract and validate the `X-Lore-Upstream-URL` header from a request.
+ *
+ * Used by local/custom providers (vllm, llama.cpp, ollama, etc.) to tell the
+ * gateway where to forward the request when `resolveUpstreamRoute()` returns
+ * null. The Pi and OpenCode plugins inject this header when the user sets
+ * `LORE_UPSTREAM_<PROVIDER>=<url>` in their environment.
+ *
+ * Returns `undefined` when the header is absent or invalid.
+ */
+export function extractUpstreamUrlHeader(
+  headers: Record<string, string>,
+): string | undefined {
+  const raw = headers["x-lore-upstream-url"];
+  if (!raw) return undefined;
+
+  // Sanitize: strip control characters, trim.
+  const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (!sanitized || sanitized.length > MAX_UPSTREAM_URL_LENGTH) return undefined;
+
+  // Must be a valid URL (http or https only, no embedded credentials).
+  try {
+    const url = new URL(sanitized);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    if (url.username || url.password) return undefined;
+    // Strip trailing /v1 — users often copy the full endpoint URL from
+    // local LLM docs (e.g. http://localhost:8000/v1) but the gateway
+    // appends /v1/... itself when building the upstream request.
+    const pathname = url.pathname.replace(/\/+$/, "").replace(/\/v1$/, "");
+    return url.origin + pathname;
+  } catch {
+    return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Project path inference
 // ---------------------------------------------------------------------------
 
