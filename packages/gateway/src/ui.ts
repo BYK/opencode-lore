@@ -479,20 +479,21 @@ form.inline { display: inline; }
 /* --- Daily cost trend chart --- */
 .daily-chart {
   display: flex; align-items: flex-end; gap: 3px;
-  height: 100px; padding: 8px 0; margin: 12px 0;
+  height: 120px; padding: 8px 0; margin: 12px 0;
   border-bottom: 1px solid var(--border);
 }
 .day-col {
   flex: 1; display: flex; flex-direction: column;
-  align-items: center; min-width: 0;
+  align-items: center; justify-content: flex-end;
+  min-width: 0; height: 100%;
 }
 .day-bar {
   width: 100%; background: #60a5fa; border-radius: 2px 2px 0 0;
-  min-height: 2px;
+  min-height: 2px; flex-shrink: 0;
 }
 .day-label {
   font-size: 0.65em; color: var(--fg3); margin-top: 4px;
-  white-space: nowrap; overflow: hidden;
+  white-space: nowrap; overflow: hidden; flex-shrink: 0;
 }
 .actions { margin: 16px 0; display: flex; gap: 8px; }
 .empty { color: var(--fg3); font-style: italic; padding: 24px 0; text-align: center; }
@@ -2120,12 +2121,13 @@ function pageCosts(): string {
   if (dailyCosts.some((d) => d.cost > 0)) {
     body += `<h3>Daily Cost Trend (last 14 days)</h3>`;
     body += `<div class="daily-chart">`;
+    const barMaxPx = 90; // max bar height in pixels (leaves room for label)
     for (const day of dailyCosts) {
-      const heightPct = (day.cost / maxDayCost) * 100;
+      const barPx = Math.max(2, (day.cost / maxDayCost) * barMaxPx);
       const label = day.date.slice(5); // "MM-DD"
       const tooltip = `${day.date}: ${formatUSD(day.cost)} (${day.sessions} session${day.sessions !== 1 ? "s" : ""})`;
       body += `<div class="day-col" title="${esc(tooltip)}">
-        <div class="day-bar" style="height:${heightPct.toFixed(1)}%"></div>
+        <div class="day-bar" style="height:${barPx.toFixed(0)}px"></div>
         <div class="day-label">${esc(label)}</div>
       </div>`;
     }

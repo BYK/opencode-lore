@@ -850,7 +850,7 @@ export function computeDailyCosts(days = 14, preloaded?: HistoricalEstimates): D
     buckets.set(d.toISOString().slice(0, 10), { cost: 0, sessions: 0 });
   }
 
-  // Historical sessions
+  // Historical sessions (excludes currently-live sessions)
   const hist = preloaded ?? computeHistoricalEstimates();
   for (const s of hist.sessions) {
     if (s.lastMessage < cutoffMs) continue;
@@ -864,13 +864,18 @@ export function computeDailyCosts(days = 14, preloaded?: HistoricalEstimates): D
     bucket.sessions += 1;
   }
 
-  // Live sessions (bucket to today)
+  // Live sessions — bucket by today's date. Historical estimates skip live
+  // sessions (to avoid double-counting), so we must add them here. We bucket
+  // to today since these sessions are actively accumulating cost right now.
   const todayKey = today.toISOString().slice(0, 10);
   const todayBucket = buckets.get(todayKey);
   if (todayBucket) {
     for (const [, c] of sessions) {
-      todayBucket.cost += totalActualCost(c);
-      todayBucket.sessions += 1;
+      const cost = totalActualCost(c);
+      if (cost > 0) {
+        todayBucket.cost += cost;
+        todayBucket.sessions += 1;
+      }
     }
   }
 
