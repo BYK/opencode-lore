@@ -814,3 +814,68 @@ export function invalidateHistoricalCache(): void {
   historicalCache = null;
   historicalCacheAt = 0;
 }
+
+// ---------------------------------------------------------------------------
+// Daily cost aggregation (for trend chart)
+// ---------------------------------------------------------------------------
+
+export type DailyCostEntry = {
+  /** Date string in YYYY-MM-DD format. */
+  date: string;
+  /** Total USD cost for the day (conversation + worker). */
+  cost: number;
+  /** Number of sessions active on this day. */
+  sessions: number;
+};
+
+/**
+ * Compute per-day cost totals over the last N days.
+ *
+ * Uses historical estimates (persisted snapshots) bucketed by lastMessage date,
+ * plus live session costs bucketed to today. Pass a pre-fetched `preloaded`
+ * to avoid redundant DB scans when the caller already has the data.
+ */
+export function computeDailyCosts(days = 14, preloaded?: HistoricalEstimates): DailyCostEntry[] {
+  const today = new Date();
+  const cutoff = new Date(today);
+  cutoff.setDate(cutoff.getDate() - days + 1);
+  cutoff.setHours(0, 0, 0, 0);
+  const cutoffMs = cutoff.getTime();
+
+  // Initialize date buckets
+  const buckets = new Map<string, { cost: number; sessions: number }>();
+  for (let i = 0; i < days; i++) {
+    const d = new Date(cutoff);
+    d.setDate(d.getDate() + i);
+    buckets.set(d.toISOString().slice(0, 10), { cost: 0, sessions: 0 });
+  }
+
+  // Historical sessions
+  const hist = preloaded ?? computeHistoricalEstimates();
+  for (const s of hist.sessions) {
+    if (s.lastMessage < cutoffMs) continue;
+    const dateKey = new Date(s.lastMessage).toISOString().slice(0, 10);
+    const bucket = buckets.get(dateKey);
+    if (!bucket) continue;
+    const sessionCost = s.persisted
+      ? s.persisted.conversationCost + s.persisted.workerCost
+      : s.distillationCost;
+    bucket.cost += sessionCost;
+    bucket.sessions += 1;
+  }
+
+  // Live sessions (bucket to today)
+  const todayKey = today.toISOString().slice(0, 10);
+  const todayBucket = buckets.get(todayKey);
+  if (todayBucket) {
+    for (const [, c] of sessions) {
+      todayBucket.cost += totalActualCost(c);
+      todayBucket.sessions += 1;
+    }
+  }
+
+  // Convert to sorted array
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, v]) => ({ date, cost: v.cost, sessions: v.sessions }));
+}
