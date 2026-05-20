@@ -19,6 +19,10 @@ import {
   MAX_TOOL_CALL_WARMING_MS,
   MIN_WARMUPS_FOR_ROI_CHECK,
   MIN_SESSION_HIT_RATE,
+  MIN_TURNS_FOR_WARMING,
+  MIN_INPUT_TOKENS_FOR_WARMING,
+  MIN_RETURN_PROBABILITY_FLOOR,
+  TOOL_CALL_MAX_CYCLES,
   HISTOGRAM_BINS,
   BREAK_FLOOR_MS,
   _resetForTest,
@@ -52,7 +56,7 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
     fingerprint: "abc123",
     lastRequestTime: Date.now() - 270_000, // 4.5 min ago (inside 5m warmup window)
     lastUserTurnTime: Date.now() - 270_000,
-    messageCount: 10,
+    messageCount: 20,
     turnsSinceCuration: 2,
     consecutiveTextOnlyTurns: 0,
     recallStore: new Map(),
@@ -60,6 +64,7 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
     lastModel: "claude-sonnet-4-20250514",
     lastProtocol: "anthropic",
     resolvedConversationTTL: "5m",
+    lastInputTokens: 100_000, // above MIN_INPUT_TOKENS_FOR_WARMING
     ...overrides,
   };
 }
@@ -549,7 +554,7 @@ describe("shouldWarm", () => {
     const now = Date.now();
     const state = makeSessionState({
       lastRequestTime: now - 270_000,
-      messageCount: 4, // 2 turns (user+assistant each) — below threshold of 3 turns (6 messages)
+      messageCount: 8, // 4 turns (user+assistant each) — below threshold of 5 turns (10 messages)
       cacheAnalytics: {
         ...makeCacheAnalytics(),
         lastRequestBody: compressBody('{"test": true}'),
@@ -1670,15 +1675,16 @@ describe("shouldWarm tool-call warming", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
   });
 
-  test("works across multiple TTL windows", () => {
+  test("tool-call warming stops at TOOL_CALL_MAX_CYCLES even across TTL windows", () => {
     const now = Date.now();
     // 14.5 min — in 3rd 5m window's warmup margin (14:15-15:00)
+    // With TOOL_CALL_MAX_CYCLES=2 and warmupCount=2, this should be rejected.
     const state = makeToolCallState({
       lastRequestTime: now - 870_000,
       warmup: {
         lastWarmupAt: now - 270_000, // past cooldown
-        warmupCount: 2,
-        totalWarmups: 2,
+        warmupCount: TOOL_CALL_MAX_CYCLES,
+        totalWarmups: TOOL_CALL_MAX_CYCLES,
         warmupHits: 0,
         disabled: false,
       },
@@ -1686,7 +1692,8 @@ describe("shouldWarm tool-call warming", () => {
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const hist = createHistogram();
 
-    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+    // Tool-call warming is now capped at TOOL_CALL_MAX_CYCLES
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
   });
 
   test("requires minimum turns", () => {
@@ -1844,7 +1851,7 @@ describe("shouldWarm session ROI guard", () => {
       warmup: {
         lastWarmupAt: 0,
         warmupCount: 0,
-        totalWarmups: 12,  // >= MIN_WARMUPS_FOR_ROI_CHECK (10)
+        totalWarmups: 12,  // >= MIN_WARMUPS_FOR_ROI_CHECK (5)
         warmupHits: 1,     // 8.3% < MIN_SESSION_HIT_RATE (20%)
         disabled: false,
       },
@@ -1890,7 +1897,7 @@ describe("shouldWarm session ROI guard", () => {
       warmup: {
         lastWarmupAt: 0,
         warmupCount: 0,
-        totalWarmups: 5,   // < MIN_WARMUPS_FOR_ROI_CHECK (10)
+        totalWarmups: MIN_WARMUPS_FOR_ROI_CHECK - 1, // below threshold
         warmupHits: 0,     // 0% hit rate, but too few warmups to judge
         disabled: false,
       },
@@ -1915,7 +1922,7 @@ describe("shouldWarm session ROI guard", () => {
         lastWarmupAt: 0,
         warmupCount: 0,
         totalWarmups: 15,
-        warmupHits: 1,     // 6.7% < MIN_SESSION_HIT_RATE (20%)
+        warmupHits: 1,     // 6.7% < MIN_SESSION_HIT_RATE (25%)
         disabled: false,
       },
       cacheAnalytics: {
@@ -1928,5 +1935,295 @@ describe("shouldWarm session ROI guard", () => {
     for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
 
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cost optimization fixes (context size gate, threshold floor, tool-call cap)
+// ---------------------------------------------------------------------------
+
+describe("shouldWarm cost optimization gates", () => {
+  beforeEach(() => {
+    _resetForTest();
+  });
+
+  test("returns false when lastInputTokens < MIN_INPUT_TOKENS_FOR_WARMING", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      lastInputTokens: 30_000, // below 50K threshold
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("returns true when lastInputTokens >= MIN_INPUT_TOKENS_FOR_WARMING", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      lastInputTokens: 100_000, // above 50K threshold
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    // Histogram with many breaks — high P(returns)
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("context size gate applies to tool-call path", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      lastStopReason: "tool_use",
+      lastInputTokens: 20_000, // below 50K threshold
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("context size gate does NOT apply to forceKeepWarm path", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      lastInputTokens: 10_000, // well below 50K — but force-keep overrides
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 0,
+        warmupHits: 0,
+        disabled: false,
+        forceKeepWarm: true,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"test": true}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("tool-call warming stops after TOOL_CALL_MAX_CYCLES", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 570_000, // 9.5 min — in warmup margin of 2nd window
+      lastStopReason: "tool_use",
+      warmup: {
+        lastWarmupAt: now - 310_000, // past cooldown
+        warmupCount: TOOL_CALL_MAX_CYCLES, // already at cap
+        totalWarmups: TOOL_CALL_MAX_CYCLES,
+        warmupHits: 0,
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("tool-call warming allowed when below TOOL_CALL_MAX_CYCLES", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      lastStopReason: "tool_use",
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: TOOL_CALL_MAX_CYCLES - 1, // one below cap
+        totalWarmups: TOOL_CALL_MAX_CYCLES - 1,
+        warmupHits: TOOL_CALL_MAX_CYCLES - 1, // good hit rate
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("initial commitment requires P(returns) >= MIN_RETURN_PROBABILITY_FLOOR", () => {
+    const now = Date.now();
+    // Histogram with mostly short gaps and very few breaks — survival drops
+    // at 4.5m but not to zero. This creates P(returns) ~29%, above the old
+    // 8.7% threshold but below the new 30% floor.
+    const hist = createHistogram();
+    for (let i = 0; i < 98; i++) recordGap(hist, 30_000);  // 30s — active
+    for (let i = 0; i < 2; i++) recordGap(hist, 360_000);  // 6m — break
+
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      consecutiveTextOnlyTurns: 0,
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+
+    // Verify this session has P(returns) below the 30% floor
+    const survivalAtIdle = survivalFunction(hist, 270_000);
+    const breakFrac = breakFraction(hist);
+    const pFinished = pSessionFinished({
+      survivalAtIdle,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: breakFrac,
+      totalTurns: 10,
+    });
+    const pReturns = 1.0 - pFinished;
+    expect(pReturns).toBeLessThan(MIN_RETURN_PROBABILITY_FLOOR);
+    // But it would have passed the old break-even threshold
+    const oldThreshold = costThreshold(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+    expect(pReturns).toBeGreaterThan(oldThreshold);
+
+    // With the new floor, warming should be rejected
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("session-level ROI check kicks in at 5 warmups", () => {
+    const now = Date.now();
+    // Session with 5 warmups and 0 hits → hit rate 0% < 25%
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: MIN_WARMUPS_FOR_ROI_CHECK, // exactly at threshold
+        warmupHits: 0, // 0% hit rate
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("session-level ROI check passes when hit rate is above threshold", () => {
+    const now = Date.now();
+    // Session with 5 warmups and 2 hits → hit rate 40% > 25%
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: MIN_WARMUPS_FOR_ROI_CHECK,
+        warmupHits: 2, // 40% hit rate > 25%
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("returns false when lastInputTokens is undefined (first turn)", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      lastInputTokens: undefined, // no response yet — ?? 0 < 50K
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("Phase B continuation uses rising threshold, not the floor", () => {
+    const now = Date.now();
+    // Session has been idle for 9.5 min (past first 5m TTL window).
+    // In warmup margin of 2nd window: 9.5min % 5min = 4.5min > 4.25min.
+    // With 1 cycle already spent, risingThreshold(k=2) ≈ 17.4% for Sonnet 5m.
+    // We need P(returns) between 17.4% and 30% to prove Phase B does NOT
+    // use the 30% floor.
+    const state = makeSessionState({
+      lastRequestTime: now - 570_000, // 9.5 min ago
+      warmup: {
+        lastWarmupAt: now - 310_000, // past cooldown
+        warmupCount: 1,
+        totalWarmups: 1,
+        warmupHits: 0,
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+
+    // Histogram: 98% short gaps, 2% long breaks. At 9.5 min idle,
+    // survival is ~2% — P(returns) should land ~29%, between the rising
+    // threshold at k=2 (~17.4%) and the 30% floor.
+    const hist = createHistogram();
+    for (let i = 0; i < 98; i++) recordGap(hist, 30_000);  // 30s
+    for (let i = 0; i < 2; i++) recordGap(hist, 600_000);  // 10m
+
+    // Verify P(returns) is in the interesting range: above rising threshold
+    // at k=2 but below the 30% floor
+    const survivalAtIdle = survivalFunction(hist, 570_000);
+    const breakFrac = breakFraction(hist);
+    const pFinished = pSessionFinished({
+      survivalAtIdle,
+      consecutiveTextOnlyTurns: 0,
+      breakFraction: breakFrac,
+      totalTurns: 10,
+    });
+    const pReturns = 1.0 - pFinished;
+    const risingThresh = cumulativeCostThreshold(
+      2, // cyclesSpent(1) + 1
+      profile.cacheReadCostPerMTok,
+      profile.cacheMissCostPerMTok,
+    );
+    // P(returns) should be above the rising threshold (continuation is profitable)
+    expect(pReturns).toBeGreaterThan(risingThresh);
+    // But below the floor (Phase A would reject this)
+    expect(pReturns).toBeLessThan(MIN_RETURN_PROBABILITY_FLOOR);
+
+    // Phase B should allow warming because it uses risingThreshold, not the floor
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
   });
 });

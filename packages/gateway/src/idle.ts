@@ -42,6 +42,7 @@ import {
   loadGlobalHistograms,
   flushGlobalHistograms,
   MIN_TURNS_FOR_WARMING,
+  MIN_INPUT_TOKENS_FOR_WARMING,
 } from "./cache-warmer";
 import * as Sentry from "@sentry/bun";
 import { runBackground } from "./background-limiter";
@@ -108,6 +109,10 @@ export function startIdleScheduler(
       // 200K Opus tokens). Checked here to avoid expensive profile/histogram
       // work before shouldWarm() rejects them anyway.
       if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) continue;
+
+      // Skip sessions with small context — absolute savings per hit
+      // don't justify the risk of wasted warmups.
+      if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) continue;
 
       // Ensure global histograms are loaded from SQLite for this project
       loadGlobalHistograms(state.projectPath);

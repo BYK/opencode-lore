@@ -78,12 +78,17 @@ export const BLEND_PSEUDOCOUNT = 20;
 export const DEAD_SESSION_THRESHOLD = 0.02;
 
 /** Minimum completed turns before warming is eligible. Filters out one-shot
- *  sessions and ensures the survival model has ≥2 gap observations. */
-export const MIN_TURNS_FOR_WARMING = 3;
+ *  sessions and ensures the survival model has ≥4 gap observations. */
+export const MIN_TURNS_FOR_WARMING = 5;
 
 /** Maximum duration (ms) to keep warming during a tool call before
- *  falling back to normal survival analysis. 30 min ≈ 6 cycles at 5m TTL. */
-export const MAX_TOOL_CALL_WARMING_MS = 30 * 60 * 1000;
+ *  falling back to normal survival analysis. 10 min ≈ 2 cycles at 5m TTL. */
+export const MAX_TOOL_CALL_WARMING_MS = 10 * 60 * 1000;
+
+/** Maximum warmup cycles during a single tool-call break. Most tool
+ *  calls complete in <5 minutes; 2 cycles covers a 10-minute operation
+ *  at 5m TTL, sufficient for 95%+ of tool calls. */
+export const TOOL_CALL_MAX_CYCLES = 2;
 
 /** Max uncached warmup responses before the global circuit breaker trips. */
 const CIRCUIT_BREAKER_MAX_FAILURES = 3;
@@ -94,12 +99,24 @@ const CIRCUIT_BREAKER_MAX_FAILURES = 3;
 export const BREAK_FLOOR_MS = 180_000;
 
 /** Minimum total warmups before session-level hit-rate ROI check kicks in. */
-export const MIN_WARMUPS_FOR_ROI_CHECK = 10;
+export const MIN_WARMUPS_FOR_ROI_CHECK = 5;
 
 /** Minimum session-level hit rate to continue warming. Below this,
- *  warming is empirically unprofitable and we stop. 20% means at least
- *  1 in 5 warmups must result in a confirmed user return. */
-export const MIN_SESSION_HIT_RATE = 0.20;
+ *  warming is empirically unprofitable and we stop. 25% means at least
+ *  1 in 4 warmups must result in a confirmed user return. */
+export const MIN_SESSION_HIT_RATE = 0.25;
+
+/** Minimum total input tokens (input + cache_read + cache_creation) before
+ *  warming is eligible. Below this threshold the absolute savings per hit
+ *  are too small to justify the risk of wasted warmups. At 50K tokens with
+ *  Opus 5m, a hit saves ~$0.29 and a warmup costs ~$0.025. */
+export const MIN_INPUT_TOKENS_FOR_WARMING = 50_000;
+
+/** Minimum P(returns) floor for the initial warming commitment. The
+ *  break-even threshold read/(write-read) is often very low (4–9%),
+ *  which causes nearly every non-dead session to get warmed. This floor
+ *  ensures at least 30% return probability before the first warmup. */
+export const MIN_RETURN_PROBABILITY_FLOOR = 0.30;
 
 // ---------------------------------------------------------------------------
 // Global circuit breaker
@@ -749,10 +766,15 @@ export function shouldWarm(
 
     const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
-    if (cyclesSpent >= maxCycles) return false;
+    // Tool-call-specific cap: most tools complete in <10min (2 cycles at 5m TTL)
+    const effectiveMax = Math.min(maxCycles, TOOL_CALL_MAX_CYCLES);
+    if (cyclesSpent >= effectiveMax) return false;
 
     // Still require some history to have a stored body worth warming
     if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) return false;
+
+    // Context too small — absolute savings per hit don't justify risk
+    if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) return false;
 
     // Only warm in the margin window of the current TTL cycle
     const intoWindow = elapsed % ttlMs;
@@ -767,6 +789,9 @@ export function shouldWarm(
   // session may be a one-shot question not worth warming ($0.30 per
   // wasted warmup at 200K Opus tokens).
   if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) return false;
+
+  // Context too small — absolute savings per hit don't justify risk
+  if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) return false;
 
   // Session marked dead
   if (state.warmup?.disabled) return false;
@@ -796,9 +821,13 @@ export function shouldWarm(
   });
   const pReturns = 1.0 - pFinished;
 
-  // Corrected cost threshold: read / (write - read)
+  // Corrected cost threshold: read / (write - read), with a floor to prevent
+  // warming sessions with trivially low return probability (8.7% for 5m TTL).
+  // NOTE: an explicit minReturnProbability config override intentionally
+  // bypasses the floor — it's a user-controlled knob for tuning.
   const autoThreshold = costThreshold(cacheReadCostPerMTok, cacheMissCostPerMTok);
-  const threshold = cfg.cache.warming.minReturnProbability ?? autoThreshold;
+  const threshold = cfg.cache.warming.minReturnProbability
+    ?? Math.max(MIN_RETURN_PROBABILITY_FLOOR, autoThreshold);
 
   // Max cycles before warming becomes unprofitable
   const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
@@ -841,6 +870,9 @@ export function shouldWarm(
     // Rising cost threshold: after k cycles, the accumulated warmup cost
     // means we need a higher P(returns) to justify the next one.
     // k=1: 8.7%, k=3: 26%, k=5: 43%, k=6: 52% for Opus 5m.
+    // NOTE: intentionally does NOT use MIN_RETURN_PROBABILITY_FLOOR — the
+    // floor only gates the initial commitment (Phase A). Once committed,
+    // the rising threshold handles profitability based on sunk costs.
     const risingThreshold = cumulativeCostThreshold(
       cyclesSpent + 1, // +1 because we're deciding whether to do the NEXT cycle
       cacheReadCostPerMTok,
@@ -978,11 +1010,12 @@ export function computeWarmingSnapshot(
   });
   const pReturns = 1.0 - pFinished;
 
-  // Corrected threshold
+  // Corrected threshold with floor
   const autoThreshold = profile
     ? costThreshold(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok)
     : 0.1;
-  const thresholdVal = cfg.cache.warming.minReturnProbability ?? autoThreshold;
+  const thresholdVal = cfg.cache.warming.minReturnProbability
+    ?? Math.max(MIN_RETURN_PROBABILITY_FLOOR, autoThreshold);
 
   // Commitment model cost analysis
   const maxCyclesVal = profile
@@ -1028,21 +1061,25 @@ export function computeWarmingSnapshot(
           notWarmingReason = "Force-keep: cooldown active";
         }
       }
-    } else if (state.lastStopReason === "tool_use") {
-      if (state.warmup?.disabled) {
-        notWarmingReason = "Warming stopped (/lore:warm:stop)";
-      } else if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
+    } else if (state.lastStopReason === "tool_use" && !state.warmup?.disabled) {
+      // Mirror shouldWarm()'s tool-call entry: `toolCallActive && !disabled`.
+      // If disabled=true, fall through to the normal path below.
+      if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
         notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
+      } else if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) {
+        const tokK = Math.round((state.lastInputTokens ?? 0) / 1000);
+        notWarmingReason = `Context too small (${tokK}k < ${MIN_INPUT_TOKENS_FOR_WARMING / 1000}k tokens)`;
       } else if (idleMs > MAX_TOOL_CALL_WARMING_MS) {
-        notWarmingReason = `Tool call exceeded max duration (${Math.round(idleMs / 60_000)}min > 30min)`;
+        notWarmingReason = `Tool call exceeded max duration (${Math.round(idleMs / 60_000)}min > ${Math.round(MAX_TOOL_CALL_WARMING_MS / 60_000)}min)`;
       } else if ((state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
                  (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) < MIN_SESSION_HIT_RATE) {
         const hitRate = ((state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) * 100).toFixed(0);
         notWarmingReason = `Tool call: session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}%)`;
       } else {
         const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
-        if ((state.warmup?.warmupCount ?? 0) >= maxCyc) {
-          notWarmingReason = "Tool call: break-even exceeded";
+        const effectiveMax = Math.min(maxCyc, TOOL_CALL_MAX_CYCLES);
+        if ((state.warmup?.warmupCount ?? 0) >= effectiveMax) {
+          notWarmingReason = `Tool call: cycle cap reached (${state.warmup?.warmupCount ?? 0} >= ${effectiveMax})`;
         } else {
           const intoWindow = idleMs % ttlMs;
           notWarmingReason = intoWindow < ttlMs - warmupMarginMs
@@ -1054,6 +1091,9 @@ export function computeWarmingSnapshot(
       notWarmingReason = "Already warmed in this TTL window";
     } else if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
       notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
+    } else if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) {
+      const tokK = Math.round((state.lastInputTokens ?? 0) / 1000);
+      notWarmingReason = `Context too small (${tokK}k < ${MIN_INPUT_TOKENS_FOR_WARMING / 1000}k tokens)`;
     } else if (state.warmup?.disabled) {
       notWarmingReason = "Warming stopped (/lore:warm:stop)";
     } else if ((state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
