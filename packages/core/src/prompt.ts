@@ -96,6 +96,33 @@ For each fix, record:
 BAD: 🟡 Fixed an FTS5 search bug
 GOOD: 🟡 FTS5 was doing exact term matching instead of prefix matching in ltm.ts. Fix: added ftsQuery() function that appends * to each search term for prefix matching. Committed as [hash].
 
+DECISIONS AND ALTERNATIVES — PRESERVE ALL OPTIONS CONSIDERED:
+
+When the assistant evaluates multiple approaches, record EVERY alternative with its name and the reason it was chosen or rejected. The user WILL ask "what else was considered?" later.
+
+For each decision point, record:
+- ALL alternatives considered (with their distinguishing names/terms)
+- Which was chosen and WHY
+- Which were rejected and WHY
+
+BAD: 🟡 Switched to flock for advisory locking.
+GOOD: 🟡 Two approaches evaluated for cleanup locking: (1) flock advisory locking — chosen, OS auto-releases on exit including SIGKILL; (2) lock file with staleness check — rejected, race condition window when checking lock age.
+
+BAD: 🟡 Using Redis for caching.
+GOOD: 🟡 Caching approach decision: Redis (chosen — supports TTL, pub/sub invalidation) over Memcached (rejected — no persistence) and in-process LRU (rejected — not shared across instances).
+
+DEBUGGING AND INVESTIGATION — PRESERVE HYPOTHESES:
+
+When investigating a bug, record the sequence of hypotheses including wrong ones. The user WILL ask "what was the first theory?" later.
+
+For each investigation, record:
+- Initial hypothesis and why it seemed plausible
+- Why each wrong hypothesis was ruled out (with specific evidence)
+- The actual root cause when found
+
+BAD: 🟡 Found the disk full issue was caused by stale locks.
+GOOD: 🟡 Investigation: initial hypothesis was cron job misconfigured/disabled — ruled out because cron was running fine (every day at 3 AM, confirmed via crontab -l). Actual root cause: stale lock file at /var/run/upload-svc/cleanup.lock (PID 28451, from Feb 28 crash) preventing cleanup from running.
+
 ASSISTANT-GENERATED CONTENT — THIS IS CRITICAL:
 
 When the assistant produces lists, recommendations, explanations, recipes, schedules, creative content, or any structured output — record EVERY ITEM with its distinguishing details. The user WILL ask about specific items later.

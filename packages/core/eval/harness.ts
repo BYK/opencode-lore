@@ -15,7 +15,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { dirname, resolve, join } from "node:path";
-import type { FixtureEntry } from "../../gateway/src/recorder";
+import type { FixtureEntry, UpstreamInterceptor } from "../../gateway/src/recorder";
 import type {
   EvalConfig,
   EvalResult,
@@ -411,50 +411,13 @@ export async function replaySession(
       cacheWriteTokens: data.usage?.cache_creation_input_tokens ?? 0,
     });
 
-    // Add the scripted assistant response to history AND store it in temporal
-    // so that recall can find the scenario's actual content. The gateway's
-    // postResponse stores the API's own response (which differs from the
-    // scripted content), so we store the scripted turn directly.
+    // Add the scripted assistant response to history.
+    // The scripted interceptor ensures the gateway stores the correct
+    // content — no manual temporal.store() needed.
     const nextTurn = turns[i + 1];
     if (nextTurn && nextTurn.role === "assistant" && !nextTurn.isFiller) {
       history.push(nextTurn);
       i++; // skip the assistant turn in the outer loop
-
-      // Store scripted assistant content in temporal for recall search.
-      // Use a stable eval-specific session ID so all scripted content is
-      // grouped in one searchable session.
-      try {
-        const { temporal } = await import("@loreai/core");
-        const text = nextTurn.content
-          .map((p: any) =>
-            p.type === "text" ? p.text :
-            p.type === "tool_use" ? `[tool:${p.name}] ${JSON.stringify(p.input).slice(0, 500)}` :
-            p.type === "tool_result" ? `[tool:result] ${p.content}` : "",
-          )
-          .filter(Boolean)
-          .join("\n");
-        if (text.trim()) {
-          temporal.store({
-            projectPath: process.cwd(),
-            info: {
-              id: `eval-scripted-${i}`,
-              sessionID: sessionID ?? `eval-replay-${Date.now()}`,
-              role: "assistant" as const,
-              time: { created: nextTurn.timestamp ?? Date.now() },
-            } as any,
-            parts: [{
-              id: `eval-scripted-part-${i}`,
-              sessionID: sessionID ?? `eval-replay-${Date.now()}`,
-              messageID: `eval-scripted-${i}`,
-              type: "text" as const,
-              text,
-              time: { start: 0, end: 0 },
-            } as any],
-          });
-        }
-      } catch {
-        // best-effort — don't fail replay if temporal import fails
-      }
     }
   }
 
@@ -813,8 +776,97 @@ async function replaySessionWithFixtures(
     }
   }
 
-  // --- NORMAL MODE ---
-  return replaySession(session, gateway);
+  // --- NORMAL MODE (with scripted interceptor) ---
+  // Use an interceptor that returns the scenario's scripted assistant
+  // responses instead of calling the real API. This ensures:
+  // 1. The gateway stores the SCRIPTED content in temporal (not the API's
+  //    own response which would be about fabrication/interruptions)
+  // 2. Distillation processes the ground-truth content
+  // 3. No upstream API calls during replay (saves cost)
+  const scriptedInterceptor = buildScriptedInterceptor(session.turns, config.model);
+  setUpstreamInterceptor(scriptedInterceptor);
+
+  try {
+    return await replaySession(session, gateway);
+  } finally {
+    setUpstreamInterceptor(undefined);
+  }
+}
+
+/**
+ * Build an upstream interceptor that returns scripted assistant responses
+ * from the scenario transcript. Each call advances through the assistant
+ * turns in order, returning an Anthropic-format response.
+ *
+ * Assumptions:
+ * - Scripted responses never contain recall tool_use blocks, so the gateway's
+ *   recall follow-up loop never fires (no extra interceptor calls).
+ * - Non-filler user and assistant turns alternate 1:1 in the scenario —
+ *   filler turns between pairs would desync the counter.
+ */
+function buildScriptedInterceptor(
+  turns: ConversationTurn[],
+  model: string,
+): UpstreamInterceptor {
+  // Extract non-filler assistant turns in order
+  const assistantTurns = turns.filter(
+    (t) => t.role === "assistant" && !t.isFiller,
+  );
+  let counter = 0;
+
+  return async () => {
+    if (counter >= assistantTurns.length) {
+      // Fallback: return a simple end_turn response
+      return new Response(
+        JSON.stringify({
+          id: `msg_eval_scripted_${counter}`,
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text: "[end of scripted session]" }],
+          model,
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    const turn = assistantTurns[counter++];
+    const content = turn.content.map((part) => {
+      switch (part.type) {
+        case "text":
+          return { type: "text" as const, text: part.text };
+        case "tool_use":
+          return {
+            type: "tool_use" as const,
+            id: part.id,
+            name: part.name,
+            input: part.input,
+          };
+        default:
+          return { type: "text" as const, text: `[${part.type}]` };
+      }
+    });
+
+    const hasToolUse = content.some((b) => b.type === "tool_use");
+    return new Response(
+      JSON.stringify({
+        id: `msg_eval_scripted_${counter}`,
+        type: "message",
+        role: "assistant",
+        content,
+        model,
+        stop_reason: hasToolUse ? "tool_use" : "end_turn",
+        stop_sequence: null,
+        usage: {
+          input_tokens: turn.tokens ?? 100,
+          output_tokens: Math.ceil((turn.tokens ?? 100) * 0.3),
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
 }
 
 // ---------------------------------------------------------------------------
