@@ -27,7 +27,6 @@ const PROJECT_B_TS = "/tmp/eval-project-ts-cli";
 const CROSS_PROJECT_BASELINES: BaselineMode[] = [
   "lore",
   "lore-memory-only",
-  "auto-mem0",
 ];
 
 // ---------------------------------------------------------------------------

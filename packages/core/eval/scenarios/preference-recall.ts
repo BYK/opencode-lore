@@ -2036,7 +2036,6 @@ const APPLICABLE_BASELINES = [
   "lore",
   "lore-memory-only",
   "tail-window",
-  "auto-mem0",
 ] as const;
 
 export const scenarios: ScenarioDefinition[] = [

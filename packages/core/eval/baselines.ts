@@ -10,7 +10,7 @@
  *   3. Raw — full conversation (upper-bound reference)
  *   4. Lore context-only (ablation) — via gateway config override
  *   5. Lore memory-only (ablation) — via gateway config override
- *   6. auto-mem0 — see auto-mem0.ts
+ *   6. (removed — auto-mem0 was a deprecated external baseline)
  */
 import type { ConversationTurn, ContentPart } from "./types";
 import type { EvalLLMClient } from "./llm-backend";

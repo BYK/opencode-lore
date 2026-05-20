@@ -7,7 +7,7 @@
  *   bun packages/core/eval/run.ts --mode live                  # live mode, all dims
  *   bun packages/core/eval/run.ts --mode live --dimensions context,recall
  *   bun packages/core/eval/run.ts --mode live --gateway localhost:8787
- *   bun packages/core/eval/run.ts --baselines auto-mem0 --dimensions recall,preferences
+ *   bun packages/core/eval/run.ts --baselines lore,tail-window --dimensions recall,preferences
  *   bun packages/core/eval/run.ts --summarize results/latest.jsonl
  *   bun packages/core/eval/run.ts --output results/eval-2025-05-16.jsonl
  */
@@ -60,7 +60,7 @@ Options:
                               Available: context, recall, preferences, cross-project, cost
   --baselines <mode,...>      Additional baselines to run
                               Available: lore, tail-window, compaction, raw,
-                              lore-context-only, lore-memory-only, auto-mem0
+                              lore-context-only, lore-memory-only
   --gateway <host:port>       Gateway address for live mode (default: 127.0.0.1:8787)
   --model <name>              Model for conversation/QA (default: auto-detected)
   --judge-model <name>        Model for LLM-as-judge (default: same as --model)

@@ -546,7 +546,6 @@ async function getBaselineContext(
     case "lore":
     case "lore-context-only":
     case "lore-memory-only":
-    case "auto-mem0":
       return ""; // handled by gateway or external tool
   }
 }
