@@ -28,7 +28,7 @@ const APPLICABLE_BASELINES: BaselineMode[] = [
   "lore-memory-only",
   "tail-window",
   "compaction",
-  "auto-mem0",
+
 ];
 
 let toolId = 0;

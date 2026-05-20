@@ -34,8 +34,7 @@ export type BaselineMode =
   | "lore-memory-only"
   | "tail-window"
   | "compaction"
-  | "raw"
-  | "auto-mem0";
+  | "raw";
 
 export const ALL_BASELINES: BaselineMode[] = [
   "lore",
@@ -44,7 +43,6 @@ export const ALL_BASELINES: BaselineMode[] = [
   "tail-window",
   "compaction",
   "raw",
-  "auto-mem0",
 ];
 
 // ---------------------------------------------------------------------------
