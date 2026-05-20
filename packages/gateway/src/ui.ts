@@ -20,6 +20,7 @@ import {
 } from "@loreai/core";
 import {
   computeHistoricalEstimates,
+  computeDailyCosts,
   getSessionCosts,
   getAllSessionCosts,
   totalActualCost,
@@ -211,6 +212,36 @@ function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(2)}M`;
 }
 
+/** Render a labeled cost progress bar with optional ghost (counterfactual) outline. */
+function renderCostBar(opts: {
+  title: string;
+  value: string;
+  percent: number;
+  tint?: string;
+  ghostPercent?: number;
+  detailLeft?: string;
+  detailRight?: string;
+}): string {
+  const pct = Math.max(0, Math.min(100, opts.percent));
+  const ghostHtml = opts.ghostPercent != null
+    ? `<div class="cost-bar-ghost" style="width:${Math.min(100, opts.ghostPercent).toFixed(1)}%"></div>`
+    : "";
+  const detailHtml = (opts.detailLeft || opts.detailRight)
+    ? `<div class="cost-bar-detail"><span>${opts.detailLeft ?? ""}</span><span>${opts.detailRight ?? ""}</span></div>`
+    : "";
+  return `<div class="cost-bar-container">
+    <div class="cost-bar-label"><span class="bar-title">${esc(opts.title)}</span><span class="bar-value">${opts.value}</span></div>
+    <div class="cost-bar">${ghostHtml}<div class="cost-bar-fill ${opts.tint ?? "bar-blue"}" style="width:${pct.toFixed(1)}%"></div></div>
+    ${detailHtml}
+  </div>`;
+}
+
+/** Render an inline mini progress bar for table cells. */
+function renderMiniBar(percent: number, tint = "bar-green"): string {
+  const pct = Math.max(0, Math.min(100, percent));
+  return `<span class="mini-bar"><span class="mini-bar-fill ${tint}" style="width:${pct.toFixed(0)}%"></span></span>`;
+}
+
 function renderCostSummary(sessionId: string): string {
   const costs = getSessionCosts(sessionId);
   if (!costs || costs.conversation.turns === 0) return "";
@@ -232,64 +263,74 @@ function renderCostSummary(sessionId: string): string {
     : "0";
 
   let html = `<div class="card" style="margin-bottom:1.5em">
-    <h2 style="margin-top:0">Cost Intelligence</h2>
-    <table class="cost-table">
-      <tr class="section-header"><td colspan="2"><strong>Your Spend</strong></td></tr>
-      <tr>
-        <td>Conversation</td>
-        <td>${formatUSD(costs.conversation.cost)}
-          <span style="color:var(--fg3);font-size:0.85em">(${formatTokens(totalInput)} in, ${formatTokens(costs.conversation.outputTokens)} out, ${cacheHitRate}% cache hit)</span></td>
-      </tr>`;
+    <h2 style="margin-top:0">Cost Intelligence</h2>`;
 
-  if (workerCost > 0) {
-    html += `<tr>
-        <td>+ Lore overhead</td>
-        <td>${formatUSD(workerCost)}`;
-    const parts: string[] = [];
-    if (costs.workers.distillation.cost > 0) parts.push(`distill: ${formatUSD(costs.workers.distillation.cost)}`);
-    if (costs.workers.curation.cost > 0) parts.push(`curate: ${formatUSD(costs.workers.curation.cost)}`);
-    if (costs.workers.compaction.cost > 0) parts.push(`compact: ${formatUSD(costs.workers.compaction.cost)}`);
-    if (costs.workers.warmup.cost > 0) parts.push(`warmup: ${formatUSD(costs.workers.warmup.cost)}`);
-    if (costs.workers.recall.cost > 0) parts.push(`recall: ${formatUSD(costs.workers.recall.cost)}`);
-    if (parts.length) html += ` <span style="color:var(--fg3);font-size:0.85em">(${parts.join(", ")})</span>`;
-    html += `</td></tr>`;
+  // Spend composition bar: conversation vs overhead
+  const spendTotal = costs.conversation.cost + workerCost;
+  const convPct = spendTotal > 0 ? (costs.conversation.cost / spendTotal) * 100 : 100;
+  const overheadParts: string[] = [];
+  if (costs.workers.distillation.cost > 0) overheadParts.push(`distill: ${formatUSD(costs.workers.distillation.cost)}`);
+  if (costs.workers.curation.cost > 0) overheadParts.push(`curate: ${formatUSD(costs.workers.curation.cost)}`);
+  if (costs.workers.compaction.cost > 0) overheadParts.push(`compact: ${formatUSD(costs.workers.compaction.cost)}`);
+  if (costs.workers.warmup.cost > 0) overheadParts.push(`warmup: ${formatUSD(costs.workers.warmup.cost)}`);
+  if (costs.workers.recall.cost > 0) overheadParts.push(`recall: ${formatUSD(costs.workers.recall.cost)}`);
+  const overheadDetail = overheadParts.length ? ` (${overheadParts.join(", ")})` : "";
+  html += renderCostBar({
+    title: "Your Spend",
+    value: formatUSD(actual),
+    percent: convPct,
+    tint: "bar-green",
+    detailLeft: `Conversation: ${formatUSD(costs.conversation.cost)} (${costs.conversation.turns} turns)`,
+    detailRight: workerCost > 0 ? `Overhead: ${formatUSD(workerCost)}${overheadDetail}` : "",
+  });
+
+  // Cache hit rate bar
+  if (totalInput > 0) {
+    html += renderCostBar({
+      title: "Cache Hit Rate",
+      value: `${cacheHitRate}%`,
+      percent: parseFloat(cacheHitRate),
+      tint: "bar-green",
+      detailLeft: `${formatTokens(totalInput)} in, ${formatTokens(costs.conversation.outputTokens)} out`,
+      detailRight: `${formatTokens(costs.conversation.cacheReadTokens)} cache reads`,
+    });
   }
 
-  html += `<tr style="border-top:1px solid var(--border)">
-        <td><strong>Total</strong></td>
-        <td><strong>${formatUSD(actual)}</strong></td>
-      </tr>`;
-
-  // Counterfactual section
-  if (withoutLore > actual) {
-    html += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Without Lore (estimated)</strong></td></tr>
-      <tr>
-        <td>Estimated total</td>
-        <td>${formatUSD(withoutLore)}</td>
-      </tr>`;
+  // Savings ratio bar: actual vs counterfactual
+  if (withoutLore > 0) {
+    const actualPct = (actual / withoutLore) * 100;
+    html += renderCostBar({
+      title: "Actual vs Without Lore",
+      value: `${formatUSD(actual)} of ${formatUSD(withoutLore)}`,
+      percent: actualPct,
+      tint: savings >= 0 ? "bar-blue" : "bar-red",
+      ghostPercent: 100,
+      detailLeft: savings >= 0
+        ? `Saved: ${formatUSD(savings)} (${savingsPct}%)`
+        : `Net overhead: ${formatUSD(-savings)}`,
+      detailRight: "",
+    });
   }
 
-  // Savings breakdown
-  const hasSavings = savings > 0;
-  if (hasSavings) {
-    html += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Savings: ${formatUSD(savings)} (${savingsPct}%)</strong></td></tr>`;
-    if (costs.counterfactual.warmupSavings > 0) {
-      html += `<tr><td>Cache warming</td><td>${formatUSD(costs.counterfactual.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${costs.counterfactual.warmupHits} hits)</span></td></tr>`;
-    }
-    if (costs.counterfactual.ttlSavings > 0) {
-      html += `<tr><td>1h TTL</td><td>${formatUSD(costs.counterfactual.ttlSavings)} <span style="color:var(--fg3);font-size:0.85em">(${costs.counterfactual.ttlHits} turns with &gt;5m gaps)</span></td></tr>`;
-    }
-    if (costs.batchSavings > 0) {
-      html += `<tr><td>Batch API</td><td>${formatUSD(costs.batchSavings)}</td></tr>`;
-    }
-    if (costs.counterfactual.avoidedCompactionCost > 0) {
-      html += `<tr><td>Avoided compactions</td><td>${formatUSD(costs.counterfactual.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${costs.counterfactual.avoidedCompactions} compactions)</span></td></tr>`;
+  // Savings breakdown (compact)
+  if (savings > 0) {
+    const items: string[] = [];
+    if (costs.counterfactual.warmupSavings > 0) items.push(`Cache warming: ${formatUSD(costs.counterfactual.warmupSavings)} (${costs.counterfactual.warmupHits} hits)`);
+    if (costs.counterfactual.ttlSavings > 0) items.push(`1h TTL: ${formatUSD(costs.counterfactual.ttlSavings)} (${costs.counterfactual.ttlHits} turns)`);
+    if (costs.batchSavings > 0) items.push(`Batch API: ${formatUSD(costs.batchSavings)}`);
+    if (costs.counterfactual.avoidedCompactionCost > 0) items.push(`Avoided compactions: ${formatUSD(costs.counterfactual.avoidedCompactionCost)} (&times;${costs.counterfactual.avoidedCompactions})`);
+    if (items.length) {
+      html += `<div style="margin-top:10px;font-size:0.85em;color:var(--fg2)">
+        <strong style="color:#10b981">Savings breakdown:</strong> ${items.join(" &middot; ")}
+      </div>`;
     }
   } else if (savings < 0) {
-    html += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em;color:#e06c75"><strong>Net overhead: ${formatUSD(-savings)}</strong> (Lore overhead exceeds savings this session)</td></tr>`;
+    html += `<div style="margin-top:10px;font-size:0.85em;color:#e06c75">
+      <strong>Net overhead: ${formatUSD(-savings)}</strong> &mdash; Lore overhead exceeds savings this session
+    </div>`;
   }
 
-  html += `</table></div>`;
+  html += `</div>`;
   return html;
 }
 
@@ -383,6 +424,72 @@ form.inline { display: inline; }
 .result-summary { font-size: 0.9em; color: var(--fg3); margin: 8px 0; }
 .cost-table td { padding: 4px 10px; font-size: 0.9em; }
 .cost-table .section-header td { padding-top: 0.6em; }
+/* --- Cost progress bars (inspired by CodexBar MetricRow) --- */
+.cost-bar-container { margin: 8px 0; }
+.cost-bar-label {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 0.85em; margin-bottom: 4px;
+}
+.cost-bar-label .bar-title { font-weight: 600; }
+.cost-bar-label .bar-value { color: var(--fg2); font-family: var(--mono); }
+.cost-bar {
+  position: relative; height: 20px; background: var(--bg3);
+  border-radius: 4px; overflow: hidden;
+}
+.cost-bar-fill {
+  height: 100%; border-radius: 4px; transition: width 0.2s; min-width: 2px;
+}
+.cost-bar-ghost {
+  position: absolute; top: 0; left: 0; height: 100%;
+  border: 2px dashed var(--fg3); border-radius: 4px;
+  opacity: 0.4; box-sizing: border-box;
+}
+.cost-bar-detail {
+  display: flex; justify-content: space-between;
+  font-size: 0.8em; color: var(--fg3); margin-top: 3px;
+}
+/* Tint colors */
+.bar-green  { background: #10b981; }
+.bar-blue   { background: #60a5fa; }
+.bar-amber  { background: #f59e0b; }
+.bar-red    { background: #ef4444; }
+/* --- Savings hero stat --- */
+.savings-hero {
+  text-align: center; padding: 16px; margin: 12px 0;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.savings-hero .big-number {
+  font-size: 2.2em; font-weight: 700; line-height: 1.2;
+}
+.savings-hero .sub-label {
+  font-size: 0.9em; color: var(--fg3); margin-top: 2px;
+}
+/* --- Inline mini bar (for table cells) --- */
+.mini-bar {
+  display: inline-block; width: 48px; height: 8px;
+  background: var(--bg3); border-radius: 3px;
+  overflow: hidden; vertical-align: middle; margin-right: 4px;
+}
+.mini-bar-fill { height: 100%; border-radius: 3px; }
+/* --- Daily cost trend chart --- */
+.daily-chart {
+  display: flex; align-items: flex-end; gap: 3px;
+  height: 100px; padding: 8px 0; margin: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.day-col {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; min-width: 0;
+}
+.day-bar {
+  width: 100%; background: #60a5fa; border-radius: 2px 2px 0 0;
+  min-height: 2px;
+}
+.day-label {
+  font-size: 0.65em; color: var(--fg3); margin-top: 4px;
+  white-space: nowrap; overflow: hidden;
+}
 .actions { margin: 16px 0; display: flex; gap: 8px; }
 .empty { color: var(--fg3); font-style: italic; padding: 24px 0; text-align: center; }
 .md { font-size: 0.9em; line-height: 1.6; overflow-wrap: break-word; }
@@ -1126,13 +1233,23 @@ function renderSessionRow(r: LiveSessionRow, opts?: { isChild?: boolean; parentI
     ? ` class="subagent-row" data-parent="${esc(parentId ?? "")}"`
     : "";
 
+  // Savings cell with background tint
+  const savingsBg = r.hasCosts && displaySavings !== 0
+    ? (displaySavings >= 0 ? "rgba(16,185,129,0.08)" : "rgba(239,68,68,0.08)")
+    : "transparent";
+
+  // Cache hit cell with inline mini-bar
+  const cacheHitCell = !Number.isNaN(r.cacheHitPct)
+    ? `${renderMiniBar(r.cacheHitPct, "bar-green")}${r.cacheHitPct.toFixed(0)}%`
+    : "-";
+
   return `<tr${trAttrs}>
     <td>${toggle}${projCell}</td>
     <td>${sessCell}</td>
     <td>${r.turns}</td>
     <td>${r.hasCosts ? formatUSD(displayCost) : "-"}</td>
-    <td>${r.hasCosts ? `<span style="color:${savingsColor}">${formatUSD(displaySavings)}</span>` : "-"}</td>
-    <td>${!Number.isNaN(r.cacheHitPct) ? r.cacheHitPct.toFixed(0) + "%" : "-"}</td>
+    <td style="background:${savingsBg}">${r.hasCosts ? `<span style="color:${savingsColor}">${formatUSD(displaySavings)}</span>` : "-"}</td>
+    <td>${cacheHitCell}</td>
     <td>${r.warmingSnap ? r.pReturnsPct.toFixed(1) + "%" : "-"}</td>
     <td>${statusCell}</td>
     <td>${hitsCell}</td>
@@ -1900,6 +2017,8 @@ function pageCosts(): string {
   let liveCompactCost = 0;
   let liveWarmupCost = 0;
   let liveRecallCost = 0;
+  let liveCacheReadTokens = 0;
+  let liveTotalInputTokens = 0;
 
   for (const [, c] of allCosts) {
     liveTotalSpend += totalActualCost(c);
@@ -1919,6 +2038,8 @@ function pageCosts(): string {
     liveCompactCost += c.workers.compaction.cost;
     liveWarmupCost += c.workers.warmup.cost;
     liveRecallCost += c.workers.recall.cost;
+    liveCacheReadTokens += c.conversation.cacheReadTokens;
+    liveTotalInputTokens += c.conversation.inputTokens + c.conversation.cacheReadTokens + c.conversation.cacheWriteTokens;
   }
 
   // --- Historical (backdated) estimates ---
@@ -1941,14 +2062,63 @@ function pageCosts(): string {
   const combinedSessionCount = allCosts.size + hist.sessionCount;
   const combinedTotalSpend = liveTotalSpend + hist.persistedConversationCost + hist.totalWorkerCost;
 
-  // Summary stats (live/total format)
+  // --- Savings hero stat ---
+  const combinedCounterfactual = combinedTotalSpend + combinedNetSavings;
+  const savingsPctCombined = combinedCounterfactual > 0
+    ? (combinedNetSavings / combinedCounterfactual * 100).toFixed(0)
+    : "0";
+  if (combinedNetSavings > 0) {
+    body += `<div class="savings-hero">
+      <div class="big-number" style="color:#10b981">${formatUSD(combinedNetSavings)} saved (${savingsPctCombined}%)</div>
+      <div class="sub-label">Total spend: ${formatUSD(combinedTotalSpend)} &middot; Overhead: ${formatUSD(combinedWorkerCost)} &middot; Without Lore: ${formatUSD(combinedCounterfactual)}</div>
+    </div>`;
+  } else if (combinedNetSavings < 0) {
+    body += `<div class="savings-hero">
+      <div class="big-number" style="color:#e06c75">Net overhead: ${formatUSD(-combinedNetSavings)}</div>
+      <div class="sub-label">Total spend: ${formatUSD(combinedTotalSpend)} &middot; Overhead: ${formatUSD(combinedWorkerCost)} &middot; Savings will grow as sessions continue</div>
+    </div>`;
+  }
+
+  // Summary stats (compact pills for secondary metrics)
+  // Trend arrow: compare live savings rate vs historical average
+  const liveSavingsRate = liveTotalWithout > 0 ? liveTotalSavings / liveTotalWithout : 0;
+  const histCounterfactual = hist.persistedConversationCost + hist.totalWorkerCost +
+    hist.warmupSavings + hist.ttlSavings + hist.batchSavings + hist.avoidedCompactionCost;
+  const histSavingsRate = histCounterfactual > 0
+    ? (hist.warmupSavings + hist.ttlSavings + hist.batchSavings + hist.avoidedCompactionCost - hist.totalWorkerCost) / histCounterfactual
+    : 0;
+  let trendArrow = "";
+  if (allCosts.size > 0 && hist.sessionCount > 0) {
+    if (liveSavingsRate > histSavingsRate + 0.02) {
+      trendArrow = ` <span title="Live savings rate above historical average" style="color:#10b981;font-size:0.7em">\u25B2</span>`;
+    } else if (liveSavingsRate < histSavingsRate - 0.02) {
+      trendArrow = ` <span title="Live savings rate below historical average" style="color:#e06c75;font-size:0.7em">\u25BC</span>`;
+    }
+  }
+
   body += `<div class="stats">
     <div class="stat"><div class="label">Sessions</div><div class="value">${allCosts.size}<span class="total">/${combinedSessionCount}</span></div></div>
-    <div class="stat"><div class="label">Spend</div><div class="value">${formatUSD(liveTotalSpend)}<span class="total">/${formatUSD(combinedTotalSpend)}</span></div></div>
+    <div class="stat"><div class="label">Spend${trendArrow}</div><div class="value">${formatUSD(liveTotalSpend)}<span class="total">/${formatUSD(combinedTotalSpend)}</span></div></div>
     <div class="stat"><div class="label">Avoided Compactions</div><div class="value">${liveAvoidedCompactions}<span class="total">/${combinedAvoidedCompactions}</span></div></div>
-    ${combinedNetSavings > 0 ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(liveTotalSavings)}<span class="total">/${formatUSD(combinedNetSavings)}</span></div></div>` : ""}
-    ${combinedNetSavings < 0 ? `<div class="stat"><div class="label">Net Overhead</div><div class="value" style="color:#e06c75">${formatUSD(-liveTotalSavings)}<span class="total">/${formatUSD(-combinedNetSavings)}</span></div></div>` : ""}
   </div>`;
+
+  // --- Daily cost trend chart ---
+  const dailyCosts = computeDailyCosts(14);
+  const maxDayCost = Math.max(...dailyCosts.map((d) => d.cost), 0.001);
+  if (dailyCosts.some((d) => d.cost > 0)) {
+    body += `<h3>Daily Cost Trend (last 14 days)</h3>`;
+    body += `<div class="daily-chart">`;
+    for (const day of dailyCosts) {
+      const heightPct = (day.cost / maxDayCost) * 100;
+      const label = day.date.slice(5); // "MM-DD"
+      const tooltip = `${day.date}: ${formatUSD(day.cost)} (${day.sessions} session${day.sessions !== 1 ? "s" : ""})`;
+      body += `<div class="day-col" title="${esc(tooltip)}">
+        <div class="day-bar" style="height:${heightPct.toFixed(1)}%"></div>
+        <div class="day-label">${esc(label)}</div>
+      </div>`;
+    }
+    body += `</div>`;
+  }
 
   // =====================================================
   // LIVE SESSIONS section
@@ -1958,30 +2128,76 @@ function pageCosts(): string {
   if (allCosts.size === 0) {
     body += `<p class="empty">No active sessions yet. Cost tracking begins when the first conversation turn is processed.</p>`;
   } else {
-    body += `<div class="card">
-      <table class="cost-table">
-        <tr class="section-header"><td colspan="2"><strong>Aggregated Spend</strong></td></tr>
-        <tr><td>Conversation</td><td>${formatUSD(liveTotalConversation)} <span style="color:var(--fg3);font-size:0.85em">(${liveTotalTurns} turns)</span></td></tr>
-        <tr><td>+ Lore overhead</td><td>${formatUSD(liveTotalWorker)}${(() => {
-          const parts: string[] = [];
-          if (liveDistillCost > 0) parts.push(`distill: ${formatUSD(liveDistillCost)}`);
-          if (liveCurateCost > 0) parts.push(`curate: ${formatUSD(liveCurateCost)}`);
-          if (liveCompactCost > 0) parts.push(`compact: ${formatUSD(liveCompactCost)}`);
-          if (liveWarmupCost > 0) parts.push(`warmup: ${formatUSD(liveWarmupCost)}`);
-          if (liveRecallCost > 0) parts.push(`recall: ${formatUSD(liveRecallCost)}`);
-          return parts.length ? ` <span style="color:var(--fg3);font-size:0.85em">(${parts.join(", ")})</span>` : "";
-        })()}</td></tr>
-        <tr style="border-top:1px solid var(--border)"><td><strong>Total</strong></td><td><strong>${formatUSD(liveTotalSpend)}</strong></td></tr>`;
+    // --- Visual cost bars ---
+    body += `<div class="card">`;
 
-    if (liveTotalSavings !== 0) {
-      body += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Savings Breakdown</strong></td></tr>`;
-      if (liveWarmupSavings > 0) body += `<tr><td>Cache warming</td><td>${formatUSD(liveWarmupSavings)}</td></tr>`;
-      if (liveTtlSavings > 0) body += `<tr><td>1h TTL</td><td>${formatUSD(liveTtlSavings)}</td></tr>`;
-      if (liveBatchSavings > 0) body += `<tr><td>Batch API</td><td>${formatUSD(liveBatchSavings)}</td></tr>`;
-      if (liveAvoidedCompactionCost > 0) body += `<tr><td>Avoided compactions</td><td>${formatUSD(liveAvoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${liveAvoidedCompactions})</span></td></tr>`;
-      body += `<tr style="border-top:1px solid var(--border)"><td><strong>Net savings</strong></td><td><strong style="color:${liveTotalSavings >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(liveTotalSavings)}</strong></td></tr>`;
+    // Spend composition bar: conversation vs overhead
+    const spendTotal = liveTotalConversation + liveTotalWorker;
+    const convPct = spendTotal > 0 ? (liveTotalConversation / spendTotal) * 100 : 100;
+    const overheadParts: string[] = [];
+    if (liveDistillCost > 0) overheadParts.push(`distill: ${formatUSD(liveDistillCost)}`);
+    if (liveCurateCost > 0) overheadParts.push(`curate: ${formatUSD(liveCurateCost)}`);
+    if (liveCompactCost > 0) overheadParts.push(`compact: ${formatUSD(liveCompactCost)}`);
+    if (liveWarmupCost > 0) overheadParts.push(`warmup: ${formatUSD(liveWarmupCost)}`);
+    if (liveRecallCost > 0) overheadParts.push(`recall: ${formatUSD(liveRecallCost)}`);
+    const overheadDetail = overheadParts.length ? ` (${overheadParts.join(", ")})` : "";
+    body += renderCostBar({
+      title: "Spend Composition",
+      value: formatUSD(liveTotalSpend),
+      percent: convPct,
+      tint: "bar-green",
+      detailLeft: `Conversation: ${formatUSD(liveTotalConversation)} (${liveTotalTurns} turns)`,
+      detailRight: `Overhead: ${formatUSD(liveTotalWorker)}${overheadDetail}`,
+    });
+
+    // Savings ratio bar: actual vs counterfactual
+    if (liveTotalWithout > 0) {
+      const actualPct = (liveTotalSpend / liveTotalWithout) * 100;
+      body += renderCostBar({
+        title: "Actual vs Without Lore",
+        value: `${formatUSD(liveTotalSpend)} of ${formatUSD(liveTotalWithout)}`,
+        percent: actualPct,
+        tint: liveTotalSavings >= 0 ? "bar-blue" : "bar-red",
+        ghostPercent: 100,
+        detailLeft: liveTotalSavings >= 0
+          ? `Saved: ${formatUSD(liveTotalSavings)}`
+          : `Overhead: ${formatUSD(-liveTotalSavings)}`,
+        detailRight: liveTotalWithout > 0
+          ? `${(100 - actualPct).toFixed(0)}% saved`
+          : "",
+      });
     }
-    body += `</table></div>`;
+
+    // Cache hit rate bar
+    const liveCacheHitPct = liveTotalInputTokens > 0
+      ? (liveCacheReadTokens / liveTotalInputTokens) * 100
+      : 0;
+    if (liveTotalInputTokens > 0) {
+      body += renderCostBar({
+        title: "Cache Hit Rate",
+        value: `${liveCacheHitPct.toFixed(0)}%`,
+        percent: liveCacheHitPct,
+        tint: "bar-green",
+        detailLeft: `${formatTokens(liveCacheReadTokens)} cache reads`,
+        detailRight: `${formatTokens(liveTotalInputTokens)} total input`,
+      });
+    }
+
+    // Savings breakdown (compact list)
+    if (liveTotalSavings !== 0) {
+      const savingsItems: string[] = [];
+      if (liveWarmupSavings > 0) savingsItems.push(`Cache warming: ${formatUSD(liveWarmupSavings)}`);
+      if (liveTtlSavings > 0) savingsItems.push(`1h TTL: ${formatUSD(liveTtlSavings)}`);
+      if (liveBatchSavings > 0) savingsItems.push(`Batch API: ${formatUSD(liveBatchSavings)}`);
+      if (liveAvoidedCompactionCost > 0) savingsItems.push(`Avoided compactions: ${formatUSD(liveAvoidedCompactionCost)} (&times;${liveAvoidedCompactions})`);
+      if (savingsItems.length) {
+        body += `<div style="margin-top:10px;font-size:0.85em;color:var(--fg2)">
+          <strong style="color:${liveTotalSavings >= 0 ? "#10b981" : "#e06c75"}">Net savings: ${formatUSD(liveTotalSavings)}</strong>
+          &mdash; ${savingsItems.join(" &middot; ")}
+        </div>`;
+      }
+    }
+    body += `</div>`;
 
     // Per-session table (unified: cost + warming columns)
     const activeSessions = getActiveSessions();
@@ -2090,13 +2306,14 @@ function pageCosts(): string {
       const trAttrs = isChild ? ` class="subagent-row" data-parent="${esc(parentSid!)}"` : "";
       const displayCost = hasChildren ? s.rolledUpWorkerCost : (s.persisted?.workerCost ?? s.distillationCost);
 
+      const savingsBg = s.avoidedCompactions > 0 ? "rgba(16,185,129,0.08)" : "transparent";
       body += `<tr${trAttrs}>
         <td>${toggle}<a href="/ui/projects/${esc(s.projectId)}">${esc(s.projectName ?? "(unnamed)")}</a></td>
         <td>${prefix}<a href="/ui/sessions/${esc(s.projectId)}/${esc(s.sessionId)}"><code>${esc(s.sessionId.slice(0, 12))}</code></a>${childCount}</td>
         <td>${s.messageCount}</td>
         <td style="font-size:0.85em">${esc(s.model.replace("claude-", "").slice(0, 20))}</td>
         <td>${formatUSD(displayCost)}</td>
-        <td>${s.avoidedCompactions > 0 ? `${s.avoidedCompactions} (${formatUSD(s.avoidedCompactionCost)})` : "-"}</td>
+        <td style="background:${savingsBg}">${s.avoidedCompactions > 0 ? `${s.avoidedCompactions} (${formatUSD(s.avoidedCompactionCost)})` : "-"}</td>
         <td>${timeAgo(s.lastMessage)}</td>
       </tr>`;
       for (const child of s.children) {
