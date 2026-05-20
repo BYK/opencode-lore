@@ -14,7 +14,8 @@
   "scripts": {
     "typecheck": "bun --filter '*' typecheck",
     "test": "bun test",
-    "build": "bun --filter '*' build"
+    "build": "bun --filter '*' build",
+    "postinstall": "bun --filter '@loreai/gateway' build"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",

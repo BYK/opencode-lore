@@ -89,10 +89,32 @@ const { values: flags } = parseArgs({
 // ---------------------------------------------------------------------------
 
 async function buildLibrary() {
-  // No-op: the npm package is built by `bun run bundle` (script/bundle.ts)
-  // which produces the self-contained CJS bundle (dist/index.cjs + dist/bin.cjs).
-  // This function exists only so `bun run build` (workspace-wide) doesn't fail.
-  console.log("⏭ @loreai/gateway: use `bun run bundle` for npm build");
+  // Create lightweight dev shims so workspace consumers can resolve
+  // the "bun" export condition without running the full `bun run bundle`.
+  // Real bundle builds (bundle.ts) wipe dist/ first, so these shims
+  // never interfere with production artifacts.
+  mkdirSync(distDir, { recursive: true });
+
+  const shims: Array<[string, string]> = [
+    ["index.bun.js", 'export * from "../src/index.ts";\n'],
+    ["embedding-worker.js", 'export * from "../../core/src/embedding-worker.ts";\n'],
+  ];
+
+  for (const [filename, content] of shims) {
+    const filePath = join(distDir, filename);
+    if (existsSync(filePath)) {
+      // Don't overwrite real bundle output (minified, large files).
+      const existing = readFileSync(filePath, "utf8");
+      if (!existing.startsWith("export *")) {
+        console.log(`  ${filename}: skipped (real bundle exists)`);
+        continue;
+      }
+    }
+    writeFileSync(filePath, content);
+    console.log(`  ${filename}: dev shim created`);
+  }
+
+  console.log("✓ @loreai/gateway: dev shims ready (use `bun run bundle` for npm build)");
 }
 
 // ---------------------------------------------------------------------------

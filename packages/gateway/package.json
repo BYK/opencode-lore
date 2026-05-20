@@ -23,8 +23,7 @@
     "build": "bun run script/build.ts",
     "bundle": "bun run script/bundle.ts",
     "build:binary": "bun run script/build.ts --binary",
-    "start": "bun run src/index.ts",
-    "prepare": "node -e \"var f=require('fs'),p='dist/index.bun.js';if(!f.existsSync(p)){f.mkdirSync('dist',{recursive:true});f.writeFileSync(p,'export * from \\\"../src/index.ts\\\";\\n')}\""
+    "start": "bun run src/index.ts"
   },
   "dependencies": {
     "p-limit": "7"
