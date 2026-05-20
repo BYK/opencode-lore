@@ -671,7 +671,7 @@ export async function searchRecall(
         }
       }
 
-      // Temporal vector search (undistilled messages only)
+      // Temporal vector search (includes distilled — embeddings preserved by markDistilled)
       if (scope !== "knowledge") {
         const pid = ensureProject(projectPath);
         const temporalVectorHits = embedding.vectorSearchTemporal(

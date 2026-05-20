@@ -798,7 +798,7 @@ async function runInner(input: {
           if (input.force) {
             // Absorb: mark distilled without LLM call to avoid blocking
             // the caller on useless work. Messages remain searchable via
-            // BM25/vector recall on the temporal table.
+            // temporal BM25/FTS5 and vector recall.
             temporal.markDistilled(segment.map((m) => m.id));
             log.info(
               `absorb tiny segment: ${segment.length} msgs, ${segTokens} tokens (below min ${cfg.distillation.minSegmentTokens})`,
