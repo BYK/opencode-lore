@@ -832,6 +832,190 @@ describe("metaDistill — anchored second round", () => {
   });
 });
 
+// ─── recentSegmentsToKeep — preserve recent gen-0 detail (#417) ─────────────
+
+describe("metaDistill — recentSegmentsToKeep", () => {
+  beforeEach(() => {
+    const pid = ensureProject(META_PROJECT);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("keeps recent gen-0 segments un-archived when more than recentSegmentsToKeep exist (first round)", async () => {
+    const pid = ensureProject(META_PROJECT);
+    // Insert 8 gen-0 rows with ascending timestamps so ordering is deterministic.
+    const ids: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      ids.push(
+        insertGen0({
+          projectId: pid,
+          sessionID: META_SESSION,
+          observations: `obs-${i}`,
+          createdAt: Date.now() + i * 1000,
+        }),
+      );
+    }
+
+    const llm = makeStubLLM("<observations>\nconsolidated older segments\n</observations>");
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    expect(result).not.toBeNull();
+
+    // With recentSegmentsToKeep=5 and 8 gen-0 rows:
+    // toConsolidate = first 3 (ids 0-2), toKeep = last 5 (ids 3-7)
+    const rows = db()
+      .query(
+        "SELECT id, archived, generation FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC",
+      )
+      .all(pid, META_SESSION) as Array<{ id: string; archived: number; generation: number }>;
+
+    // First 3 gen-0 rows should be archived.
+    for (let i = 0; i < 3; i++) {
+      const row = rows.find((r) => r.id === ids[i]);
+      expect(row).toBeDefined();
+      expect(row!.archived).toBe(1);
+    }
+    // Last 5 gen-0 rows should remain non-archived.
+    for (let i = 3; i < 8; i++) {
+      const row = rows.find((r) => r.id === ids[i]);
+      expect(row).toBeDefined();
+      expect(row!.archived).toBe(0);
+    }
+    // A new gen-1 meta row should exist.
+    const meta = rows.find((r) => r.generation === 1);
+    expect(meta).toBeDefined();
+    expect(meta!.archived).toBe(0);
+
+    // Only the first 3 segments should appear in the LLM prompt.
+    expect(llm.prompts).toHaveLength(1);
+    expect(llm.prompts[0]!.user).toContain("obs-0");
+    expect(llm.prompts[0]!.user).toContain("obs-1");
+    expect(llm.prompts[0]!.user).toContain("obs-2");
+    expect(llm.prompts[0]!.user).not.toContain("obs-3");
+    expect(llm.prompts[0]!.user).not.toContain("obs-7");
+  });
+
+  test("does not re-trigger consolidation when kept segments exist with a prior meta", async () => {
+    const pid = ensureProject(META_PROJECT);
+    // Set up: prior meta exists, 5 recent gen-0 rows (exactly recentSegmentsToKeep).
+    insertMeta({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "PRIOR_META",
+      generation: 1,
+    });
+    for (let i = 0; i < 5; i++) {
+      insertGen0({
+        projectId: pid,
+        sessionID: META_SESSION,
+        observations: `kept-obs-${i}`,
+        createdAt: Date.now() + i * 1000,
+      });
+    }
+
+    const llm = makeStubLLM("should not be called");
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    // With 5 gen-0 rows and recentSegmentsToKeep=5, toConsolidate is empty.
+    // The threshold check should short-circuit.
+    expect(result).toBeNull();
+    expect(llm.prompts).toHaveLength(0);
+  });
+
+  test("returns null when gen-0 count equals recentSegmentsToKeep (nothing to consolidate)", async () => {
+    const pid = ensureProject(META_PROJECT);
+    // Insert exactly 5 gen-0 rows (== recentSegmentsToKeep).
+    // toConsolidate is empty, so meta-distillation short-circuits.
+    for (let i = 0; i < 5; i++) {
+      insertGen0({
+        projectId: pid,
+        sessionID: META_SESSION,
+        observations: `all-obs-${i}`,
+        createdAt: Date.now() + i * 1000,
+      });
+    }
+
+    const llm = makeStubLLM("should not be called");
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    // With 5 gen-0 rows and recentSegmentsToKeep=5, toConsolidate is empty.
+    expect(result).toBeNull();
+    expect(llm.prompts).toHaveLength(0);
+
+    // All 5 gen-0 rows remain non-archived.
+    const rows = db()
+      .query(
+        "SELECT archived FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0",
+      )
+      .all(pid, META_SESSION) as Array<{ archived: number }>;
+    expect(rows.every((r) => r.archived === 0)).toBe(true);
+    expect(rows).toHaveLength(5);
+  });
+
+  test("anchored round with recentSegmentsToKeep keeps recent segments", async () => {
+    const pid = ensureProject(META_PROJECT);
+    // Prior meta + 7 new gen-0 rows.
+    insertMeta({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "PRIOR_META",
+      generation: 1,
+    });
+    const ids: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      ids.push(
+        insertGen0({
+          projectId: pid,
+          sessionID: META_SESSION,
+          observations: `anchored-obs-${i}`,
+          createdAt: Date.now() + i * 1000,
+        }),
+      );
+    }
+
+    const llm = makeStubLLM("<observations>\nanchored update\n</observations>");
+    const result = await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
+
+    expect(result).not.toBeNull();
+
+    // toConsolidate = first 2 (ids 0-1), toKeep = last 5 (ids 2-6).
+    const gen0Rows = db()
+      .query(
+        "SELECT id, archived FROM distillations WHERE project_id = ? AND session_id = ? AND generation = 0 ORDER BY created_at ASC",
+      )
+      .all(pid, META_SESSION) as Array<{ id: string; archived: number }>;
+
+    // First 2 archived.
+    expect(gen0Rows.find((r) => r.id === ids[0])!.archived).toBe(1);
+    expect(gen0Rows.find((r) => r.id === ids[1])!.archived).toBe(1);
+    // Last 5 remain non-archived.
+    for (let i = 2; i < 7; i++) {
+      expect(gen0Rows.find((r) => r.id === ids[i])!.archived).toBe(0);
+    }
+
+    // Prompt should contain anchor + only the first 2 segments.
+    expect(llm.prompts[0]!.user).toContain("<previous-meta-summary>");
+    expect(llm.prompts[0]!.user).toContain("anchored-obs-0");
+    expect(llm.prompts[0]!.user).toContain("anchored-obs-1");
+    expect(llm.prompts[0]!.user).not.toContain("anchored-obs-2");
+  });
+});
+
 // ─── detectSegments (token-aware splitting) ─────────────────────────────────
 
 describe("detectSegments", () => {
@@ -1372,21 +1556,21 @@ describe("run() expansion guard and tiny-segment handling", () => {
 
 describe("distillTokenBudget", () => {
   test("returns floor (256) for small inputs", () => {
-    // 8 * √64 = 64 → below floor
+    // 10 * √64 = 80 → below floor
     expect(distillTokenBudget(64)).toBe(256);
     expect(distillTokenBudget(100)).toBe(256);
     expect(distillTokenBudget(0)).toBe(256);
   });
 
   test("returns √N-based value for medium inputs", () => {
-    // 8 * √2000 = 8 * 44.72 = 358
-    expect(distillTokenBudget(2000)).toBe(358);
-    // 8 * √4000 = 8 * 63.25 = 506
-    expect(distillTokenBudget(4000)).toBe(506);
+    // 10 * √2000 = 10 * 44.72 = 448
+    expect(distillTokenBudget(2000)).toBe(448);
+    // 10 * √4000 = 10 * 63.25 = 633
+    expect(distillTokenBudget(4000)).toBe(633);
   });
 
   test("returns cap (4096) for very large inputs", () => {
-    // 8 * √(300000) = 8 * 547.7 = 4382 → above cap
+    // 10 * √(300000) = 10 * 547.7 = 5477 → above cap
     expect(distillTokenBudget(300000)).toBe(4096);
   });
 
@@ -1401,11 +1585,11 @@ describe("distillTokenBudget", () => {
 
   test("is much smaller than old linear budget for typical segments", () => {
     // Old: workerTokenBudget(2000, 0.25, 1024, 8192) = 1024 (floor)
-    // New: distillTokenBudget(2000) = 358
+    // New: distillTokenBudget(2000) = 448
     expect(distillTokenBudget(2000)).toBeLessThan(workerTokenBudget(2000, 0.25, 1024, 8192));
 
     // Old: workerTokenBudget(8192, 0.25, 1024, 8192) = 2048
-    // New: distillTokenBudget(8192) = 724
+    // New: distillTokenBudget(8192) = 906
     expect(distillTokenBudget(8192)).toBeLessThan(workerTokenBudget(8192, 0.25, 1024, 8192));
   });
 });

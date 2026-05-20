@@ -101,21 +101,23 @@ export function workerTokenBudget(
 /**
  * Compute the max_tokens budget for gen-0 distillation of raw messages.
  *
- * Uses a √N-based formula (8 × √N) instead of a linear ratio so that the
+ * Uses a √N-based formula (10 × √N) instead of a linear ratio so that the
  * budget grows sub-linearly with input size. This naturally constrains the
  * LLM to produce output at ~R ≈ 2–4 (the square-root boundary) and avoids
  * expansion on small segments where a linear 0.25 ratio + 1024 floor gave
  * the model far too much room.
  *
- * The multiplier (8) gives ~4× headroom above the R=2.0 target, accounting
+ * The multiplier (10) gives ~5× headroom above the R=2.0 target, accounting
  * for the detailed observation format (emoji markers, timestamps, entity
- * tags, exact numbers) required by the distillation prompt.
+ * tags, exact numbers) required by the distillation prompt. Raised from 8
+ * to improve retention of specific identifiers (error messages, file paths,
+ * version numbers) in long sessions (400K+ tokens). See #417.
  *
  * @param sourceTokens  Estimated source token count from raw messages
  * @returns             Token budget clamped to [256, 4096]
  */
 export function distillTokenBudget(sourceTokens: number): number {
-  const MULTIPLIER = 8;
+  const MULTIPLIER = 10;
   const FLOOR = 256;
   const CAP = 4096;
   return Math.max(FLOOR, Math.min(Math.ceil(MULTIPLIER * Math.sqrt(sourceTokens)), CAP));
@@ -1084,19 +1086,31 @@ async function metaDistillInner(input: {
   // since the last meta-distill — no overlap with the anchor body.
   const priorMeta = latestMeta(input.projectPath, input.sessionID);
 
+  // Partition: keep the most recent N gen-0 segments un-archived so their
+  // full detail stays in the context prefix. Only consolidate older segments.
+  // This prevents the two-stage compression from dropping specific identifiers
+  // (error messages, file paths, version numbers) in long sessions. See #417.
+  const cfg = config();
+  const recentToKeep = cfg.distillation.recentSegmentsToKeep;
+  const toConsolidate = recentToKeep > 0 && existing.length >= recentToKeep
+    ? existing.slice(0, -recentToKeep)
+    : existing;
+
   // Threshold: first meta needs ≥3 gen-0 segments to consolidate. Subsequent
   // anchored metas only need ≥1 new gen-0 since the prior meta already covers
   // earlier history; without this distinction, every meta-distill round would
   // need a fresh pile of segments and we'd lose the incremental-update benefit.
+  // Apply threshold to toConsolidate (not existing) to prevent the kept recent
+  // segments from re-triggering consolidation on the next idle tick.
   if (priorMeta) {
-    if (existing.length === 0) return null;
+    if (toConsolidate.length === 0) return null;
   } else {
-    if (existing.length < 3) return null;
+    if (toConsolidate.length < 3) return null;
   }
 
-  const userContent = recursiveUser(existing, priorMeta?.observations);
+  const userContent = recursiveUser(toConsolidate, priorMeta?.observations);
 
-  const model = input.model ?? config().model;
+  const model = input.model ?? cfg.model;
   const inputTokens = Math.ceil(userContent.length / 3);
   const maxTokens = workerTokenBudget(inputTokens, 0.25, 1024, 8192);
   const responseText = await input.llm.prompt(
@@ -1117,10 +1131,10 @@ async function metaDistillInner(input: {
   // covers new gen-0 since the last meta — we must consult the prior meta's
   // generation explicitly to keep the chain monotonic.
   const maxGen = Math.max(
-    ...existing.map((d) => d.generation),
+    ...toConsolidate.map((d) => d.generation),
     priorMeta?.generation ?? 0,
   );
-  const allSourceIDs = existing.flatMap((d) => d.source_ids);
+  const allSourceIDs = toConsolidate.flatMap((d) => d.source_ids);
 
   // Atomic: store the new meta row + archive the merged gen-0 rows in one
   // transaction. Without this, a crash between the two would leave stale
@@ -1139,10 +1153,11 @@ async function metaDistillInner(input: {
       generation: maxGen + 1,
       callType: input.callType,
     });
-    // Archive the gen-0 distillations that were merged into gen-1+.
-    // They remain searchable via BM25 recall but are excluded from the
-    // in-context prefix and (post-F2) from `loadForSession`'s default path.
-    archiveDistillations(existing.map((d) => d.id));
+    // Archive only the consolidated gen-0 distillations — recent segments
+    // kept via recentSegmentsToKeep remain non-archived in the prefix.
+    // Archived rows remain searchable via BM25 recall but are excluded from
+    // the in-context prefix and (post-F2) from `loadForSession`'s default path.
+    archiveDistillations(toConsolidate.map((d) => d.id));
     db().exec("COMMIT");
   } catch (e) {
     db().exec("ROLLBACK");

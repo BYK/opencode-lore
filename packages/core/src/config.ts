@@ -80,16 +80,22 @@ export const LoreConfig = z.object({
       metaThreshold: z.number().min(3).default(20),
       /** Max chars per tool output when rendering temporal messages for distillation input.
        *  Outputs longer than this are replaced with a compact annotation preserving line
-       *  count, error signals, and file paths. Default: 2000 (matches upstream OpenCode's
-       *  TOOL_OUTPUT_MAX_CHARS during compaction). Set to 0 to disable. */
-      toolOutputMaxChars: z.number().min(0).default(2_000),
+       *  count, error signals, and file paths. Default: 4000. Raised from 2000 to preserve
+       *  error messages and stack traces that exceed 2K chars. See #417. Set to 0 to disable. */
+      toolOutputMaxChars: z.number().min(0).default(4_000),
+      /** Number of most-recent gen-0 segments to keep un-archived when
+       *  meta-distillation fires. These segments retain full detail in the
+       *  context prefix while older segments are consolidated. Default: 5.
+       *  See #417. */
+      recentSegmentsToKeep: z.number().min(0).default(5),
     })
     .default({
       minMessages: 5,
       minSegmentTokens: 64,
       maxSegmentTokens: 16384,
       metaThreshold: 20,
-      toolOutputMaxChars: 2_000,
+      toolOutputMaxChars: 4_000,
+      recentSegmentsToKeep: 5,
     }),
   knowledge: z
     .object({
