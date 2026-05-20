@@ -439,6 +439,91 @@ export async function replaySession(
 // Baseline context generation
 // ---------------------------------------------------------------------------
 
+/**
+ * Build Lore context for QA questions, mimicking what the gradient context
+ * manager would provide in a real Lore session.
+ *
+ * In real usage, the gradient system allocates SEPARATE budgets:
+ *   - 25% of context for distillation prefix (compressed older context)
+ *   - 40% of context for raw tail window (recent messages)
+ *   - 5% for LTM knowledge entries
+ *   - Recall tool available for anything not in the above
+ *
+ * These are independent budgets — distillation doesn't reduce the raw tail.
+ * For a 200K context window: ~50K distilled + ~80K raw + ~10K LTM = ~140K total.
+ */
+async function buildLoreContext(
+  turns: ConversationTurn[],
+  contextWindow = 200_000,
+): Promise<string> {
+  // Match the gradient system's budget fractions (config.ts defaults).
+  // Subtract output reserve (32K) and estimated overhead (~8K) from the
+  // context window to compute the usable budget, matching gradient.ts
+  // which uses: usable = contextLimit - outputReserved - overhead - ltmTokens
+  const usable = Math.max(0, contextWindow - 32_000 - 8_000);
+  const distilledBudget = Math.floor(usable * 0.25);
+  const rawBudget = Math.floor(usable * 0.40);
+
+  try {
+    const { db, ensureProject } = await import("@loreai/core");
+    const parts: string[] = [];
+
+    // 1. Fetch non-archived distillation observations (matching gradient.ts
+    // which filters archived = 0). Archived gen-0 segments are reachable
+    // via the recall tool but not included in the in-context prefix.
+    const pid = ensureProject(process.cwd());
+    const distillations = db()
+      .query(
+        "SELECT id, observations, generation, token_count FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC",
+      )
+      .all(pid) as Array<{ id: string; observations: string; generation: number; token_count: number }>;
+
+    let distillTokens = 0;
+    for (const d of distillations) {
+      if (d.observations) {
+        const tokens = d.token_count || estimateTokens(d.observations);
+        if (distillTokens + tokens <= distilledBudget) {
+          parts.push(d.observations);
+          distillTokens += tokens;
+        }
+      }
+    }
+
+    // 2. Add raw conversation tail (independent budget — not reduced by
+    // distillation, matching the gradient system's separate allocations).
+    // LTM is NOT included here — the gateway injects LTM into the system
+    // prompt separately, so adding it here would cause double injection.
+    if (turns.length > 0) {
+      let tailTokens = 0;
+      let cutoff = turns.length;
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const turnTokens = turns[i].tokens ?? estimateTokens(renderConversation([turns[i]]));
+        if (tailTokens + turnTokens > rawBudget) {
+          cutoff = i + 1;
+          break;
+        }
+        tailTokens += turnTokens;
+        if (i === 0) cutoff = 0;
+      }
+      const tail = turns.slice(cutoff);
+      if (tail.length > 0) {
+        parts.push(`## Recent Conversation\n\n${renderConversation(tail)}`);
+      }
+    }
+
+    const context = parts.join("\n\n");
+    console.log(
+      `  [lore-context] Built ${estimateTokens(context)} tok: ${distillations.length} distillation(s) (${distillTokens} tok), ` +
+      `raw tail budget ${rawBudget} tok`,
+    );
+
+    return context;
+  } catch (err) {
+    console.warn("  Warning: failed to build Lore context from DB:", err);
+    return "";
+  }
+}
+
 async function getBaselineContext(
   mode: BaselineMode,
   turns: ConversationTurn[],
@@ -482,14 +567,21 @@ async function askQuestionViaGateway(
   question: string,
   gateway: GatewayHandle,
   model: string,
+  loreContext?: string,
 ): Promise<{ hypothesis: string; tokens: TokenUsage; recallInvoked: boolean }> {
+  // When loreContext is provided, include it in the user message so the model
+  // has the distillation observations and raw conversation context (mimicking
+  // real Lore sessions where the gradient context manager provides these).
+  const contextPreamble = loreContext
+    ? `Here are distilled observations and conversation context from previous coding sessions:\n\n${loreContext}\n\n`
+    : "";
   const requestBody = {
     model,
     system: QA_SYSTEM,
     messages: [
       {
         role: "user",
-        content: `Answer this question about our previous coding sessions. Be specific and factual. If you don't have enough information, say so.\n\nQuestion: ${question}`,
+        content: `${contextPreamble}Answer this question about our previous coding sessions. Be specific and factual. If you don't have enough information, say so.\n\nQuestion: ${question}`,
       },
     ],
     tools: STANDARD_TOOLS,
@@ -763,6 +855,15 @@ export async function runScenario(
 
       const context = await getBaselineContext(mode, allTurns, llm);
 
+      // For gateway-based baselines, build the Lore context once per baseline
+      // (distillation + raw tail), not per question — it's the same for all questions.
+      const isGatewayBaseline =
+        gateway.isReal !== false &&
+        (mode === "lore" || mode === "lore-context-only" || mode === "lore-memory-only");
+      const loreContext = isGatewayBaseline
+        ? await buildLoreContext(allTurns)
+        : "";
+
       // Ask each question
       for (const q of scenario.questions) {
         let hypothesis: string;
@@ -779,18 +880,14 @@ export async function runScenario(
             cacheWrite: 0,
             totalCost: 0,
           };
-        } else if (
-          gateway.isReal !== false &&
-          (mode === "lore" ||
-            mode === "lore-context-only" ||
-            mode === "lore-memory-only")
-        ) {
+        } else if (isGatewayBaseline) {
           // Gateway-based baselines: send the question through the gateway
-          // so it gets Lore's LTM injection, recall, and distilled context.
+          // so it gets Lore's LTM injection, recall tool, and distilled context.
           const answer = await askQuestionViaGateway(
             q.question,
             gateway,
             config.model,
+            loreContext,
           );
           hypothesis = answer.hypothesis;
           tokens = answer.tokens;
