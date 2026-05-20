@@ -212,25 +212,29 @@ function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(2)}M`;
 }
 
-/** Render a labeled cost progress bar with optional ghost (counterfactual) outline. */
+/**
+ * Render a labeled cost progress bar with optional ghost (counterfactual) outline.
+ * `title` and `value` are escaped. `detailLeftHtml`/`detailRightHtml` accept
+ * pre-sanitized trusted HTML (may contain entities like &times;).
+ */
 function renderCostBar(opts: {
   title: string;
   value: string;
   percent: number;
   tint?: string;
   ghostPercent?: number;
-  detailLeft?: string;
-  detailRight?: string;
+  detailLeftHtml?: string;
+  detailRightHtml?: string;
 }): string {
   const pct = Math.max(0, Math.min(100, opts.percent));
   const ghostHtml = opts.ghostPercent != null
     ? `<div class="cost-bar-ghost" style="width:${Math.min(100, opts.ghostPercent).toFixed(1)}%"></div>`
     : "";
-  const detailHtml = (opts.detailLeft || opts.detailRight)
-    ? `<div class="cost-bar-detail"><span>${opts.detailLeft ?? ""}</span><span>${opts.detailRight ?? ""}</span></div>`
+  const detailHtml = (opts.detailLeftHtml || opts.detailRightHtml)
+    ? `<div class="cost-bar-detail"><span>${opts.detailLeftHtml ?? ""}</span><span>${opts.detailRightHtml ?? ""}</span></div>`
     : "";
   return `<div class="cost-bar-container">
-    <div class="cost-bar-label"><span class="bar-title">${esc(opts.title)}</span><span class="bar-value">${opts.value}</span></div>
+    <div class="cost-bar-label"><span class="bar-title">${esc(opts.title)}</span><span class="bar-value">${esc(opts.value)}</span></div>
     <div class="cost-bar">${ghostHtml}<div class="cost-bar-fill ${opts.tint ?? "bar-blue"}" style="width:${pct.toFixed(1)}%"></div></div>
     ${detailHtml}
   </div>`;
@@ -280,8 +284,8 @@ function renderCostSummary(sessionId: string): string {
     value: formatUSD(actual),
     percent: convPct,
     tint: "bar-green",
-    detailLeft: `Conversation: ${formatUSD(costs.conversation.cost)} (${costs.conversation.turns} turns)`,
-    detailRight: workerCost > 0 ? `Overhead: ${formatUSD(workerCost)}${overheadDetail}` : "",
+    detailLeftHtml: `Conversation: ${formatUSD(costs.conversation.cost)} (${costs.conversation.turns} turns)`,
+    detailRightHtml: workerCost > 0 ? `Overhead: ${formatUSD(workerCost)}${overheadDetail}` : "",
   });
 
   // Cache hit rate bar
@@ -291,8 +295,8 @@ function renderCostSummary(sessionId: string): string {
       value: `${cacheHitRate}%`,
       percent: parseFloat(cacheHitRate),
       tint: "bar-green",
-      detailLeft: `${formatTokens(totalInput)} in, ${formatTokens(costs.conversation.outputTokens)} out`,
-      detailRight: `${formatTokens(costs.conversation.cacheReadTokens)} cache reads`,
+      detailLeftHtml: `${formatTokens(totalInput)} in, ${formatTokens(costs.conversation.outputTokens)} out`,
+      detailRightHtml: `${formatTokens(costs.conversation.cacheReadTokens)} cache reads`,
     });
   }
 
@@ -305,10 +309,10 @@ function renderCostSummary(sessionId: string): string {
       percent: actualPct,
       tint: savings >= 0 ? "bar-blue" : "bar-red",
       ghostPercent: 100,
-      detailLeft: savings >= 0
+      detailLeftHtml: savings >= 0
         ? `Saved: ${formatUSD(savings)} (${savingsPct}%)`
         : `Net overhead: ${formatUSD(-savings)}`,
-      detailRight: "",
+      detailRightHtml: "",
     });
   }
 
@@ -471,7 +475,7 @@ form.inline { display: inline; }
   background: var(--bg3); border-radius: 3px;
   overflow: hidden; vertical-align: middle; margin-right: 4px;
 }
-.mini-bar-fill { height: 100%; border-radius: 3px; }
+.mini-bar-fill { display: block; height: 100%; border-radius: 3px; }
 /* --- Daily cost trend chart --- */
 .daily-chart {
   display: flex; align-items: flex-end; gap: 3px;
@@ -2074,19 +2078,27 @@ function pageCosts(): string {
     </div>`;
   } else if (combinedNetSavings < 0) {
     body += `<div class="savings-hero">
-      <div class="big-number" style="color:#e06c75">Net overhead: ${formatUSD(-combinedNetSavings)}</div>
+      <div class="big-number" style="color:#e06c75">Net overhead: ${formatUSD(Math.abs(combinedNetSavings))}</div>
       <div class="sub-label">Total spend: ${formatUSD(combinedTotalSpend)} &middot; Overhead: ${formatUSD(combinedWorkerCost)} &middot; Savings will grow as sessions continue</div>
+    </div>`;
+  } else if (combinedTotalSpend > 0) {
+    // Exactly zero net savings — overhead equals savings
+    body += `<div class="savings-hero">
+      <div class="big-number" style="color:var(--fg2)">Breaking even</div>
+      <div class="sub-label">Total spend: ${formatUSD(combinedTotalSpend)} &middot; Lore overhead exactly matches savings</div>
     </div>`;
   }
 
   // Summary stats (compact pills for secondary metrics)
-  // Trend arrow: compare live savings rate vs historical average
+  // Trend arrow: compare live savings rate vs historical average.
+  // Both rates use the same formula: netSavings / counterfactual,
+  // where counterfactual = actualSpend + netSavings.
   const liveSavingsRate = liveTotalWithout > 0 ? liveTotalSavings / liveTotalWithout : 0;
-  const histCounterfactual = hist.persistedConversationCost + hist.totalWorkerCost +
-    hist.warmupSavings + hist.ttlSavings + hist.batchSavings + hist.avoidedCompactionCost;
-  const histSavingsRate = histCounterfactual > 0
-    ? (hist.warmupSavings + hist.ttlSavings + hist.batchSavings + hist.avoidedCompactionCost - hist.totalWorkerCost) / histCounterfactual
-    : 0;
+  const histNetSavings = hist.warmupSavings + hist.ttlSavings + hist.batchSavings +
+    hist.avoidedCompactionCost - hist.totalWorkerCost;
+  const histActualSpend = hist.persistedConversationCost + hist.totalWorkerCost;
+  const histWithoutLore = histActualSpend + histNetSavings;
+  const histSavingsRate = histWithoutLore > 0 ? histNetSavings / histWithoutLore : 0;
   let trendArrow = "";
   if (allCosts.size > 0 && hist.sessionCount > 0) {
     if (liveSavingsRate > histSavingsRate + 0.02) {
@@ -2103,7 +2115,7 @@ function pageCosts(): string {
   </div>`;
 
   // --- Daily cost trend chart ---
-  const dailyCosts = computeDailyCosts(14);
+  const dailyCosts = computeDailyCosts(14, historical);
   const maxDayCost = Math.max(...dailyCosts.map((d) => d.cost), 0.001);
   if (dailyCosts.some((d) => d.cost > 0)) {
     body += `<h3>Daily Cost Trend (last 14 days)</h3>`;
@@ -2146,8 +2158,8 @@ function pageCosts(): string {
       value: formatUSD(liveTotalSpend),
       percent: convPct,
       tint: "bar-green",
-      detailLeft: `Conversation: ${formatUSD(liveTotalConversation)} (${liveTotalTurns} turns)`,
-      detailRight: `Overhead: ${formatUSD(liveTotalWorker)}${overheadDetail}`,
+      detailLeftHtml: `Conversation: ${formatUSD(liveTotalConversation)} (${liveTotalTurns} turns)`,
+      detailRightHtml: `Overhead: ${formatUSD(liveTotalWorker)}${overheadDetail}`,
     });
 
     // Savings ratio bar: actual vs counterfactual
@@ -2159,10 +2171,10 @@ function pageCosts(): string {
         percent: actualPct,
         tint: liveTotalSavings >= 0 ? "bar-blue" : "bar-red",
         ghostPercent: 100,
-        detailLeft: liveTotalSavings >= 0
+        detailLeftHtml: liveTotalSavings >= 0
           ? `Saved: ${formatUSD(liveTotalSavings)}`
           : `Overhead: ${formatUSD(-liveTotalSavings)}`,
-        detailRight: liveTotalWithout > 0
+        detailRightHtml: liveTotalWithout > 0
           ? `${(100 - actualPct).toFixed(0)}% saved`
           : "",
       });
@@ -2178,8 +2190,8 @@ function pageCosts(): string {
         value: `${liveCacheHitPct.toFixed(0)}%`,
         percent: liveCacheHitPct,
         tint: "bar-green",
-        detailLeft: `${formatTokens(liveCacheReadTokens)} cache reads`,
-        detailRight: `${formatTokens(liveTotalInputTokens)} total input`,
+        detailLeftHtml: `${formatTokens(liveCacheReadTokens)} cache reads`,
+        detailRightHtml: `${formatTokens(liveTotalInputTokens)} total input`,
       });
     }
 

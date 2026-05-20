@@ -832,9 +832,10 @@ export type DailyCostEntry = {
  * Compute per-day cost totals over the last N days.
  *
  * Uses historical estimates (persisted snapshots) bucketed by lastMessage date,
- * plus live session costs bucketed to today.
+ * plus live session costs bucketed to today. Pass a pre-fetched `preloaded`
+ * to avoid redundant DB scans when the caller already has the data.
  */
-export function computeDailyCosts(days = 14): DailyCostEntry[] {
+export function computeDailyCosts(days = 14, preloaded?: HistoricalEstimates): DailyCostEntry[] {
   const today = new Date();
   const cutoff = new Date(today);
   cutoff.setDate(cutoff.getDate() - days + 1);
@@ -850,7 +851,7 @@ export function computeDailyCosts(days = 14): DailyCostEntry[] {
   }
 
   // Historical sessions
-  const hist = computeHistoricalEstimates();
+  const hist = preloaded ?? computeHistoricalEstimates();
   for (const s of hist.sessions) {
     if (s.lastMessage < cutoffMs) continue;
     const dateKey = new Date(s.lastMessage).toISOString().slice(0, 10);
