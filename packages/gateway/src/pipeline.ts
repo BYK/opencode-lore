@@ -3179,14 +3179,16 @@ async function handleConversationTurn(
       : result.layer === 2 ? "aggressively compressed"
       : result.layer >= 3 ? "emergency compressed" : "compressed";
     ltmText += `\n\n[Context health: conversation history is ${layerDesc}. ` +
-      `Earlier details (file paths, error messages, decisions) are preserved in distilled ` +
-      `observations and searchable via the recall tool. Use recall proactively when referencing ` +
-      `details from earlier in the session.]`;
+      `Distilled observations above are lossy summaries — specific details ` +
+      `(exact error messages, rejected alternatives, file paths, numerical values) ` +
+      `are likely omitted. Use recall to verify any specific claim before answering ` +
+      `questions about what happened, what was considered, or what the exact values were.]`;
   } else if (result.layer >= 1 && !ltmText) {
     ltmText = `[Context health: conversation history is compressed. ` +
-      `Earlier details (file paths, error messages, decisions) are preserved in distilled ` +
-      `observations and searchable via the recall tool. Use recall proactively when referencing ` +
-      `details from earlier in the session.]`;
+      `Distilled observations above are lossy summaries — specific details ` +
+      `(exact error messages, rejected alternatives, file paths, numerical values) ` +
+      `are likely omitted. Use recall to verify any specific claim before answering ` +
+      `questions about what happened, what was considered, or what the exact values were.]`;
   }
 
   // --- 7d. Unsustainable conversation warning ---
