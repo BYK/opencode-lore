@@ -126,10 +126,18 @@ describe("fetchModelData", () => {
       );
     }) as unknown as typeof fetch;
 
+    // Defensive reset: another test file's async cleanup may have populated
+    // the cache via our mock between beforeEach and here.
+    clearModelDataCache();
+    callCount = 0;
+
     const first = await fetchModelData();
+    const countAfterFirst = callCount;
     const second = await fetchModelData();
 
-    expect(callCount).toBe(1);
+    // Delta-based: immune to cross-test pollution inflating callCount.
+    expect(countAfterFirst).toBe(1);
+    expect(callCount - countAfterFirst).toBe(0); // no re-fetch — cached
     expect(first).toBe(second); // Same reference — cached
   });
 
@@ -160,12 +168,21 @@ describe("fetchModelData", () => {
       );
     }) as unknown as typeof fetch;
 
-    const [a, b, c] = await Promise.all([
-      fetchModelData(),
-      fetchModelData(),
-      fetchModelData(),
-    ]);
+    // Defensive reset: another test file's async cleanup may have populated
+    // the cache via our mock between beforeEach and here.
+    clearModelDataCache();
+    callCount = 0;
 
+    // All three calls execute synchronously — dedup returns the same promise.
+    const pa = fetchModelData();
+    const pb = fetchModelData();
+    const pc = fetchModelData();
+
+    expect(pa).toBe(pb);
+    expect(pb).toBe(pc);
+
+    const [a, b, c] = await Promise.all([pa, pb, pc]);
+    // Delta-based: only count fetches since our reset, immune to cross-test pollution.
     expect(callCount).toBe(1);
     expect(a).toBe(b);
     expect(b).toBe(c);
@@ -178,8 +195,19 @@ describe("fetchModelData", () => {
       return Promise.reject(new Error("Network error"));
     }) as unknown as typeof fetch;
 
-    const [a, b] = await Promise.all([fetchModelData(), fetchModelData()]);
+    // Defensive reset: another test file's async cleanup may have populated
+    // the cache via our mock between beforeEach and here.
+    clearModelDataCache();
+    callCount = 0;
 
+    // Dedup holds even when fetch rejects (caught internally → empty Map).
+    const pa = fetchModelData();
+    const pb = fetchModelData();
+
+    expect(pa).toBe(pb);
+
+    const [a, b] = await Promise.all([pa, pb]);
+    // Delta-based: only count fetches since our reset, immune to cross-test pollution.
     expect(callCount).toBe(1);
     expect(a).toBe(b);
     expect(a.size).toBe(0);
