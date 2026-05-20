@@ -146,6 +146,17 @@ describe("temporal", () => {
     expect(after[0].id).toBe("msg-3");
   });
 
+  test("search finds distilled messages", () => {
+    // msg-1 and msg-2 were marked distilled in the previous test
+    const results = temporal.search({
+      projectPath: PROJECT,
+      query: "OAuth",
+    });
+    expect(results.length).toBeGreaterThan(0);
+    // msg-2 contains "OAuth2" and is distilled — must still appear
+    expect(results.some((r) => r.id === "msg-2")).toBe(true);
+  });
+
   test("count and undistilledCount", () => {
     expect(temporal.count(PROJECT, "sess-1")).toBe(3);
     expect(temporal.undistilledCount(PROJECT, "sess-1")).toBe(1);
