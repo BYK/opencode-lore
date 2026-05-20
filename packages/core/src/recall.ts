@@ -523,6 +523,12 @@ export async function searchRecall(
     weight?: number;
   }> = [];
 
+  // Track whether session-specific results (temporal/distillation) exist
+  // across any query. Used to downweight knowledge when session content is
+  // available — knowledge entries are general cross-session facts, and when
+  // temporal details exist they are more likely the answer.
+  let hasSessionResults = false;
+
   // Track where primary (first-query) lists end so the MAX_RRF_LISTS cap
   // trims expanded-query lists first, preserving vector/supplemental lists.
   let primaryListEnd = 0;
@@ -571,6 +577,14 @@ export async function searchRecall(
       }
     }
 
+    if (temporalResults.length > 0 || distillationResults.length > 0) {
+      hasSessionResults = true;
+    }
+
+    // When searching all scopes AND session-specific results exist,
+    // downweight knowledge BM25 so session content ranks higher.
+    const knowledgeWeight = scope === "all" && hasSessionResults ? 0.6 : 1.0;
+
     allRrfLists.push(
       {
         items: knowledgeResults.map((item) => ({
@@ -578,6 +592,7 @@ export async function searchRecall(
           item,
         })),
         key: (r) => `k:${r.item.id}`,
+        weight: knowledgeWeight,
       },
       {
         items: distillationResults.map((item) => ({
@@ -689,11 +704,14 @@ export async function searchRecall(
           }
         }
         if (vectorTagged.length) {
-          // Same `k:` key prefix as BM25 knowledge — RRF merges, not duplicates
+          // Same `k:` key prefix as BM25 knowledge — RRF merges, not duplicates.
+          // Apply knowledge downweight so knowledge is consistently
+          // deprioritized when session-specific content exists.
+          const kvWeight = scope === "all" && hasSessionResults ? 0.6 : 1.0;
           allRrfLists.push({
             items: vectorTagged,
             key: (r) => `k:${r.item.id}`,
-            weight: vectorWeight,
+            weight: vectorWeight * kvWeight,
           });
         }
       }
