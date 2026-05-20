@@ -138,6 +138,9 @@ jobs:
           kill $SERVER_PID
           wait $SERVER_PID 2>/dev/null || true
 
+      - name: Smoke-test bundle exports under Bun
+        run: bun test packages/gateway/test/bundle-exports.test.ts
+
       # -----------------------------------------------------------------
       # CLI: standalone binary build + smoke test
       # -----------------------------------------------------------------
