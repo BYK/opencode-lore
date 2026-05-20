@@ -411,11 +411,50 @@ export async function replaySession(
       cacheWriteTokens: data.usage?.cache_creation_input_tokens ?? 0,
     });
 
-    // Add the scripted assistant response to history
+    // Add the scripted assistant response to history AND store it in temporal
+    // so that recall can find the scenario's actual content. The gateway's
+    // postResponse stores the API's own response (which differs from the
+    // scripted content), so we store the scripted turn directly.
     const nextTurn = turns[i + 1];
-    if (nextTurn && nextTurn.role === "assistant") {
+    if (nextTurn && nextTurn.role === "assistant" && !nextTurn.isFiller) {
       history.push(nextTurn);
       i++; // skip the assistant turn in the outer loop
+
+      // Store scripted assistant content in temporal for recall search.
+      // Use a stable eval-specific session ID so all scripted content is
+      // grouped in one searchable session.
+      try {
+        const { temporal } = await import("@loreai/core");
+        const text = nextTurn.content
+          .map((p: any) =>
+            p.type === "text" ? p.text :
+            p.type === "tool_use" ? `[tool:${p.name}] ${JSON.stringify(p.input).slice(0, 500)}` :
+            p.type === "tool_result" ? `[tool:result] ${p.content}` : "",
+          )
+          .filter(Boolean)
+          .join("\n");
+        if (text.trim()) {
+          temporal.store({
+            projectPath: process.cwd(),
+            info: {
+              id: `eval-scripted-${i}`,
+              sessionID: sessionID ?? `eval-replay-${Date.now()}`,
+              role: "assistant" as const,
+              time: { created: nextTurn.timestamp ?? Date.now() },
+            } as any,
+            parts: [{
+              id: `eval-scripted-part-${i}`,
+              sessionID: sessionID ?? `eval-replay-${Date.now()}`,
+              messageID: `eval-scripted-${i}`,
+              type: "text" as const,
+              text,
+              time: { start: 0, end: 0 },
+            } as any],
+          });
+        }
+      } catch {
+        // best-effort — don't fail replay if temporal import fails
+      }
     }
   }
 

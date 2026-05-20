@@ -629,6 +629,38 @@ export async function searchRecall(
       });
     }
 
+    // Session-affinity boost: when searching all scopes with a known session,
+    // add extra RRF lists for same-session results. This boosts current-session
+    // temporal messages and distillations over cross-session LTM entries that
+    // may match keywords but lack session-specific context.
+    if (scope === "all" && sessionID) {
+      const sessionTemporal = temporalResults.filter(
+        (r) => r.session_id === sessionID,
+      );
+      if (sessionTemporal.length > 0) {
+        allRrfLists.push({
+          items: sessionTemporal.map((item) => ({
+            source: "temporal" as const,
+            item,
+          })),
+          key: (r) => `t:${r.item.id}`,
+        });
+      }
+
+      const sessionDistillations = distillationResults.filter(
+        (r) => r.session_id === sessionID,
+      );
+      if (sessionDistillations.length > 0) {
+        allRrfLists.push({
+          items: sessionDistillations.map((item) => ({
+            source: "distillation" as const,
+            item,
+          })),
+          key: (r) => `d:${r.item.id}`,
+        });
+      }
+    }
+
     // Mark the end of the first (original) query's lists. Supplemental lists
     // (vector, lat.md, cross-project, quality, exact-match) are appended after
     // the loop and should be preserved over expanded-query lists when capping.
