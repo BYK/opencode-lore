@@ -249,6 +249,9 @@ export const LorePlugin: Plugin = async (ctx) => {
     // For local/custom providers, inject the original upstream URL so the
     // gateway can forward requests to the correct endpoint.
     "chat.headers": async (input, output) => {
+      // Inject stable session ID — OpenCode's DB session ID survives restarts,
+      // unlike x-session-affinity (nanoid regenerated per process).
+      output.headers["x-lore-session-id"] = input.sessionID;
       output.headers["x-lore-agent"] = input.agent;
       // Inject project path so the gateway can attribute data correctly.
       output.headers["x-lore-project"] = ctx.worktree || ctx.directory;

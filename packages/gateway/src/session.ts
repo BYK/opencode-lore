@@ -4,10 +4,10 @@
  * Uses a 3-tier identification strategy:
  *
  *  **Tier 1 — Known headers** (immediate match):
+ *    `x-lore-session-id` (Lore plugins: OpenCode, Pi — stable, deterministic),
  *    `x-claude-code-session-id` (Claude Code), `x-session-affinity`
- *    (OpenCode), `x-lore-session-id` (Pi plugin). These persist for the
- *    entire client session and survive model changes, compaction, and
- *    context rewriting.
+ *    (OpenCode native — volatile, regenerated on restart). Checked in
+ *    priority order; stable headers win over volatile ones.
  *
  *  **Tier 2 — Learned headers** (bootstrapped via fingerprint):
  *    During the first few fingerprinted turns, collect candidate `x-`
@@ -265,9 +265,9 @@ export function detectClientType(
  * Checked in order — first match wins.
  */
 export const KNOWN_SESSION_HEADERS = [
+  "x-lore-session-id",        // Lore plugins (stable, deterministic) — checked first
   "x-claude-code-session-id", // Claude Code (UUID, persists for CLI session)
-  "x-session-affinity",       // OpenCode  (nanoid, persists for session)
-  "x-lore-session-id",        // Lore plugins (Pi, etc.) — injected via registerProvider
+  "x-session-affinity",       // OpenCode  (nanoid, volatile — regenerated on restart)
 ] as const;
 
 /**
@@ -455,4 +455,62 @@ export function learnHeaders(
   }
 
   return { updatedCandidates: currentCandidates, promoted };
+}
+
+// ---------------------------------------------------------------------------
+// Tier 1b: Header value rotation detection
+// ---------------------------------------------------------------------------
+
+/** Maximum age (ms) of a session that can be considered a rotation predecessor. */
+export const ROTATION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/** Information about a candidate predecessor session. */
+export interface RotationCandidate {
+  /** Internal Lore session ID. */
+  sid: string;
+  /** Whether this session is a sub-agent. */
+  isSubagent: boolean;
+  /** Wall-clock timestamp of the last request/turn (ms since epoch). */
+  lastActiveAt: number;
+}
+
+/**
+ * Find a rotation predecessor: an existing session previously identified via
+ * the same known header name whose value has changed (e.g. client restart).
+ *
+ * Returns the predecessor's session ID and old header value if exactly one
+ * recent, non-subagent match is found. Returns `null` if zero or multiple
+ * candidates exist (ambiguous — could be concurrent sessions).
+ *
+ * This is a pure function with no side effects — the caller is responsible
+ * for re-indexing the header mapping and persisting the change.
+ */
+export function findRotationPredecessor(
+  headerName: string,
+  newHeaderValue: string,
+  headerIndex: ReadonlyMap<string, string>,
+  getCandidate: (sid: string) => RotationCandidate | null,
+  now: number = Date.now(),
+): { sid: string; oldHeaderValue: string } | null {
+  const headerPrefix = headerName + ":";
+  const newKey = headerPrefix + newHeaderValue;
+  let predecessor: { sid: string; oldHeaderValue: string } | null = null;
+
+  for (const [key, sid] of headerIndex) {
+    if (!key.startsWith(headerPrefix)) continue;
+    if (key === newKey) continue; // same value — not a rotation
+
+    const candidate = getCandidate(sid);
+    if (!candidate) continue; // orphaned index entry or not loadable
+    if (candidate.isSubagent) continue;
+    if (now - candidate.lastActiveAt > ROTATION_MAX_AGE_MS) continue;
+
+    if (predecessor) {
+      // Multiple predecessors — ambiguous (concurrent sessions).
+      return null;
+    }
+    predecessor = { sid, oldHeaderValue: key.slice(headerPrefix.length) };
+  }
+
+  return predecessor;
 }

@@ -7,6 +7,8 @@ import {
   scanForMarker,
   fingerprintMessages,
   extractKnownSessionHeader,
+  findRotationPredecessor,
+  ROTATION_MAX_AGE_MS,
 
   isSessionHeaderName,
   isIdLikeValue,
@@ -14,6 +16,7 @@ import {
   learnHeaders,
   _resetGlobalHeaderValues,
   type HeaderCandidate,
+  type RotationCandidate,
 } from "../src/session";
 
 // ---------------------------------------------------------------------------
@@ -378,6 +381,18 @@ describe("extractKnownSessionHeader", () => {
     });
   });
 
+  test("prefers x-lore-session-id over x-claude-code-session-id and x-session-affinity", () => {
+    const result = extractKnownSessionHeader({
+      "x-lore-session-id": "stable-lore-id",
+      "x-claude-code-session-id": "claude-uuid",
+      "x-session-affinity": "opencode-id",
+    });
+    expect(result).toEqual({
+      sessionId: "stable-lore-id",
+      headerName: "x-lore-session-id",
+    });
+  });
+
   test("prefers x-claude-code-session-id over x-session-affinity", () => {
     const result = extractKnownSessionHeader({
       "x-claude-code-session-id": "claude-uuid",
@@ -647,5 +662,263 @@ describe("learnHeaders", () => {
     // seenCount resets every turn — never reaches threshold
     expect(r3.updatedCandidates.get("x-request-id")?.seenCount).toBe(1);
     expect(r3.promoted).toBeNull();
+  });
+});
+
+// ===========================================================================
+// Tier 1b: Header value rotation detection
+// ===========================================================================
+
+describe("findRotationPredecessor", () => {
+  const now = Date.now();
+
+  /** Helper to build a simple header index map. */
+  function buildIndex(entries: Array<[string, string, string]>): Map<string, string> {
+    const index = new Map<string, string>();
+    for (const [headerName, headerValue, sid] of entries) {
+      index.set(`${headerName}:${headerValue}`, sid);
+    }
+    return index;
+  }
+
+  /** Helper to build a candidate lookup function. */
+  function buildLookup(
+    candidates: Map<string, RotationCandidate>,
+  ): (sid: string) => RotationCandidate | null {
+    return (sid) => candidates.get(sid) ?? null;
+  }
+
+  test("finds a single predecessor when header value rotates", () => {
+    const index = buildIndex([
+      ["x-session-affinity", "old-nanoid-abc", "lore-session-123"],
+    ]);
+    const candidates = new Map<string, RotationCandidate>([
+      ["lore-session-123", { sid: "lore-session-123", isSubagent: false, lastActiveAt: now - 60_000 }],
+    ]);
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toEqual({
+      sid: "lore-session-123",
+      oldHeaderValue: "old-nanoid-abc",
+    });
+  });
+
+  test("returns null when no predecessor exists (first session)", () => {
+    const index = new Map<string, string>();
+    const candidates = new Map<string, RotationCandidate>();
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "first-nanoid-abc",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toBeNull();
+  });
+
+  test("returns null when multiple predecessors exist (concurrent sessions)", () => {
+    const index = buildIndex([
+      ["x-session-affinity", "nanoid-session-a", "lore-session-A"],
+      ["x-session-affinity", "nanoid-session-b", "lore-session-B"],
+    ]);
+    const candidates = new Map<string, RotationCandidate>([
+      ["lore-session-A", { sid: "lore-session-A", isSubagent: false, lastActiveAt: now - 60_000 }],
+      ["lore-session-B", { sid: "lore-session-B", isSubagent: false, lastActiveAt: now - 60_000 }],
+    ]);
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toBeNull();
+  });
+
+  test("skips sub-agent sessions", () => {
+    const index = buildIndex([
+      ["x-session-affinity", "subagent-nanoid", "lore-subagent-1"],
+    ]);
+    const candidates = new Map<string, RotationCandidate>([
+      ["lore-subagent-1", { sid: "lore-subagent-1", isSubagent: true, lastActiveAt: now - 60_000 }],
+    ]);
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toBeNull();
+  });
+
+  test("skips stale sessions older than 24 hours", () => {
+    const staleTime = now - ROTATION_MAX_AGE_MS - 1;
+    const index = buildIndex([
+      ["x-session-affinity", "old-nanoid-abc", "lore-session-stale"],
+    ]);
+    const candidates = new Map<string, RotationCandidate>([
+      ["lore-session-stale", { sid: "lore-session-stale", isSubagent: false, lastActiveAt: staleTime }],
+    ]);
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toBeNull();
+  });
+
+  test("finds predecessor when stale + active sessions exist (stale filtered out)", () => {
+    const staleTime = now - ROTATION_MAX_AGE_MS - 1;
+    const index = buildIndex([
+      ["x-session-affinity", "stale-nanoid", "lore-session-stale"],
+      ["x-session-affinity", "active-nanoid", "lore-session-active"],
+    ]);
+    const candidates = new Map<string, RotationCandidate>([
+      ["lore-session-stale", { sid: "lore-session-stale", isSubagent: false, lastActiveAt: staleTime }],
+      ["lore-session-active", { sid: "lore-session-active", isSubagent: false, lastActiveAt: now - 60_000 }],
+    ]);
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toEqual({
+      sid: "lore-session-active",
+      oldHeaderValue: "active-nanoid",
+    });
+  });
+
+  test("finds predecessor when subagent + real sessions exist (subagent filtered out)", () => {
+    const index = buildIndex([
+      ["x-session-affinity", "subagent-nanoid", "lore-subagent"],
+      ["x-session-affinity", "real-nanoid", "lore-session-real"],
+    ]);
+    const candidates = new Map<string, RotationCandidate>([
+      ["lore-subagent", { sid: "lore-subagent", isSubagent: true, lastActiveAt: now - 60_000 }],
+      ["lore-session-real", { sid: "lore-session-real", isSubagent: false, lastActiveAt: now - 60_000 }],
+    ]);
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toEqual({
+      sid: "lore-session-real",
+      oldHeaderValue: "real-nanoid",
+    });
+  });
+
+  test("ignores entries from different header names", () => {
+    const index = buildIndex([
+      ["x-claude-code-session-id", "claude-uuid", "lore-session-claude"],
+      ["x-session-affinity", "old-nanoid", "lore-session-opencode"],
+    ]);
+    const candidates = new Map<string, RotationCandidate>([
+      ["lore-session-claude", { sid: "lore-session-claude", isSubagent: false, lastActiveAt: now - 60_000 }],
+      ["lore-session-opencode", { sid: "lore-session-opencode", isSubagent: false, lastActiveAt: now - 60_000 }],
+    ]);
+
+    // Rotating x-session-affinity should only find the opencode session, not claude
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toEqual({
+      sid: "lore-session-opencode",
+      oldHeaderValue: "old-nanoid",
+    });
+  });
+
+  test("skips orphaned index entries (candidate lookup returns null)", () => {
+    const index = buildIndex([
+      ["x-session-affinity", "orphaned-nanoid", "lore-session-gone"],
+    ]);
+    // No candidates — simulates session not in memory and not in DB
+    const candidates = new Map<string, RotationCandidate>();
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toBeNull();
+  });
+
+  test("session just at 24h boundary is still valid", () => {
+    // Exactly at the boundary (not over) should be included
+    const justAtBoundary = now - ROTATION_MAX_AGE_MS;
+    const index = buildIndex([
+      ["x-session-affinity", "old-nanoid", "lore-session-boundary"],
+    ]);
+    const candidates = new Map<string, RotationCandidate>([
+      ["lore-session-boundary", { sid: "lore-session-boundary", isSubagent: false, lastActiveAt: justAtBoundary }],
+    ]);
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    // now - justAtBoundary === ROTATION_MAX_AGE_MS, which is NOT > ROTATION_MAX_AGE_MS
+    expect(result).toEqual({
+      sid: "lore-session-boundary",
+      oldHeaderValue: "old-nanoid",
+    });
+  });
+
+  test("session 1ms over 24h boundary is stale", () => {
+    const justOverBoundary = now - ROTATION_MAX_AGE_MS - 1;
+    const index = buildIndex([
+      ["x-session-affinity", "old-nanoid", "lore-session-over"],
+    ]);
+    const candidates = new Map<string, RotationCandidate>([
+      ["lore-session-over", { sid: "lore-session-over", isSubagent: false, lastActiveAt: justOverBoundary }],
+    ]);
+
+    const result = findRotationPredecessor(
+      "x-session-affinity",
+      "new-nanoid-xyz",
+      index,
+      buildLookup(candidates),
+      now,
+    );
+
+    expect(result).toBeNull();
   });
 });
