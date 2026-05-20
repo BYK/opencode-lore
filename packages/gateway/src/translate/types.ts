@@ -306,6 +306,14 @@ export type SessionState = {
    *  are accepted upstream. */
   lastAnthropicBeta?: string;
 
+  // --- Amnesia mode ---
+
+  /** When true, temporal storage and background work (distillation, curation)
+   *  are suppressed. The session still gets full Lore processing (LTM injection,
+   *  recall tool, gradient transform) but doesn't write to memory.
+   *  Toggled via `/lore:amnesia:on` and `/lore:amnesia:off`. */
+  amnesia?: boolean;
+
   // --- Periodic persistence ---
 
   /** Set true when session state changes that need periodic flush to DB.
