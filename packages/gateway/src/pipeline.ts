@@ -2047,17 +2047,24 @@ function postResponse(
     // Convert gateway messages to Lore format.
     const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
 
-    // Store the latest user message BEFORE resolveToolResults — we want the
-    // original content (including tool_result text), not the placeholder
-    // "[tool results provided]" that resolveToolResults creates after merging.
-    for (let i = loreMessages.length - 1; i >= 0; i--) {
-      if (loreMessages[i].info.role === "user") {
-        temporal.store({
-          projectPath,
-          info: loreMessages[i].info,
-          parts: loreMessages[i].parts,
-        });
-        break;
+    // Skip temporal storage in amnesia mode or when x-lore-no-store is set.
+    // The session still gets full Lore processing (LTM, recall, gradient)
+    // but doesn't write to memory. Amnesia is session-scoped (toggle via
+    // /lore:amnesia:on|off); no-store is per-request (header-based).
+    const noStore = sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
+    if (!noStore) {
+      // Store the latest user message BEFORE resolveToolResults — we want the
+      // original content (including tool_result text), not the placeholder
+      // "[tool results provided]" that resolveToolResults creates after merging.
+      for (let i = loreMessages.length - 1; i >= 0; i--) {
+        if (loreMessages[i].info.role === "user") {
+          temporal.store({
+            projectPath,
+            info: loreMessages[i].info,
+            parts: loreMessages[i].parts,
+          });
+          break;
+        }
       }
     }
 
@@ -2066,23 +2073,25 @@ function postResponse(
     // after-eviction pattern but not for temporal storage above).
     resolveToolResults(loreMessages);
 
-    // Build and store the assistant response message.
-    // Strip recall marker text blocks — they contain the raw query string
-    // and pollute FTS results with self-referential noise.
-    const assistantContent = resp.content.filter(
-      (b) => !(b.type === "text" && isRecallMarker(b.text)),
-    );
-    if (assistantContent.length > 0) {
-      const assistantMsg = gatewayMessagesToLore(
-        [{ role: "assistant", content: assistantContent }],
-        sessionID,
-      )[0];
-      updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
-      temporal.store({
-        projectPath,
-        info: assistantMsg.info,
-        parts: assistantMsg.parts,
-      });
+    if (!noStore) {
+      // Build and store the assistant response message.
+      // Strip recall marker text blocks — they contain the raw query string
+      // and pollute FTS results with self-referential noise.
+      const assistantContent = resp.content.filter(
+        (b) => !(b.type === "text" && isRecallMarker(b.text)),
+      );
+      if (assistantContent.length > 0) {
+        const assistantMsg = gatewayMessagesToLore(
+          [{ role: "assistant", content: assistantContent }],
+          sessionID,
+        )[0];
+        updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
+        temporal.store({
+          projectPath,
+          info: assistantMsg.info,
+          parts: assistantMsg.parts,
+        });
+      }
     }
 
     // Update session state (persisted in the batched save after messageCount update)
@@ -2244,7 +2253,9 @@ function postResponse(
     }
 
     // --- Schedule background work (fire-and-forget) ---
-    scheduleBackgroundWork(sessionState, config);
+    if (!noStore) {
+      scheduleBackgroundWork(sessionState, config);
+    }
   } catch (e) {
     log.error("post-response processing failed:", e);
   }
@@ -3732,6 +3743,88 @@ function lastUserTextTrimmed(req: GatewayRequest): string {
   return "";
 }
 
+// ---------------------------------------------------------------------------
+// Generic /lore:* slash command dispatcher
+// ---------------------------------------------------------------------------
+
+/**
+ * Intercepts all `/lore:*` slash commands. Routes to specific handlers
+ * and returns a synthetic response. Unknown `/lore:*` commands get a
+ * helpful error response instead of being forwarded upstream.
+ */
+async function handleLoreSlashCommand(
+  req: GatewayRequest,
+  allSessions: Map<string, SessionState>,
+  config: GatewayConfig,
+): Promise<Response | null> {
+  const text = lastUserTextTrimmed(req);
+  if (!text.toLowerCase().startsWith("/lore:")) return null;
+
+  // Route to specific handlers
+  const warmupResult = handleWarmupSlashCommand(req, allSessions);
+  if (warmupResult) return warmupResult;
+
+  const curateResult = await handleCurateSlashCommand(req, allSessions, config);
+  if (curateResult) return curateResult;
+
+  const amnesiaResult = handleAmnesiaSlashCommand(req, allSessions);
+  if (amnesiaResult) return amnesiaResult;
+
+  // Unknown /lore:* command — return error instead of forwarding upstream
+  log.warn(`unknown slash command: ${text}`);
+  return slashResponse(req, `Unknown command: ${text}. Available: /lore:curate, /lore:warm:stop|keep|auto, /lore:amnesia:on|off`, `msg_lore_${Date.now()}`);
+}
+
+// ---------------------------------------------------------------------------
+// /lore:amnesia — toggle temporal storage and background work
+// ---------------------------------------------------------------------------
+
+/**
+ * `/lore:amnesia:on` — suppresses temporal storage and background work.
+ * `/lore:amnesia:off` — resumes normal storage.
+ *
+ * The session still gets full Lore processing (LTM injection, recall tool,
+ * gradient transform) but doesn't write new memories. Useful for eval QA
+ * questions, read-only introspection, and sensitive conversations.
+ */
+function handleAmnesiaSlashCommand(
+  req: GatewayRequest,
+  allSessions: Map<string, SessionState>,
+): Response | null {
+  const text = lastUserTextTrimmed(req);
+  const lower = text.toLowerCase();
+
+  const isOn = lower === "/lore:amnesia:on";
+  const isOff = lower === "/lore:amnesia:off";
+  if (!isOn && !isOff) return null;
+
+  // Find the session
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  let state: SessionState | undefined;
+  if (known) {
+    const indexKey = `${known.headerName}:${known.sessionId}`;
+    const sid = headerSessionIndex.get(indexKey);
+    if (sid) state = allSessions.get(sid);
+  }
+
+  if (state) {
+    state.amnesia = isOn;
+    log.info(
+      `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
+      `storage ${isOn ? "suppressed" : "resumed"}`,
+    );
+  }
+
+  const responseText = isOn
+    ? "Amnesia mode on — memory storage suppressed. Recall still works."
+    : "Amnesia mode off — memory storage resumed.";
+  return slashResponse(req, responseText, `msg_lore_${Date.now()}`);
+}
+
+// ---------------------------------------------------------------------------
+// /lore:warm — cache warming control
+// ---------------------------------------------------------------------------
+
 /**
  * Check if the last user message is a warmup slash command.
  *
@@ -3787,50 +3880,11 @@ function handleWarmupSlashCommand(
   }
 
   const responseText = isStop
-    ? "🧊 Cache warming stopped."
+    ? "Cache warming stopped."
     : isKeep
-      ? "🔥 Keeping cache warm."
-      : "🔄 Cache warming set to auto.";
-
-  const msgId = `msg_lore_${Date.now()}`;
-
-  // Return SSE stream when the client expects streaming (OpenCode, Claude Code)
-  if (req.stream) {
-    const sseBody = buildSSETextResponse(msgId, req.model, responseText, {
-      inputTokens: 0,
-      outputTokens: 0,
-    });
-    return new Response(sseBody, {
-      status: 200,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      },
-    });
-  }
-
-  // Non-streaming: plain JSON
-  const body = JSON.stringify({
-    id: msgId,
-    type: "message",
-    role: "assistant",
-    content: [{ type: "text", text: responseText }],
-    model: req.model,
-    stop_reason: "end_turn",
-    stop_sequence: null,
-    usage: {
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read_input_tokens: 0,
-      cache_creation_input_tokens: 0,
-    },
-  });
-
-  return new Response(body, {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
+      ? "Keeping cache warm."
+      : "Cache warming set to auto.";
+  return slashResponse(req, responseText, `msg_lore_${Date.now()}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -4020,11 +4074,10 @@ export async function handleRequest(
       if (sid) priorState = sessions.get(sid);
     }
 
-    // --- Case 0: Slash command interception ---
-    const slashResult = handleWarmupSlashCommand(req, sessions);
+    // --- Case 0: Slash command interception (/lore:*) ---
+    // All /lore:* commands are intercepted here and never forwarded upstream.
+    const slashResult = await handleLoreSlashCommand(req, sessions, config);
     if (slashResult) return slashResult;
-    const curateResult = await handleCurateSlashCommand(req, sessions, config);
-    if (curateResult) return curateResult;
 
     // --- Case 1: Compaction request → intercept ---
     // Structural detection (session-aware) first, pattern matching as fallback.

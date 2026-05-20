@@ -599,7 +599,9 @@ async function askQuestionViaGateway(
       await new Promise((r) => setTimeout(r, backoff));
     }
 
-    const resp = await gateway.chat(requestBody);
+    const resp = await gateway.chat(requestBody, {
+      "x-lore-no-store": "true",
+    });
     const recallInvoked =
       resp.headers.get("x-lore-recall-invoked") === "true";
     const data = (await resp.json()) as {
