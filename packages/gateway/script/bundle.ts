@@ -96,6 +96,34 @@ await esbuild.build({
 });
 
 // ---------------------------------------------------------------------------
+// Bun ESM bundle — for @loreai/opencode plugin running under Bun
+// ---------------------------------------------------------------------------
+// Uses conditions: ["bun"] so #db/driver resolves to driver.bun.ts (bun:sqlite).
+// Same @sentry/bun → @sentry/node remap as the CJS build — @sentry/node works
+// under Bun (proven by getsentry/cli which uses @sentry/node-core under Bun).
+// No Node.js polyfills needed — this runs natively under Bun.
+
+await esbuild.build({
+  entryPoints: [join(packageDir, "src/index.ts")],
+  bundle: true,
+  format: "esm",
+  target: "esnext",
+  platform: "node",
+  conditions: ["bun"],
+  external: ["bun:*", "node:*", "onnxruntime-node", "sharp"],
+  outfile: join(distDir, "index.bun.js"),
+  sourcemap: false,
+  minify: true,
+  logLevel: "info",
+  legalComments: "none",
+  plugins: [sentryNodePlugin],
+  define: {
+    LORE_CLI_VERSION: JSON.stringify(pkg.version),
+    __SENTRY_DEBUG_ID__: JSON.stringify(PLACEHOLDER_DEBUG_ID),
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Embedding worker — separate CJS file next to index.cjs
 // ---------------------------------------------------------------------------
 // LocalProvider in core/embedding.ts spawns this via node:worker_threads.
@@ -111,6 +139,27 @@ await esbuild.build({
   conditions: ["node"],
   external: ["onnxruntime-node", "sharp"],
   outfile: join(distDir, "embedding-worker.cjs"),
+  sourcemap: false,
+  minify: true,
+  logLevel: "info",
+  legalComments: "none",
+});
+
+// ---------------------------------------------------------------------------
+// Embedding worker (ESM) — for the Bun ESM bundle
+// ---------------------------------------------------------------------------
+// The Bun ESM bundle resolves the worker via import.meta.url →
+// ./embedding-worker.js (see core/src/embedding.ts:300-303).
+
+await esbuild.build({
+  entryPoints: [join(packageDir, "..", "core", "src", "embedding-worker.ts")],
+  bundle: true,
+  format: "esm",
+  target: "esnext",
+  platform: "node",
+  conditions: ["bun"],
+  external: ["bun:*", "node:*", "onnxruntime-node", "sharp"],
+  outfile: join(distDir, "embedding-worker.js"),
   sourcemap: false,
   minify: true,
   logLevel: "info",
@@ -310,7 +359,9 @@ export declare function _cli(): Promise<void>;
 writeFileSync(join(distDir, "index.d.cts"), typeDeclarations);
 
 console.log(`\n✓ @loreai/gateway npm bundle complete (v${pkg.version})`);
-console.log(`  dist/index.cjs            — CJS bundle`);
-console.log(`  dist/embedding-worker.cjs — embedding worker (spawned via worker_threads)`);
+console.log(`  dist/index.cjs            — CJS bundle (Node.js, node:sqlite)`);
+console.log(`  dist/index.bun.js         — ESM bundle (Bun, bun:sqlite)`);
+console.log(`  dist/embedding-worker.cjs — embedding worker CJS (Node.js)`);
+console.log(`  dist/embedding-worker.js  — embedding worker ESM (Bun)`);
 console.log(`  dist/bin.cjs              — CLI wrapper`);
 console.log(`  dist/index.d.cts          — type declarations`);

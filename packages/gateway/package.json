@@ -8,7 +8,7 @@
   "types": "./dist/index.d.cts",
   "exports": {
     ".": {
-      "bun": "./src/index.ts",
+      "bun": "./dist/index.bun.js",
       "types": "./dist/index.d.cts",
       "require": "./dist/index.cjs",
       "default": "./dist/index.cjs"
@@ -23,7 +23,8 @@
     "build": "bun run script/build.ts",
     "bundle": "bun run script/bundle.ts",
     "build:binary": "bun run script/build.ts --binary",
-    "start": "bun run src/index.ts"
+    "start": "bun run src/index.ts",
+    "prepare": "node -e \"var f=require('fs'),p='dist/index.bun.js';if(!f.existsSync(p)){f.mkdirSync('dist',{recursive:true});f.writeFileSync(p,'export * from \\\"../src/index.ts\\\";\\n')}\""
   },
   "dependencies": {
     "p-limit": "7"
@@ -31,6 +32,8 @@
   "files": [
     "dist/bin.cjs",
     "dist/embedding-worker.cjs",
+    "dist/embedding-worker.js",
+    "dist/index.bun.js",
     "dist/index.cjs",
     "dist/index.d.cts"
   ],
