@@ -70,8 +70,10 @@ import {
   generateSessionID,
   fingerprintMessages,
   MESSAGE_COUNT_PROXIMITY_THRESHOLD,
+  KNOWN_SESSION_HEADERS,
   extractKnownSessionHeader,
   learnHeaders,
+  findRotationPredecessor,
 } from "./session";
 import {
   isCompactionRequest,
@@ -903,15 +905,22 @@ function getOrCreateSession(
 /**
  * Identify or create a session from the incoming request.
  *
- * Uses a 3-tier strategy:
- *  1. **Known headers** — `x-claude-code-session-id`, `x-session-affinity`,
- *     `x-lore-session-id`. Immediate match, survives compaction & model changes.
+ * Uses a multi-tier strategy:
+ *  1. **Known headers** — `x-lore-session-id` (stable, checked first),
+ *     `x-claude-code-session-id`, `x-session-affinity`.
+ *     Immediate match, survives compaction & model changes.
+ *  1a. **Cross-header migration** — when the primary known header is new
+ *     (e.g. plugin upgrade), checks lower-priority headers for an existing
+ *     session and re-indexes under the new header.
+ *  1b. **Header value rotation** — when a known header name is present but
+ *     its value changed (client restart), finds the predecessor session and
+ *     resumes it instead of creating a new one.
  *  2. **Learned headers** — `x-` headers discovered via fingerprint-bootstrapped
  *     learning. Promoted after 3 stable turns + cross-session uniqueness.
  *  3. **Fingerprint fallback** — SHA-256 of first user message + auth suffix
  *     (no model). Message-count proximity for fork disambiguation.
  *
- * Priority: Tier 1 > Tier 2 > Tier 3.
+ * Priority: Tier 1 > 1a > 1b > Tier 2 > Tier 3.
  */
 async function identifySession(
   req: GatewayRequest,
@@ -929,11 +938,102 @@ async function identifySession(
   if (known) {
     const indexKey = `${known.headerName}:${known.sessionId}`;
     const existingSid = headerSessionIndex.get(indexKey);
-    if (existingSid && sessions.has(existingSid)) {
+    if (existingSid) {
+      // Session may only exist in DB (after gateway restart) — that's fine,
+      // getOrCreateSession() will hydrate it from the session_state table.
       return { sessionID: existingSid, isNew: false, tier: 1 };
     }
 
-    // New session with a known header — create and index it.
+    // --- Tier 1a: Cross-header migration ---
+    // The primary known header is new (e.g. plugin upgrade started sending
+    // x-lore-session-id), but the request also contains a lower-priority
+    // known header that IS already indexed (e.g. x-session-affinity from
+    // before the upgrade). Re-index under the new header and resume.
+    for (const fallbackName of KNOWN_SESSION_HEADERS) {
+      if (fallbackName === known.headerName) continue; // skip the primary
+      const fallbackValue = headers[fallbackName];
+      if (!fallbackValue) continue;
+      const fallbackKey = `${fallbackName}:${fallbackValue}`;
+      const fallbackSid = headerSessionIndex.get(fallbackKey);
+      if (fallbackSid) {
+        // Migrate: index under the new (higher-priority) header.
+        headerSessionIndex.set(indexKey, fallbackSid);
+        saveSessionTracking(fallbackSid, {
+          headerSessionId: known.sessionId,
+          headerName: known.headerName,
+        });
+        // Update in-memory state if present.
+        const inMemory = sessions.get(fallbackSid);
+        if (inMemory) {
+          inMemory.headerSessionId = known.sessionId;
+          inMemory.headerName = known.headerName;
+        }
+        log.info(
+          `session ${fallbackSid.slice(0, 16)}: migrated from ${fallbackName} to ${known.headerName}`,
+        );
+        return { sessionID: fallbackSid, isNew: false, tier: 1 };
+      }
+    }
+
+    // --- Tier 1b: Header value rotation detection ---
+    // The header name is known but the value is new (e.g. OpenCode restarted
+    // and regenerated its nanoid). Before creating a new session, check if
+    // exactly one existing session was previously identified via the SAME
+    // header name. If so, this is a client restart — resume the old session
+    // and re-index the new header value.
+    const predecessor = findRotationPredecessor(
+      known.headerName,
+      known.sessionId,
+      headerSessionIndex,
+      (sid) => {
+        // Session may be in memory or only in DB (after gateway restart).
+        const inMemory = sessions.get(sid);
+        if (inMemory) {
+          return {
+            sid,
+            isSubagent: !!inMemory.isSubagent,
+            lastActiveAt: inMemory.lastRequestTime,
+          };
+        }
+        // Lightweight DB check for recency and subagent status.
+        const persisted = loadSessionTracking(sid);
+        if (!persisted) return null; // orphaned index entry
+        return {
+          sid,
+          isSubagent: persisted.isSubagent,
+          // lastTurnAt=0 means gradient never ran yet — session is new,
+          // treat as recently active (not infinitely stale).
+          lastActiveAt: persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
+        };
+      },
+    );
+
+    if (predecessor) {
+      // Resume the old session with the new header value.
+      const oldKey = `${known.headerName}:${predecessor.oldHeaderValue}`;
+      headerSessionIndex.delete(oldKey);
+      headerSessionIndex.set(indexKey, predecessor.sid);
+
+      // Update in-memory state if present.
+      const inMemory = sessions.get(predecessor.sid);
+      if (inMemory) {
+        inMemory.headerSessionId = known.sessionId;
+        inMemory.headerName = known.headerName;
+      }
+
+      // Persist the new header mapping immediately.
+      saveSessionTracking(predecessor.sid, {
+        headerSessionId: known.sessionId,
+        headerName: known.headerName,
+      });
+
+      log.info(
+        `session ${predecessor.sid.slice(0, 16)}: resumed via ${known.headerName} value rotation`,
+      );
+      return { sessionID: predecessor.sid, isNew: false, tier: 1 };
+    }
+
+    // Genuinely new session — no predecessor or ambiguous concurrent sessions.
     const sessionID = generateSessionID();
     headerSessionIndex.set(indexKey, sessionID);
     return { sessionID, isNew: true, tier: 1 };
