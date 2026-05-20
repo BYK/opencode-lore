@@ -24,6 +24,7 @@ import {
   setCachePricing,
   shouldCompress,
   getTier,
+  selectDistillations,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
 import { isToolPart } from "../src/types";
@@ -2478,5 +2479,83 @@ describe("tier-based context management", () => {
       recordCacheUsage(0, 0, 0, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
     });
+  });
+});
+
+// ─── selectDistillations — meta preservation guarantee (#417) ───────────────
+
+describe("selectDistillations", () => {
+  /** Create a distillation stub with the fields selectDistillations uses. */
+  function dist(id: string, generation: number, createdAt: number, observations = ""): {
+    id: string; observations: string; generation: number; token_count: number; created_at: number; session_id: string;
+  } {
+    return { id, observations, generation, token_count: 100, created_at: createdAt, session_id: "sel-sess" };
+  }
+
+  test("returns all when count <= limit", () => {
+    const all = [dist("a", 0, 1), dist("b", 0, 2), dist("c", 0, 3)];
+    expect(selectDistillations(all, 5)).toEqual(all);
+    expect(selectDistillations(all, 3)).toEqual(all);
+  });
+
+  test("always includes meta (gen>=1) even when it has lowest recency", () => {
+    // 1 meta (oldest) + 5 gen-0 (newer) → limit=5 should keep the meta + 4 gen-0
+    const meta = dist("meta", 1, 100, "decided to use flock");
+    const gen0 = Array.from({ length: 5 }, (_, i) =>
+      dist(`g0-${i}`, 0, 200 + i * 10),
+    );
+    const all = [meta, ...gen0]; // chronological order
+
+    const selected = selectDistillations(all, 5);
+    expect(selected).toHaveLength(5);
+    // Meta must be present.
+    expect(selected.some((d) => d.id === "meta")).toBe(true);
+    // The oldest gen-0 should be dropped (lowest recency among gen-0).
+    expect(selected.some((d) => d.id === "g0-0")).toBe(false);
+    // Result should be chronologically sorted.
+    for (let i = 1; i < selected.length; i++) {
+      expect(selected[i]!.created_at).toBeGreaterThanOrEqual(selected[i - 1]!.created_at);
+    }
+  });
+
+  test("preserves multiple meta entries when they exist", () => {
+    const meta1 = dist("meta1", 1, 100);
+    const meta2 = dist("meta2", 2, 150);
+    const gen0 = Array.from({ length: 5 }, (_, i) =>
+      dist(`g0-${i}`, 0, 200 + i * 10),
+    );
+    const all = [meta1, meta2, ...gen0];
+
+    const selected = selectDistillations(all, 5);
+    expect(selected).toHaveLength(5);
+    expect(selected.some((d) => d.id === "meta1")).toBe(true);
+    expect(selected.some((d) => d.id === "meta2")).toBe(true);
+    // 3 gen-0 slots remaining, filled by most recent.
+    expect(selected.some((d) => d.id === "g0-4")).toBe(true);
+    expect(selected.some((d) => d.id === "g0-3")).toBe(true);
+    expect(selected.some((d) => d.id === "g0-2")).toBe(true);
+  });
+
+  test("selects by recency when all entries are gen-0 (no meta)", () => {
+    const all = Array.from({ length: 8 }, (_, i) =>
+      dist(`g0-${i}`, 0, 100 + i * 10),
+    );
+    const selected = selectDistillations(all, 3);
+    expect(selected).toHaveLength(3);
+    // Most recent 3 gen-0 should win.
+    expect(selected.map((d) => d.id)).toEqual(["g0-5", "g0-6", "g0-7"]);
+  });
+
+  test("emergency limit=2 keeps meta + most recent gen-0", () => {
+    const meta = dist("meta", 1, 100, "architecture decision");
+    const gen0 = Array.from({ length: 5 }, (_, i) =>
+      dist(`g0-${i}`, 0, 200 + i * 10),
+    );
+    const all = [meta, ...gen0];
+
+    const selected = selectDistillations(all, 2);
+    expect(selected).toHaveLength(2);
+    expect(selected[0]!.id).toBe("meta");
+    expect(selected[1]!.id).toBe("g0-4"); // most recent gen-0
   });
 });

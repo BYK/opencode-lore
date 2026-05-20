@@ -1229,23 +1229,44 @@ function importanceBonus(d: Distillation): number {
   return Math.min(bonus, 1.0);
 }
 
-function selectDistillations(all: Distillation[], limit: number): Distillation[] {
+export function selectDistillations(all: Distillation[], limit: number): Distillation[] {
   if (all.length <= limit) return all;
 
-  // Recency: normalize to [0, 0.7] where oldest = 0.0, newest = 0.7.
-  // Use (length - 1) as divisor so the last entry gets full recency weight.
-  const maxIdx = all.length - 1;
-  const scored = all.map((d, i) => ({
+  // Always include meta distillations (gen >= 1) — they contain the
+  // consolidated session history and must not be evicted by recency-weighted
+  // gen-0 segments. Without this guarantee, layer 3 (distLimit=5) would drop
+  // the meta in favor of 5 recent gen-0 segments, losing older context. #417.
+  const meta = all.filter((d) => d.generation >= 1);
+  const gen0 = all.filter((d) => d.generation === 0);
+  const remainingSlots = limit - meta.length;
+
+  // If meta entries alone fill or exceed the limit, keep them all by score.
+  if (remainingSlots <= 0) {
+    const maxIdx = meta.length - 1;
+    const scored = meta.map((d, i) => ({
+      d,
+      score: (maxIdx > 0 ? (i / maxIdx) : 1) * 0.7 + importanceBonus(d) * 0.3,
+    }));
+    return scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map((s) => s.d)
+      .sort((a, b) => a.created_at - b.created_at);
+  }
+
+  // Fill remaining slots from gen-0 by recency + importance scoring.
+  const maxIdx = gen0.length - 1;
+  const scored = gen0.map((d, i) => ({
     d,
     score: (maxIdx > 0 ? (i / maxIdx) : 1) * 0.7 + importanceBonus(d) * 0.3,
   }));
-
-  // Keep top N by score, then re-sort chronologically (cache-safe).
-  return scored
+  const topGen0 = scored
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map((s) => s.d)
-    .sort((a, b) => a.created_at - b.created_at);
+    .slice(0, remainingSlots)
+    .map((s) => s.d);
+
+  // Merge and re-sort chronologically (cache-safe).
+  return [...meta, ...topGen0].sort((a, b) => a.created_at - b.created_at);
 }
 
 // Build a synthetic message pair containing the distilled history.
