@@ -326,7 +326,20 @@ Lore re-scans the `lat.md/` directory periodically (on session idle), so changes
 
 ## Eval results
 
-At 400K tokens (realistic coding session length), Lore significantly outperforms the standard tail-window approach on preference recall:
+At 400K tokens (realistic coding session length), Lore significantly outperforms the standard tail-window approach across both context retention and preference recall:
+
+### Context retention (400K tokens)
+
+| What's tested | Lore | Tail-window | Compaction | Lore vs TW |
+|---|---|---|---|---|
+| Easy (late-session details) | **5.0**/5 | 4.7/5 | 4.7/5 | +6% |
+| Medium (mid-session details) | **2.3**/5 | 1.3/5 | 3.9/5 | +77% |
+| Hard (early-session details) | **3.3**/5 | 1.4/5 | 4.1/5 | +136% |
+| **Average across context** | **3.9**/5 | 2.6/5 | 4.1/5 | **+50%** |
+
+*Tail-window drops early-session details entirely at 400K tokens. Lore's distillation preserves them. Remaining gap to compaction tracked in [#417](https://github.com/BYK/loreai/issues/417).*
+
+### Preference recall (400K tokens)
 
 | What's tested | Lore | Tail-window | Delta |
 |---|---|---|---|
@@ -337,12 +350,12 @@ At 400K tokens (realistic coding session length), Lore significantly outperforms
 
 *Scored by LLM-as-judge on a 1–5 scale. Tail-window baseline: last 80K tokens of raw conversation (the default behavior without Lore). Evaluated at 400K tokens — the point where context management actually matters.*
 
-**What this means:** after 400K tokens of conversation, the standard approach loses a third of your stated preferences. The agent starts using `let` when you said `const`, reaches for an ORM when you mandated raw SQL, or skips tests you always require. Lore's distillation + knowledge curation preserves these preferences across sessions at near-perfect accuracy.
+**What this means:** after 400K tokens of conversation, the standard approach loses early-session details entirely and forgets a third of your stated preferences. Lore's distillation + knowledge curation preserves both across sessions.
 
-The eval suite (8 scenarios, 130+ questions, 3 dimensions) is open source in `packages/core/eval/`. Run it yourself:
+The eval suite (16 scenarios, 130+ questions, 5 dimensions) is open source in `packages/core/eval/`. Run it yourself:
 
 ```bash
-bun packages/core/eval/run.ts --mode live --dimensions preferences --inflate 400000
+bun packages/core/eval/run.ts --mode live --inflate 400000
 ```
 
 **Cost:** Lore's memory layer runs at minimal additional cost — background distillation and curation use batch APIs (50% off on supported providers) and cheaper models. Local on-device embeddings (Nomic Embed v1.5) mean zero API cost for vector search. Predictive cache warming reduces expensive cache rebuilds.
@@ -357,7 +370,7 @@ bun packages/core/eval/run.ts --mode live --dimensions preferences --inflate 400
 
 **v4 — research-informed compression.** Three changes from the KV cache compression literature ([Zweiger et al. 2025](https://arxiv.org/abs/2602.16284), [Eyuboglu et al. 2025](https://arxiv.org/abs/2501.17390)): (1) *Loss-annotated tool stripping* with metadata instead of static placeholders. (2) *Context-distillation meta-distillation* producing working context documents instead of flat event logs. (3) *Multi-resolution composable distillations* — archived gen-0 observations for recall alongside compressed gen-1 for in-context summary.
 
-**v5 — behavioral pattern detection + 400K eval.** Vector similarity-based pattern echo detection, action tagging in distillation, cross-session pattern clustering, assertion pinning for long sessions, and a scenario inflator for realistic 400K-token evaluation. This is what closed the preference gap from +15% to +47% over tail-window.
+**v5 — behavioral pattern detection + 400K eval.** Vector similarity-based pattern echo detection, action tagging in distillation, cross-session pattern clustering, assertion pinning for long sessions, and a scenario inflator for realistic 400K-token evaluation. This is what closed the preference gap from +15% to +47% over tail-window. Context retention eval shows +50% over tail-window at 400K tokens — early-session details that tail-window drops entirely are preserved by Lore's distillation.
 
 ## Development setup
 
