@@ -71,17 +71,18 @@ describe("resolveToolResults", () => {
     expect(resultParts).toHaveLength(0);
   });
 
-  test("user message with only tool_result parts gets placeholder text after stripping", () => {
+  test("user message with only tool_result parts gets placeholder text with recall ID after stripping", () => {
     const messages = gatewayMessagesToLore(makeToolConversation(), "sess-2");
     resolveToolResults(messages);
 
     // The user message that was tool_result-only should now have a placeholder
+    // with a recall-able reference to the original message: (t:<messageID>)
     const toolResultUser = messages[2]!;
     expect(toolResultUser.parts).toHaveLength(1);
     expect(toolResultUser.parts[0]!.type).toBe("text");
-    expect((toolResultUser.parts[0] as any).text).toBe(
-      "[tool results provided]",
-    );
+    const text = (toolResultUser.parts[0] as any).text as string;
+    expect(text).toStartWith("[tool results provided] (t:");
+    expect(text).toEndWith(")");
   });
 
   test("user message with text + tool_result preserves text, strips tool_result", () => {
@@ -146,13 +147,13 @@ describe("resolveToolResults", () => {
     const messages = gatewayMessagesToLore(gwMessages, "sess-4");
     resolveToolResults(messages);
 
-    // Orphaned tool_result should be stripped, replaced with placeholder
+    // Orphaned tool_result should be stripped, replaced with placeholder + recall ID
     const userMsg = messages[1]!;
     expect(userMsg.parts).toHaveLength(1);
     expect(userMsg.parts[0]!.type).toBe("text");
-    expect((userMsg.parts[0] as any).text).toBe(
-      "[tool results provided]",
-    );
+    const text = (userMsg.parts[0] as any).text as string;
+    expect(text).toStartWith("[tool results provided] (t:");
+    expect(text).toEndWith(")");
   });
 
   test("multiple tool calls in one assistant message: all tool_result parts stripped", () => {

@@ -6,11 +6,22 @@
  * blocks" Anthropic API error that occurs when gradient evicts an assistant
  * message but keeps the following user message with orphaned tool_result refs.
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import {
   loreMessagesToGateway,
   removeOrphanedToolResults,
 } from "../src/pipeline";
+import {
+  gatewayMessagesToLore,
+  resolveToolResults,
+} from "../src/temporal-adapter";
+import {
+  transform,
+  setModelLimits,
+  calibrate,
+  db,
+  ensureProject,
+} from "@loreai/core";
 import type {
   LoreMessageWithParts,
   LoreUserMessage,
@@ -19,7 +30,7 @@ import type {
   LoreTextPart,
   LoreToolPart,
 } from "@loreai/core";
-import type { GatewayContentBlock } from "../src/translate/types";
+import type { GatewayContentBlock, GatewayMessage } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -653,4 +664,362 @@ test("BUG-006: multiple tool_results in one message are all preserved", () => {
   expect(toolMsgs[1].tool_call_id).toBe("call_2");
   expect(toolMsgs[2].tool_call_id).toBe("call_3");
   expect(toolMsgs[2].content).toBe(""); // empty content preserved
+});
+
+// ---------------------------------------------------------------------------
+// #424: removeOrphanedToolResults — bidirectional validation (tool_use → tool_result)
+// ---------------------------------------------------------------------------
+
+describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", () => {
+  test("removes orphaned tool_use when no following user message exists", () => {
+    const messages: Array<{
+      role: "user" | "assistant";
+      content: GatewayContentBlock[];
+    }> = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I will read the file" },
+          { type: "tool_use", id: "toolu_001", name: "read", input: {} },
+        ],
+      },
+    ];
+
+    removeOrphanedToolResults(messages);
+
+    // tool_use should be removed — no following user with tool_result
+    const assistant = messages[1];
+    expect(assistant.content).toHaveLength(1);
+    expect(assistant.content[0].type).toBe("text");
+  });
+
+  test("removes orphaned tool_use when following message is assistant (back-to-back)", () => {
+    // This simulates the #424 bug: prefix ends with assistant, raw window
+    // starts with assistant — loreMessagesToGateway produces back-to-back
+    // assistants where the first has tool_use with no tool_result.
+    const messages: Array<{
+      role: "user" | "assistant";
+      content: GatewayContentBlock[];
+    }> = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "[memory context]" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "distilled observations" },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me read the file" },
+          { type: "tool_use", id: "toolu_eval_000010", name: "read", input: { path: "src/main.ts" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", toolUseId: "toolu_eval_000010", content: "file contents" },
+        ],
+      },
+    ];
+
+    removeOrphanedToolResults(messages);
+
+    // The tool_use on assistant[2] references tool_result on user[3], but
+    // messages[3].role is user — this should be kept since the following
+    // message IS a user with the matching tool_result.
+    const assistant2 = messages[2];
+    expect(assistant2.content.some((b) => b.type === "tool_use")).toBe(true);
+  });
+
+  test("removes tool_use when following user has no matching tool_result", () => {
+    const messages: Array<{
+      role: "user" | "assistant";
+      content: GatewayContentBlock[];
+    }> = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me read" },
+          { type: "tool_use", id: "toolu_001", name: "read", input: {} },
+          { type: "tool_use", id: "toolu_002", name: "write", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          // Only has tool_result for toolu_001, not toolu_002
+          { type: "tool_result", toolUseId: "toolu_001", content: "result" },
+          { type: "text", text: "continue" },
+        ],
+      },
+    ];
+
+    removeOrphanedToolResults(messages);
+
+    const assistant = messages[1];
+    // toolu_001 kept (has matching result), toolu_002 removed
+    expect(assistant.content).toHaveLength(2); // text + toolu_001
+    const toolUseBlocks = assistant.content.filter((b) => b.type === "tool_use");
+    expect(toolUseBlocks).toHaveLength(1);
+    expect((toolUseBlocks[0] as any).id).toBe("toolu_001");
+  });
+
+  test("keeps tool_use when following user has matching tool_result", () => {
+    const messages: Array<{
+      role: "user" | "assistant";
+      content: GatewayContentBlock[];
+    }> = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "toolu_001", name: "read", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", toolUseId: "toolu_001", content: "data" },
+        ],
+      },
+    ];
+
+    removeOrphanedToolResults(messages);
+
+    // Everything should be preserved
+    expect(messages[1].content).toHaveLength(1);
+    expect(messages[1].content[0].type).toBe("tool_use");
+    expect(messages[2].content).toHaveLength(1);
+    expect(messages[2].content[0].type).toBe("tool_result");
+  });
+
+  test("replaces empty assistant with placeholder after removing all tool_use blocks", () => {
+    const messages: Array<{
+      role: "user" | "assistant";
+      content: GatewayContentBlock[];
+    }> = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "toolu_001", name: "read", input: {} },
+        ],
+      },
+      // No following user message at all
+    ];
+
+    removeOrphanedToolResults(messages);
+
+    // The assistant message should have a placeholder instead of being empty
+    expect(messages[1].content).toHaveLength(1);
+    expect(messages[1].content[0].type).toBe("text");
+    expect((messages[1].content[0] as any).text).toBe("[assistant response]");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #424: End-to-end integration test — inflated eval through full pipeline
+// ---------------------------------------------------------------------------
+
+describe("end-to-end: inflated eval tool_use/tool_result through full pipeline (#424)", () => {
+  // Use a unique session ID to avoid state pollution from other gradient tests
+  const SESSION_E2E = `sess-e2e-424-${Date.now()}`;
+  const PID_E2E = "/test/pipeline/e2e-424";
+  let projectId: string;
+
+  beforeAll(() => {
+    projectId = ensureProject(PID_E2E);
+    // Small context window to force gradient compression (like 400K inflate)
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+  });
+
+  afterAll(() => {
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+  });
+
+  /**
+   * Simulates the eval's buildMessages() → gateway pipeline path.
+   * Builds Anthropic-format messages with tool_use/tool_result pairs
+   * (like inflated filler), converts through the full pipeline, and
+   * validates Anthropic API compliance.
+   */
+  test("inflated messages with tool_use/tool_result survive gradient compression", () => {
+    // Store a distillation so gradient produces a prefix (triggers layer 1+)
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "dist-e2e-424",
+        projectId,
+        SESSION_E2E,
+        "",
+        "[]",
+        "x".repeat(500),
+        "[]",
+        0,
+        170,
+        0,
+        Date.now(),
+      );
+
+    // Build Anthropic-format messages mimicking inflated eval:
+    // Alternating user text + assistant tool_use + user tool_result + assistant text
+    // (same pattern as inflate.ts filler templates).
+    // Each turn generates ~1000 tokens (3000 chars / 3) to overflow the 8K usable budget.
+    const gatewayMessages: GatewayMessage[] = [];
+    let toolCounter = 0;
+
+    for (let i = 0; i < 15; i++) {
+      const toolId = `toolu_eval_${(++toolCounter).toString(36).padStart(6, "0")}`;
+
+      // User asks to do something (~300 tokens)
+      gatewayMessages.push({
+        role: "user",
+        content: [{ type: "text", text: `Implement feature ${i}: ${"x".repeat(900)}` }],
+      });
+
+      // Assistant calls a tool (~700 tokens: text + tool input)
+      gatewayMessages.push({
+        role: "assistant",
+        content: [
+          { type: "text", text: `I'll implement feature ${i}. ${"z".repeat(600)}` },
+          { type: "tool_use", id: toolId, name: "write", input: { path: `src/feature${i}.ts`, content: "x".repeat(1200) } },
+        ],
+      });
+
+      // User provides tool result (~300 tokens)
+      gatewayMessages.push({
+        role: "user",
+        content: [
+          { type: "tool_result", toolUseId: toolId, content: `Wrote src/feature${i}.ts successfully. ${"w".repeat(800)}` },
+        ],
+      });
+
+      // Assistant summarizes (~300 tokens)
+      gatewayMessages.push({
+        role: "assistant",
+        content: [{ type: "text", text: `Feature ${i} implemented successfully. ${"y".repeat(900)}` }],
+      });
+    }
+
+    // Final user message (current turn)
+    gatewayMessages.push({
+      role: "user",
+      content: [{ type: "text", text: "Now summarize everything we did." }],
+    });
+
+    // --- Full pipeline path (same as pipeline.ts step 7) ---
+    // 1. Convert to Lore format
+    const loreMessages = gatewayMessagesToLore(gatewayMessages, SESSION_E2E);
+
+    // 2. Resolve tool results (merges into assistant parts, strips from user)
+    resolveToolResults(loreMessages);
+
+    // 3. Gradient transform (will compress at layer 1+ due to small context)
+    const result = transform({
+      messages: loreMessages,
+      projectPath: PID_E2E,
+      sessionID: SESSION_E2E,
+    });
+
+    // Must be at gradient layer 1+ (compressed with prefix)
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+    // Messages were evicted (not all 61 input messages survive)
+    expect(result.messages.length).toBeLessThan(loreMessages.length);
+
+    // 4. Convert back to gateway format
+    const transformedMessages = loreMessagesToGateway(result.messages);
+
+    // 5. Safety net
+    removeOrphanedToolResults(transformedMessages);
+
+    // --- Anthropic API compliance validation ---
+
+    // A. No back-to-back same-role messages
+    for (let i = 1; i < transformedMessages.length; i++) {
+      expect(transformedMessages[i].role).not.toBe(transformedMessages[i - 1].role);
+    }
+
+    // B. First message must be user
+    expect(transformedMessages[0].role).toBe("user");
+
+    // C. Every tool_use on an assistant has a matching tool_result on the
+    //    immediately following user message
+    for (let i = 0; i < transformedMessages.length; i++) {
+      const msg = transformedMessages[i];
+      if (msg.role !== "assistant") continue;
+      const toolUseIds = msg.content
+        .filter((b) => b.type === "tool_use")
+        .map((b) => (b as { id: string }).id);
+
+      if (toolUseIds.length === 0) continue;
+
+      // Must have a following user message
+      const next = transformedMessages[i + 1];
+      expect(next).toBeDefined();
+      expect(next.role).toBe("user");
+
+      // Every tool_use ID must have a matching tool_result
+      const toolResultIds = new Set(
+        next.content
+          .filter((b) => b.type === "tool_result")
+          .map((b) => (b as { toolUseId: string }).toolUseId),
+      );
+
+      for (const id of toolUseIds) {
+        expect(toolResultIds.has(id)).toBe(true);
+      }
+    }
+
+    // D. Every tool_result on a user references a tool_use on the preceding assistant
+    for (let i = 0; i < transformedMessages.length; i++) {
+      const msg = transformedMessages[i];
+      if (msg.role !== "user") continue;
+      const toolResultIds = msg.content
+        .filter((b) => b.type === "tool_result")
+        .map((b) => (b as { toolUseId: string }).toolUseId);
+
+      if (toolResultIds.length === 0) continue;
+
+      const prev = transformedMessages[i - 1];
+      expect(prev).toBeDefined();
+      expect(prev.role).toBe("assistant");
+
+      const toolUseIdSet = new Set(
+        prev.content
+          .filter((b) => b.type === "tool_use")
+          .map((b) => (b as { id: string }).id),
+      );
+
+      for (const id of toolResultIds) {
+        expect(toolUseIdSet.has(id)).toBe(true);
+      }
+    }
+
+    // E. No empty content arrays
+    for (const msg of transformedMessages) {
+      expect(msg.content.length).toBeGreaterThan(0);
+    }
+  });
 });

@@ -2488,8 +2488,9 @@ describe("selectDistillations", () => {
   /** Create a distillation stub with the fields selectDistillations uses. */
   function dist(id: string, generation: number, createdAt: number, observations = ""): {
     id: string; observations: string; generation: number; token_count: number; created_at: number; session_id: string;
+    r_compression: number | null; c_norm: number | null; source_ids: string[];
   } {
-    return { id, observations, generation, token_count: 100, created_at: createdAt, session_id: "sel-sess" };
+    return { id, observations, generation, token_count: 100, created_at: createdAt, session_id: "sel-sess", r_compression: null, c_norm: null, source_ids: [] };
   }
 
   test("returns all when count <= limit", () => {
@@ -2557,5 +2558,164 @@ describe("selectDistillations", () => {
     expect(selected).toHaveLength(2);
     expect(selected[0]!.id).toBe("meta");
     expect(selected[1]!.id).toBe("g0-4"); // most recent gen-0
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #424: prefix/raw boundary role alternation (tool_use/tool_result mismatch)
+// ---------------------------------------------------------------------------
+
+describe("gradient — prefix/raw boundary role alternation (#424)", () => {
+  const SESSION_424 = "sess-424";
+  const PID_424 = "/test/gradient/project-424";
+  let projectId424: string;
+
+  // Helper: make an assistant message with a completed tool part.
+  function makeToolAssistant(
+    id: string,
+    toolName: string,
+    callID: string,
+    output: string,
+  ): LoreMessageWithParts {
+    const info: LoreMessage = {
+      id,
+      sessionID: SESSION_424,
+      role: "assistant",
+      time: { created: Date.now() },
+      parentID: `parent-${id}`,
+      modelID: "claude-sonnet-4-20250514",
+      providerID: "anthropic",
+      mode: "build",
+      path: { cwd: "/test", root: "/test" },
+      cost: 0,
+      tokens: {
+        input: 100,
+        output: 50,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+    };
+    return {
+      info,
+      parts: [
+        {
+          id: `tool-${id}`,
+          sessionID: SESSION_424,
+          messageID: id,
+          type: "tool",
+          callID,
+          tool: toolName,
+          state: {
+            status: "completed",
+            input: { path: "test.ts" },
+            output,
+            time: { start: Date.now(), end: Date.now() },
+          },
+        } as unknown as LorePart,
+      ],
+    };
+  }
+
+  beforeAll(() => {
+    projectId424 = ensureProject(PID_424);
+  });
+
+  beforeEach(() => {
+    resetCalibration(SESSION_424);
+    resetPrefixCache(SESSION_424);
+    resetRawWindowCache(SESSION_424);
+    resetDistillationSnapshot(SESSION_424);
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId424);
+  });
+
+  afterAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId424);
+  });
+
+  test("raw window after cutoff does not start with assistant when prefix is present", () => {
+    // Build a conversation that triggers gradient compression (layers 1+).
+    // The message array is designed so the budget cutoff naturally falls
+    // before an assistant message with tool parts.
+    //
+    // Structure: [u1, a1(tool), u2, a2(tool), u3, a3(tool), ..., uN(current)]
+    // When the budget-based cutoff evicts early messages, the raw window
+    // could start with an assistant. With the prefix (ending in assistant),
+    // this would create back-to-back assistants → tool_use without tool_result.
+
+    // Store a distillation so gradient mode uses a prefix
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "dist-424",
+        projectId424,
+        SESSION_424,
+        "",
+        "[]",
+        "x".repeat(500), // small distillation
+        "[]",
+        0,
+        170, // ~500 chars / 3
+        0,
+        Date.now(),
+      );
+
+    // Build enough messages to overflow the 10K context window.
+    // Each tool output is ~1500 chars = ~500 tokens. With 15 tool turns
+    // (30 messages), we get ~7500 tokens of tool content + overhead.
+    const messages: LoreMessageWithParts[] = [];
+    for (let i = 0; i < 15; i++) {
+      messages.push(
+        makeMsg(`u${i}`, "user", `Do step ${i}`, SESSION_424),
+      );
+      messages.push(
+        makeToolAssistant(
+          `a${i}`,
+          "read",
+          `call-${i}`,
+          "x".repeat(1500),
+        ),
+      );
+    }
+    // Final user message (current turn)
+    messages.push(
+      makeMsg("u-final", "user", "Now do the final step", SESSION_424),
+    );
+
+    const result = transform({
+      messages,
+      projectPath: PID_424,
+      sessionID: SESSION_424,
+    });
+
+    // The result must be at layer >= 1 (gradient mode with prefix)
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+
+    // Core assertion: no two consecutive messages should have the same role.
+    // This catches the back-to-back assistant bug that causes
+    // "tool_use ids found without tool_result" (#424).
+    for (let i = 1; i < result.messages.length; i++) {
+      const prev = result.messages[i - 1];
+      const curr = result.messages[i];
+      expect(
+        curr.info.role,
+      ).not.toBe(
+        prev.info.role,
+      );
+    }
+
+    // Additional: if the first message after the prefix is in the result,
+    // and a prefix exists (layer >= 1), then the 3rd message (idx 2, after
+    // [user_distilled, assistant_distilled]) must be user role.
+    if (result.messages.length > 2) {
+      const firstRaw = result.messages[2]; // after [user, assistant] prefix
+      expect(firstRaw.info.role).toBe("user");
+    }
   });
 });

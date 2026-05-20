@@ -39,6 +39,7 @@ type Distillation = {
   created_at: number;
   session_id: string;
   c_norm: number | null;
+  r_compression: number | null;
 };
 
 export type ScoredDistillation = Distillation & { rank: number };
@@ -135,8 +136,8 @@ function searchDistillationsLike(input: {
     .join(" AND ");
   const likeParams = terms.map((term) => `%${term}%`);
   const sql = input.sessionID
-    ? `SELECT id, observations, generation, created_at, session_id, c_norm FROM distillations WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
-    : `SELECT id, observations, generation, created_at, session_id, c_norm FROM distillations WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
+    ? `SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE project_id = ? AND session_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`
+    : `SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE project_id = ? AND ${conditions} ORDER BY created_at DESC LIMIT ?`;
   const allParams = input.sessionID
     ? [input.pid, input.sessionID, ...likeParams, input.limit]
     : [input.pid, ...likeParams, input.limit];
@@ -155,13 +156,13 @@ function searchDistillationsScored(input: {
   const limit = input.limit ?? 10;
 
   const ftsSQL = input.sessionID
-    ? `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, d.c_norm, rank
+    ? `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, d.c_norm, d.r_compression, rank
        FROM distillation_fts f
        CROSS JOIN distillations d ON d.rowid = f.rowid
        WHERE distillation_fts MATCH ?
        AND d.project_id = ? AND d.session_id = ?
        ORDER BY rank LIMIT ?`
-    : `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, d.c_norm, rank
+    : `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id, d.c_norm, d.r_compression, rank
        FROM distillation_fts f
        CROSS JOIN distillations d ON d.rowid = f.rowid
        WHERE distillation_fts MATCH ?
@@ -192,7 +193,7 @@ function searchDistillationsScored(input: {
 
 /** Default formatting config used when no overrides are provided. */
 const DEFAULT_FORMAT_CONFIG = {
-  charBudget: 8000,
+  charBudget: 12000,
   relevanceFloor: 0.15,
   maxResults: 15,
 };
@@ -234,7 +235,7 @@ const SOURCE_WEIGHT: Record<TaggedResult["source"], number> = {
   "cross-knowledge": 1.0,
   "lat-section": 0.9,
   distillation: 0.8,
-  temporal: 0.5,
+  temporal: 0.8,
 };
 
 /** Tier multipliers for budget allocation. */
@@ -426,6 +427,10 @@ function renderResultLine(tagged: TaggedResult, charBudget: number): string {
     }
     case "distillation": {
       const d = tagged.item;
+      // Compression hint: signal when the distillation is lossy so the model
+      // knows to drill into source messages for exact details.
+      const compressionHint =
+        d.r_compression != null && d.r_compression < 1.0 ? "[lossy] " : "";
       const fullText = inline(d.observations);
       const content = truncateAtSentence(fullText, charBudget);
       const wasTruncated = fullText.length > charBudget;
@@ -436,7 +441,7 @@ function renderResultLine(tagged: TaggedResult, charBudget: number): string {
         sourceIds.length > 0
           ? ` (sources: ${sourceIds.map((s) => `t:${s}`).join(", ")})`
           : "";
-      return `- ${content}${wasTruncated ? ` (${id})` : ""}${sourceRef}`;
+      return `- ${compressionHint}${content}${wasTruncated ? ` (${id})` : ""}${sourceRef}`;
     }
     case "temporal": {
       const m = tagged.item;
@@ -608,6 +613,22 @@ export async function searchRecall(
       });
     }
 
+    // Recency-biased list for distillation results (structural parity with
+    // temporal). Recent distillations covering the most recent work get a
+    // deserved RRF boost. Same `d:` key prefix so RRF merges, not duplicates.
+    if (distillationResults.length > 0) {
+      const recencySorted = [...distillationResults].sort(
+        (a, b) => b.created_at - a.created_at,
+      );
+      allRrfLists.push({
+        items: recencySorted.map((item) => ({
+          source: "distillation" as const,
+          item,
+        })),
+        key: (r) => `d:${r.item.id}`,
+      });
+    }
+
     // Mark the end of the first (original) query's lists. Supplemental lists
     // (vector, lat.md, cross-project, quality, exact-match) are appended after
     // the loop and should be preserved over expanded-query lists when capping.
@@ -652,7 +673,7 @@ export async function searchRecall(
           .map((hit): TaggedResult | null => {
             const row = db()
               .query(
-                "SELECT id, observations, generation, created_at, session_id, c_norm FROM distillations WHERE id = ?",
+                "SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id = ?",
               )
               .get(hit.id) as Distillation | null;
             if (!row) return null;
@@ -844,7 +865,7 @@ export async function searchRecall(
   // Priority: primary (original query BM25 + recency) and supplemental
   // (vector, lat.md, cross-project, quality, exact-match) are high-value.
   // Expanded-query BM25 lists are lowest priority — trim those first.
-  const MAX_RRF_LISTS = 10;
+  const MAX_RRF_LISTS = 14;
   if (allRrfLists.length > MAX_RRF_LISTS) {
     // Layout: [0..primaryListEnd) = primary, [primaryListEnd..perQueryEnd) = expanded, [perQueryEnd..) = supplemental
     const primary = allRrfLists.slice(0, primaryListEnd);
@@ -899,7 +920,7 @@ export function recallById(id: string): string {
     case "d": {
       const row = db()
         .query(
-          "SELECT id, observations, generation, created_at, session_id, c_norm FROM distillations WHERE id = ?",
+          "SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id = ?",
         )
         .get(rawId) as Distillation | null;
       if (!row) return `No entry found for id: ${id}`;
@@ -966,7 +987,8 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
 
 /** Standard tool description reused verbatim by each host adapter. */
 export const RECALL_TOOL_DESCRIPTION =
-  'Search your persistent memory for this project. Two cases where you MUST use this tool: (1) Cross-session references — the user mentions past work, "last time", "before", "we discussed", "earlier", or "remember". Prior sessions are never in your context. (2) Missing details — file paths, past decisions, preferences, or approaches you don\'t see in your current window. Always prefer recall over assuming. Searches knowledge, distilled history, and message archives.' +
+  'Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn\'t in your current context: file paths, past decisions, user preferences, prior approaches, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don\'t have the information. Searches long-term knowledge, distilled history, and raw message archives.' +
+  '\n\nYour context contains references in the format (prefix:id) — e.g. (d:abc123) for distillations, (t:abc123) for messages. These appear in distillation headers, tool result placeholders, and truncated recall results. Pass any such ID to this tool\'s `id` parameter to retrieve the full original content. Distillations marked "lossy" have lost specific details — use the ID to drill down.' +
   '\n\nNever write recall status text (like "📚 Searching…" or "📚 Fetching…") yourself — these are injected by the system automatically when you use this tool.';
 
 /** Standard parameter descriptions reused by each host adapter. */
@@ -974,5 +996,5 @@ export const RECALL_PARAM_DESCRIPTIONS = {
   query: "What to search for — be specific. Include keywords, file names, or concepts.",
   scope:
     "Search scope: 'all' (default) searches everything, 'session' searches current session only, 'project' searches all sessions in this project, 'knowledge' searches only long-term knowledge.",
-  id: "Fetch full content of a specific result by its source-prefixed ID (e.g. 'k:abc123', 'd:abc123'). IDs are shown on truncated results in recall output. When id is provided, query is ignored.",
+  id: "Fetch full content of a specific result by its source-prefixed ID (e.g. 'k:abc123', 'd:abc123', 't:abc123'). These IDs appear throughout your context: in distillation headers, tool result placeholders, and truncated recall results. When id is provided, query is ignored.",
 };

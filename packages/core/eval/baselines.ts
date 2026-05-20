@@ -121,56 +121,85 @@ Conversation to summarize:
 /**
  * Simulate compaction: LLM-summarize the prefix that falls outside
  * the tail window, then return summary + tail.
+ *
+ * Iterative: when the total exceeds `compactionThreshold`, compact the prefix
+ * and check again. Real tools (Claude Code) auto-compact at ~83.5% of the
+ * context window, and a 400K session triggers 2-3 compaction cycles. Each
+ * cycle replaces the prefix with a summary, losing more detail.
  */
 export async function compactionBaseline(
   turns: ConversationTurn[],
   tailBudgetTokens: number = 80_000,
   llm: EvalLLMClient,
+  modelContextWindow: number = 200_000,
 ): Promise<string> {
-  const total = totalTokens(turns);
+  // Match Claude Code's autoCompactThreshold: effectiveContextWindow * 0.835
+  const compactionThreshold = Math.floor(
+    (modelContextWindow - Math.min(32_000, modelContextWindow * 0.15)) * 0.835,
+  );
+  const maxCompactions = 4; // safety cap
+  let currentTurns = turns;
+  let compactionCount = 0;
 
-  // If everything fits, no compaction needed
-  if (total <= tailBudgetTokens) {
-    return renderConversation(turns);
-  }
+  while (compactionCount < maxCompactions) {
+    const total = totalTokens(currentTurns);
 
-  // Find the tail window cutoff
-  let tailTokens = 0;
-  let cutoff = turns.length;
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const turnTokens =
-      turns[i].tokens ?? estimateTokens(renderTurn(turns[i]));
-    if (tailTokens + turnTokens > tailBudgetTokens) {
-      cutoff = i + 1;
-      break;
+    // If everything fits within the threshold (or within the tail budget
+    // on the first pass), no more compaction needed.
+    if (compactionCount > 0 && total <= compactionThreshold) break;
+    if (total <= tailBudgetTokens) break;
+
+    // Find the tail window cutoff
+    let tailTokens = 0;
+    let cutoff = currentTurns.length;
+    for (let i = currentTurns.length - 1; i >= 0; i--) {
+      const turnTokens =
+        currentTurns[i].tokens ?? estimateTokens(renderTurn(currentTurns[i]));
+      if (tailTokens + turnTokens > tailBudgetTokens) {
+        cutoff = i + 1;
+        break;
+      }
+      tailTokens += turnTokens;
+      if (i === 0) cutoff = 0;
     }
-    tailTokens += turnTokens;
-    if (i === 0) cutoff = 0;
+
+    const prefix = currentTurns.slice(0, cutoff);
+    const tail = currentTurns.slice(cutoff);
+
+    if (prefix.length === 0) break;
+
+    // Summarize the prefix via LLM
+    const prefixText = renderConversation(prefix);
+    const userPrompt = COMPACTION_USER_TEMPLATE.replace(
+      "{{conversation}}",
+      prefixText,
+    );
+
+    const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
+      maxTokens: 4096,
+      temperature: 0,
+    });
+
+    // Replace prefix with a synthetic summary turn + keep tail
+    const summaryTurn: ConversationTurn = {
+      role: "assistant",
+      content: [{ type: "text", text: `## Compacted Summary (pass ${compactionCount + 1})\n\n${result.text}` }],
+      tokens: estimateTokens(result.text),
+    };
+    currentTurns = [summaryTurn, ...tail];
+    compactionCount++;
+
+    console.log(
+      `  [compaction] pass ${compactionCount}: ${prefix.length} turns summarized → ${estimateTokens(result.text)} tok, ${currentTurns.length} turns remaining (${totalTokens(currentTurns)} tok)`,
+    );
   }
 
-  const prefix = turns.slice(0, cutoff);
-  const tail = turns.slice(cutoff);
-
-  if (prefix.length === 0) {
-    return renderConversation(tail);
+  // Final render
+  if (compactionCount === 0) {
+    return renderConversation(currentTurns);
   }
 
-  // Summarize the prefix via LLM
-  const prefixText = renderConversation(prefix);
-  const userPrompt = COMPACTION_USER_TEMPLATE.replace(
-    "{{conversation}}",
-    prefixText,
-  );
-
-  const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
-    maxTokens: 4096,
-    temperature: 0,
-  });
-
-  return (
-    `## Compacted Summary of Earlier Conversation\n\n${result.text}\n\n` +
-    `---\n\n## Recent Conversation\n\n${renderConversation(tail)}`
-  );
+  return renderConversation(currentTurns);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,16 +255,10 @@ export function memoryOnlyConfigOverrides(): Record<string, unknown> {
 export function buildQAPrompt(
   context: string,
   question: string,
-  mode: "baseline" | "lore",
+  _mode: "baseline" | "lore",
 ): string {
-  const preamble =
-    mode === "lore"
-      ? "Here are distilled observations and knowledge from a coding session. " +
-        "If the observations don't have enough detail, use the recall tool to search for it."
-      : "Here is context from a past coding session.";
-
   return (
-    `${preamble}\n\n${context}\n\n` +
+    `Here is context from a past coding session.\n\n${context}\n\n` +
     `Question: ${question}\n\n` +
     `Answer concisely and specifically. Include exact values, file paths, and names when known.`
   );
@@ -243,9 +266,8 @@ export function buildQAPrompt(
 
 export const QA_SYSTEM =
   "You are answering questions about past coding sessions. " +
-  "You have a recall tool available — USE IT to search your memory for specific details " +
-  "(file paths, branch names, error messages, version numbers, test counts, etc.). " +
-  "Always invoke recall before answering unless the answer is already in your system context. " +
-  "When recall returns results with source IDs (t:xxx), you can recall those IDs to get " +
-  "the full original message with exact details. " +
-  "Be specific and factual. If you don't have enough information even after recall, say so.";
+  "Do your best to come up with the exact and correct answer. " +
+  "Use all the tools available to you to find it. " +
+  "Be specific and factual — include exact file paths, error messages, " +
+  "version numbers, and names when known. " +
+  "If you don't have enough information, say so.";

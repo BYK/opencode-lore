@@ -2046,9 +2046,10 @@ function postResponse(
     // Store all messages (user + assistant) from this turn.
     // Convert gateway messages to Lore format.
     const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
-    resolveToolResults(loreMessages);
 
-    // Store the latest user message (last user message in the array)
+    // Store the latest user message BEFORE resolveToolResults — we want the
+    // original content (including tool_result text), not the placeholder
+    // "[tool results provided]" that resolveToolResults creates after merging.
     for (let i = loreMessages.length - 1; i >= 0; i--) {
       if (loreMessages[i].info.role === "user") {
         temporal.store({
@@ -2059,6 +2060,11 @@ function postResponse(
         break;
       }
     }
+
+    // Resolve tool results for gradient transform (merges tool_result into
+    // assistant parts, strips from user messages — needed for reconstruct-
+    // after-eviction pattern but not for temporal storage above).
+    resolveToolResults(loreMessages);
 
     // Build and store the assistant response message.
     // Strip recall marker text blocks — they contain the raw query string
@@ -3627,6 +3633,7 @@ export function removeOrphanedToolResults(
     content: GatewayContentBlock[];
   }>,
 ): void {
+  // --- Pass 1: Remove orphaned tool_result blocks (tool_result → tool_use) ---
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]!;
     if (msg.role !== "user") continue;
@@ -3659,6 +3666,46 @@ export function removeOrphanedToolResults(
     // doesn't reject an empty content array.
     if (msg.content.length === 0) {
       msg.content = [{ type: "text", text: "[tool results provided]" }];
+    }
+  }
+
+  // --- Pass 2: Remove orphaned tool_use blocks (tool_use → tool_result) ---
+  // Every tool_use on an assistant must have a matching tool_result on the
+  // immediately following user message. Without this, the Anthropic API
+  // rejects with "tool_use ids found without tool_result blocks immediately
+  // after". This catches edge cases where gradient eviction or back-to-back
+  // assistants leave tool_use blocks without matching results (#424).
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== "assistant") continue;
+    if (!msg.content.some((b) => b.type === "tool_use")) continue;
+
+    // Collect tool_result IDs from the following user message
+    const next =
+      i + 1 < messages.length && messages[i + 1]!.role === "user"
+        ? messages[i + 1]!
+        : null;
+    const toolResultIds = new Set(
+      (next?.content ?? [])
+        .filter((b): b is GatewayToolResultBlock => b.type === "tool_result")
+        .map((b) => b.toolUseId),
+    );
+
+    // Remove tool_use blocks that have no matching tool_result
+    const before = msg.content.length;
+    msg.content = msg.content.filter(
+      (b) =>
+        b.type !== "tool_use" ||
+        toolResultIds.has((b as GatewayToolUseBlock).id),
+    );
+    if (msg.content.length < before) {
+      log.warn(
+        `removed ${before - msg.content.length} orphaned tool_use block(s) from assistant message ${i}`,
+      );
+    }
+    // If the assistant message is now empty, add placeholder text.
+    if (msg.content.length === 0) {
+      msg.content = [{ type: "text", text: "[assistant response]" }];
     }
   }
 }

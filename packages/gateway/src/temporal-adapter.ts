@@ -293,7 +293,10 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
       (p) => !(isToolPart(p) && p.tool === "result"),
     );
     // If stripping left the user message with no content parts,
-    // add a placeholder text part so the message survives API conversion.
+    // add a recall-able placeholder so the model can fetch the original
+    // tool output via recall using the temporal message ID (t:xxx).
+    // The original content is stored in temporal BEFORE resolveToolResults
+    // runs, so `t:<messageID>` retrieves the full tool_result text.
     if (msg.parts.length === 0 && before > 0) {
       msg.parts = [
         {
@@ -301,7 +304,7 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
           sessionID: "",
           messageID: msg.info.id,
           type: "text" as const,
-          text: "[tool results provided]",
+          text: `[tool results provided] (t:${msg.info.id})`,
           time: { start: 0, end: 0 },
         } satisfies LoreTextPart,
       ];

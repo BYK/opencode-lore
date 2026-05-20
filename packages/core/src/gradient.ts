@@ -683,6 +683,9 @@ type Distillation = {
   token_count: number;
   created_at: number;
   session_id: string;
+  r_compression: number | null;
+  c_norm: number | null;
+  source_ids: string[];
 };
 
 // Load non-archived distillations for the in-context prefix.
@@ -694,12 +697,16 @@ function loadDistillations(
 ): Distillation[] {
   const pid = ensureProject(projectPath);
   const query = sessionID
-    ? "SELECT id, observations, generation, token_count, created_at, session_id FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC"
-    : "SELECT id, observations, generation, token_count, created_at, session_id FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC";
+    ? "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC"
+    : "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC";
   const params = sessionID ? [pid, sessionID] : [pid];
-  return db()
+  const rows = db()
     .query(query)
-    .all(...params) as Distillation[];
+    .all(...params) as Array<Omit<Distillation, "source_ids"> & { source_ids: string }>;
+  return rows.map((r) => ({
+    ...r,
+    source_ids: r.source_ids ? JSON.parse(r.source_ids) : [],
+  }));
 }
 
 // Cached distillation loader — avoids hitting the DB on every transform() call.
@@ -1480,8 +1487,21 @@ function tryFitStable(input: {
     const windowSize = rawWindowCache!.pinnedRawCount + newMessages;
     const pinnedIdx = Math.max(0, input.messages.length - windowSize);
 
+    // Ensure the pinned window starts with a user message when a prefix is
+    // present — the prefix ends with assistant so a leading assistant in the
+    // raw window would create back-to-back assistants (#424).
+    let adjustedPinnedIdx = pinnedIdx;
+    if (input.prefix.length > 0) {
+      while (
+        adjustedPinnedIdx < input.messages.length &&
+        input.messages[adjustedPinnedIdx].info.role === "assistant"
+      ) {
+        adjustedPinnedIdx++;
+      }
+    }
+
     // Measure the token cost of the pinned window.
-    const pinnedWindow = input.messages.slice(pinnedIdx);
+    const pinnedWindow = input.messages.slice(adjustedPinnedIdx);
     const pinnedTokens = pinnedWindow.reduce(
       (sum, m) => sum + estimateMessage(m),
       0,
@@ -1961,6 +1981,17 @@ function transformInner(input: {
     olderTokens += est;
   }
 
+  // Ensure role alternation at the prefix/raw boundary: drop leading assistant
+  // messages from the older tail so the raw window starts with user (#424).
+  while (
+    olderMessages.length > 0 &&
+    nuclearPrefix.length > 0 &&
+    olderMessages[0].info.role === "assistant"
+  ) {
+    olderTokens -= estimateMessage(olderMessages[0]);
+    olderMessages.shift();
+  }
+
   const nuclearRaw = [...olderMessages, ...currentTurn];
   const nuclearRawTokens = olderTokens + currentTurnTokens;
 
@@ -2132,6 +2163,22 @@ function tryFit(input: {
     }
     olderTokens += tokens;
     if (i === 0) cutoff = 0;
+  }
+
+  // Ensure role alternation at the prefix/raw boundary: the distilled prefix
+  // ends with an assistant message, so the raw window must start with a user.
+  // The backward budget scan is purely token-based and can land on any role.
+  // If the cutoff produces a raw window starting with assistant(s), advance it
+  // past them — otherwise loreMessagesToGateway produces back-to-back assistants
+  // and the API rejects with "tool_use ids found without tool_result" (#424).
+  if (input.prefix.length > 0) {
+    while (
+      cutoff < olderMessages.length &&
+      olderMessages[cutoff].info.role === "assistant"
+    ) {
+      olderTokens -= estimateMessage(olderMessages[cutoff]);
+      cutoff++;
+    }
   }
 
   const rawMessages = [...olderMessages.slice(cutoff), ...currentTurn];

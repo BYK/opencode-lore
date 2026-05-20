@@ -832,6 +832,23 @@ export async function runScenario(
       }
     }
 
+    // Backfill embeddings for distillations and temporal messages created
+    // during replay. The startup backfill runs before any content exists;
+    // this ensures vector search works for QA questions.
+    if (gateway.isReal !== false) {
+      try {
+        const { embedding } = await import("@loreai/core");
+        const kn = await embedding.backfillEmbeddings();
+        const dist = await embedding.backfillDistillationEmbeddings();
+        console.log(
+          `  [embedding] post-replay backfill: ${kn} knowledge, ${dist} distillations` +
+          ` (available=${embedding.isAvailable()})`,
+        );
+      } catch (err) {
+        console.warn("  Warning: post-replay embedding backfill failed:", err);
+      }
+    }
+
     // Collect all turns across sessions for baseline context building
     const allTurns = scenario.sessions.flatMap((s) => s.turns);
 

@@ -147,9 +147,9 @@ export const LoreConfig = z.object({
        *  Default: 1.5. Set to 1.0 to disable. */
       vectorBoostWeight: z.number().min(1).max(5).default(1.5),
       /** Minimum meaningful query terms (after stopword removal) to activate
-       *  vector boost. Short keyword queries (1-2 terms) are left unweighted
-       *  since BM25 excels there. Default: 3. */
-      vectorBoostMinTerms: z.number().min(1).max(10).default(3),
+       *  vector boost. Single-term queries are left unweighted since BM25
+       *  excels there. Default: 2. */
+      vectorBoostMinTerms: z.number().min(1).max(10).default(2),
       /** Vector embedding search.
        *  Supports multiple providers:
        *  - "local" (default): @huggingface/transformers + nomic-embed-text-v1.5, no API key needed.
@@ -184,8 +184,8 @@ export const LoreConfig = z.object({
       recall: z
         .object({
           /** Total character budget for recall output. Controls how much context the
-           *  recall results consume. ~2K tokens at 8000 chars. Default: 8000. */
-          charBudget: z.number().min(2000).max(20000).default(8000),
+           *  recall results consume. ~3K tokens at 12000 chars. Default: 12000. */
+          charBudget: z.number().min(2000).max(20000).default(12000),
           /** Minimum RRF score relative to top result. Results below
            *  topScore * relevanceFloor are dropped. Default: 0.15.
            *  Set to 0 to disable score-based cutoff. */
@@ -193,16 +193,16 @@ export const LoreConfig = z.object({
           /** Max results to show in recall output. Default: 15. */
           maxResults: z.number().min(3).max(30).default(15),
         })
-        .default({ charBudget: 8000, relevanceFloor: 0.15, maxResults: 15 }),
+        .default({ charBudget: 12000, relevanceFloor: 0.15, maxResults: 15 }),
     })
     .default({
       ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
       recallLimit: 10,
       queryExpansion: true,
       vectorBoostWeight: 1.5,
-      vectorBoostMinTerms: 3,
+      vectorBoostMinTerms: 2,
       embeddings: { enabled: true, provider: "local" as const, model: "nomic-ai/nomic-embed-text-v1.5", dimensions: 768 },
-      recall: { charBudget: 8000, relevanceFloor: 0.15, maxResults: 15 },
+      recall: { charBudget: 12000, relevanceFloor: 0.15, maxResults: 15 },
     }),
   cache: z
     .object({

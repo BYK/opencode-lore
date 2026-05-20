@@ -478,10 +478,16 @@ Produce update/delete ops to reduce entry count to at most ${input.targetMax}. P
 
 // Format distillations for injection into the message context.
 // Observations are plain event-log text — inject them directly under a header.
+// Optional metadata (id, r_compression, source_ids) adds drill-down hints so
+// the model knows how lossy each distillation is and can use recall to fetch
+// the full original messages.
 export function formatDistillations(
   distillations: Array<{
     observations: string;
     generation: number;
+    id?: string;
+    r_compression?: number | null;
+    source_ids?: string[];
   }>,
 ): string {
   if (!distillations.length) return "";
@@ -493,18 +499,37 @@ export function formatDistillations(
   if (meta.length) {
     sections.push("### Earlier Work (summarized)");
     for (const d of meta) {
-      sections.push(d.observations.trim());
+      sections.push(formatOneDistillation(d));
     }
   }
 
   if (recent.length) {
     sections.push("### Recent Work (distilled)");
     for (const d of recent) {
-      sections.push(d.observations.trim());
+      sections.push(formatOneDistillation(d));
     }
   }
 
   return sections.join("\n\n");
+}
+
+/** Render a single distillation with optional metadata header. */
+function formatOneDistillation(d: {
+  observations: string;
+  id?: string;
+  r_compression?: number | null;
+  source_ids?: string[];
+}): string {
+  if (!d.id) return d.observations.trim();
+
+  const lossy = d.r_compression != null && d.r_compression < 1.0;
+  const sourceCount = d.source_ids?.length ?? 0;
+  const meta = [
+    `d:${d.id}`,
+    lossy ? "lossy" : null,
+    sourceCount > 0 ? `${sourceCount} source${sourceCount > 1 ? "s" : ""}` : null,
+  ].filter(Boolean).join(" | ");
+  return `(${meta})\n${d.observations.trim()}`;
 }
 
 // Strict Markdown skeleton for the /compact session summary. Task-oriented
